@@ -9,9 +9,19 @@
 - `sidecar/knuaf_sidecar/` — stdlib만 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
   JSON-lines(stdin/stdout)로 대화합니다. `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
   CLI 전용 스크립트(build_docx, gg_excel_*, gg_office, gg_deps, gg_kordoc)는 서브프로세스로 실행해 출력을
-  `{ok, exit, status, data, path, block_reason, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
+  `{ok, exit, status, data, path, block_reason, commit_state, detail, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
   `methods.list`가 각 메서드의 쓰기 여부를 보고합니다. 읽기 전용 조회로 `materials.list`(intake 사실 + sources/ 파일),
   `artifact.list`(build/ 산출물 스캔), `artifact.preview`(xlsx 읽기 전용 표·md 텍스트·pdf 표지)가 있습니다.
+  `project.major`는 원본의 공개 전공 계약으로 유효 바인딩만 읽습니다. renderer는 그 전공을 출력 요청의 `major_id`로
+  명시하고 원본이 정본 바인딩과 다시 대조합니다. 없거나 무효인 바인딩은 전공 확인 요청으로 돌아가며 기본 전공을 만들지 않습니다.
+  출력 취소는 전공 사전 조회부터 같은 clientId로 추적합니다. 조회 중 취소하면 main이 이미 읽기를 끝냈어도
+  후속 출력은 시작하지 않으며 UI 대기를 끝냅니다. 이미 시작한 출력은 기존 main/sidecar 취소 결과를 따릅니다.
+  `office.clean`은 요청한 job 목록 전체를 원본 cleanup_guard에 넘깁니다. 닫힌 job의 삭제와 미확인 세션의
+  보존·거절을 함께 보고하며, 일부 job이 거절되면 전체 성공으로 표시하지 않습니다.
+  출판 오류는 commit 상태와 exit 2(미반영)·3(반영 후 정리 남음)·4(반영 여부 불명)를 유지합니다.
+  잠금은 `gg_lock.inspect_lock`(구조 조회), `probe_lock`(일회성 점유 관측), `cleanup_owner`(소유 증거만 정리)를 사용합니다.
+  점유 관측은 다음 쓰기 허가가 아니며, 정리는 실제 OS guard를 재획득한 경우에만 실행합니다. PID나 기록의 나이로 해제하지 않습니다.
+  기존 정본의 v2 전환은 모든 writer 중단을 명시 확인하는 별도 오프라인 절차입니다. 자동 init·잠금 삭제·전환은 하지 않습니다.
 - `src/main/` — 인터프리터 선택(`KNUAF_PYTHON` > `<프로젝트>/.venv` > 번들 python > PATH), 사이드카 브리지, IPC, 설정.
   `file:read`는 작업 폴더 안 `.pdf`/`.md`/`.txt`만(50MB 이하) 바이트로 돌려주고, `file:save-as`는 폴더 안 파일을
   사용자가 고른 위치로 복사합니다 — 둘 다 경로가 폴더 밖으로 나가면 거절합니다.
@@ -50,13 +60,12 @@
     (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아 `legacy` 빌드)로 그리고, DOCX는 같은 이름의 PDF(같은 폴더 또는
     build/native)가 있을 때만 그 PDF를 보여 주며, 없으면 Office 렌더 버튼과 "원래 앱으로 열기"를 둡니다.
     XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
-    **재무 엑셀 만들기**는 등록한 학생 재무 파일을 우선 복사하고, 없으면 동봉 기준 양식으로
-    새 파일을 만듭니다. 이름 충돌 때는 새 버전 이름을 쓰며 학생 원본·기존 입력값을 덮어쓰지 않습니다.
-    양식 정본은 `skills/knuaf-dev/assets/templates/finance-template.xlsx`이고,
-    `stage:skill`이 assets까지 패키징합니다. 연도별 교체도 같은 경로의 파일 하나를 교체합니다.
-    프로젝트 로컬 스킬 설치도 assets를 포함하고, 스킬 버전 해시에 XLSX 내용까지 반영합니다.
-    양식 파일만 교체해도 다음 스킬 갱신 때 구버전을 감지합니다.
-    새 사본은 입력값 채우기·실제 Excel 재계산·본문 대조가 끝난 재무 결과가 아닙니다.
+    **재무 엑셀 만들기**는 유효 전공 바인딩을 확인하고 등록한 학생 재무 파일을 우선 복사합니다. 선택한 파일의
+    읽기 실패를 동봉본으로 대체하지 않습니다. 등록 파일이 없으면 전공별 양식을 먼저 확인하도록 안내하며,
+    특용작물 전공에서 명시적으로 선택한 X01만 동봉 자산으로 만듭니다. H01·X02를 X01로 대체하지 않습니다.
+    다른 전공은 원본의 지원 출력·양식 조사 계약을 그대로 따릅니다. 새 사본은 실제 Excel 재계산·본문 대조·제출 승인이 아닙니다.
+    설치는 assets와 `version.json`·`skill.json`·`install-manifest.json`을 보존하며, root metadata도 내용 fingerprint에 포함합니다.
+    프로젝트 두 공급자 설치 경로는 `.knuaf-gui/skill-install.json`에 기록해 원본 `gg_update.py auto`가 `managed`로 종료하게 합니다.
 
 스킬(`knuaf-dev`)은 전역이 아니라 프로젝트 로컬(`<프로젝트>/.claude/skills`, `<프로젝트>/.agents/skills`)에 설치됩니다.
 
@@ -118,7 +127,11 @@ pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
 ```
 
-사이드카 프로토콜 테스트는 저장소 루트의 `tests/test_sidecar.py`에 있습니다.
+사이드카 회귀는 `tests/test_sidecar.py`, `tests/test_sidecar_publication.py`에 있습니다.
+`KNUAF_TEST_SCRIPTS_DIR=/절대/compose/묶음/scripts`로 현행 knuaf-doc 묶음을 지정해 실행합니다.
+첫 단위 검토 중에는 구 `skills/knuaf-dev` 사본과 v0.2.0 source pin을 유지하므로,
+기본 구판 회귀에서 현행 공개 계약 전용 시험은 skip되며 별도의 compose 시험을 반드시 실행해야 합니다.
+overlay 내용·stage/build 동봉 배선·구판 제거는 첫 단위 독립검토 이후 범위입니다.
 
 알려진 A안 한계(독립검토 A1): 사용자 문구의 `copy.ts` 중앙관리 AST 검사는 대체 없이 제거되어
 일부 새 화면 문구가 인라인입니다(A1-04). 첫 화면에는 시안의 세 가지 시작 제안 칩이 없습니다(A1-05).
@@ -128,6 +141,8 @@ pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-elec
 
 개발·테스트 전용 환경 변수:
 
+- `KNUAF_SCRIPTS_DIR=/절대/compose/묶음/scripts` — 개발 모드에서 **묶음 전체**의 원본을 선택합니다. 사이드카·에이전트 설치·W1의 S0가 같은 묶음을 사용하며, 설치본에서는 무시합니다.
+- `KNUAF_TEST_SCRIPTS_DIR=/절대/compose/묶음/scripts` — pytest의 원본 선택. 예: 저장소 루트에서 `KNUAF_TEST_SCRIPTS_DIR=… .venv-dev/bin/python -m pytest tests/test_sidecar.py tests/test_sidecar_read_all.py tests/test_sidecar_publication.py`.
 - `KNUAF_CLAUDE_MODEL=sonnet` — Claude 채팅 SDK 세션에 `model`을 고정합니다(테스트 전용).
 - `KNUAF_DRY_LAUNCH=1` — 외부 터미널 실행 스크립트를 쓰기만 하고 열지 않습니다(테스트 전용).
 - `KNUAF_LIVE=1` — `e2e/live-*.spec.ts`를 포함해 실행합니다. 실제 Claude/Codex 로그인과 구독 사용량이 필요하므로 기본 실행에서는 제외됩니다.

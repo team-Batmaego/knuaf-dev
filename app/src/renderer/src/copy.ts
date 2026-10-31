@@ -36,8 +36,8 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     kind: 'warning'
   },
   lock_ambiguous: {
-    title: '잠금 기록이 불명확해서 해제하지 않았어요.',
-    action: '"설정 > 문제 해결"에서 잠금 정보를 보고, 다른 창에서 도우미가 이 폴더에 저장 중이 아닌지 확인해 주세요.',
+    title: '잠금 상태를 확인할 수 없어 기록을 정리하지 않았어요.',
+    action: '"설정 > 문제 해결"에서 구조와 점유 상태를 확인해 주세요. 잠금 파일을 직접 지우지 마세요.',
     kind: 'warning'
   },
   revision_stale: {
@@ -56,6 +56,26 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     title: '지금 상태에서는 할 수 없는 작업이에요.',
     action: '아래 설명을 확인해 주세요. 필요하면 내 논문에서 도우미에게 알려 주세요.',
     kind: 'error'
+  },
+  major_required: {
+    title: '전공 확인이 먼저 필요해요.',
+    action: '도우미에게 소속 전공을 알려 주세요. 원답변과 전공 기록을 확인한 뒤 다시 만들 수 있어요.',
+    kind: 'warning'
+  },
+  operation_not_committed: {
+    title: '작업을 반영하지 않았어요.',
+    action: '자세히에서 원인을 확인한 뒤 도우미에게 알려 주세요.',
+    kind: 'warning'
+  },
+  committed_cleanup_pending: {
+    title: '작업은 반영됐지만 정리가 남았어요.',
+    action: '같은 작업을 바로 반복하지 말고, 남은 기록과 수령증을 도우미와 확인해 주세요.',
+    kind: 'warning'
+  },
+  indeterminate: {
+    title: '작업이 반영됐는지 확인하지 못했어요.',
+    action: '다시 만들거나 파일을 지우지 말고, 정본과 수령증을 도우미와 먼저 확인해 주세요.',
+    kind: 'warning'
   },
   deps_not_ready: {
     title: '작업 준비가 아직 끝나지 않았어요.',
@@ -220,7 +240,10 @@ export function describeError(e: unknown): DescribedError {
       return { ...copy, code, action: '새 실행기는 시작하지 않았어요. "설정 > Python 실행기 > 고급"에서 "적용·재시작"을 눌러 종료를 다시 시도해 주세요.', raw: `(${code}) ${message}` }
     }
   }
-  return { ...copy, code, raw: code ? `(${code}) ${message}` : message }
+  const evidence = e && typeof e === 'object' && 'data' in e && (
+    code === 'operation_not_committed' || code === 'committed_cleanup_pending' || code === 'indeterminate'
+  ) ? `\n${JSON.stringify(e.data, null, 2)}` : ''
+  return { ...copy, code, raw: (code ? `(${code}) ${message}` : message) + evidence }
 }
 
 /**
@@ -280,10 +303,6 @@ export const STATUS_LABEL: Record<string, string> = {
   review_ready: '초안 다 씀',
   installed: '설치됨',
   missing: '없음',
-  live: '실행 중',
-  stale_releasable: '남은 잠금',
-  foreign_host: '다른 기기',
-  ambiguous: '불명확',
   none: '없음'
 }
 
@@ -320,29 +339,50 @@ export const COLLECTION_LABEL: Record<string, string> = {
   outputs: '결과물'
 }
 
-/** gg_core.unlock releases only a lock from this same host whose owner process is gone. */
-export const LOCK_VERDICT_COPY: Record<string, { title: string; detail: string }> = {
-  none: {
-    title: '잠금 없음',
-    detail: '지금은 아무도 이 폴더를 잠그고 있지 않아요. 해제할 것이 없어요.'
-  },
-  live: {
-    title: '실행 중인 작업이 잠금을 쥐고 있어요',
-    detail: '같은 기기의 작업이 아직 살아 있어요. 해제하면 그 작업의 저장이 깨질 수 있어 앱이 해제하지 않아요. 기다리거나 그 작업(도우미 창)을 확인해 주세요.'
-  },
-  stale_releasable: {
-    title: '남은 잠금이에요',
-    detail: '같은 기기에서 이미 종료된 작업이 남긴 잠금이에요. 소유 프로세스가 없는 것을 확인했으니 "잠금 해제"로 풀 수 있어요.'
-  },
-  foreign_host: {
-    title: '다른 기기의 잠금이에요',
-    detail: '다른 기기에서 만든 잠금이라 여기서는 그 작업이 살아 있는지 알 수 없어요. 해제는 잠근 기기에서 확인해 주세요.'
-  },
-  ambiguous: {
-    title: '소유 기록이 불명확해요',
-    detail: '누가 잠갔는지 읽을 수 없거나 프로세스 상태를 판정할 수 없어요. 앱은 이런 잠금을 보존해요. 다른 창에서 저장 중이 아닌지 직접 확인한 뒤 도우미에게 알려 주세요.'
-  }
-}
+/** v2 structure and OS-guard observations are independent; neither is a future write permit. */
+export const LOCK_COPY = {
+  label: '쓰기 잠금',
+  structure: {
+    absent: '잠금 구조 없음',
+    legacy: '이전 잠금 방식',
+    initializing: '잠금 구조 준비 중',
+    ready: '잠금 구조 확인됨',
+    damaged: '잠금 구조 확인 필요',
+    unavailable: '잠금 구조를 읽지 못함'
+  } as Record<string, string>,
+  state: {
+    unprobed: '점유 확인 전',
+    free: '관측 시 점유 없음',
+    busy: '다른 작업이 점유 중',
+    unavailable: '점유 확인 불가'
+  } as Record<string, string>,
+  observation: '점유 상태는 확인한 순간의 관측이에요. 다음 저장의 허가가 아니며, 저장할 때 다시 잠금을 잡아요.',
+  owner: '마지막 점유 기록',
+  ownerBody: '소유 기록은 과거 작업의 증거예요. 프로세스 번호만으로 현재 점유나 정리 가능 여부를 판단하지 않아요.',
+  probe: '점유 상태 확인',
+  probing: '확인 중…',
+  cleanup: '소유 기록 정리',
+  cleanupBody: '잠금을 새로 잡을 수 있을 때 소유 기록만 정리해요. 잠금 구조와 가드 파일은 남기며, 실행 중인 작업의 점유를 끊지 않아요.',
+  cleaned: '소유 기록을 정리했어요.',
+  nothingCleaned: '정리할 소유 기록이 없어요.',
+  unavailable: '점유 상태를 확인하지 못했어요.',
+  recovery: '이전 방식이거나 손상된 폴더는 별도의 오프라인 전환·복구가 필요해요. 앱과 도우미의 저장 작업을 모두 멈췄는지 확인한 뒤 담당자에게 전환을 요청해 주세요. 정본을 새로 만들거나 잠금 파일을 지우지 마세요.',
+  observedAt: '관측 시각',
+  details: '잠금 진단 기록'
+} as const
+
+export const OUTPUT_COPY = {
+  majorTitle: '전공 확인이 먼저 필요해요.',
+  majorBody: '도우미에게 소속 전공을 알려 주세요. 원답변과 전공 기록이 확인되기 전에는 파일을 만들지 않아요.',
+  majorPrompt: '소속 전공을 확인하고 원답변 근거와 모듈 버전을 갖춘 전공 바인딩을 정본에 기록해 주세요. 없거나 무효인 전공을 추정하거나 기본 전공으로 대체하지 마세요.',
+  askMajor: '도우미에게 전공 확인 요청',
+  templateTitle: '재무 양식을 먼저 골라요',
+  templateBody: '등록한 학생 재무 파일이 없어요. 전공에 맞는 학생 양식을 먼저 확인하고, 없는 경우에만 원본 절차에 따라 공용 양식을 선택해요.',
+  templatePrompt: '제 전공에 맞는 재무 양식과 현재 학생 파일을 확인해 주세요. H01·X02를 X01로 대체하지 말고, 다른 전공의 공용 양식은 원본의 전공 양식 부재 조사와 명시 선택 절차를 따라 주세요. 선택한 학생 파일은 정본에 등록하고 입력값은 보존해 주세요.',
+  askTemplate: '도우미에게 양식 확인 요청',
+  chooseX01: '공용 X01 빈 양식 사용',
+  templateChoice: '학생 양식을 확인하거나 공용 양식을 선택해요.'
+} as const
 
 /**
  * gg_core check_id → what the check is *about*, in 한국어.
@@ -651,7 +691,6 @@ export const COMPLETION: Record<string, string> = {
   filled: '값을 채웠어요',
   deps_ready: '작업 준비가 끝났어요',
   kordoc_ready: '문서 읽기 도구가 준비됐어요',
-  unlocked: '잠금을 해제했어요',
   restored: '이전 정본을 새 개정으로 되돌렸어요',
   init_done: '빈 정본을 만들었어요',
   cancelled: '취소했어요'
@@ -1117,7 +1156,6 @@ export const ARTIFACTS = {
     submitBody: '학교 제출용 후보를 만들어요 — 누르면 검토 상태를 먼저 알려줘요',
     xlsx: '재무 엑셀 만들기',
     xlsxBody: '등록한 재무 파일을 새 사본으로 만들어요. 기존 입력값과 수식을 그대로 보존해요',
-    xlsxBundled: '동봉 기준 양식으로 빈 재무 엑셀을 만들어요. 수식·서식은 보존하고 입력값은 비워 두었어요',
     xlsxCreated: '재무 엑셀 사본을 만들었어요',
     xlsxNext: '입력값 채우기와 실제 Excel 재계산·본문 대조는 별도로 필요해요. 제출 완료가 아니에요.',
     gateBlocked: '제출용 후보를 만들 수 없어요. 먼저 필요한 것',

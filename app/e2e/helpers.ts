@@ -7,7 +7,7 @@ import { DEFAULT_WINDOW } from '../src/shared/window'
 
 export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
-export const scripts = join(repo, 'skills', 'knuaf-dev', 'scripts')
+export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(repo, 'skills', 'knuaf-dev', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
 /** init-only project (revision 0) or a project with a source, a section and a fact (revision 1). */
@@ -23,15 +23,40 @@ export function synthProject(opts: { withContent?: boolean } = { withContent: tr
   writeFileSync(change, JSON.stringify({ request_id: 'e2e:1', ops: [
     { collection: 'sources', value: { id: 'src-answers', path: 'sources/answers.md', claims: {} } },
     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } },
-    { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } }
+    { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } },
+    ...syntheticMajor(root)
   ] }), 'utf-8')
   const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
   if (a.status !== 0) throw new Error(a.stdout + a.stderr)
   return root
 }
 
+/** A test selection with claim-backed evidence, not a production default. */
+function syntheticMajor(root: string): { collection: string; value: Record<string, unknown> }[] {
+  if (!existsSync(join(scripts, 'gg_major_contract.py'))) return []
+  const result = spawnSync(python, ['-B', '-c', [
+    'import sys; sys.path.insert(0, sys.argv[1])',
+    'import gg_major_contract as mc',
+    'print(mc.default_registry().resolve("specialty_crops").module_version)'
+  ].join('\n'), scripts], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr)
+  writeFileSync(join(root, 'sources', 'major.txt'), 'Synthetic explicit selection\n')
+  const fact = {
+    id: 'major', field_id: 'common.major_id', kind: 'reported_fact', value: 'specialty_crops',
+    unit: '', value_type: 'text', period: null, scope: 'project', answer_state: 'provided',
+    verification: 'claim_supported', module_version: result.stdout.trim(),
+    source_refs: [{ id: 'major-source', revision: 1, locator: 'L1', claim_id: 'major' }]
+  }
+  const { field_id, kind, value, unit, period, scope, answer_state } = fact
+  return [
+    { collection: 'sources', value: { id: 'major-source', path: 'sources/major.txt', claim_review: 'synthetic-review',
+      claims: { major: { field_id, kind, value, unit, period, scope, answer_state } } } },
+    { collection: 'facts', value: fact }
+  ]
+}
+
 export function plantStaleLock(root: string): void {
-  mkdirSync(join(root, '.gg-lock'))
+  mkdirSync(join(root, '.gg-lock'), { recursive: true })
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 

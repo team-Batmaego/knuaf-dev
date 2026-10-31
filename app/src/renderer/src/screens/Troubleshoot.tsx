@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import { rpc } from '../rpc'
 import { Disclosure } from '../components/Disclosure'
@@ -8,7 +8,7 @@ import { Badge, StatusBadge } from '../components/Badge'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
-import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_VERDICT_COPY, describeError, relativeTime, type DescribedError } from '../copy'
+import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -18,31 +18,47 @@ import { useShallow } from 'zustand/react/shallow'
  */
 export function TroubleshootSections() {
   const { root, hasProject, status, refresh, refreshSidecar, refreshDeps, sidecar, open } = useProject(useShallow((s) => ({ root: s.root, hasProject: s.hasProject, status: s.status, refresh: s.refresh, refreshSidecar: s.refreshSidecar, refreshDeps: s.refreshDeps, sidecar: s.sidecar, open: s.open })))
-  const [doc, setDoc] = useState<Record<string, any> | null>(null)
+  const [diagnosis, setDiagnosis] = useState<{ root: string; data: Record<string, any> } | null>(null)
+  const doc = diagnosis?.root === root ? diagnosis.data : null
+  const requestSeq = useRef(0)
+  const [lockBusy, setLockBusy] = useState(false)
   const [err, setErr] = useState<DescribedError | null>(null)
   const [msg, setMsg] = useState<{ title: string; body?: string } | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'unlock' | 'restore' | 'init'; rev?: number } | null>(null)
   const deps = useRunner()
   const kordoc = useRunner()
-  const load = async () => {
+  const load = useCallback(async () => {
     if (!root) return
-    setErr(null)
-    try { setDoc(await rpc.doctor(root)) } catch (e) { setErr(describeError(e)) }
-  }
-  useEffect(() => { void load(); void refreshSidecar() }, [root, status?.revision])
+    const seq = ++requestSeq.current
+    setErr(null); setDiagnosis(null); setLockBusy(false)
+    try {
+      const data = await rpc.doctor(root)
+      if (seq === requestSeq.current) setDiagnosis({ root, data })
+    } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
+  }, [root])
+  useEffect(() => {
+    setErr(null); setMsg(null); setConfirm(null); setLockBusy(false)
+    void load(); void refreshSidecar()
+    return () => { ++requestSeq.current }
+  }, [load, status?.revision])
   if (!root) return <div className="caption">먼저 "내 논문"에서 폴더를 여세요.</div>
   const lock: LockInfo | undefined = doc?.lock
   const hist: HistoryRow[] = Array.isArray(doc?.snapshots) ? doc!.snapshots : []
   const depsInfo = doc?.deps
   const act = async () => {
     if (!confirm) return
-    const c = confirm; setConfirm(null); setErr(null); setMsg(null)
+    const c = confirm; setConfirm(null); setErr(null); setMsg(null); setLockBusy(true)
+    const seq = requestSeq.current
     try {
-      if (c.kind === 'unlock') { const r = await rpc.unlock(root); setMsg({ title: COMPLETION.unlocked, body: r.leftover ? '남은 파일: ' + r.leftover : undefined }) }
+      if (c.kind === 'unlock') {
+        const r = await rpc.unlock(root)
+        if (seq === requestSeq.current) setMsg({ title: r.owner_cleaned ? LOCK_COPY.cleaned : LOCK_COPY.nothingCleaned })
+      }
       if (c.kind === 'restore' && c.rev != null && status) { const r = await rpc.restore(root, c.rev, status.revision); setMsg({ title: COMPLETION.restored, body: `${r.restored_from}번째 기록의 정본을 ${r.revision}번째 기록으로 되돌렸어요. 복원 직전 상태는 ${r.pre_restore_snapshot}에 남아 있어요.` }) }
       if (c.kind === 'init') { await rpc.init(root); setMsg({ title: COMPLETION.init_done }); await open(root); return }
       await refresh(); await load()
-    } catch (e) { setErr(describeError(e)) }
+    } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
+    finally { if (seq === requestSeq.current) setLockBusy(false) }
   }
   const ensureDeps = async () => {
     setErr(null); setMsg(null)
@@ -56,12 +72,21 @@ export function TroubleshootSections() {
     if (env?.ok) { setMsg({ title: COMPLETION.kordoc_ready }); await load() }
     else if (env) setErr(describeError({ code: 'business_rule', message: env.block_reason ?? env.stderr.slice(-300) }))
   }
-  const verdict = lock ? LOCK_VERDICT_COPY[lock.verdict] : null
+  const probe = async () => {
+    const seq = ++requestSeq.current
+    setLockBusy(true); setErr(null); setMsg(null)
+    try {
+      const observed = await rpc.lockInfo(root, true)
+      if (seq === requestSeq.current) setDiagnosis((prev) => prev?.root === root ? { root, data: { ...prev.data, lock: observed } } : prev)
+    } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
+    finally { if (seq === requestSeq.current) setLockBusy(false) }
+  }
+  const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
   const orphans: string[] = doc?.gg?.orphan_files ?? []
   return (
     <div>
       <div className="row" style={{ marginBottom: 'var(--sp-3)' }}>
-        <button className="quiet" onClick={load}><Icon name="refresh" size={16} /> 다시 진단</button>
+        <button className="quiet" disabled={lockBusy} onClick={load}><Icon name="refresh" size={16} /> 다시 진단</button>
       </div>
       {err && <Feedback kind={err.kind} title={err.title} body={err.action} details={<code>{err.raw}</code>} />}
       {msg && <Feedback kind="completion" title={msg.title} body={msg.body} />}
@@ -83,16 +108,24 @@ export function TroubleshootSections() {
         <ProgressPanel busy={deps.busy} phase={deps.phase} elapsedMs={deps.elapsedMs} lines={deps.lines} onCancel={deps.cancel} />
       </Disclosure>
 
-      <Disclosure label="쓰기 잠금" preset="fix:lock">
-        <div className="card-head"><h2>쓰기 잠금</h2>{lock && <StatusBadge status={lock.verdict === 'none' ? 'pass' : lock.verdict === 'stale_releasable' ? 'warning' : lock.verdict === 'live' ? 'blocked' : 'fail'} label={verdict?.title ?? lock.verdict} />}</div>
-        {lock && verdict && (
+      <Disclosure label={LOCK_COPY.label} preset="fix:lock">
+        <div className="card-head">
+          <h2>{LOCK_COPY.label}</h2>
+          {lock && <StatusBadge status={lock.structure === 'ready' ? 'pass' : 'blocked'} label={LOCK_COPY.structure[lock.structure] ?? lock.structure} />}
+        </div>
+        {lock && (
           <div>
-            <div>{verdict.detail}</div>
-            {lock.owner && <div className="caption">pid {String(lock.owner.pid)} · {String(lock.owner.host)} · {lock.acquired_at ? relativeTime(lock.acquired_at * 1000) + ' 획득' : '획득 시각 없음'} · 프로세스 {lock.pid_alive === null ? '판정 불가' : lock.pid_alive ? '살아 있음' : '종료됨'}</div>}
+            <StatusBadge status={lock.lock_state === 'free' ? 'pass' : lock.lock_state === 'busy' ? 'blocked' : 'pending'} label={LOCK_COPY.state[lock.lock_state] ?? lock.lock_state} />
+            <p className="caption">{LOCK_COPY.observation}</p>
+            <div className="caption">{LOCK_COPY.observedAt}: <time>{lock.observed_at}</time></div>
+            {lock.owner && <p><strong>{LOCK_COPY.owner}</strong><br />{LOCK_COPY.ownerBody}</p>}
+            {lock.structure !== 'ready' && <Feedback kind="warning" title={LOCK_COPY.structure[lock.structure] ?? LOCK_COPY.unavailable} body={LOCK_COPY.recovery} />}
             <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
-              <button className="danger" disabled={lock.verdict !== 'stale_releasable'} onClick={() => setConfirm({ kind: 'unlock' })}>잠금 해제</button>
-              {lock.verdict !== 'stale_releasable' && lock.present && <span className="caption">같은 기기에서 종료된 작업의 잠금만 해제할 수 있어요.</span>}
+              <button disabled={lockBusy || lock.structure !== 'ready'} onClick={probe}>{lockBusy ? LOCK_COPY.probing : LOCK_COPY.probe}</button>
+              <button className="danger" disabled={lockBusy || !canCleanup} onClick={() => setConfirm({ kind: 'unlock' })}>{LOCK_COPY.cleanup}</button>
             </div>
+            <p className="caption">{LOCK_COPY.cleanupBody}</p>
+            <details><summary>{LOCK_COPY.details}</summary><pre>{JSON.stringify(lock, null, 2)}</pre></details>
           </div>
         )}
       </Disclosure>
@@ -119,8 +152,8 @@ export function TroubleshootSections() {
       </Disclosure>
 
       <Disclosure label="문서 읽기 도구" preset="fix:kordoc">
-        <div className="card-head"><h2>문서 읽기 도구</h2>{doc?.kordoc && !doc.kordoc.error && <StatusBadge status={doc.kordoc.cli_path ? 'pass' : 'blocked'} label={doc.kordoc.cli_path ? '준비됨' : '없음'} />}</div>
-        {doc?.kordoc && !doc.kordoc.error && <div className="caption">{doc.kordoc.cli_path ? <code>{doc.kordoc.cli_path}</code> : '아직 없어요.'} · 캐시 {doc.kordoc.cache_present ? '있음' : '없음'}</div>}
+        <div className="card-head"><h2>문서 읽기 도구</h2>{doc?.kordoc && !doc.kordoc.error && <StatusBadge status={doc.kordoc.capability_verified ? 'pass' : 'pending'} label={doc.kordoc.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
+        {doc?.kordoc && !doc.kordoc.error && <div className="caption">{doc.kordoc.cli_path ? <code>{doc.kordoc.cli_path}</code> : '아직 없어요.'} · 캐시 {doc.kordoc.candidates?.some((c: { installed: boolean }) => c.installed) ? '있음' : '없음'}</div>}
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
           <button disabled={kordoc.busy || !!doc?.kordoc?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
           <span className="caption">{KORDOC_SENTENCE}</span>
@@ -128,7 +161,7 @@ export function TroubleshootSections() {
         <ProgressPanel busy={kordoc.busy} phase={kordoc.phase} elapsedMs={kordoc.elapsedMs} lines={kordoc.lines} onCancel={kordoc.cancel} />
       </Disclosure>
 
-      <Confirm open={confirm?.kind === 'unlock'} title="잠금 해제" body={<p>같은 기기에서 이미 종료된 작업의 잠금만 해제해요. 다른 창에서 도우미가 이 폴더에 저장 중이 아닌지 확인하셨나요?</p>} confirmLabel="해제" danger onConfirm={act} onCancel={() => setConfirm(null)} />
+      <Confirm open={confirm?.kind === 'unlock'} title={LOCK_COPY.cleanup} body={<p>{LOCK_COPY.cleanupBody}</p>} confirmLabel={LOCK_COPY.cleanup} danger onConfirm={act} onCancel={() => setConfirm(null)} />
       <Confirm open={confirm?.kind === 'restore'} title={`${confirm?.rev}번째 기록으로 복원`} body={<p><b>현재 상태를 먼저 저장해요.</b> 그다음 정본만 {confirm?.rev}번째 기록 시점으로 되돌리고 새 기록 번호를 붙여요. 장 파일과 발행물은 그대로예요.</p>} confirmLabel="복원" danger onConfirm={act} onCancel={() => setConfirm(null)} />
       <Confirm open={confirm?.kind === 'init'} title="빈 정본 만들기" body={<p>이 폴더에 새 정본을 만들어요. 기존 정본이 있으면 만들지 않아요.</p>} onConfirm={act} onCancel={() => setConfirm(null)} />
     </div>

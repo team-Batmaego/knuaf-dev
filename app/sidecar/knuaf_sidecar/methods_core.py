@@ -81,6 +81,18 @@ def project_load(ctx, params):
     return {"project": p, "revision": p["revision"], "schema_version": p["schema_version"]}
 
 
+def project_major(ctx, params):
+    """Read the confirmed binding; never infer a major or write a selection."""
+    import gg_major_contract as mc
+
+    project = _core().load(_root(params))
+    try:
+        binding = mc.binding_from_project(mc.default_registry(), project)
+    except mc.MajorContractError as error:
+        raise RpcError("major_required", str(error), mc.common_only_plan(error)) from error
+    return dict(vars(binding), project_revision=project["revision"])
+
+
 def project_status(ctx, params):
     core = _core()
     root = _root(params)
@@ -169,8 +181,8 @@ def project_export(ctx, params):
     kind = params.get("kind", "review")
     if kind not in ("draft", "review", "submission_candidate"):
         raise RpcError("invalid_params", "kind는 draft|review|submission_candidate")
-    path = _core().export(_root(params), kind)
-    return {"path": path, "kind": kind}
+    result = _core().export(_root(params), kind, major_id=params.get("major_id"))
+    return dict(result, kind=kind)
 
 
 def project_history(ctx, params):
@@ -185,42 +197,27 @@ def project_restore(ctx, params):
 
 
 def lock_info(ctx, params):
-    return _core().lock_info(_root(params))
+    import gg_lock
+
+    root = _root(params)
+    return gg_lock.probe_lock(root) if params.get("probe") is True else gg_lock.inspect_lock(root)
 
 
 def lock_unlock(ctx, params):
-    return _core().unlock(_root(params))
+    import gg_lock
+
+    try:
+        return gg_lock.cleanup_owner(_root(params))
+    except gg_lock.LockError as error:
+        code = "lock_held" if error.status == "busy" else "lock_ambiguous"
+        raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
 
 
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
-    out = {"gg": core.doctor(root), "lock": core.lock_info(root)}
-    try:
-        import gg_deps
-
-        out["deps"] = gg_deps.doctor(root)
-    except Exception as error:  # noqa: BLE001 - diagnostics must not fail the call
-        out["deps"] = {"error": str(error)}
-    try:
-        import gg_kordoc
-
-        cli, kind = gg_kordoc._resolve_kordoc(None)
-        cache = gg_kordoc._cache_root(None)
-        legacy = [str(r) for r in gg_kordoc._legacy_cache_roots()]
-        out["kordoc"] = {
-            "cli_path": cli,
-            "source_kind": kind,
-            "cache_dir": str(cache),
-            "cache_present": (cache / gg_kordoc.VERSION).exists() or any((Path(r) / gg_kordoc.VERSION).exists() for r in legacy),
-            "legacy_cache_dirs": legacy,
-        }
-    except Exception as error:  # noqa: BLE001
-        out["kordoc"] = {"error": str(error)}
-    try:
-        out["snapshots"] = core.history(root)
-    except (OSError, ValueError) as error:
-        out["snapshots"] = {"error": str(error)}
+    report = core.doctor(root, probe=params.get("probe") is True)
+    out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
     out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
     return out
 
@@ -513,6 +510,7 @@ def register(server):
     server.register("sys.hello", sys_hello)
     server.register("project.init", project_init, write=True)
     server.register("project.load", project_load)
+    server.register("project.major", project_major)
     server.register("project.status", project_status)
     server.register("project.checks", project_checks)
     server.register("project.next", project_next)

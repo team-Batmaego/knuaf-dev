@@ -110,15 +110,17 @@ test('hard rules hold across screens', async () => {
   await expect(page.locator('.paper-head .popover .pop-row').first()).toContainText('머리말')
   await page.keyboard.press('Escape')
 
-  // troubleshoot (설정 > 문제 해결): release only for a stale same-host lock; sanctioned Kordoc sentence only
+  // v2 cleanup requires a free OS-guard observation, never PID inference.
   await navTo(page, '설정')
   await openPreset(page, 'fix:lock')
   await openPreset(page, 'fix:kordoc')
   await expect(page.locator(`text=${KORDOC}`)).toHaveCount(1)
-  await expect(page.locator('button:has-text("잠금 해제")')).toBeDisabled()
+  const cleanup = page.getByRole('button', { name: '소유 기록 정리', exact: true })
+  await expect(cleanup).toBeDisabled()
   plantStaleLock(root)
   await page.click('text=다시 진단')
-  await expect(page.locator('text=남은 잠금')).toBeVisible({ timeout: 30_000 })
-  await expect(page.locator('button:has-text("잠금 해제")')).toBeEnabled()
+  await expect(cleanup).toBeDisabled()
+  await page.getByRole('button', { name: '점유 상태 확인', exact: true }).click()
+  await expect(cleanup).toBeEnabled()
   await electronApp.close()
 })

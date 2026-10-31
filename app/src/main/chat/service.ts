@@ -430,7 +430,7 @@ export class ChatService {
         const old = s.skillHash && s.skillHash !== version ? s.skillHash : existsSync(marker) ? readFileSync(marker, 'utf-8').trim() : '이전 버전'
         installSkill(source, skill, version)
         s.messages.push({ id: randomUUID(), role: 'system', text: `규칙집이 갱신됐어요 (이전 ${old} → 현재 ${version})`, at: new Date().toISOString() })
-      }
+      } else installSkill(source, skill, version) // Refresh GUI ownership even for an unchanged copy.
       const connection = this.connection(root, provider)
       if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? CLAUDE_AUTH_COPY.required : 'AI 계정 연결을 먼저 완료해 주세요.')
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로

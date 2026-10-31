@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / "skills" / "knuaf-dev" / "scripts"
+SCRIPTS = Path(os.environ.get("KNUAF_TEST_SCRIPTS_DIR", REPO / "skills" / "knuaf-dev" / "scripts")).resolve()
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -91,3 +91,38 @@ def project(empty_folder):
     write_section(root, "sections/01.md", "Ⅰ. 머리말", "농장A의 재배 면적은 600평이다.")
     core.apply(root, basic_change(), 0)
     return root
+
+
+@pytest.fixture
+def publication_skill():
+    """The first-unit checkpoint keeps the old bundle until composition is staged."""
+    if not (SCRIPTS / "gg_major_contract.py").is_file():
+        pytest.skip("current knuaf-doc bundle required: set KNUAF_TEST_SCRIPTS_DIR")
+
+
+def bind_test_major(root, major_id="specialty_crops"):
+    import gg_core as core
+    import gg_major_contract as mc
+
+    revision = core.load(root)["revision"]
+    (root / "major-answer.txt").write_text("Synthetic explicit major selection\n", encoding="utf-8")
+    fact = {
+        "id": "selected-major", "field_id": "common.major_id", "kind": "reported_fact",
+        "value": major_id, "unit": "", "value_type": "text", "period": None, "scope": "project",
+        "answer_state": "provided", "verification": "claim_supported",
+        "module_version": mc.default_registry().resolve(major_id).module_version,
+        "source_refs": [{"id": "major-answer", "revision": revision + 1, "locator": "L1", "claim_id": "major"}],
+    }
+    claim = {k: fact[k] for k in ("field_id", "value", "unit", "period", "scope", "answer_state", "kind")}
+    core.apply(root, {"request_id": "test:bind:" + major_id, "ops": [
+        {"collection": "sources", "value": {
+            "id": "major-answer", "path": "major-answer.txt", "claims": {"major": claim}, "claim_review": "synthetic-review",
+        }},
+        {"collection": "facts", "value": fact},
+    ]}, revision)
+
+
+@pytest.fixture
+def publication_project(publication_skill, project):
+    bind_test_major(project)
+    return project

@@ -8,7 +8,7 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { accessSync, chmodSync, constants, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { APP_NAME_SHORT } from '../shared/name'
 import { pathKeyOf } from './chat/contracts'
 import { renameWithRetry, writeFileAtomic } from './safeWrite'
@@ -231,10 +231,15 @@ export function probeVersion(path: string): Promise<string | null> {
 
 // ---------------------------------------------------------------- 3. skill source + version
 
-/** Checkout: `<appRoot>/../skills/knuaf-dev`; packaged: `<resourcesPath>/skill` (see scripts/stage-skill.mjs). */
+/** Development overrides select the whole bundle, not just the sidecar scripts. */
 export function skillSource(appRoot: string, isPackaged: boolean, resourcesPath: string): string {
-  return resolveSkillSource(isPackaged ? join(resourcesPath, 'skill') : join(appRoot, '..', 'skills', 'knuaf-dev'))
+  const bundled = isPackaged ? join(resourcesPath, 'skill')
+    : process.env.KNUAF_SCRIPTS_DIR ? dirname(resolve(process.env.KNUAF_SCRIPTS_DIR))
+      : join(appRoot, '..', 'skills', 'knuaf-dev')
+  return resolveSkillSource(bundled)
 }
+
+const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json']
 
 /** Walk `abs`, collecting "rel/path:sha256(content)" for the files installSkill copies. */
 function skillFingerprint(abs: string, rel: string, out: string[]): void {
@@ -265,6 +270,10 @@ export function skillVersion(source: string): string {
   h.update(existsSync(skillMd) ? readFileSync(skillMd) : Buffer.alloc(0))
   const entries: string[] = []
   for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries)
+  for (const name of SKILL_METADATA) {
+    const file = join(source, name)
+    if (existsSync(file)) entries.push(`${name}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`)
+  }
   entries.sort()
   for (const e of entries) h.update('\n' + e)
   return h.digest('hex').slice(0, 12)
@@ -349,7 +358,7 @@ export function retireSupersededSkills(target: string): string[] {
   return moved
 }
 
-/** Copy SKILL.md + references/ + scripts/ + assets/ into `target`, leaving a version marker. */
+/** Copy the bundle payload and root metadata; GUI ownership lives outside it. */
 export function installSkill(source: string, target: string, version: string): InstallResult {
   retireSupersededSkills(target)
   const project = dirname(dirname(dirname(target)))
@@ -381,6 +390,10 @@ export function installSkill(source: string, target: string, version: string): I
   for (const dir of ['references', 'scripts', 'assets']) {
     const from = join(source, dir)
     if (existsSync(from)) cpSync(from, join(target, dir), { recursive: true, filter: copyFilter })
+  }
+  for (const name of SKILL_METADATA) {
+    const from = join(source, name)
+    if (existsSync(from)) cpSync(from, join(target, name))
   }
   writeFileSync(join(target, VERSION_FILE), version + '\n', 'utf-8')
 

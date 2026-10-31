@@ -1,4 +1,4 @@
-import type { ArtifactItem, ArtifactPreview, Envelope, HistoryRow, LockInfo, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, ArtifactPreview, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -41,19 +41,58 @@ async function call<T>(method: string, params: Record<string, unknown> = {}, onE
   }
 }
 
+const OUTPUT_METHODS: Record<string, true> = {
+  'paper.generate': true, 'docx.build': true, 'excel.create': true, 'excel.clear': true, 'excel.fill': true,
+  'excel.formula_patch': true, 'excel.print': true, 'office.word': true, 'office.excel': true, 'office.batch': true
+}
+
+async function outputParams(params: Record<string, unknown>, clientId?: string): Promise<Record<string, unknown>> {
+  const binding = await call<MajorBinding>('project.major', { root: params.root }, undefined, clientId)
+  // Explicit caller choices still reach the original guard, which rejects a mismatch.
+  return { ...params, major_id: 'major_id' in params ? params.major_id : binding.major_id }
+}
+
+// Own the preflight gap even when main has already finished the read and cannot cancel it.
+const preflightCancels = new Map<string, () => boolean>()
+
+async function script(method: string, params: Record<string, unknown>, onEvent?: EventHandler, clientId?: string): Promise<Envelope> {
+  if (OUTPUT_METHODS[method] !== true) return call<Envelope>(method, params, onEvent, clientId)
+  const id = clientId ?? rpc.newClientId()
+  let interrupt!: (error: RpcFailure) => void
+  const interrupted = new Promise<never>((_resolve, reject) => { interrupt = reject })
+  let preparing = true
+  let cancellation: RpcFailure | null = null
+  preflightCancels.set(id, () => {
+    if (!preparing) return false // Once dispatched, the real output's cancellation result is authoritative.
+    cancellation ??= new RpcFailure({ code: 'cancelled', message: 'request cancelled' })
+    interrupt(cancellation)
+    return true
+  })
+  try {
+    const selected = await Promise.race([outputParams(params, id), interrupted])
+    if (cancellation) throw cancellation // Cancellation may win just after the read promise settled.
+    preparing = false
+    return await call<Envelope>(method, selected, onEvent, id)
+  } finally {
+    preflightCancels.delete(id)
+  }
+}
+
 export const rpc = {
   call,
   status: (root: string) => call<Status>('project.status', { root }),
   load: (root: string) => call<ProjectLoad>('project.load', { root }),
+  major: (root: string) => call<MajorBinding>('project.major', { root }),
   checks: (root: string, scope: 'all' | 'submission' = 'all') => call<Status['checks']>('project.checks', { root, scope }),
   sections: (root: string) => call<SectionRow[]>('project.sections', { root }),
   readSection: (root: string, id: string) => call<{ id: string; title: string; path: string; draft: string }>('section.read', { root, id }),
   readAllSections: (root: string) => call<SectionRead[]>('section.read_all', { root }),
-  export: (root: string, kind: string) => call<{ path: string; kind: string }>('project.export', { root, kind }),
+  export: async (root: string, kind: string) => call<{ path: string; kind: string; status: string; request_id: string }>(
+    'project.export', await outputParams({ root, kind })),
   history: (root: string) => call<HistoryRow[]>('project.history', { root }),
   restore: (root: string, revision: number, expected_revision: number) => call<{ revision: number; restored_from: number; pre_restore_snapshot: string; notice: string }>('project.restore', { root, revision, expected_revision }),
-  lockInfo: (root: string) => call<LockInfo>('lock.info', { root }),
-  unlock: (root: string) => call<{ released: boolean; owner: unknown; leftover: string | null; notice?: string }>('lock.unlock', { root }),
+  lockInfo: (root: string, probe = false) => call<LockInfo>('lock.info', { root, probe }),
+  unlock: (root: string) => call<OwnerCleanup>('lock.unlock', { root }),
   doctor: (root: string) => call<Record<string, any>>('doctor.all', { root }),
   /**
    * `build/` 아래 개정별 폴더. 검토본 기준 N 은 여기서 읽는다(진행 규칙 §4-4) —
@@ -66,11 +105,14 @@ export const rpc = {
   artifactPreview: (root: string, path: string) => call<ArtifactPreview>('artifact.preview', { root, path }),
   init: (root: string) => call<{ project: unknown }>('project.init', { root }),
   /** Long-running script; pass a `clientId` from `newClientId()` to be able to `cancel` it. */
-  script: (method: string, params: Record<string, unknown>, onEvent?: EventHandler, clientId?: string) => call<Envelope>(method, params, onEvent, clientId),
+  script,
   /** Mint a renderer-side id for a cancellable call. */
   newClientId: () => `r${Date.now().toString(36)}-${++seq}`,
-  /** Ask main to cancel whatever is running under this clientId. Resolves true if something was in flight. */
-  cancel: (clientId: string): Promise<boolean> => window.knuaf.cancel(clientId)
+  /** Cancel the owned preflight and the current main request under the same clientId. */
+  cancel: async (clientId: string): Promise<boolean> => {
+    const local = preflightCancels.get(clientId)?.() ?? false
+    return (await window.knuaf.cancel(clientId)) || local
+  }
 }
 
 /** Human wording for error codes; the raw message is always shown too. */
