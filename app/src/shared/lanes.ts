@@ -67,9 +67,9 @@ export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
     'ChatGPT 낮음만',
     false,
     lane('codex', 'terra', 'main'),
-    lane('codex', 'luna', 'sub'),
-    lane('codex', 'luna', 'sub'),
-    lane('codex', 'luna', 'sub'),
+    lane('codex', 'luna', 'relay'),
+    lane('codex', 'luna', 'relay'),
+    lane('codex', 'luna', 'relay'),
     lane('codex', 'terra', 'relay', DRAFT_REVIEW_EFFORT)
   ),
   'codex-high': row(
@@ -77,9 +77,9 @@ export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
     'ChatGPT 높음만',
     false,
     lane('codex', 'sol', 'main'),
-    lane('codex', 'astra', 'sub'),
-    lane('codex', 'terra', 'sub'),
-    lane('codex', 'luna', 'sub'),
+    lane('codex', 'astra', 'relay'),
+    lane('codex', 'terra', 'relay'),
+    lane('codex', 'luna', 'relay'),
     lane('codex', 'astra', 'relay', DRAFT_REVIEW_EFFORT)
   ),
   'claude-low': row(
@@ -127,7 +127,7 @@ export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
     'Claude 낮음 + ChatGPT 높음',
     true,
     lane('codex', 'sol', 'main'),
-    lane('codex', 'astra', 'sub'),
+    lane('codex', 'astra', 'relay'),
     lane('claude', 'haiku', 'relay'),
     lane('claude', 'haiku', 'relay'),
     lane('codex', 'astra', 'relay', DRAFT_REVIEW_EFFORT)
@@ -279,10 +279,16 @@ export function deriveLaneModels(claudeTier: PlanTier, codexTier: PlanTier): Rec
   return { design, research, writing, repeat: writing, review }
 }
 
-export function howFor(laneName: WorkLane, company: Provider, mainCompany: Provider): LaneHow {
+export function howFor(
+  laneName: WorkLane,
+  company: Provider,
+  mainCompany: Provider,
+  claudeSubAllowed: boolean
+): LaneHow {
   if (laneName === 'design') return 'main'
   if (laneName === 'review') return 'relay'
-  return company === mainCompany ? 'sub' : 'relay'
+  if (company === 'codex') return 'relay'
+  return company === mainCompany && claudeSubAllowed ? 'sub' : 'relay'
 }
 
 function findCatalogModel(
@@ -318,6 +324,7 @@ export interface LaneDesignChoice {
 
 export interface LaneContext {
   mainCompany: Provider
+  claudeSubAllowed: boolean
   catalog?: ModelCatalog
   mainLanes?: readonly WorkLane[]
   design?: LaneDesignChoice
@@ -367,7 +374,10 @@ export function resolveLanes(value: LaneRowId | LaneRow, context: LaneContext): 
       plan[laneName] = { company: context.mainCompany, model: null, effort: null, how: 'main' }
       if (missing) notes.push({ lane: laneName, kind: 'main-takeover', model: entry.model ?? '' })
     } else {
-      plan[laneName] = { ...entry, how: howFor(laneName, entry.company, context.mainCompany) }
+      plan[laneName] = {
+        ...entry,
+        how: howFor(laneName, entry.company, context.mainCompany, context.claudeSubAllowed)
+      }
     }
   }
   return { plan, notes }
@@ -476,7 +486,8 @@ export function proposeLaneRequest(
   request: LaneRequest,
   accounts: readonly AccountSnapshot[],
   base: LanePlan,
-  mainCompany: Provider
+  mainCompany: Provider,
+  claudeSubAllowed: boolean
 ): LaneProposal {
   const check = checkLaneRequest(request, accounts)
   const design = check.accepted.find((entry) => entry.lane === 'design' && !entry.main && entry.company)
@@ -484,7 +495,9 @@ export function proposeLaneRequest(
   const next = {} as LanePlan
   for (const { lane } of WORK_LANES) {
     const current = base[lane]
-    next[lane] = current ? { ...current, how: howFor(lane, current.company, nextMainCompany) } : null
+    next[lane] = current
+      ? { ...current, how: howFor(lane, current.company, nextMainCompany, claudeSubAllowed) }
+      : null
   }
   for (const accepted of check.accepted) {
     if (accepted.main) {
@@ -494,7 +507,7 @@ export function proposeLaneRequest(
         company: accepted.company,
         model: accepted.model,
         effort: accepted.effort,
-        how: howFor(accepted.lane, accepted.company, nextMainCompany)
+        how: howFor(accepted.lane, accepted.company, nextMainCompany, claudeSubAllowed)
       }
     }
   }

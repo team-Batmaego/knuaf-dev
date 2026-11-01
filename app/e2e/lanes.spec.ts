@@ -130,8 +130,15 @@ test('LANE_TABLE 8줄 — 1·2번은 기존 CODEX_TIER_MODELS와 같고, 6~8번�
     }
     for (const lane of ['research', 'writing', 'repeat'] as const) {
       expect(['sub', 'relay']).toContain(lanes[lane].how)
+      if (lanes[lane].company === 'codex') expect(lanes[lane].how).toBe('relay')
     }
   }
+  for (const rowId of ['claude-low', 'claude-high'] as const) {
+    for (const lane of ['research', 'writing', 'repeat'] as const) {
+      expect(LANE_TABLE[rowId].lanes[lane].how).toBe('sub')
+    }
+  }
+  expect(LANE_TABLE['claude-high-codex-low'].lanes.research.how).toBe('sub')
 })
 
 test('규칙 1~4로 5번 줄과 초안 3줄이 그대로 다시 나온다', () => {
@@ -141,30 +148,64 @@ test('규칙 1~4로 5번 줄과 초안 3줄이 그대로 다시 나온다', () =
   expect(deriveLaneModels('low', 'low')).toEqual(tableModels('both-low'))
 })
 
-test('how 규칙 — 설계는 main, 검토는 언제나 relay, 같은 회사는 sub·다른 회사는 relay', () => {
-  expect(howFor('design', 'codex', 'claude')).toBe('main')
-  expect(howFor('review', 'claude', 'claude')).toBe('relay')
-  expect(howFor('research', 'claude', 'claude')).toBe('sub')
-  expect(howFor('research', 'codex', 'claude')).toBe('relay')
+test('how 규칙 — 설계는 main, 검토는 relay, ChatGPT는 언제나 relay, Claude만 허용 시 sub', () => {
+  expect(howFor('design', 'codex', 'claude', true)).toBe('main')
+  expect(howFor('review', 'claude', 'claude', true)).toBe('relay')
+  expect(howFor('research', 'claude', 'claude', true)).toBe('sub')
+  expect(howFor('research', 'codex', 'claude', true)).toBe('relay')
+  expect(howFor('research', 'codex', 'codex', true)).toBe('relay')
+  expect(howFor('research', 'claude', 'claude', false)).toBe('relay')
+  expect(howFor('design', 'claude', 'claude', false)).toBe('main')
+  expect(howFor('review', 'claude', 'claude', false)).toBe('relay')
 })
 
 test('추천 줄을 실행 배치로 풀면 표의 how가 나오고, 칩 회사가 바뀌면 실제 본대화 회사로 다시 계산한다', () => {
-  const same = resolveLanes('both-high', { mainCompany: 'claude' })
+  const same = resolveLanes('both-high', { mainCompany: 'claude', claudeSubAllowed: true })
   expect(laneOf(same.plan, 'research')).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
   expect(laneOf(same.plan, 'writing')).toMatchObject({ company: 'codex', model: 'luna', how: 'relay' })
   expect(laneOf(same.plan, 'review')).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
 
-  const swapped = resolveLanes('both-high', { mainCompany: 'codex' })
-  expect(laneOf(swapped.plan, 'research')).toMatchObject({ company: 'codex', how: 'sub' })
-  expect(laneOf(swapped.plan, 'writing')).toMatchObject({ company: 'codex', how: 'sub' })
-  expect(laneOf(swapped.plan, 'repeat')).toMatchObject({ company: 'codex', how: 'sub' })
+  const swapped = resolveLanes('both-high', { mainCompany: 'codex', claudeSubAllowed: true })
+  expect(laneOf(swapped.plan, 'research')).toMatchObject({ company: 'codex', how: 'relay' })
+  expect(laneOf(swapped.plan, 'writing')).toMatchObject({ company: 'codex', how: 'relay' })
+  expect(laneOf(swapped.plan, 'repeat')).toMatchObject({ company: 'codex', how: 'relay' })
   expect(laneOf(swapped.plan, 'review')).toMatchObject({ company: 'codex', how: 'relay' })
+})
+
+test('ChatGPT는 같은 회사여도 relay, Claude는 허용 때만 sub이고 아니면 relay — 설계·검토는 그대로', () => {
+  const codexPlan = resolveLanes('codex-low', { mainCompany: 'codex', claudeSubAllowed: true })
+  expect(laneOf(codexPlan.plan, 'design')).toMatchObject({ company: 'codex', how: 'main' })
+  for (const lane of ['research', 'writing', 'repeat'] as const) {
+    expect(laneOf(codexPlan.plan, lane).how).toBe('relay')
+  }
+  expect(laneOf(codexPlan.plan, 'review')).toMatchObject({ company: 'codex', how: 'relay' })
+
+  const claudeAllowed = resolveLanes('claude-low', {
+    mainCompany: 'claude',
+    claudeSubAllowed: true
+  })
+  for (const lane of ['research', 'writing', 'repeat'] as const) {
+    expect(laneOf(claudeAllowed.plan, lane).how).toBe('sub')
+  }
+  expect(laneOf(claudeAllowed.plan, 'design').how).toBe('main')
+  expect(laneOf(claudeAllowed.plan, 'review').how).toBe('relay')
+
+  const claudeBlocked = resolveLanes('claude-low', {
+    mainCompany: 'claude',
+    claudeSubAllowed: false
+  })
+  for (const lane of ['research', 'writing', 'repeat'] as const) {
+    expect(laneOf(claudeBlocked.plan, lane).how).toBe('relay')
+  }
+  expect(laneOf(claudeBlocked.plan, 'design').how).toBe('main')
+  expect(laneOf(claudeBlocked.plan, 'review').how).toBe('relay')
 })
 
 test('검토 모델이 목록에 없으면 검토는 미실행이고 본대화로 돌리지 않는다', () => {
   const withoutTerra = CODEX_MODELS.filter((entry) => entry.model !== 'gpt-6.1-terra')
   const resolved = resolveLanes('both-low', {
     mainCompany: 'claude',
+    claudeSubAllowed: true,
     catalog: { claude: CLAUDE_MODELS, codex: withoutTerra }
   })
   expect(resolved.plan.review).toBeNull()
@@ -176,6 +217,7 @@ test('자료·글쓰기·반복 모델이 목록에 없으면 그 레인만 본�
   const withoutSonnet = CLAUDE_MODELS.filter((entry) => entry.model !== 'sonnet')
   const resolved = resolveLanes('claude-high-codex-low', {
     mainCompany: 'claude',
+    claudeSubAllowed: true,
     catalog: { claude: withoutSonnet, codex: CODEX_MODELS }
   })
   expect(resolved.plan.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
@@ -184,14 +226,14 @@ test('자료·글쓰기·반복 모델이 목록에 없으면 그 레인만 본�
 })
 
 test('학생이 "이 레인은 본대화가 직접" 하면 그 레인만 main이 되고, 검토는 그 예외가 없다', () => {
-  const forced = resolveLanes('both-high', { mainCompany: 'claude', mainLanes: ['research'] })
+  const forced = resolveLanes('both-high', { mainCompany: 'claude', claudeSubAllowed: true, mainLanes: ['research'] })
   expect(forced.plan.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
-  const reviewForced = resolveLanes('both-high', { mainCompany: 'claude', mainLanes: ['review'] })
+  const reviewForced = resolveLanes('both-high', { mainCompany: 'claude', claudeSubAllowed: true, mainLanes: ['review'] })
   expect(laneOf(reviewForced.plan, 'review').how).toBe('relay')
 })
 
 test('모델 목록을 아직 모르면 없는 것으로 단정하지 않는다', () => {
-  const resolved = resolveLanes('both-high', { mainCompany: 'claude' })
+  const resolved = resolveLanes('both-high', { mainCompany: 'claude', claudeSubAllowed: true })
   expect(laneOf(resolved.plan, 'research').how).toBe('relay')
   expect(resolved.notes).toEqual([])
 })
@@ -205,7 +247,7 @@ test('학생 배치안 — 통과한 레인만 바꾸고 나머지 레인은 추
     quote: '글쓰기는 Terra high로 해',
     lanes: { writing: { company: 'codex', model: 'terra', effort: 'high' } }
   }
-  const proposal = proposeLaneRequest(request, ACCOUNTS, BASE, 'claude')
+  const proposal = proposeLaneRequest(request, ACCOUNTS, BASE, 'claude', true)
   expect(proposal.rejected).toEqual([])
   expect(proposal.accepted).toEqual([
     { lane: 'writing', main: false, company: 'codex', model: 'gpt-6.1-terra', effort: 'high' }
@@ -220,14 +262,41 @@ test('학생이 설계를 다른 회사로 옮기면 나머지 레인의 how도 
     { scope: 'once', quote: '설계는 Codex Sol로', lanes: { design: { company: 'codex', model: 'sol' } } },
     ACCOUNTS,
     BASE,
-    'claude'
+    'claude',
+    true
   )
   expect(proposal.rejected).toEqual([])
   expect(proposal.next.design).toMatchObject({ company: 'codex', model: 'gpt-6.1-sol', how: 'main' })
-  expect(proposal.next.research).toMatchObject({ company: 'codex', model: 'astra', how: 'sub' })
-  expect(proposal.next.writing).toMatchObject({ company: 'codex', model: 'luna', how: 'sub' })
-  expect(proposal.next.repeat).toMatchObject({ company: 'codex', model: 'luna', how: 'sub' })
+  expect(proposal.next.research).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
+  expect(proposal.next.writing).toMatchObject({ company: 'codex', model: 'luna', how: 'relay' })
+  expect(proposal.next.repeat).toMatchObject({ company: 'codex', model: 'luna', how: 'relay' })
   expect(proposal.next.review).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
+})
+
+test('학생 지정 병합도 ChatGPT는 relay, Claude는 허용 때만 sub — 설계·검토는 그대로', () => {
+  const request: LaneRequest = { scope: 'once', quote: '', lanes: {} }
+  const claudeBase = planFromRow('claude-low')
+  const claudeAllowed = proposeLaneRequest(request, ACCOUNTS, claudeBase, 'claude', true)
+  for (const lane of ['research', 'writing', 'repeat'] as const) {
+    expect(laneOf(claudeAllowed.next, lane).how).toBe('sub')
+  }
+  expect(laneOf(claudeAllowed.next, 'design').how).toBe('main')
+  expect(laneOf(claudeAllowed.next, 'review').how).toBe('relay')
+
+  const claudeBlocked = proposeLaneRequest(request, ACCOUNTS, claudeBase, 'claude', false)
+  for (const lane of ['research', 'writing', 'repeat'] as const) {
+    expect(laneOf(claudeBlocked.next, lane).how).toBe('relay')
+  }
+  expect(laneOf(claudeBlocked.next, 'design').how).toBe('main')
+  expect(laneOf(claudeBlocked.next, 'review').how).toBe('relay')
+
+  const codexBase = planFromRow('codex-low')
+  const codexPlan = proposeLaneRequest(request, ACCOUNTS, codexBase, 'codex', true)
+  for (const lane of ['research', 'writing', 'repeat'] as const) {
+    expect(laneOf(codexPlan.next, lane).how).toBe('relay')
+  }
+  expect(laneOf(codexPlan.next, 'design').how).toBe('main')
+  expect(laneOf(codexPlan.next, 'review').how).toBe('relay')
 })
 
 test('카드를 누르기 전에는 적용되지 않고, 취소하면 추천 그대로다', () => {
@@ -236,7 +305,8 @@ test('카드를 누르기 전에는 적용되지 않고, 취소하면 추천 그
     { scope: 'continue', quote: '글쓰기는 Terra', lanes: { writing: { company: 'codex', model: 'terra' } } },
     ACCOUNTS,
     BASE,
-    'claude'
+    'claude',
+    true
   )
   expect(BASE).toEqual(before)
   expect(applyLaneProposal(proposal, 'cancel')).toEqual({ plan: before, scope: null })
@@ -247,7 +317,8 @@ test('카드에서 이번만·계속을 고르면 그 범위가 결과에 남는
     { scope: 'once', quote: '글쓰기는 Terra', lanes: { writing: { company: 'codex', model: 'terra' } } },
     ACCOUNTS,
     BASE,
-    'claude'
+    'claude',
+    true
   )
   expect(applyLaneProposal(proposal, 'once')).toMatchObject({ scope: 'once' })
   expect(applyLaneProposal(proposal, 'continue')).toMatchObject({ scope: 'continue' })
@@ -287,7 +358,8 @@ test('학생이 "검토도 이 대화에서" 하면 검토 레인만 거절하�
     { scope: 'once', quote: '', lanes: { review: { main: true } } },
     ACCOUNTS,
     BASE,
-    'claude'
+    'claude',
+    true
   )
   expect(proposal.next.review).toEqual(BASE.review)
 })
@@ -304,7 +376,7 @@ test('학생 배치안 — 한 모델로 몰기, 검토를 같은 회사로 두�
   expect(check.rejected).toEqual([])
   expect(check.accepted).toHaveLength(5)
 
-  const proposal = proposeLaneRequest(all, ACCOUNTS, BASE, 'claude')
+  const proposal = proposeLaneRequest(all, ACCOUNTS, BASE, 'claude', true)
   expect(laneOf(proposal.next, 'design').how).toBe('main')
   expect(laneOf(proposal.next, 'review')).toMatchObject({ company: 'codex', effort: 'ultra', how: 'relay' })
 
@@ -312,7 +384,8 @@ test('학생 배치안 — 한 모델로 몰기, 검토를 같은 회사로 두�
     { scope: 'once', quote: '검토는 Claude Opus max', lanes: { review: { company: 'claude', model: 'opus', effort: 'max' } } },
     ACCOUNTS,
     BASE,
-    'claude'
+    'claude',
+    true
   )
   expect(claudeReview.rejected).toEqual([])
   expect(claudeReview.next.review).toMatchObject({ company: 'claude', model: 'opus', effort: 'max', how: 'relay' })
