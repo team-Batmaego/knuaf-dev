@@ -299,6 +299,57 @@ test('학생 지정 병합도 ChatGPT는 relay, Claude는 허용 때만 sub — 
   expect(laneOf(codexPlan.next, 'review').how).toBe('relay')
 })
 
+test('L-01 학생 지정·목록 부재로 main이 된 레인은 요청에 없으면 main으로 보존한다', () => {
+  const accounts = [
+    claude({ models: [model('opus', 'Claude Opus', ['high'])] }),
+    codex({ models: [model('astra', 'Astra', ['high'])] })
+  ]
+  const request: LaneRequest = {
+    scope: 'once',
+    quote: '검토만 Astra high',
+    lanes: { review: { company: 'codex', model: 'astra', effort: 'high' } }
+  }
+  for (const allowed of [true, false]) {
+    const base = resolveLanes('both-high', {
+      mainCompany: 'claude',
+      claudeSubAllowed: allowed,
+      mainLanes: ['research']
+    }).plan
+    const next = proposeLaneRequest(request, accounts, base, 'claude', allowed).next
+    expect(next.research).toEqual(base.research)
+    expect(next.research).toMatchObject({ company: 'claude', model: null, effort: null, how: 'main' })
+  }
+
+  const missingBase = resolveLanes('claude-high', {
+    mainCompany: 'claude',
+    claudeSubAllowed: true,
+    catalog: { claude: [model('opus', 'Claude Opus', ['high'])] }
+  }).plan
+  expect(missingBase.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
+  const missingNext = proposeLaneRequest(request, accounts, missingBase, 'claude', true).next
+  expect(missingNext.research).toEqual(missingBase.research)
+})
+
+test('L-01 설계를 다른 회사로 옮겨도 기존 main 레인은 회사만 새 본대화 회사로 맞춘다', () => {
+  const accounts = [
+    claude({ models: [model('opus', 'Claude Opus', ['high'])] }),
+    codex({ models: [model('sol', 'Sol', [...EFFORTS, 'ultra'])] })
+  ]
+  const base = resolveLanes('both-high', {
+    mainCompany: 'claude',
+    claudeSubAllowed: true,
+    mainLanes: ['research']
+  }).plan
+  const next = proposeLaneRequest(
+    { scope: 'once', quote: '설계는 Codex Sol', lanes: { design: { company: 'codex', model: 'sol' } } },
+    accounts,
+    base,
+    'claude',
+    true
+  ).next
+  expect(next.research).toEqual({ company: 'codex', model: null, effort: null, how: 'main' })
+})
+
 test('카드를 누르기 전에는 적용되지 않고, 취소하면 추천 그대로다', () => {
   const before = structuredClone(BASE)
   const proposal = proposeLaneRequest(
@@ -348,6 +399,55 @@ test('학생 배치안 검사 — 목록에 없는 모델·깊이, 다른 공급
     lane: 'writing',
     reason: 'model-unverified'
   })
+})
+
+test('L-02 Claude는 목록 ID와 정확히 같을 때만 인정하고 표시 이름 낱말로 추측하지 않는다', () => {
+  for (const [requested, listed, name] of [
+    ['claude', 'opus', 'Claude Opus'],
+    ['sonnet', 'opus', 'Opus (formerly Sonnet)'],
+    ['opus', 'anthropic/claude-opus', 'Claude Opus']
+  ] as const) {
+    const check = checkWriting(
+      { company: 'claude', model: requested },
+      [claude({ models: [model(listed, name, ['high'])] })]
+    )
+    expect(check.accepted).toEqual([])
+    expect(check.rejected).toEqual([
+      { lane: 'writing', reason: 'model-not-listed', model: requested, effort: null }
+    ])
+  }
+
+  const base = planFromRow('both-high')
+  const proposal = proposeLaneRequest(
+    { scope: 'once', quote: '글쓰기는 sonnet', lanes: { writing: { company: 'claude', model: 'sonnet' } } },
+    [claude({ models: [model('opus', 'Opus (formerly Sonnet)', ['high'])] })],
+    base,
+    'claude',
+    true
+  )
+  expect(proposal.accepted).toEqual([])
+  expect(proposal.next.writing).toEqual(base.writing)
+})
+
+test('L-02 추천 모델 목록 대조도 표시 이름이 아니라 정확한 목록 ID로만 한다', () => {
+  const resolved = resolveLanes('claude-high', {
+    mainCompany: 'claude',
+    claudeSubAllowed: true,
+    catalog: { claude: [model('opus', 'Opus (formerly Sonnet)', ['high'])] }
+  })
+  expect(resolved.plan.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
+  expect(resolved.notes).toContainEqual({ lane: 'research', kind: 'main-takeover', model: 'sonnet' })
+})
+
+test('L-02 Codex 별칭이 다른 공급자 ID로만 풀리면 거절한다', () => {
+  const check = checkWriting(
+    { company: 'codex', model: 'astra' },
+    [claude(), codex({ models: [model('openai/gpt-6.1-astra', 'Astra', ['high'])] })]
+  )
+  expect(check.accepted).toEqual([])
+  expect(check.rejected).toEqual([
+    { lane: 'writing', reason: 'model-not-listed', model: 'astra', effort: null }
+  ])
 })
 
 test('학생이 "검토도 이 대화에서" 하면 검토 레인만 거절하고 추천 검토는 그대로 둔다', () => {

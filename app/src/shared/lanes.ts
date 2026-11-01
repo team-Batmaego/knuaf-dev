@@ -297,16 +297,11 @@ function findCatalogModel(
   requested: string
 ): ModelCatalogEntry | undefined {
   const exact = models.find((entry) => entry.model === requested)
-  if (exact) return exact
-  if (company === 'codex') {
-    const resolved = resolveCodexAlias([...models], requested)
-    return resolved ? models.find((entry) => entry.model === resolved) : undefined
-  }
-  const token = requested.toLowerCase()
-  return models.find((entry) => {
-    const nameWords = entry.name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
-    return nameWords.includes(token) || lastToken(entry.model) === token
-  })
+  if (exact) return isCrossProviderModelId(exact.model) ? undefined : exact
+  if (company === 'claude') return undefined
+  const resolved = resolveCodexAlias([...models], requested)
+  if (!resolved || isCrossProviderModelId(resolved)) return undefined
+  return models.find((entry) => entry.model === resolved)
 }
 
 function modelPresent(company: Provider, model: string, catalog: ModelCatalog | undefined): boolean | null {
@@ -492,24 +487,34 @@ export function proposeLaneRequest(
   const check = checkLaneRequest(request, accounts)
   const design = check.accepted.find((entry) => entry.lane === 'design' && !entry.main && entry.company)
   const nextMainCompany = design?.company ?? mainCompany
+  const acceptedByLane = new Map(check.accepted.map((entry) => [entry.lane, entry]))
   const next = {} as LanePlan
   for (const { lane } of WORK_LANES) {
     const current = base[lane]
-    next[lane] = current
-      ? { ...current, how: howFor(lane, current.company, nextMainCompany, claudeSubAllowed) }
-      : null
-  }
-  for (const accepted of check.accepted) {
-    if (accepted.main) {
-      next[accepted.lane] = { company: nextMainCompany, model: null, effort: null, how: 'main' }
-    } else if (accepted.company && accepted.model) {
-      next[accepted.lane] = {
-        company: accepted.company,
-        model: accepted.model,
-        effort: accepted.effort,
-        how: howFor(accepted.lane, accepted.company, nextMainCompany, claudeSubAllowed)
-      }
+    const accepted = acceptedByLane.get(lane)
+    if (accepted) {
+      next[lane] = accepted.main
+        ? { company: nextMainCompany, model: null, effort: null, how: 'main' }
+        : accepted.company && accepted.model
+          ? {
+              company: accepted.company,
+              model: accepted.model,
+              effort: accepted.effort,
+              how: howFor(lane, accepted.company, nextMainCompany, claudeSubAllowed)
+            }
+          : current
+      continue
     }
+    if (!current) {
+      next[lane] = null
+      continue
+    }
+    if (current.how === 'main') {
+      next[lane] =
+        current.company === nextMainCompany ? { ...current } : { ...current, company: nextMainCompany }
+      continue
+    }
+    next[lane] = { ...current, how: howFor(lane, current.company, nextMainCompany, claudeSubAllowed) }
   }
   return {
     quote: request.quote,
