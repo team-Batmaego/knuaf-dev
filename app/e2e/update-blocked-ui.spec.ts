@@ -25,7 +25,7 @@ test('Windows owner block replaces install even in an open or in-flight dialog',
       ipcMain.handle('guide:open', () => { g.guides!++; return true })
       ipcMain.handle('app-update:install', async event => {
         g.installs!++
-        event.sender.send('app-update:status', { phase: 'blocked', reason: 'store_owner', current: '0.5.1', latest: '0.6.0', page: 'https://github.com/knuaf-devcat/knuaf-dev/releases/tag/v0.6.0' })
+        event.sender.send('app-update:status', { phase: 'blocked', reason: 'store_owner', current: '0.5.1', latest: '0.6.0', page: 'https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.0' })
         await new Promise<void>(resolve => { g.finishInstall = resolve })
         return { error: { code: 'update', message: 'owner blocked' } }
       })
@@ -45,7 +45,7 @@ test('Windows owner block replaces install even in an open or in-flight dialog',
     await page.locator('dialog[data-screen="settings"] > .sheet-head button[aria-label="닫기"]').click()
     const send = (latest: string | null, phase = 'blocked') => electronApp.evaluate(({ webContents }, payload) => {
       webContents.fromId(payload.id)!.send('app-update:status', { phase: payload.phase, reason: payload.phase === 'blocked' ? 'store_owner' : undefined,
-        current: '0.5.1', latest: payload.latest, page: payload.latest ? 'https://github.com/knuaf-devcat/knuaf-dev/releases/tag/v0.6.0' : 'https://github.com/knuaf-devcat/knuaf-dev/releases' })
+        current: '0.5.1', latest: payload.latest, page: payload.latest ? 'https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.0' : 'https://github.com/team-Batmaego/knuaf-dev/releases' })
     }, { id: windowId, latest, phase })
     await send('0.6.0', 'available')
     await page.locator('.titlebar').getByRole('button', { name: '업데이트', exact: true }).click()

@@ -3,8 +3,8 @@ import { createHash, createPublicKey, verify } from 'node:crypto'
 export const SKILL_API = 1
 export const MAX_FILES = 600
 export const MAX_BYTES = 80 * 1024 * 1024
-export const ASSET_PREFIX = 'https://github.com/knuaf-devcat/knuaf-dev/releases/download/'
-export const CHANNEL_URL = 'https://raw.githubusercontent.com/knuaf-devcat/knuaf-dev/main/updates/channel.json'
+export const ASSET_PREFIX = 'https://github.com/team-Batmaego/knuaf-dev/releases/download/'
+export const CHANNEL_URL = 'https://raw.githubusercontent.com/team-Batmaego/knuaf-dev/main/updates/channel.json'
 export interface Envelope { manifest: string; sig: string }
 export interface SkillManifest {
   schema: 1; name: 'knuaf-dev'; version: string; api: number; minApp: string
@@ -40,7 +40,7 @@ export function safePath(value: string): void {
 export function assetUrl(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !value.startsWith(ASSET_PREFIX)) throw new Error('허용되지 않은 내려받기 주소예요.')
   const u = new URL(value)
-  if (u.username || u.password || u.search || u.hash || u.href !== value || !u.pathname.startsWith('/knuaf-devcat/knuaf-dev/releases/download/')) throw new Error('허용되지 않은 내려받기 주소예요.')
+  if (u.username || u.password || u.search || u.hash || u.href !== value || !u.pathname.startsWith('/team-Batmaego/knuaf-dev/releases/download/')) throw new Error('허용되지 않은 내려받기 주소예요.')
 }
 function base64(value: unknown, max: number): Buffer {
   if (typeof value !== 'string' || value.length > Math.ceil(max / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new Error('서명 정보 인코딩이 잘못됐어요.')

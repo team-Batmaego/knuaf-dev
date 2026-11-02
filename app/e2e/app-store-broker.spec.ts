@@ -440,7 +440,7 @@ for (const contract of ownerContracts) test(`OWNER process-token contract: ${con
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-const releasesPage = 'https://github.com/knuaf-devcat/knuaf-dev/releases'
+const releasesPage = 'https://github.com/team-Batmaego/knuaf-dev/releases'
 const ownerFailures = [
   'user_data_owner_mismatch', 'user_data_owner_administrators',
   'pinned_owner_mismatch', 'pinned_owner_administrators',

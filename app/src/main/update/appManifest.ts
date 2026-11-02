@@ -2,7 +2,7 @@ import { assetUrl, compare, exact, hash, object, signedObject, version, type Env
 export const MAX_INSTALLER_BYTES = 1024 * 1024 * 1024
 export interface AppManifest { schema: 1; name: 'knuaf-dev-app'; version: string; platform: 'win32-x64'; url: string; size: number; sha256: string }
 export interface VerifiedApp { manifest: AppManifest; envelope: Envelope }
-export function releasePage(v: unknown): string { version(v); return `https://github.com/knuaf-devcat/knuaf-dev/releases/tag/v${v}` }
+export function releasePage(v: unknown): string { version(v); return `https://github.com/team-Batmaego/knuaf-dev/releases/tag/v${v}` }
 export function parseApp(value: unknown, keys: readonly string[]): VerifiedApp {
   const e = object(value), signed = signedObject(value, keys), m = signed.value
   exact(m, ['schema', 'name', 'version', 'platform', 'url', 'size', 'sha256'])
