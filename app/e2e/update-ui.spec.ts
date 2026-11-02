@@ -40,14 +40,14 @@ test('signed local channel: install, rollback, incompatible app and offline', as
   collect(resolve(__dirname, '..', '..', 'skills', 'knuaf-dev'))
   files['SKILL.md'] = Buffer.concat([files['SKILL.md'], Buffer.from('\n<!-- W3 test update -->\n')])
   files['skill.json'] = Buffer.from('{"version":"1.0.1","api":1}')
-  const archive = zip(files), url = 'https://github.com/knuaf-devcat/knuaf-dev/releases/download/skill-v1.0.1/skill.zip'
+  const archive = zip(files), url = 'https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.1/skill.zip'
   let needsApp = false, offline = false, appLatest = '0.5.1'
   const server = createServer((_req, res) => {
     if (offline) { res.writeHead(503).end(); return }
     const m = { schema: 1, name: 'knuaf-dev', version: '1.0.1', api: needsApp ? 2 : 1, minApp: '0.5.1', url, size: archive.length, sha256: sha(archive), files: Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, sha(bytes)])) }
     const bytes = Buffer.from(JSON.stringify(m))
     res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify({ schema: 1, skill: { manifest: bytes.toString('base64'), sig: sign(null, bytes, pair.privateKey).toString('base64') }, app: { latest: appLatest, page: `https://github.com/knuaf-devcat/knuaf-dev/releases/tag/v${appLatest}` } }))
+    res.end(JSON.stringify({ schema: 1, skill: { manifest: bytes.toString('base64'), sig: sign(null, bytes, pair.privateKey).toString('base64') }, app: { latest: appLatest, page: `https://github.com/team-Batmaego/knuaf-dev/releases/tag/v${appLatest}` } }))
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const addr = server.address()
@@ -98,7 +98,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
       shell.openExternal = async (url: string) => { (globalThis as typeof globalThis & { openedUpdate?: string }).openedUpdate = url }
     })
     await section.getByRole('button', { name: '내려받기 페이지 열기' }).click()
-    await expect.poll(() => electronApp.evaluate(() => (globalThis as typeof globalThis & { openedUpdate?: string }).openedUpdate)).toBe('https://github.com/knuaf-devcat/knuaf-dev/releases/tag/v99.0.0')
+    await expect.poll(() => electronApp.evaluate(() => (globalThis as typeof globalThis & { openedUpdate?: string }).openedUpdate)).toBe('https://github.com/team-Batmaego/knuaf-dev/releases/tag/v99.0.0')
     await page.locator('dialog[data-screen="settings"] > .sheet-head button[aria-label="닫기"]').click()
     await page.locator('.titlebar').getByRole('button', { name: '업데이트', exact: true }).click()
     await expect(page.getByRole('dialog', { name: '새 앱 99.0.0이 나왔어요' })).toBeVisible()
@@ -141,12 +141,15 @@ test('connection probe returns pause immediately and preserves later success and
 })
 
 test('app update progress remains reachable after closing the named dialog', async () => {
-  const { electronApp, page } = await launch({ env: { KNUAF_AGENT_PATH_ONLY: '1', PATH: '/usr/bin:/bin', KNUAF_UPDATE_PUBLIC_KEY: '', KNUAF_UPDATE_CHANNEL_URL: '' } })
+  const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const { electronApp, page } = await launch({ env: {
+    KNUAF_AGENT_PATH_ONLY: '1', PATH: '/usr/bin:/bin',
+    KNUAF_UPDATE_PUBLIC_KEY: publicKey, KNUAF_UPDATE_CHANNEL_URL: 'http://127.0.0.1:1/channel.json'
+  } })
   try {
-    // Windows startup recovery is asynchronous. Finish the real check and observe its
-    // fail-closed state before sending any synthetic status on the same IPC channel.
+    // A local unreachable channel exercises the real fail-closed check without relying on production network.
     const startup = await page.evaluate(() => window.knuaf.appUpdate.check())
-    expect(startup).toMatchObject({ result: { phase: 'unavailable', latest: null } })
+    expect(startup).toMatchObject({ result: { phase: 'error', latest: null } })
     await navTo(page, '설정')
     const section = page.getByRole('region', { name: '업데이트' })
     await expect(section.locator('p.caption', { hasText: '앱 판' })).toContainText('확인할 수 없어요')
@@ -161,7 +164,7 @@ test('app update progress remains reachable after closing the named dialog', asy
     })
     const emit = (phase: string) => electronApp.evaluate(({ BrowserWindow }, phase) => {
       BrowserWindow.getAllWindows()[0].webContents.send('app-update:status', {
-        phase, current: '0.5.1', latest: '0.6.0', page: 'https://github.com/knuaf-devcat/knuaf-dev/releases/tag/v0.6.0', received: 30, total: 100
+        phase, current: '0.5.1', latest: '0.6.0', page: 'https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.0', received: 30, total: 100
       })
     }, phase)
     // A later fail-closed event must still remove the button; do not mask real states.

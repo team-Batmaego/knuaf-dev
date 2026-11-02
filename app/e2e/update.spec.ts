@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import { ASSET_PREFIX, CHANNEL_URL, compare, MAX_BYTES, sha256, verifySkill, type SkillManifest } from '../src/main/update/manifest'
 import { extractSkill } from '../src/main/update/archive'
-import { updateConfig } from '../src/main/update/keys'
+import { UPDATE_KEYS, updateConfig } from '../src/main/update/keys'
 import { boundedFetch } from '../src/main/update/network'
 import { SkillStore } from '../src/main/update/store'
 import { SkillSwitch, skillSwitch } from '../src/main/update/switch'
@@ -95,6 +95,11 @@ for (const changes of [
   { files: { 'SKILL.md': 'a'.repeat(64), 'skill.json': 'b'.repeat(64), 'skill.JSON': 'c'.repeat(64) } }
 ]) test(`strict signed manifest rejects ${JSON.stringify(changes)}`, () => {
   expect(() => fixture('1.0.1', changes).verified()).toThrow()
+})
+
+test('asset URLs are pinned to the new org prefix (old org rejected)', () => {
+  expect(fixture().verified().manifest.url.startsWith(ASSET_PREFIX)).toBe(true)
+  expect(() => fixture('1.0.1', { url: 'https://github.com/knuaf-devcat/knuaf-dev/releases/download/skill-v1.0.1/skill.zip' }).verified()).toThrow(/내려받기 주소/)
 })
 
 test('unknown signed fields and unsupported app/API are rejected before download', async () => {
@@ -197,19 +202,19 @@ test('newer bundle wins and cleanup runs only on explicit startup, retaining act
   expect(compare('1.10.0', '1.9.99')).toBe(1)
 })
 
-test('packaged ignores all developer overrides, empty production keys reject verification and never fetch', async () => {
+test('packaged ignores all developer overrides and uses the two pinned production keys', async () => {
   const env = { KNUAF_UPDATE_PUBLIC_KEY: publicKey, KNUAF_UPDATE_CHANNEL_URL: 'http://127.0.0.1:3210/channel.json' }
   expect(updateConfig(false, env)).toEqual({ channel: env.KNUAF_UPDATE_CHANNEL_URL, keys, development: true })
   const packaged = updateConfig(true, env)
-  expect(packaged).toEqual({ channel: CHANNEL_URL, keys: [], development: false })
+  expect(packaged).toEqual({ channel: CHANNEL_URL, keys: Object.values(UPDATE_KEYS), development: false })
+  expect(packaged.keys).toHaveLength(2); expect(new Set(packaged.keys).size).toBe(2)
   expect(() => verifySkill(fixture().signed, packaged.keys)).toThrow(/서명/)
   const { store, bundled } = setup('1.0.0', packaged.keys)
-  let fetched = false
-  const updates = new SkillUpdates(store, { config: packaged, fetch: async () => { fetched = true; throw new Error('must not fetch') }, restartSidecar: async () => {} })
-  expect((await updates.check()).phase).toBe('unavailable')
-  expect(updates.status().message).toBe('업데이트를 확인할 수 없어요.')
+  const fetched: string[] = []
+  const updates = new SkillUpdates(store, { config: packaged, fetch: async url => { fetched.push(url); throw new Error('offline') }, restartSidecar: async () => {} })
+  expect((await updates.check()).phase).toBe('error')
   await expect(updates.install()).rejects.toThrow()
-  expect(fetched).toBe(false)
+  expect(fetched).toEqual([CHANNEL_URL])
   expect(store.resolveSkillSource()).toBe(bundled)
 })
 
