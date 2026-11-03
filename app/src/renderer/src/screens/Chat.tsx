@@ -13,7 +13,7 @@ import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
-import { CHAT, CHAT_EVENT, CLOSE_LABEL, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError } from '../copy'
+import { CHAT, CHAT_EVENT, CLOSE_LABEL, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
 import { chatSuggestion } from '../suggest'
 import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
@@ -372,10 +372,7 @@ export function Chat() {
           const result = await window.knuaf.createProjectFolder(name)
           if (!live()) return
           if ('error' in result) {
-            const denied = /\b(EACCES|EPERM)\b|not permitted/i.test(result.error.message)
-            setFolderError(window.knuaf.platform === 'darwin' && denied
-              ? `${PROJECT_FOLDER.macFolderDenied} ${PROJECT_FOLDER.macFolderRecovery}`
-              : window.knuaf.platform === 'win32' ? PROJECT_FOLDER.windowsCreateFailed : PROJECT_FOLDER.createFailed)
+            setFolderError(projectFolderCreationError(window.knuaf.platform, result.error.message))
             return
           }
           dir = result.result.root

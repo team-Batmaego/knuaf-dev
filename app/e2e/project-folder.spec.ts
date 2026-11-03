@@ -1,3 +1,4 @@
+import { PROJECT_FOLDER, projectFolderCreationError } from '../src/renderer/src/copy'
 import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -197,7 +198,11 @@ test('폴더 이름의 경로 구분자는 작업 폴더 밖으로 나가지 않
   } finally { await electronApp.close() }
 })
 
-test('폴더 생성이 실패하면 첫 메시지를 보존하고 다시 선택할 수 있다', async () => {
+test('폴더 이름 충돌은 권한 차단 안내로 오분류하지 않고 첫 메시지를 보존한다', async () => {
+  expect(projectFolderCreationError('win32', 'EEXIST: file already exists')).toBe(PROJECT_FOLDER.createFailed)
+  expect(projectFolderCreationError('win32', 'ENOTDIR: not a directory')).toBe(PROJECT_FOLDER.createFailed)
+  expect(projectFolderCreationError('win32', 'EPERM: operation not permitted')).toBe(PROJECT_FOLDER.windowsCreateFailed)
+  expect(projectFolderCreationError('darwin', 'EACCES: permission denied')).toBe(`${PROJECT_FOLDER.macFolderDenied} ${PROJECT_FOLDER.macFolderRecovery}`)
   const dir = scratch()
   writeFileSync(join(dir, 'knuaf-dev'), '폴더가 아닌 파일')
   const { electronApp, page } = await launch({ env: fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' }) })
@@ -207,6 +212,7 @@ test('폴더 생성이 실패하면 첫 메시지를 보존하고 다시 선택�
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
     await expect(page.getByRole('alert')).toContainText('폴더를 만들지 못했어요')
+    await expect(page.getByRole('alert')).not.toContainText('폴더 보호 기능')
     await expect(page.getByText('딸기 창업', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: /내 폴더 고르기/ })).toBeEnabled()
   } finally { await electronApp.close() }

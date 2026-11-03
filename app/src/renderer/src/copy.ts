@@ -1538,6 +1538,12 @@ export const PROJECT_FOLDER = {
   macFolderDenied: '지금 하려던 일: 새 논문 폴더를 만들어요. macOS가 문서 폴더 접근을 허용하지 않아 아직 만들지 못했어요.',
   macFolderRecovery: '문서 폴더를 쓰려면 시스템 설정에서 이 앱의 문서 폴더 접근을 허용한 뒤 다시 만들거나, 내 폴더 고르기로 다른 곳을 골라 주세요.',
 } as const
+export function projectFolderCreationError(platform: string, message: string): string {
+  const denied = /\b(EACCES|EPERM)\b|not permitted/i.test(message)
+  if (platform === 'darwin' && denied) return `${PROJECT_FOLDER.macFolderDenied} ${PROJECT_FOLDER.macFolderRecovery}`
+  if (platform === 'win32' && denied) return PROJECT_FOLDER.windowsCreateFailed
+  return PROJECT_FOLDER.createFailed
+}
 
 export const QUESTION_FORM = {
   undecided: '미정',
