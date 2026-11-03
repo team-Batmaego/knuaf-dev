@@ -137,14 +137,17 @@ test('실 kordoc MCP: 도구 목록·탐침 A/B·stdin 종료', async () => {
 })
 
 /**
- * 검토 R1-01 의 실물 반례를 고정한다: **다른 `KORDOC_ROOT`로 뜬 실제 서버**는
+ * 검토 R1-01·FIXCHECK1 의 실물 반례를 고정한다: **다른 `KORDOC_ROOT`로 뜬 실제 서버**는
  * 탐침 A가 경계 검사 이전 오류("파일을 찾을 수 없습니다")로 떨어지면 통과해서는 안 된다.
+ *
+ * `rootName` 은 그 오류 메시지에 섞이는 경로 조각이다 — 폴더 이름이 `지원하지 않는 확장자입니다`면
+ * "경로에 문구가 들어 있다"는 이유만으로 확장자 오류로 분류되던 구멍(검토 FIXCHECK1 잔여)을 잰다.
  * 같은 서버가 논문 폴더 밖 파일을 실제로 읽는다는 것도 함께 기록한다(구멍의 크기).
  */
-test('실 kordoc MCP: 잘못된 root 서버는 탐침 A가 경계 이전 오류면 통과하지 못한다', async () => {
+async function wrongRootCase(rootName: string) {
   test.setTimeout(120_000)
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'kordoc-wrongroot-')))
-  const root = join(base, 'project')
+  const root = join(base, rootName)
   const wrongRoot = join(base, 'outside')
   const outsideFile = join(wrongRoot, 'outside.pdf')
   mkdirSync(root); mkdirSync(wrongRoot)
@@ -186,7 +189,7 @@ test('실 kordoc MCP: 잘못된 root 서버는 탐침 A가 경계 이전 오류�
 
     const error = await verifyCodexKordoc(adapter, { threadId: 'real-wrong-root', root, spec })
       .then(() => null, (e: unknown) => e)
-    console.log(`[real] wrong-root verify=${error instanceof McpSafetyError ? error.reason : 'PASS'}`)
+    console.log(`[real] wrong-root(${rootName}) verify=${error instanceof McpSafetyError ? error.reason : 'PASS'}`)
     expect(error).toBeInstanceOf(McpSafetyError)
     expect((error as McpSafetyError).reason).toBe('probe-a-unproven')
 
@@ -201,4 +204,12 @@ test('실 kordoc MCP: 잘못된 root 서버는 탐침 A가 경계 이전 오류�
     if (!c.child.killed && c.child.exitCode === null) { c.child.stdin.end(); c.child.kill('SIGKILL') }
     rmSync(base, { recursive: true, force: true })
   }
+}
+
+test('실 kordoc MCP: 잘못된 root 서버는 탐침 A가 경계 이전 오류면 통과하지 못한다', async () => {
+  await wrongRootCase('project')
+})
+
+test('실 kordoc MCP: 경로가 오류 문구와 같은 폴더여도 A를 통과시키지 않는다(FIXCHECK1)', async () => {
+  await wrongRootCase('지원하지 않는 확장자입니다')
 })

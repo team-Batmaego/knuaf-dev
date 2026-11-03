@@ -57,10 +57,19 @@ const TERMINAL_STATUS = new Set(['failed', 'cancelled', 'disabled', 'authenticat
 export const ROOT_DENIAL_TEXT = '허용된 작업 디렉토리(KORDOC_ROOT) 밖의 경로입니다'
 
 /**
- * 확장자 검사 문장(`safePath` 실측: `지원하지 않는 확장자입니다: <ext> (허용: …)`).
- * 폴더 자체를 넘긴 탐침 A가 **경계 검사를 통과한 뒤**에만 나올 수 있는 오류라 이것만 허용한다.
+ * 오류 **종류** 판정은 문장 시작부의 고정 형식으로만 한다(검토 FIXCHECK1 잔여 지적).
+ *
+ * kordoc 도구 결과 형식은 `오류: <종류 문장>: <경로…>`(실측)이다. 경로가 문장 뒤에 붙으므로
+ * 부분 문자열 포함(`includes`)으로 종류를 고르면, **경로에 그 문구가 들어간 "파일 없음" 응답**이
+ * 확장자 오류로 오인된다 — 그게 바로 다른 root 서버를 통과시키던 구멍이다.
+ * 그래서 `^`(필요하면 `오류: ` 접두)로 시작부를 고정하고, 여러 텍스트 항목은 **전부 같은 종류**여야 한다.
  */
+/** `safePath` 실측: `지원하지 않는 확장자입니다: <ext> (허용: …)` — 경계 검사 **뒤**에만 나온다. */
 export const EXTENSION_ERROR_TEXT = '지원하지 않는 확장자입니다'
+export const EXTENSION_ERROR_PATTERN = /^(?:오류:\s*)?지원하지 않는 확장자입니다:/
+
+/** `assertWithinRoot` 실측: `허용된 작업 디렉토리(KORDOC_ROOT) 밖의 경로입니다: <realPath>`. */
+export const ROOT_DENIAL_PATTERN = /^(?:오류:\s*)?허용된 작업 디렉토리\(KORDOC_ROOT\) 밖의 경로입니다:/
 
 const DEFAULT_SLEEP = (ms: number): Promise<void> => {
   const { promise, resolve } = Promise.withResolvers<void>()
@@ -74,7 +83,9 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 export interface ToolResult {
   isError: boolean
-  /** `content[].text` 만 이어 붙인 것. 도구가 실제로 돌려준 문장이다. */
+  /** `content[].text` 항목들. 판정은 항목별 시작부로만 한다(경로 속 문구에 속지 않게). */
+  items: string[]
+  /** 항목을 `\n` 으로 이어 붙인 진단용 문자열. 판정에 쓰지 않는다. */
   text: string
 }
 
@@ -90,11 +101,21 @@ export function readToolResult(value: unknown): ToolResult | null {
   if (!rec) return null
   if (!Array.isArray(rec.content)) return null
   if (rec.isError !== undefined && typeof rec.isError !== 'boolean') return null
-  const text = rec.content.flatMap((item) => {
+  const items = rec.content.flatMap((item) => {
     const c = asRecord(item)
     return c && c.type === 'text' && typeof c.text === 'string' ? [c.text] : []
-  }).join('\n')
-  return { isError: rec.isError === true, text }
+  })
+  return { isError: rec.isError === true, items, text: items.join('\n') }
+}
+
+/**
+ * 도구 결과가 **그 종류의 고정 시작부**로 시작하는 오류인가.
+ *
+ * 텍스트 항목이 하나 이상 있어야 하고, **모든 항목이 같은 종류**여야 한다 — 여러 항목이 서로 다른
+ * 종류를 말하면 종류를 확정할 수 없으므로 거짓(닫힘)이다. `includes`가 아니라 `test`(앵커 포함)만 쓴다.
+ */
+export function resultIsKind(result: ToolResult, pattern: RegExp): boolean {
+  return result.items.length > 0 && result.items.every((t) => pattern.test(t.trim()))
 }
 
 /**
@@ -292,11 +313,11 @@ export async function verifyCodexKordoc(request: JsonRpcLike, opts: VerifyOption
   if (call.expired()) throw new McpSafetyError('kordoc MCP 검증 시간이 초과됐어요', 'startup-timeout')
   if (!a.text.trim()) throw new McpSafetyError('탐침 A 응답이 비어 있어 적용된 root를 확인하지 못했어요', 'probe-a-empty')
   if (a.isError) {
-    if (a.text.includes(ROOT_DENIAL_TEXT)) {
+    if (resultIsKind(a, ROOT_DENIAL_PATTERN)) {
       throw new McpSafetyError('kordoc의 작업 폴더가 논문 폴더보다 하위로 잡혔어요', 'probe-a-denied')
     }
-    // 경계 검사를 통과한 뒤에만 나올 수 있는 오류는 확장자 오류뿐이다.
-    if (!a.text.includes(EXTENSION_ERROR_TEXT)) {
+    // 경계 검사를 통과한 뒤에만 나올 수 있는 오류는 확장자 오류뿐이다 — 문장 시작부로만 판정한다.
+    if (!resultIsKind(a, EXTENSION_ERROR_PATTERN)) {
       throw new McpSafetyError('탐침 A가 경계 검사를 지났다는 것을 증명하지 못했어요', 'probe-a-unproven')
     }
   }
@@ -304,7 +325,7 @@ export async function verifyCodexKordoc(request: JsonRpcLike, opts: VerifyOption
   const b = await probe(call, opts.threadId, dirname(rootReal))
   if (call.expired()) throw new McpSafetyError('kordoc MCP 검증 시간이 초과됐어요', 'startup-timeout')
   if (!b.isError) throw new McpSafetyError('kordoc의 작업 폴더가 논문 폴더보다 위로 잡혔어요', 'probe-b-allowed')
-  if (!b.text.includes(ROOT_DENIAL_TEXT)) {
+  if (!resultIsKind(b, ROOT_DENIAL_PATTERN)) {
     throw new McpSafetyError('탐침 B가 root 거절 오류를 돌려주지 않았어요', 'probe-b-unproven')
   }
 }
