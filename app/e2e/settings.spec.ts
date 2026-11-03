@@ -99,6 +99,7 @@ test('a student with no permission_mode setting sees the default as not asking',
   const fresh = await launch({ userData: freshUserData() })
   await navTo(fresh.page, '설정')
   await expect(fresh.page.locator('input[name="permission-mode"]').nth(0)).toBeChecked()
+  await expect(fresh.page.locator('section.card', { has: fresh.page.locator('input[name="permission-mode"]') })).toContainText('모든 논문 폴더에서')
   await expect(fresh.page.locator('input[name="permission-mode"]').nth(1)).not.toBeChecked()
   await fresh.electronApp.close()
 
@@ -113,13 +114,30 @@ test('a student with no permission_mode setting sees the default as not asking',
 // 끄면 예전처럼 묻는다 — 고른 값이 디스크에 남아야 다음 실행에도 이어진다.
 test('turning the permission toggle off records ask, and back on records trust', async () => {
   const userData = freshUserData()
+  writeFileSync(join(userData, 'settings.json'), JSON.stringify({ trusted_roots: ['legacy-root'] }), 'utf-8')
   const { electronApp, page } = await launch({ userData })
   await navTo(page, '설정')
+  await expect(page.getByText('이 폴더에서만 항상 허용')).toHaveCount(0)
   await page.locator('input[name="permission-mode"]').nth(1).check()
   await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).permission_mode).toBe('ask')
+  await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).trusted_roots).toEqual([])
   await page.locator('input[name="permission-mode"]').nth(0).check()
   await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).permission_mode).toBe('trust')
   await electronApp.close()
+})
+
+test('turning global trust on preserves the inactive folder exception list', async () => {
+  const userData = freshUserData()
+  writeFileSync(join(userData, 'settings.json'), JSON.stringify({ permission_mode: 'ask', trusted_roots: ['legacy-root'] }), 'utf-8')
+  const { electronApp, page } = await launch({ userData })
+  try {
+    await navTo(page, '설정')
+    await expect(page.getByText('이 폴더에서만 항상 허용')).toBeVisible()
+    await page.locator('input[name="permission-mode"]').nth(0).check()
+    await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).permission_mode).toBe('trust')
+    await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).trusted_roots).toEqual(['legacy-root'])
+    await expect(page.getByText('이 폴더에서만 항상 허용')).toHaveCount(0)
+  } finally { await electronApp.close() }
 })
 
 // 기본을 바꾸는 설정이면 무엇을 포기하는지도 같은 자리에서 말해야 한다 — 도우미가 논문 폴더

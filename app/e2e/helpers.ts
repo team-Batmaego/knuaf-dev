@@ -35,7 +35,7 @@ export function plantStaleLock(root: string): void {
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 
-export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
+export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'kd-userdata-'))
   /**
    * 여는 화면은 켤 때마다 화면을 덮고 2.6초를 쓴다. 대부분의 테스트는 그것을 보려는 게
@@ -57,6 +57,8 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   if (!opts.intro && preset.show_intro === undefined) preset.show_intro = false
   if (opts.onboarded === false) delete preset.onboarded_at
   else if (!preset.onboarded_at) preset.onboarded_at = new Date().toISOString()
+  if (opts.permissionPrompt) delete preset.first_project_permission_asked_at
+  else if (!preset.first_project_permission_asked_at) preset.first_project_permission_asked_at = new Date().toISOString()
   writeFileSync(settingsFile, JSON.stringify(preset), 'utf-8')
   // A shell that exports ELECTRON_RUN_AS_NODE would make the app run as plain Node (require('electron') yields the binary path).
   const env = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }

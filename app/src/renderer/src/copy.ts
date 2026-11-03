@@ -899,6 +899,12 @@ export function formatBytes(n: number): string {
 /** Office 작업영역이 macOS 개인정보 보호(TCC)에 막혔을 때의 안내. block_reason 텍스트로 판별한다. */
 export function officeHint(reason: string | null | undefined): { title: string; body: string } | null {
   if (!reason) return null
+  if (/-1743|Apple Events?|자동화 권한 오류/i.test(reason)) {
+    return {
+      title: 'Word·Excel 제어를 허용하지 않았어요',
+      body: '시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 Word·Excel을 제어하려는 앱을 허용한 뒤, 지금 하려던 작업을 다시 시도해 주세요.'
+    }
+  }
   if (/Group Containers/.test(reason) && /not permitted|권한/i.test(reason)) {
     return {
       title: 'macOS가 Office 데이터 폴더 접근을 막았어요',
@@ -1435,13 +1441,13 @@ export const SETTINGS = {
   folderOpenOther: '다른 폴더 열기…',
   folderRecentClear: '목록 지우기',
   /** 유일한 경로 입력칸 — 평소엔 접혀 있고 일반 동선(선택 대화상자·드롭·최근 카드)에는 없다. */
-  trustedTitle: '묻지 않기로 한 폴더',
-  trustedBody: '이 폴더들에서는 도우미가 명령을 실행할 때 확인을 묻지 않아요. 언제든 해제할 수 있어요.',
+  trustedTitle: '이 폴더에서만 항상 허용',
+  trustedBody: '전역 설정이 “매번 묻기”일 때 예외로 허용한 폴더예요. 여기서 해제하면 이 폴더에서도 다시 물어요.',
   trustedOff: '해제',
   folderAdvanced: '고급 — 경로로 열기',
   folderPathLabel: '폴더 경로',
   folderPathOpen: '경로로 열기',
-  // GUI-04 — 열기 실패를 알릴 때 지금 폴더가 어떻게 됐는지를 같이 말한다.
+  // GUI-04 — 폴더 열기 실패를 알릴 때 지금 폴더가 어떻게 됐는지를 같이 말한다.
   folderKeptAfterFail: (name: string) => `"${name}" 폴더는 그대로 열려 있어요.`,
   folderNoneAfterFail: '아직 열려 있는 폴더가 없어요.',
   helperTitle: '도우미 연결',
@@ -1450,15 +1456,13 @@ export const SETTINGS = {
   helperChatClaude: 'Claude',
   helperChatNote: '막히면 아래 "앱 밖 터미널로 도우미 열기"로 같은 도우미를 직접 띄울 수 있어요.',
   /**
-   * 권한 묻기 기본값 — 기본은 '묻지 않기'다. 숨기지 않고 여기 보이는 설정으로 둔다.
-   * tradeoff 는 무엇을 포기하는지 사실만 적는다: 도우미는 논문 폴더 밖의 PDF·웹 문서도 읽고,
-   * 그렇게 읽은 글 안에 섞여 들어온 지시를 앱이 걸러 주지는 않는다. 겁주지 않고,
-   * 근거 없는 안심도 주지 않는다.
+   * 전역 권한 선택은 모든 논문 폴더와 폴더 밖 명령에 적용된다. 설정에서 언제든
+   * 매번 묻게 바꿀 수 있으며, 바꾸면 폴더별 예외도 지운다.
    */
-  permissionWhich: '도우미가 도구를 쓸 때 물어볼까요?',
-  permissionTrust: '묻지 않기 — 기본값',
-  permissionAsk: '쓸 때마다 물어보기',
-  permissionTradeoff: '묻지 않기로 두면 도우미가 명령을 실행하거나 논문 폴더 밖의 파일을 열 때도 확인을 거치지 않아요. 도우미는 참고자료 PDF나 웹 문서도 읽는데, 그렇게 읽은 글 안에 섞여 들어온 지시를 앱이 걸러 주지는 않아요.',
+  permissionWhich: '모든 논문 폴더에서 도우미의 허락 요청을 어떻게 처리할까요?',
+  permissionTrust: '항상 허용 — 모든 논문 폴더에서',
+  permissionAsk: '매번 묻기 — 모든 논문 폴더에서',
+  permissionTradeoff: '항상 허용하면 파일을 고치거나 논문 폴더 밖에 영향을 주는 명령도 확인 없이 실행돼요. 매번 묻기로 바꾸면 폴더별 예외도 해제돼요. 도우미는 참고자료 PDF나 웹 문서도 읽는데, 그렇게 읽은 글 안에 섞여 들어온 지시를 앱이 걸러 주지는 않아요.',
   troubleTitle: '문제 해결',
   toolsTitle: '고급 도구',
   toolsNote: '직접 실행 — 평소엔 필요 없어요',
@@ -1524,7 +1528,15 @@ export const PROJECT_FOLDER = {
   finder: 'Finder에서 열기',
   explorer: '파일 탐색기에서 열기',
   openFailed: '폴더를 열지 못했어요.',
-  createFailed: '폴더를 만들지 못했어요. 다시 시도하거나 내 폴더를 골라 주세요.'
+  createFailed: '폴더를 만들지 못했어요. 다시 시도하거나 내 폴더를 골라 주세요.',
+  permissionTitle: '모든 논문 폴더에서 허락 방식을 골라 주세요.',
+  permissionBody: '항상 허용은 모든 논문 폴더에서 파일 고치기와 폴더 밖 명령까지 자동 승인해요. 매번 묻기는 예전에 허용한 폴더도 다시 물어요. 설정에서 언제든 바꿀 수 있어요.',
+  permissionAlways: '항상 허용',
+  permissionAsk: '매번 묻기',
+  windowsWriteFailed: '지금 하려던 일: 이 폴더를 열어요. 이 폴더에는 임시 파일을 만들 수 없어 열지 않았어요. 해결하려면 내 폴더 고르기로 쓰기 가능한 곳을 골라 주세요. 회사·학교 컴퓨터의 폴더 보호 기능이 막았을 수 있어요.',
+  windowsCreateFailed: '지금 하려던 일: 새 논문 폴더를 만들어요. 이 위치에는 폴더를 만들 수 없어요. 해결하려면 내 폴더 고르기로 쓰기 가능한 폴더를 고르거나 다른 위치를 사용해 주세요. 회사·학교 컴퓨터의 폴더 보호 기능이 막았을 수 있어요.',
+  macFolderDenied: '지금 하려던 일: 새 논문 폴더를 만들어요. macOS가 문서 폴더 접근을 허용하지 않아 아직 만들지 못했어요.',
+  macFolderRecovery: '문서 폴더를 쓰려면 시스템 설정에서 이 앱의 문서 폴더 접근을 허용한 뒤 다시 만들거나, 내 폴더 고르기로 다른 곳을 골라 주세요.',
 } as const
 
 export const QUESTION_FORM = {

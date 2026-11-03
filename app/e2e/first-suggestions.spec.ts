@@ -13,7 +13,7 @@ for (const [label, prompt] of suggestions) {
   test(`${label}: 편집한 첫 요청이 폴더 선택 뒤 한 번 전달된다`, async () => {
     const dir = scratch()
     const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in', FAKE_CODEX_REPLY: replyFile(dir, '확인했어요') })
-    const { electronApp, page } = await launch({ env })
+    const { electronApp, page } = await launch({ env, permissionPrompt: true })
     try {
       await electronApp.evaluate(({ app }, docs) => app.setPath('documents', docs), dir)
       await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
@@ -31,7 +31,13 @@ for (const [label, prompt] of suggestions) {
       await expect(page.locator('.folder-message')).toHaveText(edited)
       await page.getByRole('textbox', { name: '논문 이름' }).fill('딸기 논문')
       await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
+      await expect(page.getByText('모든 논문 폴더에서 허락 방식을 골라 주세요.')).toBeVisible()
+      await page.getByRole('button', { name: '매번 묻기' }).click()
       await expect(page.getByText('확인했어요')).toBeVisible({ timeout: 30000 })
+      const savedSettings = await page.evaluate(() => window.knuaf.getSettings())
+      expect(savedSettings.permission_mode).toBe('ask')
+      expect(savedSettings.trusted_roots).toEqual([])
+      expect(savedSettings.first_project_permission_asked_at).toBeTruthy()
       await expect(page.locator('.chat-msg.user')).toHaveCount(1)
       await expect(page.locator('.chat-msg.user')).toHaveText(edited)
     } finally { await electronApp.close() }

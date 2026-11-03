@@ -223,16 +223,16 @@ function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, o
       {submitted ? <div className="folder-question">
         <div className="folder-message">{submitted}</div>
         <section className="folder-card">
-          <h2>{PROJECT_FOLDER.title}</h2>
-          <p>{PROJECT_FOLDER.body}</p>
-          <label>{PROJECT_FOLDER.name}<input value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
-          <button className="folder-option recommended" onClick={onCreate} disabled={busy}>
-            <strong>{PROJECT_FOLDER.create} · {PROJECT_FOLDER.recommended}</strong>
-            <small>{PROJECT_FOLDER.location(projectFolderName(name))}</small>
-          </button>
-          <button className="folder-option" onClick={onPick} disabled={busy}>
-            <strong>{PROJECT_FOLDER.pick}</strong><small>{PROJECT_FOLDER.pickBody}</small>
-          </button>
+            <h2>{PROJECT_FOLDER.title}</h2>
+            <p>{PROJECT_FOLDER.body}</p>
+            <label>{PROJECT_FOLDER.name}<input value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
+            <button className="folder-option recommended" onClick={onCreate} disabled={busy}>
+              <strong>{PROJECT_FOLDER.create} · {PROJECT_FOLDER.recommended}</strong>
+              <small>{PROJECT_FOLDER.location(projectFolderName(name))}</small>
+            </button>
+            <button className="folder-option" onClick={onPick} disabled={busy}>
+              <strong>{PROJECT_FOLDER.pick}</strong><small>{PROJECT_FOLDER.pickBody}</small>
+            </button>
           {createError && <p role="alert">{createError}</p>}
           <button className="quiet" onClick={onBack} disabled={busy}>돌아가기</button>
         </section>
@@ -288,6 +288,7 @@ export function Chat() {
   const pOpenFailure = useProject((s) => s.openFailure)
   const pRetryFailed = useProject((s) => s.retryFailed)
   const retryOpen = useProject((s) => s.retryOpen)
+  const firstProjectGate = useProject((s) => s.firstProjectGate)
   const clearPError = useProject((s) => s.clearError)
   const openSheet = useProject((s) => s.openSheet)
   const events = useProject((s) => s.events)
@@ -370,7 +371,13 @@ export function Chat() {
         else {
           const result = await window.knuaf.createProjectFolder(name)
           if (!live()) return
-          if ('error' in result) { setFolderError(PROJECT_FOLDER.createFailed); return }
+          if ('error' in result) {
+            const denied = /\b(EACCES|EPERM)\b|not permitted/i.test(result.error.message)
+            setFolderError(window.knuaf.platform === 'darwin' && denied
+              ? `${PROJECT_FOLDER.macFolderDenied} ${PROJECT_FOLDER.macFolderRecovery}`
+              : window.knuaf.platform === 'win32' ? PROJECT_FOLDER.windowsCreateFailed : PROJECT_FOLDER.createFailed)
+            return
+          }
           dir = result.result.root
           createdFolder.current = { name, root: dir }
         }
@@ -378,7 +385,8 @@ export function Chat() {
         dir = await window.knuaf.pickFolder()
         if (!live()) return
       }
-      if (dir && live()) await openFirstFolder(dir, generation, projectSeq)
+      if (!dir || !live()) return
+      await openFirstFolder(dir, generation, projectSeq)
     } catch {
       if (live()) setFolderError(PROJECT_FOLDER.createFailed)
     } finally {
@@ -394,6 +402,24 @@ export function Chat() {
     setFolderBusy(false)
     setNewText(''); setSubmitted(null); setQueued(null); setFolderError(null); createdFolder.current = null
   }, [newProjectSeq])
+  const previousProjectGate = useRef(firstProjectGate)
+  useEffect(() => {
+    const previous = previousProjectGate.current
+    if (
+      previous?.kind === 'write-error' &&
+      firstProjectGate &&
+      firstProjectGate.root !== previous.root &&
+      queued?.root === previous.root &&
+      queued.submission === submission.current &&
+      queued.text === submitted
+    ) {
+      // The student replaced the folder that failed the write probe; continue this request at the selected root.
+      setQueued({ ...queued, root: firstProjectGate.root })
+    } else if (previous && !firstProjectGate && !projectRoot && queued?.root === previous.root) {
+      setQueued(null); setSubmitted(null); setFolderError(null)
+    }
+    previousProjectGate.current = firstProjectGate
+  }, [firstProjectGate, projectRoot, queued, submitted])
   useEffect(() => {
     if (projectRoot && submitted && !queued) setQueued({ root: projectRoot, text: submitted, submission: submission.current })
   }, [projectRoot, submitted, queued])

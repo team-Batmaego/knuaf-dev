@@ -70,6 +70,7 @@ mac:
     # 이 문자열이 없으면 macOS 가 자동화 동의 창 자체를 띄우지 못해 변환이
     # 그 자리에서 실패한다. 학생이 무엇에 쓰는지 읽고 허용할 문장이라 한국어로 쓴다.
     NSAppleEventsUsageDescription: "논문 DOCX와 재무 엑셀을 Word·Excel로 열어 PDF로 만들기 위해 사용합니다."
+    NSDocumentsFolderUsageDescription: "논문 파일과 결과물을 문서 폴더에 저장하고 읽기 위해 사용합니다."
     # 아래 넷은 Electron 기본 Info.plist 가 넣어 주는 영문 문구다. 이 앱은
     # 카메라·마이크·블루투스를 쓰지 않으므로 키째로 지운다. null 은 빈 값이 아니라
     # '삭제'로 동작한다 — macPackager 가 extendInfo 를 deepAssign 한 뒤 값이 null 인
