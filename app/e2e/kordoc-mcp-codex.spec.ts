@@ -339,3 +339,76 @@ test('R1-01: 설계대로 A의 성공(내용 있음)은 통과 — 확장자 오
   })
   await verifyCodexKordoc(m, opts())
 })
+
+
+// ── 검토 FIXCHECK1 잔여(M1-R1-01) — 오류 종류는 문장 시작부로만 판정한다 ─────────
+
+test('FIXCHECK1: 경로에 "지원하지 않는 확장자입니다"가 들어간 파일 없음 오류는 A를 통과시키지 않는다', async () => {
+  const phrasePath = `${root}/지원하지 않는 확장자입니다`  // 실제 잔여 반례의 폴더 이름
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    return { content: [{ type: 'text', text: `오류: 파일을 찾을 수 없습니다: ${phrasePath}` }], isError: true }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-a-unproven')
+})
+
+test('FIXCHECK1: 경로에 root 거절 문구가 들어간 오류도 B를 통과시키지 않는다(대칭)', async () => {
+  const phrasePath = `${root}/허용된 작업 디렉토리(KORDOC_ROOT) 밖의 경로입니다`
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: '오류: 지원하지 않는 확장자입니다:  (허용: .hwpx)' }], isError: true }
+    }
+    return { content: [{ type: 'text', text: `오류: 파일을 찾을 수 없습니다: ${phrasePath}` }], isError: true }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-b-unproven')
+})
+
+test('FIXCHECK1: 여러 텍스트 항목이 서로 다른 종류면 확정하지 않는다', async () => {
+  const mixed = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return {
+        content: [
+          { type: 'text', text: `오류: 파일을 찾을 수 없습니다: ${root}` },
+          { type: 'text', text: '오류: 지원하지 않는 확장자입니다:  (허용: .hwpx)' }
+        ],
+        isError: true
+      }
+    }
+    return { content: [{ type: 'text', text: `오류: ${ROOT_DENIAL_TEXT}: /x` }], isError: true }
+  })
+  await expectSafety(verifyCodexKordoc(mixed, opts()), 'probe-a-unproven')
+
+  // 같은 종류만 여러 항목이면 인정한다(실제 서버는 1개를 주지만 형식상 허용).
+  const same = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: '오류: 지원하지 않는 확장자입니다: .hwpx' }, { type: 'text', text: '지원하지 않는 확장자입니다: .hwpx' }], isError: true }
+    }
+    return { content: [{ type: 'text', text: `오류: ${ROOT_DENIAL_TEXT}: /x` }], isError: true }
+  })
+  await verifyCodexKordoc(same, opts())
+})
+
+test('FIXCHECK1: MCP 래퍼의 "오류: " 접두가 없어도 시작부 고정은 그대로 동작한다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: '지원하지 않는 확장자입니다: .hwpx' }], isError: true }
+    }
+    return { content: [{ type: 'text', text: `${ROOT_DENIAL_TEXT}: /x` }], isError: true }
+  })
+  await verifyCodexKordoc(m, opts())
+})
+
+test('FIXCHECK1: 문장 중간에만 문구가 있는 오류는 종류를 확정하지 않는다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: '문서 처리 중 오류 (지원하지 않는 확장자입니다: .hwpx)' }], isError: true }
+    }
+    return { content: [{ type: 'text', text: `전달 실패 — ${ROOT_DENIAL_TEXT}: /x` }], isError: true }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-a-unproven')
+})
