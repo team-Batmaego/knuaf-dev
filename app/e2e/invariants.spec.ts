@@ -26,6 +26,11 @@ test('the built app is named what the app calls itself', () => {
     .toMatch(/^[A-Za-z0-9._${}-]+$/)
 })
 
+test('Windows installer is configured for a one-click per-user install', () => {
+  const yml = readFileSync(join(app, 'electron-builder.yml'), 'utf-8')
+  expect(yml).toMatch(/^nsis:\n  oneClick: true\n  perMachine: false\n  runAfterFinish: true\n  createDesktopShortcut: true\n  createStartMenuShortcut: true\n  include: build\/installer\.nsh$/m)
+})
+
 test('reduced motion collapses transitions but keeps the spinner', async () => {
   const { electronApp, page } = await launch({ reducedMotion: 'reduce' })
   const dur = await page.locator('.titlebar .tbtn').first().evaluate((el) => getComputedStyle(el).transitionDuration)
