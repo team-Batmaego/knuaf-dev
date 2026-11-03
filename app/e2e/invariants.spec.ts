@@ -28,7 +28,10 @@ test('the built app is named what the app calls itself', () => {
 
 test('Windows installer is configured for a one-click per-user install', () => {
   const yml = readFileSync(join(app, 'electron-builder.yml'), 'utf-8')
-  expect(yml).toMatch(/^nsis:\n  oneClick: true\n  perMachine: false\n  runAfterFinish: true\n  createDesktopShortcut: true\n  createStartMenuShortcut: true\n  include: build\/installer\.nsh$/m)
+  const nsisConfig = /^nsis:\r?\n  oneClick: true\r?\n  perMachine: false\r?\n  runAfterFinish: true\r?\n  createDesktopShortcut: true\r?\n  createStartMenuShortcut: true\r?\n  include: build\/installer\.nsh$/m
+  for (const lineEnding of ['\n', '\r\n']) {
+    expect(yml.replace(/\r?\n/g, lineEnding)).toMatch(nsisConfig)
+  }
 })
 
 test('reduced motion collapses transitions but keeps the spinner', async () => {
