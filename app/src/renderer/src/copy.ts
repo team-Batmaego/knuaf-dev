@@ -42,7 +42,7 @@ export const UPDATE = {
   appButton: '앱 업데이트',
   appTitle: (version: string) => `새 앱 ${version}이 나왔어요`,
   appMac: '내려받기 페이지를 열어 새 앱을 설치할 수 있어요.',
-  appWindows: '앱이 닫혔다가 다시 열려요. 관리자 확인 창이 뜨면 ‘예’를 눌러 주세요.',
+  appWindows: '앱이 닫혔다가 다시 열려요. 확인 창이 뜨면 ‘예’를 눌러 주세요.',
   appOpen: '내려받기 페이지 열기',
   appInstall: '지금 설치',
   later: '나중에',

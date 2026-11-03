@@ -19,7 +19,7 @@ namespace KnuafUpdate {
   [DllImport("kernel32.dll",SetLastError=true)] static extern uint GetProcessId(IntPtr process);
   static Dictionary<string,object> Unknown() { return new Dictionary<string,object>{{"unknown",true}}; }
   static Dictionary<string,object> Started(int pid) { return pid>0 ? new Dictionary<string,object>{{"started",true},{"pid",pid}} : Unknown(); }
-  public static Dictionary<string,object> Execute(string userData,string expectedPath,string version,long size,string sha) {
+  public static Dictionary<string,object> Execute(string userData,string expectedPath,string version,long size,string sha,bool elevate) {
    bool attempted=false;
    try {
     using(var files=new Files(userData,false)) {
@@ -30,26 +30,32 @@ namespace KnuafUpdate {
       // until CreateProcess or runas/UAC has returned a confirmed start/cancel/failure.
       if(!Files.Matches(file,size,sha)) throw new IOException("Installer hash mismatch");
       attempted=true;
+      // A per-user installation must NOT be elevated: NSIS then upgrades it for the
+      // current user without a UAC prompt. A per-machine or uncertain installation
+      // keeps the admin request, so a silent per-machine upgrade never dies unseen
+      // after the app has already quit waiting for the start acknowledgement.
+      if(elevate) return Elevated(path);
       var startup=new Startup(); startup.cb=(uint)Marshal.SizeOf(typeof(Startup)); ProcessInfo info;
       var args=new StringBuilder(path.Length+32); args.Append('"').Append(path).Append('"').Append(" /S --updated --force-run");
       // Detached process, new group, NO inherited handles (including stdin/stdout pipes).
       if(CreateProcess(path,args,IntPtr.Zero,IntPtr.Zero,false,0x208,IntPtr.Zero,Path.GetDirectoryName(path),ref startup,out info)) {
        CloseHandle(info.thread); CloseHandle(info.process); return Started((int)info.pid);
       }
-      int error=Marshal.GetLastWin32Error();
-      if(error!=740) throw new Win32Exception(error);
-      var shell=new Shell(); shell.cb=(uint)Marshal.SizeOf(typeof(Shell));
-      // NOCLOSEPROCESS | NOASYNC | FLAG_NO_UI | UNICODE. In particular NOASYNC
-      // prevents a queued shell request from outliving our protective handles.
-      shell.mask=0x4540; shell.verb="runas"; shell.file=path; shell.args="/S --updated --force-run";
-      shell.directory=Path.GetDirectoryName(path); shell.show=1;
-      if(!ShellExecuteEx(ref shell)) throw new Win32Exception(Marshal.GetLastWin32Error());
-      if(shell.process==IntPtr.Zero) return Unknown();
-      try { return Started((int)GetProcessId(shell.process)); } finally { CloseHandle(shell.process); }
+      throw new Win32Exception(Marshal.GetLastWin32Error());
      }
     }
    } catch(Win32Exception error) { return new Dictionary<string,object>{{"started",false},{"cancelled",error.NativeErrorCode==1223}}; }
    catch { return attempted ? Unknown() : new Dictionary<string,object>{{"started",false},{"cancelled",false}}; }
+  }
+  static Dictionary<string,object> Elevated(string path) {
+   var shell=new Shell(); shell.cb=(uint)Marshal.SizeOf(typeof(Shell));
+   // NOCLOSEPROCESS | NOASYNC | FLAG_NO_UI | UNICODE. In particular NOASYNC
+   // prevents a queued shell request from outliving our protective handles.
+   shell.mask=0x4540; shell.verb="runas"; shell.file=path; shell.args="/S --updated --force-run";
+   shell.directory=Path.GetDirectoryName(path); shell.show=1;
+   if(!ShellExecuteEx(ref shell)) throw new Win32Exception(Marshal.GetLastWin32Error());
+   if(shell.process==IntPtr.Zero) return Unknown();
+   try { return Started((int)GetProcessId(shell.process)); } finally { CloseHandle(shell.process); }
   }
  }
 }
