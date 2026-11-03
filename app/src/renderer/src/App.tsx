@@ -12,6 +12,7 @@ import { TitleBar } from './components/TitleBar'
 import { Workspace } from './components/Workspace'
 import { PaperPane } from './components/PaperPane'
 import { Sheet } from './components/Sheet'
+import { FirstProjectGate } from './components/FirstProjectGate'
 import { SheetOver } from './components/SheetOver'
 import { showsPaper, useLayout } from './components/useLayout'
 import { ARTIFACTS, CHECKUP, MATERIALS, SETTINGS } from './copy'
@@ -133,6 +134,7 @@ export function App() {
             {sheet === 'artifacts' && <Sheet open side screen="artifacts" title={ARTIFACTS.title} onClose={closeSheet}><Artifacts /></Sheet>}
             {sheet === 'settings' && <Sheet open side screen="settings" title={SETTINGS.title} onClose={closeSheet}><SettingsScreen /></Sheet>}
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}
+            <FirstProjectGate />
           </>}
         >
           <Workspace chat={<Chat />} paper={<PaperPane overlay={checkup} />} />
