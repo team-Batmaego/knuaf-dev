@@ -37,7 +37,9 @@ test('signed local channel: install, rollback, incompatible app and offline', as
       else if (entry.isFile()) files[name] = readFileSync(join(dir, entry.name))
     }
   }
-  collect(resolve(__dirname, '..', '..', 'skills', 'knuaf-dev'))
+  // 서명할 묶음은 정식 동봉 입력(`pnpm build`의 stage:skill 산출물)을 쓴다.
+  // 저장소 안 스킬 사본은 P0-2b에서 제거됐고, 이 시험은 build 뒤에 돈다.
+  collect(resolve(__dirname, '..', 'resources', 'skill'))
   files['SKILL.md'] = Buffer.concat([files['SKILL.md'], Buffer.from('\n<!-- W3 test update -->\n')])
   files['skill.json'] = Buffer.from('{"version":"1.0.1","api":1}')
   const archive = zip(files), url = 'https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.1/skill.zip'
