@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { sha256, jsonBytes, readTree, fileHashes, zipBytes, validVersion, MAX_BYTES, compose, overlayHash, writeTree } from './compose-skill.mjs'
 
-export const RELEASE_PREFIX = 'https://github.com/knuaf-devcat/knuaf-dev/releases/download/'
+export const RELEASE_PREFIX = 'https://github.com/team-Batmaego/knuaf-dev/releases/download/'
 
 export function signManifest(manifestBytes, privateKey) {
   let key

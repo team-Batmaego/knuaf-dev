@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -17,10 +17,10 @@ import { AppHandoff } from '../src/main/update/handoff'
 import { agentActivity } from '../src/main/update/activity'
 import { SkillSwitch } from '../src/main/update/switch'
 import { OwnedProcessWatch, type ProcessInfo } from '../src/main/update/processes'
-import { updateConfig } from '../src/main/update/keys'
+import { UPDATE_KEYS, updateConfig } from '../src/main/update/keys'
 
-// FIX1 forbids key generation. Only signature verification's RETURN is substituted;
-// the real store, SHA-256, adapter, download pipeline and AppUpdates ordering execute.
+// R1 scenarios substitute only signature verification's RETURN;
+// the policy case below uses an ephemeral test-only signing key.
 const source = transpileModule(readFileSync(join(__dirname, '../src/main/update/appService.ts'), 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
 const roots: string[] = []
 const temporary = (): string => { const root = mkdtempSync(join(tmpdir(), 'knuaf-update-security-')); roots.push(root); return root }
@@ -207,10 +207,30 @@ test('R1-03: sub-millisecond parent PID reuse cannot hide an older owned orphan'
   expect(watch.busy([app, outside, reused, orphan])).toBe(true)
 })
 
-test('real packaged empty-key policy stays closed after asynchronous store recovery and ignores developer overrides', async () => {
-  const h = scenario(); let fetches = 0
-  const actual = new AppUpdates({ ...h.options, config: updateConfig(true, { KNUAF_UPDATE_PUBLIC_KEY: 'TEST-ONLY-placeholder', KNUAF_UPDATE_CHANNEL_URL: 'http://127.0.0.1:1' }), fetch: async () => { ++fetches; throw new Error('must not fetch') } })
-  expect((await actual.check()).phase).toBe('unavailable')
-  await expect(actual.install()).rejects.toThrow()
-  expect(fetches).toBe(0); expect(h.executed).toEqual([]); expect(h.quit()).toBe(0)
+test('real packaged production keys ignore developer overrides and reject test-key-signed installers', async () => {
+  const h = scenario(), testPair = generateKeyPairSync('ed25519')
+  const config = updateConfig(true, {
+    KNUAF_UPDATE_PUBLIC_KEY: testPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    KNUAF_UPDATE_CHANNEL_URL: 'http://127.0.0.1:1/test-only.json'
+  })
+  expect(config).toEqual({ channel: manifest.CHANNEL_URL, keys: Object.values(UPDATE_KEYS), development: false })
+  expect(config.keys).toHaveLength(2); expect(new Set(config.keys).size).toBe(2)
+
+  const bytes = Buffer.from(JSON.stringify({
+    schema: 1, name: 'knuaf-dev-app', version: '0.6.0', platform: 'win32-x64',
+    url: `${manifest.ASSET_PREFIX}v0.6.0/setup.exe`, size: approved.length, sha256: digest(approved)
+  }, null, 2) + '\n')
+  const envelope = { manifest: bytes.toString('base64'), sig: sign(null, bytes, testPair.privateKey).toString('base64') }
+  const fetches: string[] = []
+  const actual = new AppUpdates({ ...h.options, config, fetch: async url => {
+    fetches.push(url)
+    if (url !== manifest.CHANNEL_URL) return new Response('unexpected asset', { status: 500 })
+    return new Response(JSON.stringify({ schema: 1, app: {
+      latest: '0.6.0', page: appManifest.releasePage('0.6.0'), 'win32-x64': envelope
+    } }))
+  } })
+  expect((await actual.check()).phase).toBe('error')
+  await expect(install(actual)).rejects.toThrow()
+  expect(fetches).toEqual([manifest.CHANNEL_URL])
+  expect(h.executed).toEqual([]); expect(h.quit()).toBe(0)
 })

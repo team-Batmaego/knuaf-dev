@@ -2,7 +2,16 @@ import { createPublicKey } from 'node:crypto'
 import { CHANNEL_URL } from './manifest'
 
 // Owner-approved release prerequisite: populate both only after key provisioning.
-export const UPDATE_KEYS = { current: '', reserve: '' } as const
+export const UPDATE_KEYS = {
+  current: `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA+5+O9DEfPDra/WcOF+KVghniapg1QYe1fsED1SFVflo=
+-----END PUBLIC KEY-----
+`,
+  reserve: `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAOO1nBw10mBbMZz5ajYJoM+oVKfhcgn/7nzTwYznP1FE=
+-----END PUBLIC KEY-----
+`
+} as const
 export interface UpdateConfig { channel: string; keys: readonly string[]; development: boolean }
 function valid(key: string): boolean { try { return createPublicKey(key).asymmetricKeyType === 'ed25519' } catch { return false } }
 export function updateConfig(packaged: boolean, env: NodeJS.ProcessEnv = process.env): UpdateConfig {

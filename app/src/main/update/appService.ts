@@ -12,7 +12,7 @@ export interface AppUpdateStatus {
   current: string; latest: string | null; page: string | null; reason?: 'store_owner'; message?: string; received?: number; total?: number
 }
 interface Pending { from: string; to: string; installer: string; at: string }
-const RELEASES_PAGE = 'https://github.com/knuaf-devcat/knuaf-dev/releases'
+const RELEASES_PAGE = 'https://github.com/team-Batmaego/knuaf-dev/releases'
 const OWNER_FAILURES = new Set([
   'user_data_owner_mismatch', 'user_data_owner_administrators',
   'pinned_owner_mismatch', 'pinned_owner_administrators',

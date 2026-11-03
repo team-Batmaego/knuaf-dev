@@ -223,9 +223,9 @@ test('Mac only opens a fixed newer release page and never invokes the installer'
   expect((await rejected.check()).phase).toBe('error'); await expect(rejected.openPage()).rejects.toThrow()
 })
 
-test('empty packaged keys disable app verification and ignore developer overrides without fetching', async () => {
+test('packaged keys are the pinned production pair and reject a test-signed installer', async () => {
   const h = scenario(), updates = new AppUpdates({ ...h.options, config: updateConfig(true, { KNUAF_UPDATE_PUBLIC_KEY: publicKey, KNUAF_UPDATE_CHANNEL_URL: 'http://127.0.0.1:1' }) })
-  expect((await updates.check()).phase).toBe('unavailable'); expect(h.requests).toEqual([])
+  expect((await updates.check()).phase).toBe('error'); expect(h.requests).toEqual([CHANNEL_URL])
   await expect(updates.install()).rejects.toThrow(); expect(h.calls).toEqual([])
 })
 
