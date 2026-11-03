@@ -6,8 +6,9 @@ import { NATIVE_FILES } from './nativeFiles'
 import { NATIVE_INSTALLER, type InstallerLaunch } from './nativeInstaller'
 import { OwnedProcessWatch, resourcesBusy, type ProcessInfo, type ProcessSnapshot } from './processes'
 import { NATIVE_PROCESSES } from './nativeProcesses'
+import { detectInstallMode, type InstallMode } from './installMode'
 
-export type PowerShell = (script: string, timeout: number, launch?: InstallerLaunch) => Promise<string>
+export type PowerShell = (script: string, timeout: number, launch?: InstallerLaunch & { elevate: boolean }) => Promise<string>
 const literal = (s: string): string => "'" + s.replaceAll("'", "''") + "'"
 export const runPowerShell: PowerShell = async (script, timeout) => {
   if (process.platform !== 'win32') throw new Error('Windows에서만 실행할 수 있어요.')
@@ -40,7 +41,8 @@ ${NATIVE_PROCESSES}
 '@;`
 export interface Inventory { resources: string; appExecutable: string; processes: ProcessInfo[] }
 export class WindowsUpdateRuntime {
-  constructor(private resources: string, private appExecutable: string, private appPid = process.pid, private shell: PowerShell = runPowerShell) {}
+  constructor(private resources: string, private appExecutable: string, private appPid = process.pid, private shell: PowerShell = runPowerShell,
+    private mode: () => Promise<InstallMode> = () => detectInstallMode(appExecutable, process.env, runPowerShell)) {}
   async inventory(): Promise<Inventory> {
     const text = await this.shell(`$ErrorActionPreference='Stop'; ${LONG_PATH}
 $r=[UpdateNativePath]::Expand(${literal(this.resources)}); if (!$r) { throw 'resources path unavailable' };
@@ -87,10 +89,13 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
   async startInstaller(request: InstallerLaunch): Promise<void> {
     version(request.version); hash(request.sha256)
     if (!Number.isSafeInteger(request.size) || request.size < 1) throw new Error('설치 파일 크기가 잘못됐어요.')
+    // A failed or uncertain detection keeps the admin request; only a proved
+    // per-user installation may launch the installer with the user's own token.
+    const elevate = await this.mode().then(mode => mode !== 'user', () => true)
     const text = await this.shell(`$ErrorActionPreference='Stop'; Add-Type -ReferencedAssemblies System.dll,System.Core.dll -TypeDefinition @'
 ${NATIVE_FILES}
 ${NATIVE_INSTALLER}
-'@; [KnuafUpdate.Installer]::Execute(${literal(request.userData)},${literal(request.path)},${literal(request.version)},${request.size},${literal(request.sha256)}) | ConvertTo-Json -Compress`, 0, request)
+'@; [KnuafUpdate.Installer]::Execute(${literal(request.userData)},${literal(request.path)},${literal(request.version)},${request.size},${literal(request.sha256)},${elevate ? '$true' : '$false'}) | ConvertTo-Json -Compress`, 0, { ...request, elevate })
     const unknown = (): Error => Object.assign(new Error('설치 파일 시작 여부를 확인하지 못했어요. 설치 기록을 보관했어요.'), { code: 'installer_unknown' })
     let result: Record<string, unknown>
     try { result = object(JSON.parse(text)) } catch { throw unknown() }
