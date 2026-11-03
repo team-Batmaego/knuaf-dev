@@ -46,7 +46,7 @@ export function ProjectSidebar() {
         <button className="project-remove" aria-label={`목록에서 제거: ${r.root}`} onClick={() => void remove(r.root)}>×</button>
       </div>)}
       <button className="project-nav" onClick={() => void pick()}>+ 논문 추가</button>
-      {root && <button className="project-nav" onClick={() => { void window.knuaf.openPath(root).then((error: string) => setOpenError(!!error)).catch(() => setOpenError(true)) }}>
+      {root && <button className="project-nav" onClick={() => { void window.knuaf.folderOpen('project').then((r) => setOpenError('error' in r)).catch(() => setOpenError(true)) }}>
         {window.knuaf.platform === 'darwin' ? PROJECT_FOLDER.finder : PROJECT_FOLDER.explorer}
       </button>}
       {openError && <p role="alert" className="caption">{PROJECT_FOLDER.openFailed}</p>}
