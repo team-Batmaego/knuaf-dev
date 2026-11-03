@@ -1,8 +1,10 @@
+!include UAC.nsh
+
 !ifndef BUILD_UNINSTALLER
 Function CleanupLegacyMachineInstall
   ReadRegStr $6 HKLM "Software\${APP_GUID}" InstallLocation
   ${If} $6 != ""
-    StrCpy $1 "$6\${UNINSTALL_FILENAME}"
+    StrCpy $1 "$6\Uninstall ${PRODUCT_FILENAME}.exe"
     ${If} ${FileExists} "$1"
       InitPluginsDir
       StrCpy $2 "$PLUGINSDIR\old-uninstaller.exe"
