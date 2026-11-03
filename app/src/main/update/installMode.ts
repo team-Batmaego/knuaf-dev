@@ -72,14 +72,14 @@ export function classifyInstallMode(facts: InstallFacts): InstallMode {
   const programFiles = normalized(facts.programFiles)
   const programFilesX86 = normalized(facts.programFilesX86)
   if (facts.machine.status === 'present' && normalized(facts.machine.path) === dir) return 'machine'
-  // Program Files is not writable without elevation, whatever the records claim.
+  // Program Files is never writable without elevation, whatever the records claim.
   if (within(dir, programFiles) || within(dir, programFilesX86)) return 'machine'
   if (facts.machine.status === 'unknown' || facts.user.status === 'unknown') return 'unknown'
-  if (facts.machine.status === 'present') return 'machine'
+  // The matching HKCU location identifies the running per-user install. A stale
+  // HKLM record for a different path must not make its updater request elevation.
   if (facts.user.status === 'present' && normalized(facts.user.path) === dir) return 'user'
-  // The default per-user location is a fallback only when BOTH records are
-  // cleanly absent. A conflicting or malformed record must not be read as
-  // "no record": NSIS would follow the record's own INSTDIR, so stay elevated.
+  if (facts.machine.status === 'present') return 'machine'
+  // The default path is a fallback only when BOTH records are cleanly absent.
   if (facts.user.status === 'absent' && facts.machine.status === 'absent' && within(dir, local)) return 'user'
   return 'unknown'
 }

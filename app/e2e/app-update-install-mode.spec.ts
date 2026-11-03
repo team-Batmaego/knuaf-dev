@@ -31,6 +31,7 @@ test('only a proved per-user installation is classified as non-elevated', () => 
   expect(classifyInstallMode(facts())).toBe('user')
   // A custom directory is trusted only through the matching per-user install record.
   expect(classifyInstallMode(facts({ executable: 'D:\\Helper\\knuaf-dev.exe', user: { status: 'present', path: 'd:\\helper' } }))).toBe('user')
+  expect(classifyInstallMode(facts({ user: { status: 'present', path: 'C:\\Users\\student\\AppData\\Local\\Programs\\knuaf-dev' }, machine: { status: 'present', path: 'C:\\Program Files\\knuaf-dev' } }))).toBe('user')
   expect(classifyInstallMode(facts({ executable: 'D:\\Helper\\knuaf-dev.exe' }))).toBe('unknown')
   // All-users evidence wins even when the per-user record also matches.
   expect(classifyInstallMode(facts({ machine: { status: 'present', path: 'C:\\Users\\student\\AppData\\Local\\Programs\\knuaf-dev' } }))).toBe('machine')
@@ -57,6 +58,7 @@ test('install mode detection reads only exact install records and fails closed',
     detectInstallMode(userExe, env, async () => JSON.stringify(records))
   expect(await detect({ user: { present: true, value: 'C:\\Users\\student\\AppData\\Local\\Programs\\knuaf-dev' }, machine: { present: false } })).toBe('user')
   expect(await detect({ user: { present: false }, machine: { present: false } })).toBe('user')
+  expect(await detect({ user: { present: true, value: 'C:\\Users\\student\\AppData\\Local\\Programs\\knuaf-dev' }, machine: { present: true, value: 'C:\\Program Files\\knuaf-dev' } })).toBe('user')
   expect(await detect({ user: { present: false }, machine: { present: true, value: 'C:\\Program Files\\knuaf-dev' } })).toBe('machine')
   // Conflict at the default per-user location: the record's own INSTDIR wins inside
   // NSIS, so this must stay on the admin side rather than run non-elevated.
@@ -108,6 +110,16 @@ test('installer launch elevates for machine or uncertain modes only', async () =
   const failed = runs(async () => { throw new Error('detection failed') })
   await failed.runtime.startInstaller(request)
   expect(failed.launches[0].elevate).toBe(true)
+})
+
+test('stale machine install record does not elevate consecutive per-user updates', async () => {
+  const installed = runs(async () => classifyInstallMode(facts({
+    user: { status: 'present', path: 'C:\\Users\\student\\AppData\\Local\\Programs\\knuaf-dev' },
+    machine: { status: 'present', path: 'C:\\Program Files\\knuaf-dev' }
+  })))
+  await installed.runtime.startInstaller(request)
+  await installed.runtime.startInstaller({ ...request, version: '0.6.1', path: 'C:\\data\\app-update\\0.6.1\\installer.exe' })
+  expect(installed.launches.map(({ elevate }) => elevate)).toEqual([false, false])
 })
 
 test('non-elevated launch preserves cancelled, failed and unknown acknowledgements', async () => {
