@@ -7,10 +7,10 @@
  * 거절되는지 본다. 화면(store)은 실패한 `open` 에서 기존 root 를 유지하는 기존 시험이 따로 있다.
  */
 import { expect, test, type Page } from '@playwright/test'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { launch, openProject, python, shellCalls, spyShell, synthProject } from './helpers'
+import { launch, openProject, shellCalls, spyShell, synthProject } from './helpers'
 
 interface OpenReply {
   result?: { root: string; hasProject: boolean }
@@ -44,31 +44,24 @@ test('뒤에 온 없는 경로 요청도 진행 중이던 전환을 무효화한
   plant(a, 'memo.txt')
   plant(b, 'memo.txt')
   const missing = join(mkdtempSync(join(tmpdir(), 'kd-missing-')), '없는폴더')
-  const gate = mkdtempSync(join(tmpdir(), 'kd-gate-'))
-  const trigger = join(gate, 'go')
-  const started = join(gate, 'started')
-  // B 의 사이드카 시작만 잡아 두는 실행기 — C 요청을 그 사이에 넣기 위한 시험 대역이다.
-  const wrapper = join(gate, 'slow-python.sh')
-  writeFileSync(wrapper, `#!/bin/sh\ntouch "${started}"\nwhile [ ! -f "${trigger}" ]; do sleep 0.05; done\nexec "${python}" "$@"\n`, 'utf-8')
-  chmodSync(wrapper, 0o755)
   const log = join(mkdtempSync(join(tmpdir(), 'kd-shell-')), 'calls.txt')
 
   const { electronApp, page } = await launch()
   try {
     await openProject(page, a)
     await spyShell(electronApp, log)
-    await bridge(page, 'setSettings', { python_override: wrapper })
 
-    // B 를 기다리지 않고 시작한다. 실행기가 started 를 만들 때까지 B 는 시작 중이다.
+    // 사이드카 재시작을 큐에 먼저 넣어 B 의 configure 를 기다리게 한다. OS 별 셸 스크립트
+    // 대신 앱 자신의 직렬화 큐를 쓰므로 macOS·윈도우에서 같은 방식으로 기다린다.
+    const restart = bridge(page, 'sidecarRestart', null)
     const pendingB = bridge<OpenReply>(page, 'openProject', b)
-    await expect.poll(() => existsSync(started), { timeout: 15_000 }).toBe(true)
 
-    // 그 사이 없는 경로 C — renderer 의 세대를 올리는 요청이다.
+    // B 가 큐에서 기다리는 사이 없는 경로 C — renderer 도 메인도 세대를 올리는 요청이다.
     const c = await bridge<OpenReply>(page, 'openProject', missing)
     expect(c.error?.code).toBe('not_found')
 
-    writeFileSync(trigger, '')
     expect((await pendingB).result?.root, 'B 의 성공 응답이 오지 않았다').toBe(b)
+    await restart
 
     // 늦게 성공한 B 는 허용 기준도 창 제목도 바꾸지 않는다 — 화면은 A 다.
     expect((await bridge<Reply>(page, 'openFileLink', join(a, 'memo.txt'))).result?.opened, 'A 를 열지 못했다').toBe(true)

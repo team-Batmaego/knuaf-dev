@@ -7,6 +7,15 @@ import { dirname, resolve, sep } from 'node:path'
  */
 export type IdOf = (path: string) => string | null
 
+/** 경로 해석에 쓰는 규칙. 제품은 실행 OS의 `node:path`를, 시험은 `path.posix`/`path.win32`를 넣는다. */
+export interface PathSemantics {
+  resolve: (...paths: string[]) => string
+  dirname: (path: string) => string
+  sep: string
+}
+
+const nativePaths: PathSemantics = { resolve, dirname, sep }
+
 /** 신원 조회. 파일 ID를 쓸 수 없는 파일 시스템(ino 0)은 null — 그때는 정확 경로 비교로 물러난다. */
 export const fileId: IdOf = (path) => {
   try {
@@ -26,18 +35,26 @@ export const fileId: IdOf = (path) => {
  *
  * 파일 신원을 얻을 수 없는 파일 시스템(예: ino 0)에서는 **정규화 없는 정확 비교**만 한다 —
  * 두 값 모두 호출자가 realpath로 얻은 실제 경로이므로, 접두사가 맞으면 실제 조상이다.
+ * 비교는 원문이 아니라 **해석된 경로**(`paths.resolve`)로 한다: `..`가 섞인 문자열이
+ * 접두사만 맞고 실제로는 밖인 경우를 통과시키지 않기 위함이다.
  */
-export function insideByFileId(root: string, target: string, idOf: IdOf = fileId): boolean {
+export function insideByFileId(
+  root: string,
+  target: string,
+  idOf: IdOf = fileId,
+  paths: PathSemantics = nativePaths
+): boolean {
+  const resolved = paths.resolve(target)
   const rootId = idOf(root)
   if (rootId) {
-    let path = resolve(target)
+    let path = resolved
     for (let depth = 0; depth < 256; depth++) {
       if (idOf(path) === rootId) return true
-      const up = dirname(path)
+      const up = paths.dirname(path)
       if (up === path) break
       path = up
     }
   }
-  const prefix = root.endsWith(sep) ? root : root + sep
-  return target === root || target.startsWith(prefix)
+  const prefix = root.endsWith(paths.sep) ? root : root + paths.sep
+  return resolved === root || resolved.startsWith(prefix)
 }
