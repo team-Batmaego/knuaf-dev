@@ -274,10 +274,22 @@ function readCoded(e: unknown): { code: string | null; message: string } {
   return { code: null, message: String(e) }
 }
 
+/**
+ * `gg_core.export`(v0.3.x) refuses a receipt-less file already sitting at the destination
+ * (`export_destination_conflict`). That is the same fact as a text-based overwrite refusal —
+ * the path exists and was preserved — so it must get the same "목록에서 여세요" wording, not
+ * the generic "작업을 반영하지 않았어요" and never a nonexistent “새 버전 경로” button (GUI-07).
+ */
+function exportDestinationConflict(e: unknown): boolean {
+  if (!e || typeof e !== 'object' || !('data' in e)) return false
+  const data = e.data
+  return !!data && typeof data === 'object' && 'reason' in data && data.reason === 'export_destination_conflict'
+}
+
 /** Duck-typed on `{ code, message }` (RpcError, RpcFailure, plain Error, string). */
 export function describeError(e: unknown): DescribedError {
   const { code, message } = readCoded(e)
-  const copy = errorCopy(code ?? 'default')
+  const copy = code === 'operation_not_committed' && exportDestinationConflict(e) ? ERROR_COPY.overwrite_refused : errorCopy(code ?? 'default')
   if ((code === 'sidecar_stop_failed' || code === 'sidecar_stop_timeout') && e && typeof e === 'object' && 'data' in e) {
     const data = e.data
     if (data && typeof data === 'object' && 'recovery' in data && data.recovery === 'retry_stop') {
@@ -730,6 +742,8 @@ export const CHECKUP = {
 
 export const COMPLETION: Record<string, string> = {
   exported: '검토본을 만들었어요',
+  /** v0.3.x export dedupes the same revision+content and returns `status: existing`. */
+  exported_existing: '이미 만든 파일이에요',
   docx_built: 'DOCX를 만들었어요',
   paper_generated: '논문 골격을 만들었어요',
   blank_created: '빈 사본을 만들었어요',
@@ -844,6 +858,13 @@ export const CREDIT = {
 export const KORDOC_SENTENCE = '문서를 읽는 데 필요한 도구를 준비할게요. 처음 한 번은 시간이 조금 걸릴 수 있어요.'
 
 export const NO_OVERWRITE_NOTE = '기존 파일은 덮어쓰지 않아요. 같은 이름이 있으면 새 이름을 골라 주세요.'
+
+/**
+ * v0.3.x `export_locked` treats the same revision + same content as the same request and
+ * returns the existing path (`status: existing`) instead of making a second file. Say that
+ * happened and point at the list — never at a "새 버전 경로" button that does not exist (GUI-07).
+ */
+export const EXISTING_OUTPUT_NOTE = '같은 내용이라 새로 만들지 않았어요. 아래 결과물 목록에서 열 수 있어요.'
 
 /** SKILL.md 불변 조건 5 — nothing here counts as school submission or professor approval. */
 export const NOT_APPROVAL_NOTE = '교수님 승인으로 표시되지 않아요. 자동 점검 통과와 승인은 별개예요.'

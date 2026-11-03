@@ -29,6 +29,14 @@ test('Windows owner block replaces install even in an open or in-flight dialog',
         await new Promise<void>(resolve => { g.finishInstall = resolve })
         return { error: { code: 'update', message: 'owner blocked' } }
       })
+      // 이 spec은 앱 업데이트 소유자 차단이 주제다. 규칙집 확인은 네트워크에 기대는 별개
+      // 경로라, 그것이 끝나지 않으면('확인하고 있어요') '지금 확인' 단추가 계속 disabled다.
+      // 시작 시 도는 실제 확인을 고정 상태로 답해 검증 대상을 흔들리지 않게 한다.
+      const settled = { phase: 'error', current: '1.0.0', bundled: true, highest: null, available: null, kept: [], message: 'e2e: 규칙집 확인 고정' }
+      for (const channel of ['update:status', 'update:check']) {
+        ipcMain.removeHandler(channel)
+        ipcMain.handle(channel, () => ({ result: settled }))
+      }
     })
     const event = electronApp.waitForEvent('window')
     const windowId = await electronApp.evaluate(async ({ BrowserWindow }, options) => {
@@ -73,8 +81,12 @@ test('Windows owner block replaces install even in an open or in-flight dialog',
     const section = page.getByRole('region', { name: '업데이트' })
     await expect(section).toContainText('자동 업데이트를 사용할 수 없어요')
     await expect(section).toContainText('다음 업데이트도 같은 방법으로 설치해야 해요')
-    await section.getByRole('button', { name: '지금 확인' }).click()
-    await expect(section.getByRole('button', { name: '지금 확인' })).toBeEnabled()
+    const check = section.getByRole('button', { name: '지금 확인' })
+    // 스킬 업데이트 확인이 도는 동안 이 단추는 disabled다 — 끝난 뒤에 눌러야 클릭이 삼켜지지 않는다.
+    await expect(check).toBeEnabled({ timeout: 30_000 })
+    await check.click()
+    // 방금 누른 확인이 도는 동안(네트워크 한도 15초) 다시 disabled였다가 끝나면 돌아온다.
+    await expect(check).toBeEnabled({ timeout: 30_000 })
     expect(await electronApp.evaluate(() => (globalThis as typeof globalThis & { appChecks?: number }).appChecks)).toBe(0)
     await expect(section).toContainText('자동 업데이트를 사용할 수 없어요')
     await section.getByRole('button', { name: '내려받기 페이지 열기' }).click()

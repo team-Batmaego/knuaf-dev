@@ -8,7 +8,7 @@ import type { Envelope } from '../../../shared/types'
 import type { RunnerLine, RunnerPhase } from './useRunner'
 import { versioned } from '../screens/Outputs'
 import { useStage } from './useStage'
-import { ARTIFACTS, CHECKUP, COMPLETION, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, OUTPUT_COPY, checkLabel, describeError } from '../copy'
+import { ARTIFACTS, CHECKUP, COMPLETION, EXISTING_OUTPUT_NOTE, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, OUTPUT_COPY, checkLabel, describeError } from '../copy'
 import type { FeedbackKind } from './Feedback'
 
 const PAPER_IN = 'paper-input.json'
@@ -212,6 +212,9 @@ export function useMake(): Make {
     if (missingReview) patch({ feedback: { kind: 'warning', title: noticeTitle, body: noticeRest }, feedbackKind: kind })
     try {
       const r = await rpc.export(root, kind)
+      // v0.3.x export_locked dedupes the same revision+content through its receipt and
+      // returns the existing path. That is success, but no new file was made — say so.
+      const again = r.status === 'existing'
       const unverified = status ? status.gate.filter((g) => g.status !== 'pass' && g.severity === 'error') : []
       patch({
         lastOk: true, lastPath: r.path, feedbackKind: kind,
@@ -219,13 +222,13 @@ export function useMake(): Make {
           ? {
             kind: 'warning',
             title: noticeTitle,
-            body: <><div>{noticeRest}</div><div>{COMPLETION.exported}: <code>{r.path}</code></div><div className="caption" style={{ marginTop: 'var(--sp-1)' }}>{NOT_APPROVAL_NOTE}</div></>,
+            body: <><div>{noticeRest}</div><div>{again ? COMPLETION.exported_existing : COMPLETION.exported}: <code>{r.path}</code></div>{again && <div>{EXISTING_OUTPUT_NOTE}</div>}<div className="caption" style={{ marginTop: 'var(--sp-1)' }}>{NOT_APPROVAL_NOTE}</div></>,
             actions: <button onClick={() => window.knuaf.reveal(r.path)}>{ARTIFACTS.reveal}</button>
           }
           : {
             kind: 'completion',
-            title: COMPLETION.exported,
-            body: <><code>{r.path}</code><br /><span className="caption">{NOT_APPROVAL_NOTE}</span></>,
+            title: again ? COMPLETION.exported_existing : COMPLETION.exported,
+            body: <><code>{r.path}</code>{again && <><br /><span>{EXISTING_OUTPUT_NOTE}</span></>}<br /><span className="caption">{NOT_APPROVAL_NOTE}</span></>,
             actions: <button onClick={() => window.knuaf.reveal(r.path)}>{ARTIFACTS.reveal}</button>,
             details: unverified.length > 0
               ? <div><div className="caption">{ARTIFACTS.make.unverified(unverified.length)}</div><ul>{unverified.slice(0, 12).map((g, i) => <li key={i}><code>{g.check_id}</code> {g.target}: {g.reason}</li>)}{unverified.length > 12 && <li>…</li>}</ul></div>
