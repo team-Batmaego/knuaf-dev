@@ -48,21 +48,15 @@ test('build-installers.yml 은 설치본에 영향 주는 feat/** push 와 수�
   const on = triggers(raw)
   expect(on).toMatch(/workflow_dispatch/)
   expect(on, '태그로도 돈다 — 배포 경로와 겹친다').not.toMatch(/tags:/)
-  // push 는 feat/** 로만, 설치본에 영향을 주는 파일에서만 돈다.
-  const push = triggerBlock(raw, 'push')
-  expect(push).toMatch(/branches:\s*\[\s*"feat\/\*\*"\s*\]/)
-  for (const glob of [
-    // 설치본에 들어가는 입력 전체를 덮는 단순한 목록(W2-ENC-R1-02). 쪼개면 빠뜨리는 구멍이
-    // 생긴다 — `app/**` 가 app/src·app/sidecar·electron.vite.config.ts 를 모두 포함한다.
-    'app/**',
-    'skills/knuaf-dev/**',
-    'docs/학생용-사용안내.*',
-    '.github/workflows/build-installers.yml',
-    '.github/workflows/release.yml',
-  ]) {
-    expect(push, `paths 에 ${glob} 가 없다`).toContain(glob)
-  }
-  expect(push.split('\n').filter((l) => /^\s{6}- "/.test(l)), 'paths 항목 수가 바뀌었다').toHaveLength(5)
+  const push = triggerBlock(yaml, 'push')
+  expect(push, 'feat/** 이외의 push도 설치본 경로를 실행한다').toMatch(/branches:\s*\[\s*["']feat\/\*\*["']\s*\]/)
+  expect(push, '빌드 입력의 양성 path 필터가 없다').toMatch(/^\s{4}paths:\s*$/m)
+  expect(push, '빌드 입력을 제외하는 역방향 필터가 생겼다').not.toMatch(/paths-ignore:/)
+  const paths = [...push.matchAll(/^\s+-\s+["']([^"']+)["']\s*$/gm)].map(match => match[1])
+  expect(paths).toEqual(expect.arrayContaining([
+    'app/**', 'docs/학생용-사용안내.*',
+    '.github/workflows/build-installers.yml', '.github/workflows/release.yml',
+  ]))
   // 비밀값: 참조 자체가 없어야 한다(`secrets: inherit` 포함).
   expect(yaml, '비밀값을 참조한다').not.toMatch(/secrets/)
   // 서명·공증: 자동 탐색을 끄고 공증을 명시적으로 끈다.

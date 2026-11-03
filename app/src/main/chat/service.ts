@@ -2,7 +2,7 @@ import { CLAUDE_AUTH_COPY, MODEL_SELECTION_COPY } from '../../shared/copy'
 import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
-import { findExecutable, installSkill, skillState, skillVersion, VERSION_FILE } from '../agent'
+import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexConnection } from './codex'
@@ -224,7 +224,7 @@ export class ChatService {
     this.owners.add(root)
     return () => { this.owners.delete(root); releaseSwitch(); releaseActivity() }
   }
-  private skillDir(root: string, provider: Provider) { return join(root, provider === 'codex' ? '.agents' : '.claude', 'skills', 'knuaf-dev') }
+  private skillDir(root: string, provider: Provider) { return skillTargets(root)[provider] }
   private connection(root: string, provider: Provider): AgentConnection {
     this.ensureActive()
     const key = this.key(root, provider)

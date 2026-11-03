@@ -8,7 +8,7 @@ import { skillSource } from './agent'
 export const APP_ROOT = resolve(__dirname, '..', '..')
 import type { SidecarInfo } from '../shared/types'
 
-/** Where the skill scripts live: repo checkout in dev, resources/skill in a packaged app. */
+/** Both checkout and packaged execution use the selected composed bundle. */
 export function scriptsDir(): string {
   return join(skillSource(APP_ROOT, app.isPackaged, process.resourcesPath), 'scripts')
 }

@@ -7,7 +7,7 @@ import { DEFAULT_WINDOW } from '../src/shared/window'
 
 export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
-export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(repo, 'skills', 'knuaf-dev', 'scripts')
+export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
 /** init-only project (revision 0) or a project with a source, a section and a fact (revision 1). */
@@ -33,7 +33,7 @@ export function synthProject(opts: { withContent?: boolean } = { withContent: tr
 
 /** A test selection with claim-backed evidence, not a production default. */
 function syntheticMajor(root: string): { collection: string; value: Record<string, unknown> }[] {
-  if (!existsSync(join(scripts, 'gg_major_contract.py'))) return []
+  if (!existsSync(join(scripts, 'gg_major_contract.py'))) throw new Error('Incompatible bundle: run stage:skill')
   const result = spawnSync(python, ['-B', '-c', [
     'import sys; sys.path.insert(0, sys.argv[1])',
     'import gg_major_contract as mc',

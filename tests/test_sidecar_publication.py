@@ -38,7 +38,11 @@ def test_held_output_retains_reason_and_is_not_a_success_even_on_exit_zero():
     assert env["detail"] == "different explicit selection"
 
 
-def test_export_needs_explicit_matching_major_and_preserves_the_canonical(project, publication_skill):
+def test_export_needs_explicit_matching_major_and_preserves_the_canonical(empty_folder, publication_skill):
+    import gg_core as core
+
+    project = empty_folder
+    core.init(project)
     sidecar = Sidecar()
     try:
         unbound = sidecar.call("project.major", root=str(project))

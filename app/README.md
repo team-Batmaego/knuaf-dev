@@ -122,16 +122,44 @@ INT1 회귀는 `e2e/int1.spec.ts`가 실제 prepare 실패·늦은 성공·새 �
 ```bash
 cd app
 pnpm install
-KNUAF_PYTHON=$(which python3.13) pnpm dev          # 개발 실행 (스크립트는 ../skills/knuaf-dev/scripts 를 사용)
+KNUAF_PYTHON=$(which python3.13) pnpm dev          # stage 호환 게이트 → compose 묶음으로 개발 실행
 pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
 ```
 
-사이드카 회귀는 `tests/test_sidecar.py`, `tests/test_sidecar_publication.py`에 있습니다.
-`KNUAF_TEST_SCRIPTS_DIR=/절대/compose/묶음/scripts`로 현행 knuaf-doc 묶음을 지정해 실행합니다.
-첫 단위 검토 중에는 구 `skills/knuaf-dev` 사본과 v0.2.0 source pin을 유지하므로,
-기본 구판 회귀에서 현행 공개 계약 전용 시험은 skip되며 별도의 compose 시험을 반드시 실행해야 합니다.
-overlay 내용·stage/build 동봉 배선·구판 제거는 첫 단위 독립검토 이후 범위입니다.
+개인 `.harness.conf`나 공유 하네스를 수정할 필요가 없습니다. 종전 훅 명령인
+`.venv-dev/bin/python -m pytest`는 추적된 `tests/conftest.py`를 통해 수집 전에
+고정 pin을 오프라인으로 준비하고, 실패하면 수집 오류 대신 준비 원인과 비0 종료를 냅니다.
+CI의 `test-with-skill.mjs`도 같은 stage를 사용합니다. 직접 실행하려면 저장소 루트에서
+`node app/scripts/test-with-skill.mjs --offline --python .venv-dev/bin/python`을 사용합니다.
+캐시의 HEAD/tag·전체 상태뿐 아니라 실제 바이트를 고정 commit blob과 대조합니다.
+숨김 index 플래그로 가린 변조도 거절하며, 검증한 입력의 격리 사본으로 호환 시험을 합니다.
+준비 실패 시 예전 `resources/skill`로 통과시키지 않습니다. 상세 캐시/로컬 검증 절차는 루트 README를 따릅니다.
+
+원본은 `skill-source.json`의 고정 commit/tag, 앱 전용 차이는 `skill-overlay/`입니다.
+`stage:skill`은 W2 compose 결과를 최종 bytes 그대로 소비자·원본 내부 시험과
+`UPSTREAM_PROTECTION_TESTS`에 명시한 원본 루트 보호 시험에 넣습니다.
+이 목록은 앱에서 이관한 유효 보호에 대응하며 원본 루트 전체를 무조건 수집하지 않습니다.
+시험이 누락되거나 하나라도 실패하면 동봉을 거절합니다. 모두 성공한 경우에만
+`resources/skill/`로 동봉하며 dev/build/resource 준비·skill-release CI가 같은 게이트를 사용합니다.
+실패하면 이전 묶음을 보존하며 구판 사본으로 자동 대체하지 않습니다.
+
+현재 공개 pin v0.3.1은 이 게이트를 통과합니다: 소비자 시험 245 passed·2 skipped, 원본 기본 시험 681 passed·25 skipped.
+고정값을 바꾸면 같은 게이트를 다시 통과해야 하며, 통과하지 못하면 동봉을 거절합니다.
+문서 소비자 보호는 최종 `SKILL.md`와 하위 `references/**/*.md`에서 퇴역 원장을
+새 기록·쓰기 대상으로 지시하는 문형과 저장 위치 표를 거절합니다. 읽기·보존·쓰기 금지
+언급은 허용합니다. v0.3.1은 이 보호도 통과하며, 이후 원본 판이 다시 위반하면 제외 없이 거절합니다.
+
+로컬 검증용 compose는 `KNUAF_SCRIPTS_DIR=/절대/묶음/scripts`(앱)와
+`KNUAF_TEST_SCRIPTS_DIR=/절대/묶음/scripts`(pytest)로 지정합니다.
+stage를 통과하지 않은 로컬 입력은 **검증 전용**이며, `pnpm exec electron-vite build`로 띄운 화면을
+정식 stage/build·설치본 검증 통과로 집계하지 않습니다. packaged 앱은 개발 override를 무시합니다.
+
+S0는 동봉 묶음의 `skill.json` 판/API를 읽으며 암묵적 1.0.0 추정은 없습니다.
+에이전트 설치·사이드카·채팅은 같은 선택 묶음을 사용합니다. root metadata도 fingerprint에 들어가고
+재설치 시 학생 수정 사본을 skill 탐색 경로 밖으로 백업합니다.
+프로젝트 `.knuaf-gui/skill-install.json`은 양쪽 설치 경로를 표시하며, 설치본의 `gg_update.py auto`는
+`managed`로 종료하여 앱 업데이트 경로와 경쟁하지 않습니다.
 
 알려진 A안 한계(독립검토 A1): 사용자 문구의 `copy.ts` 중앙관리 AST 검사는 대체 없이 제거되어
 일부 새 화면 문구가 인라인입니다(A1-04). 첫 화면에는 시안의 세 가지 시작 제안 칩이 없습니다(A1-05).
@@ -141,7 +169,7 @@ overlay 내용·stage/build 동봉 배선·구판 제거는 첫 단위 독립검
 
 개발·테스트 전용 환경 변수:
 
-- `KNUAF_SCRIPTS_DIR=/절대/compose/묶음/scripts` — 개발 모드에서 **묶음 전체**의 원본을 선택합니다. 사이드카·에이전트 설치·W1의 S0가 같은 묶음을 사용하며, 설치본에서는 무시합니다.
+- `KNUAF_SCRIPTS_DIR=/절대/compose/묶음/scripts` — 개발 모드에서 **묶음 전체**의 원본을 선택합니다. 부모 묶음의 `skill.json`이 필요합니다. 사이드카·에이전트 설치·W1의 S0가 같은 묶음을 사용하며, 설치본에서는 무시합니다.
 - `KNUAF_TEST_SCRIPTS_DIR=/절대/compose/묶음/scripts` — pytest의 원본 선택. 예: 저장소 루트에서 `KNUAF_TEST_SCRIPTS_DIR=… .venv-dev/bin/python -m pytest tests/test_sidecar.py tests/test_sidecar_read_all.py tests/test_sidecar_publication.py`.
 - `KNUAF_CLAUDE_MODEL=sonnet` — Claude 채팅 SDK 세션에 `model`을 고정합니다(테스트 전용).
 - `KNUAF_DRY_LAUNCH=1` — 외부 터미널 실행 스크립트를 쓰기만 하고 열지 않습니다(테스트 전용).
@@ -163,7 +191,7 @@ pnpm fetch:python       # python-build-standalone 3.12 → resources/python
 pnpm build:wheelhouse   # openpyxl·python-docx·lxml·pypdf 휠 → resources/wheelhouse
 pnpm build:icons        # build/icon.svg → icns·ico·png
 pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf
-pnpm stage:skill        # ../skills/knuaf-dev → resources/skill
+pnpm stage:skill        # 고정 knuaf-doc + 앱 overlay → 호환 게이트 → resources/skill
 ```
 
 번들 python은 `gg_deps.py ensure`의 base 인터프리터로만 쓰이고, 패키지는 계약대로 `<프로젝트>/.venv`에 설치됩니다.

@@ -235,7 +235,7 @@ export function probeVersion(path: string): Promise<string | null> {
 export function skillSource(appRoot: string, isPackaged: boolean, resourcesPath: string): string {
   const bundled = isPackaged ? join(resourcesPath, 'skill')
     : process.env.KNUAF_SCRIPTS_DIR ? dirname(resolve(process.env.KNUAF_SCRIPTS_DIR))
-      : join(appRoot, '..', 'skills', 'knuaf-dev')
+      : join(appRoot, 'resources', 'skill')
   return resolveSkillSource(bundled)
 }
 
@@ -360,6 +360,9 @@ export function retireSupersededSkills(target: string): string[] {
 
 /** Copy the bundle payload and root metadata; GUI ownership lives outside it. */
 export function installSkill(source: string, target: string, version: string): InstallResult {
+  // A missing build bundle must never retire a student's working installed copy.
+  const skillMd = join(source, 'SKILL.md')
+  if (!existsSync(skillMd)) throw new Error('스킬 원본에 SKILL.md가 없음: ' + source)
   retireSupersededSkills(target)
   const project = dirname(dirname(dirname(target)))
   const markerDir = join(project, '.knuaf-gui')
@@ -384,8 +387,6 @@ export function installSkill(source: string, target: string, version: string): I
   }
 
   mkdirSync(target, { recursive: true })
-  const skillMd = join(source, 'SKILL.md')
-  if (!existsSync(skillMd)) throw new Error('스킬 원본에 SKILL.md가 없음: ' + source)
   cpSync(skillMd, join(target, 'SKILL.md'))
   for (const dir of ['references', 'scripts', 'assets']) {
     const from = join(source, dir)

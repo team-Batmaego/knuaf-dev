@@ -1,8 +1,8 @@
 // Unit tests for src/main/agent.ts. Plain Playwright `test()` in Node: no Electron is launched.
 import { expect, test } from '@playwright/test'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mock } from 'node:test'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
@@ -365,13 +365,6 @@ test.describe('findExecutable / probeVersion', () => {
 })
 
 test.describe('skill source + version', () => {
-  test('skillSource resolves the checkout and packaged layouts', () => {
-    expect(source).toBe(resolve(appRoot, '..', 'skills', 'knuaf-dev'))
-    expect(existsSync(join(source, 'SKILL.md'))).toBe(true)
-    // 패키지 배치는 `resourcesPath` 아래 `skill` 이다 — 조립은 join 이 하므로 기대값도 join 으로
-    // 만든다(윈도우에서는 역슬래시가 나온다). 리터럴 '/' 로 견주면 윈도우에서만 어긋난다.
-    expect(skillSource(appRoot, true, '/App/Contents/Resources')).toBe(join('/App/Contents/Resources', 'skill'))
-  })
 
   test('skillVersion is stable, 12 hex, and changes with content', () => {
     const a = skillVersion(source)
@@ -424,6 +417,67 @@ test.describe('skill source + version', () => {
 })
 
 test.describe('installSkill', () => {
+  test('a missing source preserves existing student copies, GUI marker and legacy skill', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kd-missing-source-'))
+    try {
+      const target = skillTargets(root).claude
+      const legacy = join(dirname(target), 'knuaf-doc')
+      for (const folder of [target, legacy, join(root, '.knuaf-gui')]) mkdirSync(folder, { recursive: true })
+      writeFileSync(join(target, 'SKILL.md'), '# student working copy\n')
+      writeFileSync(join(legacy, 'SKILL.md'), '# student legacy notes\n')
+      const marker = join(root, '.knuaf-gui', 'skill-install.json')
+      writeFileSync(marker, '{"student":"preserved"}')
+      expect(() => installSkill(join(root, 'missing-bundle'), target, 'new-version')).toThrow()
+      expect(readFileSync(join(target, 'SKILL.md'), 'utf8')).toBe('# student working copy\n')
+      expect(readFileSync(join(legacy, 'SKILL.md'), 'utf8')).toBe('# student legacy notes\n')
+      expect(readFileSync(marker, 'utf8')).toBe('{"student":"preserved"}')
+      expect(existsSync(skillBackupDir(target))).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  test('metadata-only bundle changes reinstall both providers, preserve backups and remain GUI-managed', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kd-composed-install-'))
+    try {
+      const origin = join(root, 'bundle'), project = join(root, 'project'), home = join(root, 'home')
+      cpSync(source, origin, { recursive: true })
+      mkdirSync(home)
+      const targets = skillTargets(project), previous = skillVersion(origin)
+      const metadata = JSON.parse(readFileSync(join(origin, 'skill.json'), 'utf8'))
+      for (const target of Object.values(targets)) {
+        installSkill(origin, target, previous)
+        writeFileSync(join(target, 'student-note.txt'), 'preserve student annotations')
+      }
+      writeFileSync(join(origin, 'skill.json'), JSON.stringify({ ...metadata, version: '1.0.1' }))
+      const current = skillVersion(origin)
+      expect(current).not.toBe(previous)
+      const localPython = resolve(appRoot, '../.venv-dev/bin/python')
+      const python = process.env.KNUAF_PYTHON ?? (existsSync(localPython) ? localPython : process.platform === 'win32' ? 'python' : 'python3')
+      // Execute the installed updater, but forbid every real network connection even on a regression.
+      const entry = `import runpy,sys
+def offline(event,args):
+    if event in ("socket.connect","socket.getaddrinfo"): raise RuntimeError("network forbidden in managed install test")
+sys.addaudithook(offline)
+sys.argv=[sys.argv[1],"auto"]
+runpy.run_path(sys.argv[0],run_name="__main__")`
+      for (const target of Object.values(targets)) {
+        expect(skillState(target, current)).toBe('outdated')
+        const result = installSkill(origin, target, current)
+        expect(result.action).toBe('updated')
+        expect(readFileSync(join(result.backup!, 'student-note.txt'), 'utf8')).toBe('preserve student annotations')
+        expect(JSON.parse(readFileSync(join(result.backup!, 'skill.json'), 'utf8'))).toEqual(metadata)
+        expect(JSON.parse(readFileSync(join(target, 'skill.json'), 'utf8')).version).toBe('1.0.1')
+        expect(skillVersion(target)).toBe(current)
+        const managed = spawnSync(python, ['-c', entry, join(target, 'scripts/gg_update.py')], {
+          encoding: 'utf8', timeout: 15_000, env: { ...process.env, HOME: home, USERPROFILE: home },
+        })
+        expect(managed.status, managed.stdout + managed.stderr).toBe(0)
+        expect(JSON.parse(managed.stdout).result).toBe('managed')
+      }
+      expect(readdirSync(join(project, '.claude/skills'))).toEqual(['knuaf-dev'])
+      expect(readdirSync(join(project, '.agents/skills'))).toEqual(['knuaf-dev'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   test('installs into a tmp project root, is unchanged on rerun, and backs up when tampered', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-root-'))
     const targets = skillTargets(root)

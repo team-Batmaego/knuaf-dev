@@ -33,7 +33,7 @@ async function triggerRefresh(electronApp: ElectronApplication): Promise<void> {
 
 /** `build/<N>/review/검토용.md` 를 CLI 로 만든다. */
 function exportReview(root: string): void {
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'export', root, '--kind', 'review'], { encoding: 'utf-8' })
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'export', root, '--kind', 'review', '--major', 'specialty_crops'], { encoding: 'utf-8' })
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
 }
 

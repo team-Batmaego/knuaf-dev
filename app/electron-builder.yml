@@ -65,7 +65,7 @@ mac:
   extendInfo:
     CFBundleDisplayName: KNUAF-Dev · 창업논문 작성 도우미
     # 스킬이 osascript/AppleScript 로 Word·Excel 을 직접 몬다
-    # (skills/knuaf-dev/scripts/gg_office.py). entitlements 의
+    # (resources/skill/scripts/gg_office.py). entitlements 의
     # com.apple.security.automation.apple-events 는 '보낼 수 있다'만 정할 뿐,
     # 이 문자열이 없으면 macOS 가 자동화 동의 창 자체를 띄우지 못해 변환이
     # 그 자리에서 실패한다. 학생이 무엇에 쓰는지 읽고 허용할 문장이라 한국어로 쓴다.
