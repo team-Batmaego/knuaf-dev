@@ -65,13 +65,16 @@ interface ProjectState {
   retryOpen: (root: string, onOpened?: (root: string) => void | Promise<void>) => Promise<boolean>
   sidecar: (SidecarInfo & { basePython?: string; wheelhouse?: string | null }) | null
   settings: Settings | null
-  /** 열려 있는 시트. null이면 논문·대화만 보인다. */
+  /** First-folder permission consent is global; the main process gates every project:open caller. */
+  firstProjectGate: { root: string; kind: 'permission' | 'write-error' } | null
   sheet: Screen | null
   settingsFocus: SettingsFocus
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
-  /** 시트를 닫는다 — v5의 "대화로 돌아가기"(자료의 "답변에 첨부", 점검의 "고쳐달라기" 등). */
   closeSheet: () => void
+  /** Save the global choice before retrying the same open request. */
+  chooseFirstProjectPermission: (mode: 'trust' | 'ask') => Promise<void>
+  cancelFirstProjectGate: () => void
   /** Navigate to 설정 with a disclosure preset open (deep link from failure feedback). */
   openSettings: (focus?: SettingsFocus) => void
   clearSettingsFocus: () => void
@@ -204,6 +207,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   error: null,
   openFailure: null,
   retryFailed: null,
+  firstProjectGate: null,
   sidecar: null,
   settings: null,
   sheet: null,
@@ -231,6 +235,18 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 종이 닫힘도 설정에서 읽는다 — 앱을 다시 켜도 학생이 닫아 둔 것은 닫힌 채다.
     set({ settings, ...(root ? { paperClosed: settings?.ui_prefs?.[root]?.paperClosed === true } : {}) })
   },
+  chooseFirstProjectPermission: async (mode) => {
+    const gate = get().firstProjectGate
+    if (!gate || gate.kind !== 'permission') return
+    await window.knuaf.setSettings({
+      permission_mode: mode,
+      ...(mode === 'ask' ? { trusted_roots: [] } : {}),
+      first_project_permission_asked_at: new Date().toISOString()
+    })
+    await get().loadSettings()
+    await get().open(gate.root)
+  },
+  cancelFirstProjectGate: () => set({ firstProjectGate: null, loading: false }),
   loadSections: async () => {
     const root = get().root
     if (!root) { set({ sections: null }); return }
@@ -292,12 +308,16 @@ export const useProject = create<ProjectState>((set, get) => ({
     const r = await window.knuaf.openProject(root)
     if (superseded()) return null
     if (r.error) {
+      if (r.error.code === 'first_project_permission_required' || r.error.code === 'folder_not_writable') {
+        set({ loading: false, firstProjectGate: { root, kind: r.error.code === 'folder_not_writable' ? 'write-error' : 'permission' } })
+        return null
+      }
       const d = describeError(r.error)
       if (!opts?.local) set({ error: d })
       // 실패한 그 선택의 python·kind 와 재시도 대상 root 를 오류와 함께 보관한다(PY-D1-03).
       // 이전 프로젝트의 store.sidecar 로 판단하면 첫 실패에서 버튼이 서지 않고, 다른 논문을
       // 열었던 세션에서는 틀린 kind 로 판단한다.
-      set({ loading: false, openFailure: r.startupFailed && r.sidecar ? { root, sidecar: r.sidecar, code: r.error.code } : null })
+      set({ loading: false, firstProjectGate: null, openFailure: r.startupFailed && r.sidecar ? { root, sidecar: r.sidecar, code: r.error.code } : null })
       return d
     }
     // 위에서 error 분기를 돌려보냈으므로 result 는 반드시 있다 — 없으면 계약 위반이므로
@@ -312,7 +332,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     if (superseded()) return null
     const settings = get().settings
     set({
-      root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek, depsReady: null,
+      root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek, depsReady: null, firstProjectGate: null,
       // 폴더마다 다른 취향이므로 폴더가 바뀌면 여기서 다시 읽는다(전역 settings 는 그대로).
       paperClosed: settings?.ui_prefs?.[root]?.paperClosed === true
     })

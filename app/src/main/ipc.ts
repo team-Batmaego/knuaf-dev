@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, net, shell, systemPreferences } from 'electron'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
+import { probeProjectWritable } from './project-write'
 import { basename, extname, join, resolve, sep } from 'node:path'
 import { insideByFileId } from './file-identity'
 import type { Sidecar } from './sidecar'
@@ -151,6 +152,13 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     const seq = ++openSeq
     if (!existsSync(root)) return { error: { code: 'not_found', message: '폴더가 없음: ' + root } }
     const settings = loadSettings()
+    if (!settings.first_project_permission_asked_at) {
+      if (process.platform === 'win32') {
+        try { await probeProjectWritable(root) }
+        catch (error) { return { error: { code: 'folder_not_writable', message: String(error) } } }
+      }
+      return { error: { code: 'first_project_permission_required', message: '첫 논문 폴더의 전역 권한 방식을 골라 주세요.' } }
+    }
     try {
       const info = await sidecar.configure(root, settings.python_override)
       // 성공한 전환만 허용 기준을 바꾼다(검토 ATTACH-R1-05). 실패하면 이전 폴더가 그대로
@@ -185,7 +193,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('project:pick', async () => {
     const w = win()
     const r = await dialog.showOpenDialog(w!, { properties: ['openDirectory', 'createDirectory'], title: '논문 작업 폴더 선택' })
-    return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
+    if (r.canceled || r.filePaths.length === 0) return null
+    const root = r.filePaths[0]
+    return root
   })
 
   ipcMain.handle('file:pick', async (_e, opts: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }) => {
@@ -548,7 +558,10 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       const name = projectFolderName(title)
       for (let n = 1; n <= 10000; n++) {
         const root = join(parent, n === 1 ? name : `${name} (${n})`)
-        try { await mkdir(root); return { result: { root } } }
+        try {
+          await mkdir(root)
+          return { result: { root } }
+        }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
       }
       throw new Error('같은 이름의 폴더가 너무 많아요.')

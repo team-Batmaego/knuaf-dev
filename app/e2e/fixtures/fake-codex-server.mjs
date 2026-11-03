@@ -17,6 +17,7 @@
  *   FAKE_CODEX_TURN_LOG     `turn/start` 로 온 model·effort 를 한 줄씩 덧붙일 파일 — 시험이 읽는다
  *   FAKE_CODEX_APPLIED_LOG  `turn/start` 뒤 그 대화에 **실제로 적용된** model·effort — 생략이
  *                           이전 값을 유지하는 계약(턴 덮어쓰기)을 흉내 내는 상태 기록
+ *   FAKE_CODEX_TURN_INPUT_LOG  submitted turn text and thread id, one JSON record per turn
  *   FAKE_CODEX_DEFAULT_MODEL / FAKE_CODEX_DEFAULT_EFFORT
  *                           새 대화(과 `ephemeral` 대화)의 서버 기본값. 기본 `gpt-default` / `medium`
  *   FAKE_CODEX_INIT_DELAY_MS
@@ -45,6 +46,8 @@ const HOLD_AFTER_DELTA = process.env.FAKE_CODEX_HOLD === 'after-delta'
 /** `model/list` 응답 — 시험이 요금제별 목록을 흉내 낼 수 있게 환경변수로 바꾼다. */
 const TURN_LOG = process.env.FAKE_CODEX_TURN_LOG ?? ''
 const APPLIED_LOG = process.env.FAKE_CODEX_APPLIED_LOG ?? ''
+const DECISION_LOG = process.env.FAKE_CODEX_DECISION_LOG ?? ''
+const TURN_INPUT_LOG = process.env.FAKE_CODEX_TURN_INPUT_LOG ?? ''
 /** 새 대화에 서버가 실제로 쓰는 기본값 — 앱은 이것을 '되돌리기' 값으로 쓴다. */
 const DEFAULT_MODEL = process.env.FAKE_CODEX_DEFAULT_MODEL ?? 'gpt-default'
 const DEFAULT_EFFORT = process.env.FAKE_CODEX_DEFAULT_EFFORT ?? 'medium'
@@ -114,8 +117,13 @@ const threadResult = (id, turns = []) => {
 }
 
 function handle(message) {
-  // 답이 없는 것: `initialized` 알림, 그리고 우리가 보낸 요청에 대한 앱의 응답.
-  if (message.method === undefined) return
+  // Answerless notifications and responses from the app.
+  if (message.method === undefined) {
+    if (DECISION_LOG && message.id !== undefined && message.result?.decision) {
+      appendFileSync(DECISION_LOG, `${JSON.stringify({ decision: message.result.decision })}\n`)
+    }
+    return
+  }
   if (message.method === 'initialized') { initialized = true; return }
   if (message.id === undefined) return
   const id = message.id
@@ -164,6 +172,10 @@ function handle(message) {
       // 쪽 나눔은 흉내 내지 않는다(앱은 nextCursor 가 없으면 멈춘다).
       return out({ id, result: { data: MODELS, nextCursor: null } })
     case 'turn/start': {
+      if (TURN_INPUT_LOG) {
+        const text = (params.input ?? []).filter((item) => item.type === 'text').map((item) => item.text).join('\n')
+        appendFileSync(TURN_INPUT_LOG, `${JSON.stringify({ threadId: params.threadId, text })}\n`)
+      }
       // 앱이 실제로 보낸 값만 남긴다 — "안 골랐을 때는 키가 없다"를 시험이 구분할 수 있게.
       if (TURN_LOG) {
         const rec = {}

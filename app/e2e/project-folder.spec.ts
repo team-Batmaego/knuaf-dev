@@ -1,8 +1,10 @@
+import { PROJECT_FOLDER, projectFolderCreationError } from '../src/renderer/src/copy'
 import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { probeProjectWritable } from '../src/main/project-write'
 import { launch } from './helpers'
-import { fakeCodexEnv, replyFile, scratch } from './fixtures/fake-codex'
+import { fakeCodexEnv, replyFile, scratch, userDataWith } from './fixtures/fake-codex'
 
 test('첫 메시지 뒤 자동 폴더를 만들되 같은 이름의 기존 폴더는 보존한다', async () => {
   const dir = scratch()
@@ -34,6 +36,150 @@ test('첫 메시지 뒤 자동 폴더를 만들되 같은 이름의 기존 폴�
     await expect.poll(() => electronApp.evaluate(() => Reflect.get(globalThis, 'folderOpened'))).toBe(realpathSync(created))
   } finally { await electronApp.close() }
 })
+test('첫 논문 폴더에서 항상 허용을 고르면 모든 폴더의 전역 trust가 저장된다', async () => {
+  const dir = scratch()
+  const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in', FAKE_CODEX_REPLY: replyFile(dir, '권한 선택 완료') })
+  const { electronApp, page } = await launch({ env, permissionPrompt: true })
+  try {
+    await electronApp.evaluate(({ app }, docs) => app.setPath('documents', docs), dir)
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('첫 논문')
+    await page.getByRole('button', { name: '보내기', exact: true }).click()
+    await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
+    const gate = page.locator('dialog[data-screen="first-project-gate"]')
+    await expect(gate).toBeVisible()
+    await expect(gate).not.toContainText(/Word|Excel|자동화/)
+    await gate.getByRole('button', { name: '항상 허용' }).click()
+    const settings = await page.evaluate(() => window.knuaf.getSettings())
+    expect(settings.permission_mode).toBe('trust')
+    expect(settings.trusted_roots ?? []).toEqual([])
+    expect(settings.first_project_permission_asked_at).toBeTruthy()
+  } finally { await electronApp.close() }
+})
+test('쓰기 시험은 충돌 파일을 보존하고 성공한 임시 파일만 지운다', async () => {
+  const dir = scratch()
+  const root = join(dir, 'probe-target')
+  mkdirSync(root)
+  const bytes = Buffer.from([0, 1, 2, 253, 254, 255])
+  const collision = join(root, '.knuaf-write-test-collision')
+  writeFileSync(collision, bytes)
+  await expect(probeProjectWritable(root, () => 'collision')).rejects.toMatchObject({ code: 'EEXIST' })
+  expect(readFileSync(collision)).toEqual(bytes)
+  await probeProjectWritable(root, () => 'created-by-this-probe')
+  expect(existsSync(join(root, '.knuaf-write-test-created-by-this-probe'))).toBe(false)
+})
+test('Windows first-open write failure explains the current action and lets the student retry elsewhere', async () => {
+  const dir = scratch()
+  const notFolder = join(dir, 'not-a-folder')
+  const otherRoot = join(dir, 'writable-folder')
+  writeFileSync(notFolder, 'leave unchanged')
+  mkdirSync(otherRoot)
+  const { electronApp, page } = await launch({ env: fakeCodexEnv(join(dir, 'bin')), permissionPrompt: true })
+  const originalPlatform = await electronApp.evaluate(() => process.platform)
+  try {
+    await electronApp.evaluate(({ dialog }, paths) => {
+      let next = 0
+      dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [paths[next++]], bookmarks: [] })) as typeof dialog.showOpenDialog
+    }, [notFolder, otherRoot])
+    await electronApp.evaluate(() => Object.defineProperty(process, 'platform', { value: 'win32', configurable: true }))
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-folder' }))
+    const gate = page.locator('dialog[data-screen="first-project-gate"]')
+    await expect(gate).toContainText('지금 하려던 일')
+    await expect(gate).toContainText('해결하려면')
+    expect(readFileSync(notFolder, 'utf8')).toBe('leave unchanged')
+    await electronApp.evaluate((_, platform) => Object.defineProperty(process, 'platform', { value: platform, configurable: true }), originalPlatform)
+    await gate.getByRole('button', { name: '내 폴더 고르기' }).click()
+    await expect(page.getByText('모든 논문 폴더에서 허락 방식을 골라 주세요.')).toBeVisible()
+    await page.getByRole('button', { name: '매번 묻기' }).click()
+    await expect(page.locator('.chat-pane')).toBeVisible({ timeout: 30000 })
+  } finally {
+    await electronApp.evaluate((_, platform) => Object.defineProperty(process, 'platform', { value: platform, configurable: true }), originalPlatform)
+    await electronApp.close()
+  }
+})
+
+test('Windows write-failure recovery sends the queued first request exactly once to the replacement folder', async () => {
+  const dir = scratch()
+  const failedRoot = join(dir, 'A')
+  const replacementRoot = join(dir, 'B')
+  const inputLog = join(dir, 'turn-inputs.jsonl')
+  const firstRequest = '반드시 전달할 첫 요청입니다'
+  writeFileSync(failedRoot, 'not a folder')
+  mkdirSync(replacementRoot)
+  const env = fakeCodexEnv(join(dir, 'bin'), {
+    FAKE_CODEX_MODE: 'logged-in',
+    FAKE_CODEX_REPLY: replyFile(dir, 'B에서 받았어요'),
+    FAKE_CODEX_TURN_INPUT_LOG: inputLog
+  })
+  const { electronApp, page } = await launch({ env, permissionPrompt: true })
+  const originalPlatform = await electronApp.evaluate(() => process.platform)
+  try {
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill(firstRequest)
+    await page.getByRole('button', { name: '보내기', exact: true }).click()
+    await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
+    await electronApp.evaluate(({ dialog }, roots) => {
+      let next = 0
+      dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [roots[next++]], bookmarks: [] })) as typeof dialog.showOpenDialog
+    }, [failedRoot, replacementRoot])
+    await electronApp.evaluate(() => Object.defineProperty(process, 'platform', { value: 'win32', configurable: true }))
+    await page.getByRole('button', { name: /내 폴더 고르기/ }).click()
+
+    const gate = page.locator('dialog[data-screen="first-project-gate"]')
+    await expect(gate).toContainText('임시 파일')
+    await expect(page.locator('.chat-msg.user')).toHaveCount(0)
+    await gate.getByRole('button', { name: '내 폴더 고르기' }).click()
+    await expect(gate).toContainText('모든 논문 폴더에서 허락 방식을 골라 주세요.')
+    await electronApp.evaluate((_, platform) => Object.defineProperty(process, 'platform', { value: platform, configurable: true }), originalPlatform)
+    await gate.getByRole('button', { name: '매번 묻기' }).click()
+
+    await expect(page.getByText('B에서 받았어요')).toBeVisible({ timeout: 30000 })
+    await expect(page.locator('.chat-msg.user')).toHaveCount(1)
+    await expect(page.locator('.chat-msg.user')).toHaveText(firstRequest)
+    await expect.poll(() => existsSync(inputLog) ? readFileSync(inputLog, 'utf8').trim().split('\n').filter(Boolean).length : 0).toBe(1)
+    const [{ text }] = readFileSync(inputLog, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { text: string })
+    expect(text).toContain(firstRequest)
+    expect(text).toContain(`작업 폴더: ${replacementRoot}`)
+    expect(text).not.toContain(`작업 폴더: ${failedRoot}`)
+  } finally {
+    await electronApp.evaluate((_, platform) => Object.defineProperty(process, 'platform', { value: platform, configurable: true }), originalPlatform)
+    await electronApp.close()
+  }
+})
+for (const route of ['sidebar add', 'sidebar recent', 'titlebar create', 'titlebar other', 'titlebar recent', 'app menu open', 'app menu recent'] as const) {
+  test(`first-folder gate covers the ${route} open route`, async () => {
+    const dir = scratch()
+    const root = join(dir, 'first-folder')
+    mkdirSync(root)
+    const userData = route.endsWith('recent') ? userDataWith(dir, { recent: [{ root, opened_at: new Date().toISOString() }] }) : undefined
+    const { electronApp, page } = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin')), permissionPrompt: true })
+    try {
+      await electronApp.evaluate(({ dialog }, selected) => {
+        dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [selected], bookmarks: [] })) as typeof dialog.showOpenDialog
+      }, root)
+      if (route === 'sidebar add') await page.getByRole('button', { name: '+ 논문 추가' }).click()
+      else if (route === 'sidebar recent') await page.locator('.project-sidebar button[title]').first().click()
+      else if (route === 'titlebar create' || route === 'titlebar other') {
+        await page.getByTitle('다른 논문 열기').click()
+        await page.getByText(route === 'titlebar create' ? '새 폴더 만들기' : '다른 폴더 열기…', { exact: true }).click()
+      } else if (route === 'titlebar recent') {
+        await page.getByTitle('다른 논문 열기').click()
+        await page.locator('.popover').getByRole('button', { name: 'first-folder' }).click()
+      } else if (route === 'app menu open') {
+        await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-folder' }))
+      } else {
+        await electronApp.evaluate(({ BrowserWindow }, selected) => BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-recent', root: selected }), root)
+      }
+      const gate = page.locator('dialog[data-screen="first-project-gate"]')
+      await expect(gate).toBeVisible()
+      await gate.getByRole('button', { name: '매번 묻기' }).click()
+      await expect(page.locator('.chat-pane')).toBeVisible({ timeout: 30000 })
+      const settings = await page.evaluate(() => window.knuaf.getSettings())
+      expect(settings.permission_mode).toBe('ask')
+      expect(settings.first_project_permission_asked_at).toBeTruthy()
+    } finally { await electronApp.close() }
+  })
+}
 
 test('폴더 이름의 경로 구분자는 작업 폴더 밖으로 나가지 않는다', async () => {
   const dir = scratch()
@@ -52,7 +198,11 @@ test('폴더 이름의 경로 구분자는 작업 폴더 밖으로 나가지 않
   } finally { await electronApp.close() }
 })
 
-test('폴더 생성이 실패하면 첫 메시지를 보존하고 다시 선택할 수 있다', async () => {
+test('폴더 이름 충돌은 권한 차단 안내로 오분류하지 않고 첫 메시지를 보존한다', async () => {
+  expect(projectFolderCreationError('win32', 'EEXIST: file already exists')).toBe(PROJECT_FOLDER.createFailed)
+  expect(projectFolderCreationError('win32', 'ENOTDIR: not a directory')).toBe(PROJECT_FOLDER.createFailed)
+  expect(projectFolderCreationError('win32', 'EPERM: operation not permitted')).toBe(PROJECT_FOLDER.windowsCreateFailed)
+  expect(projectFolderCreationError('darwin', 'EACCES: permission denied')).toBe(`${PROJECT_FOLDER.macFolderDenied} ${PROJECT_FOLDER.macFolderRecovery}`)
   const dir = scratch()
   writeFileSync(join(dir, 'knuaf-dev'), '폴더가 아닌 파일')
   const { electronApp, page } = await launch({ env: fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' }) })
@@ -62,6 +212,7 @@ test('폴더 생성이 실패하면 첫 메시지를 보존하고 다시 선택�
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
     await expect(page.getByRole('alert')).toContainText('폴더를 만들지 못했어요')
+    await expect(page.getByRole('alert')).not.toContainText('폴더 보호 기능')
     await expect(page.getByText('딸기 창업', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: /내 폴더 고르기/ })).toBeEnabled()
   } finally { await electronApp.close() }
