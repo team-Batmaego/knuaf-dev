@@ -11,11 +11,11 @@ export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', '
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
 /** init-only project (revision 0) or a project with a source, a section and a fact (revision 1). */
-export function synthProject(opts: { withContent?: boolean } = { withContent: true }): string {
+export function synthProject(opts: { withContent?: boolean; financeGate?: boolean } = { withContent: true }): string {
   const root = mkdtempSync(join(tmpdir(), 'kd-e2e-'))
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'init', root], { encoding: 'utf-8' })
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
-  if (!opts.withContent) return root
+  if (opts.withContent === false) return root
   mkdirSync(join(root, 'sections'), { recursive: true }); mkdirSync(join(root, 'sources'), { recursive: true })
   writeFileSync(join(root, 'sources', 'answers.md'), '# 원답변\n\n재배 면적: 600평\n', 'utf-8')
   writeFileSync(join(root, 'sections', '01.md'), '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n농장A의 재배 면적은 600평이다. 정읍 일대 기후를 고려해 작목을 선택했다.\n<!-- gg:draft:end -->\n', 'utf-8')
@@ -24,7 +24,8 @@ export function synthProject(opts: { withContent?: boolean } = { withContent: tr
     { collection: 'sources', value: { id: 'src-answers', path: 'sources/answers.md', claims: {} } },
     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } },
     { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } },
-    ...syntheticMajor(root)
+    ...syntheticMajor(root),
+    ...(opts.financeGate === false ? [] : syntheticFinanceGate(root))
   ] }), 'utf-8')
   const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
   if (a.status !== 0) throw new Error(a.stdout + a.stderr)
@@ -51,6 +52,29 @@ function syntheticMajor(root: string): { collection: string; value: Record<strin
   return [
     { collection: 'sources', value: { id: 'major-source', path: 'sources/major.txt', claim_review: 'synthetic-review',
       claims: { major: { field_id, kind, value, unit, period, scope, answer_state } } } },
+    { collection: 'facts', value: fact }
+  ]
+}
+
+/**
+ * v0.3.x 원본 계약의 본문 전 재무 게이트 기록. 지원 전공 + 본문 절이면 게이트 기록이
+ * 없을 때 `project.status`가 `finance_gate`를 `needs_user`로 내 2단계에 머문다.
+ * 합성 시험은 재무 수치를 다루지 않으므로 원본이 허용하는 `not_computable`(사유 포함)을
+ * claim-backed 사실로 남겨 게이트를 통과시킨다 — 앱 판정 규칙은 바꾸지 않는다.
+ */
+function syntheticFinanceGate(root: string): { collection: string; value: Record<string, unknown> }[] {
+  writeFileSync(join(root, 'sources', 'finance-gate.txt'), 'Synthetic finance inputs unavailable\n')
+  const fact = {
+    id: 'finance-gate', field_id: 'finance.gate.state', kind: 'reported_fact',
+    value: 'not_computable', unit: '', value_type: 'text', period: null, scope: 'project',
+    answer_state: 'provided', verification: 'claim_supported',
+    reason: '합성 시험: 재무 입력 없음',
+    source_refs: [{ id: 'finance-gate-source', revision: 1, locator: 'L1', claim_id: 'state' }]
+  }
+  const { field_id, kind, value, unit, period, scope, answer_state } = fact
+  return [
+    { collection: 'sources', value: { id: 'finance-gate-source', path: 'sources/finance-gate.txt', claim_review: 'synthetic-review',
+      claims: { state: { field_id, kind, value, unit, period, scope, answer_state } } } },
     { collection: 'facts', value: fact }
   ]
 }
