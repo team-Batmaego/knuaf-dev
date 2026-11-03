@@ -5,14 +5,37 @@
  * 기존 경로를 `status: existing`으로 돌려준다.** 그래서 두 조건을 따로 잠근다:
  * ① 같은 개정 2회차는 멱등 성공이고, 안내가 없는 "새 버전 경로" 버튼 대신 실제로 있는
  *    결과물 **목록**을 가리킨다.
- * ② receipt 없이 목적지 자리에 파일이 남아 있으면 원본이 실제로 거절한다
- *    (`gg_core.py` `export_destination_conflict`: "소유권 미확인 산출물 충돌: 기존 경로를 보존함").
- *    그때도 안내는 덮어쓰지 않았다는 사실과 **목록**을 말한다.
+ * ② receipt 없이 목적지 자리에 무언가 남아 있으면 원본이 거절한다
+ *    (`gg_core.py` `export_destination_conflict`). 원본 조건은 `dest_dir.exists() or
+ *    requested.exists()`라 **파일 존재를 보장하지 않는다** — 빈 폴더만 있어도 난다. 그래서
+ *    안내는 파일·목록 존재를 단정하지 않고, 보장되는 사실(그 자리에 이미 무언가가 있어
+ *    그대로 두었고 새로 만들지 않았다)과 실제로 있는 곳(결과물 화면)만 말한다.
  */
-import { expect, test } from '@playwright/test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { expect, test, type Locator } from '@playwright/test'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch, navTo, openProject, synthProject } from './helpers'
+
+const FORBIDDEN = ['새 버전 경로', '새 경로를 쓰세요']
+
+/**
+ * `export_destination_conflict` 안내의 공통 계약. 원본은 폴더만 있어도 거절하므로
+ * 파일·목록이 있다고 단정하면 안 되고, 화면에 없는 조작을 가리켜도 안 된다(GUI-07).
+ */
+async function expectConflictGuidance(fb: Locator): Promise<string> {
+  const text = await fb.innerText()
+  for (const label of FORBIDDEN) expect(text, `없는 조작을 가리킨다: ${label}`).not.toContain(label)
+  for (const claim of ['목록에 이미', '아래 목록에', '그 파일은']) {
+    expect(text, `파일·목록 존재를 단정한다: ${claim}`).not.toContain(claim)
+  }
+  // 보장되는 사실만 말한다.
+  expect(text).toContain('같은 자리에 이미 무언가')
+  expect(text).toContain('새로 만들지 않았어요')
+  expect(text).toContain('그대로 두었어요')
+  // 실제로 있는 곳만 가리킨다.
+  expect(text).toContain('결과물 화면')
+  return text
+}
 
 test('같은 개정의 검토본을 다시 만들면 이미 있는 파일을 목록에서 열라고 한다 (GUI-07)', async () => {
   const root = synthProject()
@@ -34,7 +57,7 @@ test('같은 개정의 검토본을 다시 만들면 이미 있는 파일을 목
     const text = await fb.innerText()
     // 화면에 없는 조작을 시키지 않는다.
     expect(text, '없는 "새 버전 경로" 버튼을 누르라고 한다').not.toContain('새 버전 경로')
-    for (const label of ['새 버전 경로', '새 경로를 쓰세요']) expect(text).not.toContain(label)
+    for (const label of FORBIDDEN) expect(text).not.toContain(label)
     // 실제로 일어난 일을 말하고, 실제로 있는 곳을 가리켜야 한다.
     expect(text, '같은 내용이라 새로 만들지 않았다는 사실을 말해야 한다').toContain('새로 만들지 않았어요')
     expect(text, '안내가 가리키는 목록에 그 파일이 있어야 한다').toContain('목록')
@@ -44,7 +67,7 @@ test('같은 개정의 검토본을 다시 만들면 이미 있는 파일을 목
   }
 })
 
-test('목적지에 receipt 없는 파일이 있으면 원본이 거절하고 안내는 목록을 가리킨다 (GUI-07)', async () => {
+test('목적지에 receipt 없는 파일이 있으면 원본이 거절하고 안내는 존재를 단정하지 않는다 (GUI-07)', async () => {
   const root = synthProject()
   // 원본 export의 목적지: build/<개정>/review/검토용.md. receipt 없이 파일만 미리 둔다.
   const revision = JSON.parse(readFileSync(join(root, 'project.json'), 'utf8')).revision as number
@@ -59,19 +82,41 @@ test('목적지에 receipt 없는 파일이 있으면 원본이 거절하고 안
     await page.waitForSelector('.chat-pane', { timeout: 30_000 })
     await navTo(page, '결과물')
     const sheet = page.locator('[data-screen="artifacts"]')
-    // 그 파일은 목록에 보인다 — 안내가 "목록에서 열라"고 해도 맞는 말이다.
+    // 이 경우 파일은 실제로 목록에 있다 — 그래도 안내는 그 존재를 단정하지 않는다.
     await expect(sheet).toContainText('검토용.md', { timeout: 30_000 })
     await page.click('.make-row:has-text("검토본 만들기") button')
-    const fb = sheet.locator('.feedback').filter({ hasText: '덮어쓰지' }).first()
+    const fb = sheet.locator('.feedback').filter({ hasText: '같은 자리에 이미 무언가' }).first()
     await expect(fb).toBeVisible({ timeout: 60_000 })
-
-    const text = await fb.innerText()
-    expect(text, '없는 "새 버전 경로" 버튼을 누르라고 한다').not.toContain('새 버전 경로')
-    for (const label of ['새 버전 경로', '새 경로를 쓰세요']) expect(text).not.toContain(label)
-    expect(text, '실제로 일어난 일을 말해야 한다').toContain('덮어쓰지 않았어요')
-    expect(text, '실제로 있는 곳을 가리켜야 한다').toContain('목록')
+    await expectConflictGuidance(fb)
     // 거절은 보존이다 — 미리 둔 파일을 건드리지 않는다.
     expect(readFileSync(pre, 'utf8')).toBe('# 이미 있는 파일\n')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('목적지에 빈 폴더만 있어도 존재를 단정하지 않고 폴더를 보존한다 (GUI-07)', async () => {
+  const root = synthProject()
+  // 반례: `dest_dir.exists()`만으로 같은 오류가 난다. 파일이 없으므로 목록도 비어 있다.
+  const revision = JSON.parse(readFileSync(join(root, 'project.json'), 'utf8')).revision as number
+  const dest = join(root, 'build', String(revision), 'review')
+  mkdirSync(dest, { recursive: true })
+
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await page.waitForSelector('.chat-pane', { timeout: 30_000 })
+    await navTo(page, '결과물')
+    const sheet = page.locator('[data-screen="artifacts"]')
+    await expect(sheet).toContainText('아직 결과물이 없어요', { timeout: 30_000 })
+    await page.click('.make-row:has-text("검토본 만들기") button')
+    const fb = sheet.locator('.feedback').filter({ hasText: '같은 자리에 이미 무언가' }).first()
+    await expect(fb).toBeVisible({ timeout: 60_000 })
+    await expectConflictGuidance(fb)
+    // 안내와 화면이 모순되지 않는다 — 여전히 목록은 비어 있다.
+    await expect(sheet).toContainText('아직 결과물이 없어요')
+    // 거절은 보존이다 — 빈 폴더가 그대로 있고 새 파일도 없다.
+    expect(readdirSync(dest)).toEqual([])
   } finally {
     await electronApp.close()
   }

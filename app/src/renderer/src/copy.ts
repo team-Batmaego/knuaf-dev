@@ -96,6 +96,18 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '그 파일은 아래 목록에 이미 있어요 — 거기서 열어 보세요. 새로 만들려면 논문을 고쳐 다음 기록이 된 뒤에 다시 눌러 주세요.',
     kind: 'warning'
   },
+  /**
+   * `gg_core.export_locked`는 `dest_dir.exists() **또는** requested.exists()`면 이 이유로 거절한다
+   * (`scripts/gg_core.py:5511-5517`). 그래서 이 오류는 파일이 있다는 것을 보장하지 않는다 —
+   * 빈 목적지 폴더만 있어도 난다. 파일·목록 존재를 단정하지 않고, 보장되는 사실만 말한다:
+   * 그 자리에 이미 무언가가 있어 그대로 두었고 새 파일을 만들지 않았다. 가리키는 곳은 화면에
+   * 실제로 있는 결과물 화면과 방금 누른 단추뿐이다(GUI-07).
+   */
+  export_destination_conflict: {
+    title: '같은 자리에 이미 무언가 있어 새로 만들지 않았어요.',
+    action: '그 자리의 내용은 그대로 두었어요. 결과물 화면에서 지금까지 만든 파일을 확인하거나, 논문을 고쳐 다음 기록이 된 뒤에 다시 눌러 주세요.',
+    kind: 'warning'
+  },
   business_rule: {
     title: '지금 상태에서는 할 수 없는 작업이에요.',
     action: '아래 설명을 확인해 주세요. 필요하면 내 논문에서 도우미에게 알려 주세요.',
@@ -275,10 +287,9 @@ function readCoded(e: unknown): { code: string | null; message: string } {
 }
 
 /**
- * `gg_core.export`(v0.3.x) refuses a receipt-less file already sitting at the destination
- * (`export_destination_conflict`). That is the same fact as a text-based overwrite refusal —
- * the path exists and was preserved — so it must get the same "목록에서 여세요" wording, not
- * the generic "작업을 반영하지 않았어요" and never a nonexistent “새 버전 경로” button (GUI-07).
+ * `gg_core.export`(v0.3.x) refuses when anything already sits at the destination — the folder
+ * OR the file (`export_destination_conflict`). It must not borrow the text-based
+ * `overwrite_refused` wording, which asserts a file is in the list.
  */
 function exportDestinationConflict(e: unknown): boolean {
   if (!e || typeof e !== 'object' || !('data' in e)) return false
@@ -289,7 +300,7 @@ function exportDestinationConflict(e: unknown): boolean {
 /** Duck-typed on `{ code, message }` (RpcError, RpcFailure, plain Error, string). */
 export function describeError(e: unknown): DescribedError {
   const { code, message } = readCoded(e)
-  const copy = code === 'operation_not_committed' && exportDestinationConflict(e) ? ERROR_COPY.overwrite_refused : errorCopy(code ?? 'default')
+  const copy = code === 'operation_not_committed' && exportDestinationConflict(e) ? ERROR_COPY.export_destination_conflict : errorCopy(code ?? 'default')
   if ((code === 'sidecar_stop_failed' || code === 'sidecar_stop_timeout') && e && typeof e === 'object' && 'data' in e) {
     const data = e.data
     if (data && typeof data === 'object' && 'recovery' in data && data.recovery === 'retry_stop') {
