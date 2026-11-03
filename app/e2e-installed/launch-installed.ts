@@ -101,12 +101,12 @@ export async function launchInstalled(
 }
 
 /**
- * 첫 실행 화면을 **건너뛰는** userData. `e2e/helpers.ts` 의 `launch()` 와 같은 두 키를 심는다 —
- * 여는 화면(2.6초)과 온보딩을 끄는 값이다. 첫 실행 자체를 보는 시험은 이 함수를 쓰지 않는다.
+ * 첫 실행 화면을 **건너뛰는** userData. `e2e/helpers.ts` 의 `launch()` 와 같은 세 키를 심는다 —
+ * 여는 화면(2.6초)·온보딩·첫 폴더 권한 질문을 끄는 값이다. 첫 실행 자체를 보는 시험은 이 함수를 쓰지 않는다.
  */
 export function seededUserData(dir: string = mkdtempSync(join(tmpdir(), 'kd-installed-ud-'))): string {
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'settings.json'), JSON.stringify({ show_intro: false, onboarded_at: new Date().toISOString() }), 'utf-8')
+  writeFileSync(join(dir, 'settings.json'), JSON.stringify({ show_intro: false, onboarded_at: new Date().toISOString(), first_project_permission_asked_at: new Date().toISOString() }), 'utf-8')
   return dir
 }
 
