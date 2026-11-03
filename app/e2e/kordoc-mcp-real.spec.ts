@@ -16,12 +16,12 @@
  */
 import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { READ_TOOLS, advertisedReadTools, parseVersion } from '../src/main/chat/kordocMcp'
-import { ROOT_DENIAL_TEXT } from '../src/main/chat/kordocMcpVerify'
+import { READ_TOOLS, advertisedReadTools, parseVersion, type KordocMcpSpec } from '../src/main/chat/kordocMcp'
+import { McpSafetyError, ROOT_DENIAL_TEXT, verifyCodexKordoc } from '../src/main/chat/kordocMcpVerify'
 
 const real = process.env.KNUAF_REAL_KORDOC === '1'
 const mcpJs = process.env.KNUAF_KORDOC_MCP_JS ?? ''
@@ -132,6 +132,73 @@ test('실 kordoc MCP: 도구 목록·탐침 A/B·stdin 종료', async () => {
     if (race.exited) expect(race.code).toBe(0)
   } finally {
     if (!c.child.killed && c.child.exitCode === null) c.child.kill('SIGKILL')
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+/**
+ * 검토 R1-01 의 실물 반례를 고정한다: **다른 `KORDOC_ROOT`로 뜬 실제 서버**는
+ * 탐침 A가 경계 검사 이전 오류("파일을 찾을 수 없습니다")로 떨어지면 통과해서는 안 된다.
+ * 같은 서버가 논문 폴더 밖 파일을 실제로 읽는다는 것도 함께 기록한다(구멍의 크기).
+ */
+test('실 kordoc MCP: 잘못된 root 서버는 탐침 A가 경계 이전 오류면 통과하지 못한다', async () => {
+  test.setTimeout(120_000)
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'kordoc-wrongroot-')))
+  const root = join(base, 'project')
+  const wrongRoot = join(base, 'outside')
+  const outsideFile = join(wrongRoot, 'outside.pdf')
+  mkdirSync(root); mkdirSync(wrongRoot)
+  writeFileSync(outsideFile, '%PDF-1.4\nsynthetic review file\n')
+  const c = client(mcpJs, wrongRoot)
+  const moved = `${root}-moved`
+  let movedNow = false
+  try {
+    const init = await c.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'knuaf-e2e', version: '1' } }) as { serverInfo?: { name?: string; version?: string } }
+    c.notify('notifications/initialized', {})
+    const version = init.serverInfo?.version ?? ''
+    expect(parseVersion(version)).not.toBeNull()
+    const list = await c.request('tools/list', {}) as { tools?: { name: string }[] }
+    const readNames = new Set<string>(advertisedReadTools(version) ?? [])
+    const reads = (list.tools ?? []).filter((t) => readNames.has(t.name))
+    const spec: KordocMcpSpec = { command: process.execPath, args: [], env: { KORDOC_ROOT: wrongRoot, KORDOC_OFFLINE: '1' }, version }
+
+    // Codex 상태 조회만 어댑터 — 탐침 결과는 실제 서버 응답이다.
+    const adapter = {
+      request: async (method: string, params?: unknown) => {
+        if (method === 'mcpServerStatus/list') {
+          // verify 가 root realpath 를 이미 구한 뒤 경로가 사라진 상황(검토자 반례 그대로).
+          renameSync(root, moved)
+          movedNow = true
+          return {
+            data: [{
+              runtimeStatus: 'connected',
+              toolsError: null,
+              serverInfo: init.serverInfo,
+              tools: Object.fromEntries(reads.map((t) => [t.name, t]))
+            }],
+            nextCursor: null
+          }
+        }
+        const p = params as { tool: string; arguments: unknown }
+        return c.request('tools/call', { name: p.tool, arguments: p.arguments })
+      }
+    }
+
+    const error = await verifyCodexKordoc(adapter, { threadId: 'real-wrong-root', root, spec })
+      .then(() => null, (e: unknown) => e)
+    console.log(`[real] wrong-root verify=${error instanceof McpSafetyError ? error.reason : 'PASS'}`)
+    expect(error).toBeInstanceOf(McpSafetyError)
+    expect((error as McpSafetyError).reason).toBe('probe-a-unproven')
+
+    renameSync(moved, root)
+    movedNow = false
+    // 그 서버는 정말로 폴더 밖 파일을 읽는다 — 검증이 막지 못하면 이것이 열린다는 증거.
+    const leak = await c.request('tools/call', { name: 'detect_format', arguments: { file_path: outsideFile } })
+    console.log(`[real] wrong-root leak=${JSON.stringify(leak)}`)
+    expect(textOf(leak)).toContain(': pdf')
+  } finally {
+    if (movedNow && existsSync(moved)) renameSync(moved, root)
+    if (!c.child.killed && c.child.exitCode === null) { c.child.stdin.end(); c.child.kill('SIGKILL') }
     rmSync(base, { recursive: true, force: true })
   }
 })

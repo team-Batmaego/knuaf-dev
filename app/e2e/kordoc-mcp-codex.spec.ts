@@ -31,7 +31,13 @@ const spec: KordocMcpSpec = {
 /** 가짜 시계 — 검증 함수는 실제로 잠들지 않는다. */
 function clock() {
   let t = 0
-  return { now: () => t, sleep: async (ms: number) => { t += ms }, elapsed: () => t }
+  return {
+    now: () => t,
+    sleep: async (ms: number) => { t += ms },
+    elapsed: () => t,
+    /** 응답 도중 시간이 흐른 경우 — 검토 R1-02 의 지연 응답 재현. */
+    advance: (ms: number) => { t += ms }
+  }
 }
 
 type Call = { method: string; params: Record<string, unknown> }
@@ -233,4 +239,103 @@ test('E3: 도구 목록이 비었거나 serverInfo.name 이 다르면 끈다', a
 
   const other = rpc(() => ({ data: [server({ serverInfo: { name: 'other', version: spec.version } })], nextCursor: null }))
   await expectSafety(verifyCodexKordoc(other, opts()), 'server-name')
+})
+
+// ── 검토 R1 반례(M1-R1-01·02) — 고치기 전 구현에서는 통과했다 ─────────────────
+
+test('R1-02: 늦게 온 connected — 상한을 넘겼으면 통과가 아니다', async () => {
+  const c = clock()
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') {
+      c.advance(21_000)
+      return { data: [server()], nextCursor: null }
+    }
+    return probeReply((call.params.arguments as { file_path: string }).file_path)
+  })
+  await expectSafety(verifyCodexKordoc(m, opts({ ...c })), 'startup-timeout')
+  // 상한을 넘긴 응답은 탐침으로도 쓰지 않는다.
+  expect(m.calls.filter((x) => x.method === 'mcpServer/tool/call')).toHaveLength(0)
+})
+
+test('R1-02: 페이지 수집이 상한을 넘기면 끝낸다', async () => {
+  const c = clock()
+  let pages = 0
+  const m = rpc((call) => {
+    if (call.method !== 'mcpServerStatus/list') return probeReply((call.params.arguments as { file_path: string }).file_path)
+    pages++
+    c.advance(10_000)
+    return pages < 6 ? { data: [], nextCursor: 'same-cursor' } : { data: [server()], nextCursor: null }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts({ ...c })), 'startup-timeout')
+  expect(pages).toBe(2)
+})
+
+test('R1-02: 반복 cursor 는 시간이 남아 있어도 끝낸다', async () => {
+  const m = rpc((call) => (call.method === 'mcpServerStatus/list' ? { data: [], nextCursor: 'loop' } : probeReply((call.params.arguments as { file_path: string }).file_path)))
+  await expectSafety(verifyCodexKordoc(m, opts()), 'pagination-loop')
+  expect(m.calls.filter((x) => x.method === 'mcpServerStatus/list')).toHaveLength(2)
+})
+
+test('R1-02: 응답하지 않는 RPC 도 남은 시간에 실패로 닫는다', async () => {
+  const m = { request: () => new Promise<unknown>(() => {}) }
+  await expectSafety(verifyCodexKordoc(m, opts({ startupTimeoutMs: 60, pollMs: 10 })), 'startup-timeout')
+})
+
+test('R1-01: 탐침 A가 "파일을 찾을 수 없습니다"면 경계 통과를 증명하지 못한다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    return { content: [{ type: 'text', text: `오류: 파일을 찾을 수 없습니다: ${(call.params.arguments as { file_path: string }).file_path}` }], isError: true }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-a-unproven')
+})
+
+test('R1-01: 내용 없는 A({content:[], status:"failed"})는 통과가 아니다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    return { content: [], status: 'failed' }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-a-empty')
+})
+
+test('R1-01: B의 _meta 에만 root 문구가 있어도 성공 응답은 통과가 아니다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: '오류: 지원하지 않는 확장자입니다:  (허용: .hwpx)' }], isError: true }
+    }
+    return { content: [{ type: 'text', text: 'ok' }], isError: false, _meta: { message: ROOT_DENIAL_TEXT } }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-b-allowed')
+})
+
+test('R1-01: 도구 결과를 읽을 수 없는 응답(content 가 배열이 아님)은 닫는다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    return { content: '오류: 지원하지 않는 확장자입니다', _meta: { message: ROOT_DENIAL_TEXT } }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-unreadable')
+  const m2 = rpc((call) => (call.method === 'mcpServerStatus/list' ? { data: [server()], nextCursor: null } : { _meta: { text: ROOT_DENIAL_TEXT } }))
+  await expectSafety(verifyCodexKordoc(m2, opts()), 'probe-unreadable')
+})
+
+test('R1-01: B가 root 문구 없는 오류(없는 파일 등)면 증명 실패', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: '오류: 지원하지 않는 확장자입니다:  (허용: .hwpx)' }], isError: true }
+    }
+    return { content: [{ type: 'text', text: '오류: 파일을 찾을 수 없습니다: /x' }], isError: true }
+  })
+  await expectSafety(verifyCodexKordoc(m, opts()), 'probe-b-unproven')
+})
+
+test('R1-01: 설계대로 A의 성공(내용 있음)은 통과 — 확장자 오류와 함께 허용 목록이다', async () => {
+  const m = rpc((call) => {
+    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if ((call.params.arguments as { file_path: string }).file_path === realpathSync(root)) {
+      return { content: [{ type: 'text', text: 'hwpx' }], isError: false }
+    }
+    return { content: [{ type: 'text', text: `오류: ${ROOT_DENIAL_TEXT}: /x` }], isError: true }
+  })
+  await verifyCodexKordoc(m, opts())
 })
