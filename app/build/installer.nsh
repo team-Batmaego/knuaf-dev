@@ -1,5 +1,9 @@
 !include UAC.nsh
 
+# electron-builder adds its plugin directories in a task that can finish after this
+# file is included, so a top-level Function calling UAC::/StdUtils:: may compile
+# before plugins exist. customHeader is expanded later by installer.nsi.
+!macro customHeader
 !ifndef BUILD_UNINSTALLER
 Function CleanupLegacyMachineInstall
   ReadRegStr $6 HKLM "Software\${APP_GUID}" InstallLocation
@@ -67,6 +71,7 @@ Function CleanupLegacyMachineInstall
   ${EndIf}
 FunctionEnd
 !endif
+!macroend
 
 !macro customInit
   ${IfNot} ${Silent}
