@@ -1,22 +1,88 @@
 /**
- * GUI 감사 GUI-12: 완료 답변의 파일 링크가 마크다운 원문으로 보이고, 접근성 역할도
- * 일반 텍스트였다. 결과물 메뉴로 돌아가야만 파일에 닿을 수 있었다.
+ * GUI-12 감사(파일 링크가 원문 텍스트였다) → 형님 확정 2026-11-03 으로 **동작이 넓어졌다**.
+ * 누르면 메인이 경로를 다시 확인한 뒤 ① 폴더 안에 실제로 있는 문서면 연결 프로그램으로 열고
+ * ② 그 밖의 형식은 열지 않고 폴더에서 보여 주며 ③ 폴더 밖·없는 파일이면 결과물 시트로 간다.
+ * 이 시험은 그 갈래를 메인의 shell 호출 기록으로 잠근다(실제 탐색기·프로그램은 띄우지 않는다).
  */
 import { expect, test } from '@playwright/test'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { launch, openProject, synthProject } from './helpers'
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { launch, openProject, seedChat, shellCalls, spyShell, synthProject } from './helpers'
 
-const TEXT = '검토본을 만들었어요. [검토전_본문.md](build/검토전_본문.md) 에서 볼 수 있어요.'
+const callLog = (): string => join(mkdtempSync(join(tmpdir(), 'kd-shell-')), 'calls.txt')
+
+/** 존재하는 txt 파일을 만들고 그 상대경로를 돌려준다. */
+function plantFile(root: string, rel: string, body = 'ATTACH_REPRO_20261103\n'): string {
+  const p = join(root, rel)
+  mkdirSync(dirname(p), { recursive: true })
+  writeFileSync(p, body, 'utf-8')
+  return rel
+}
+
+test('파일 단추: 폴더 안에 실제로 있는 문서는 연결 프로그램으로 연다', async () => {
+  const root = synthProject()
+  const rel = plantFile(root, 'build/검토전_본문.md', '# 본문\n')
+  seedChat(root, `검토본을 만들었어요. [검토전_본문.md](${rel}) 에서 볼 수 있어요.`)
+  const log = callLog()
+
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await spyShell(electronApp, log)
+    const link = page.getByRole('button', { name: '검토전_본문.md' })
+    await expect(link).toBeVisible({ timeout: 30_000 })
+    await link.click()
+    // 열었고, 폴더에서 보기로 대신하지 않았고, 결과물 시트로 가지도 않았다.
+    await expect.poll(() => shellCalls(log)).toEqual([`open\t${realpathSync(join(root, rel))}`])
+    await expect(page.getByRole('heading', { name: '결과물' })).toHaveCount(0)
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('파일 단추: 열지 않는 형식은 열지 않고 폴더에서 보여 준다', async () => {
+  const root = synthProject()
+  const rel = plantFile(root, 'build/설치파일.exe', 'MZ not really\n')
+  seedChat(root, `첨부했어요. [설치파일.exe](${rel})`)
+  const log = callLog()
+
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await spyShell(electronApp, log)
+    await page.getByRole('button', { name: '설치파일.exe' }).click()
+    await expect.poll(() => shellCalls(log)).toEqual([`reveal\t${realpathSync(join(root, rel))}`])
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('파일 단추: 열 프로그램이 없으면 폴더에서 보여 주고 쉬운 말로 알린다', async () => {
+  const root = synthProject()
+  const rel = plantFile(root, 'build/검토전_본문.md', '# 본문\n')
+  seedChat(root, `검토본을 만들었어요. [검토전_본문.md](${rel})`)
+  const log = callLog()
+
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await spyShell(electronApp, log, { openFailure: 'no application associated' })
+    await page.getByRole('button', { name: '검토전_본문.md' }).click()
+    await expect.poll(() => shellCalls(log)).toEqual([
+      `open\t${realpathSync(join(root, rel))}`,
+      `reveal\t${realpathSync(join(root, rel))}`
+    ])
+    await expect(page.getByText('파일을 열지 못해 폴더에서 보여 줬어요.')).toBeVisible()
+  } finally {
+    await electronApp.close()
+  }
+})
 
 test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 않는다 (GUI-12)', async () => {
   const root = synthProject()
-  mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
-  for (const p of ['codex', 'claude'])
-    writeFileSync(join(root, '.knuaf-gui', `chat-${p}.json`), JSON.stringify({
-      root, provider: p, state: 'idle',
-      messages: [{ id: 'a1', role: 'assistant', text: TEXT, at: new Date().toISOString() }]
-    }), 'utf-8')
+  // 파일을 만들지 않는다 — 없는 파일은 결과물 시트로 간다(옛 동작 유지).
+  seedChat(root, '검토본을 만들었어요. [검토전_본문.md](build/검토전_본문.md) 에서 볼 수 있어요.')
 
   const { electronApp, page } = await launch()
   try {
@@ -43,17 +109,12 @@ test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 �
  */
 test('폴더 밖·주소를 가리키는 링크는 누를 수 있게 만들지 않는다 (GUI-12)', async () => {
   const root = synthProject()
-  mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
   const text = [
     '[받으세요](https://example.invalid/x.exe)',
     '[열쇠](/Users/other/.ssh/id_rsa)',
     '[위로](../../다른폴더/x.md)'
   ].join(' 그리고 ')
-  for (const p of ['codex', 'claude'])
-    writeFileSync(join(root, '.knuaf-gui', `chat-${p}.json`), JSON.stringify({
-      root, provider: p, state: 'idle',
-      messages: [{ id: 'a2', role: 'assistant', text, at: new Date().toISOString() }]
-    }), 'utf-8')
+  seedChat(root, text)
 
   const { electronApp, page } = await launch()
   try {

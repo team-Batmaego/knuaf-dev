@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch } from './helpers'
 import { fakeCodexEnv, replyFile, scratch } from './fixtures/fake-codex'
@@ -29,7 +29,9 @@ test('첫 메시지 뒤 자동 폴더를 만들되 같은 이름의 기존 폴�
     expect(existsSync(created)).toBe(true)
     expect(readFileSync(join(existing, '원본.txt'), 'utf8')).toBe('보존')
     await page.getByRole('button', { name: process.platform === 'darwin' ? 'Finder에서 열기' : '파일 탐색기에서 열기' }).click()
-    await expect.poll(() => electronApp.evaluate(() => Reflect.get(globalThis, 'folderOpened'))).toBe(created)
+    // 메인은 경로 검사를 통과한 **실제 경로**(심링크 해소)로 연다. macOS 의 /var → /private/var
+    // 처럼 같은 폴더를 가리키는 다른 표기가 올 수 있으므로, 폴더 동일성으로 비교한다.
+    await expect.poll(() => electronApp.evaluate(() => Reflect.get(globalThis, 'folderOpened'))).toBe(realpathSync(created))
   } finally { await electronApp.close() }
 })
 

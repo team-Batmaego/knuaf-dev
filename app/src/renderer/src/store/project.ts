@@ -88,6 +88,12 @@ interface ProjectState {
    */
   materials: MaterialsData | null
   artifacts: ArtifactItem[] | null
+  /**
+   * 결과물 목록을 **읽지 못한 이유**. `artifacts === null` 이 "아직 안 읽음"인지 "읽기 실패"인지
+   * 화면이 구분하려면 이 값이 필요하다 — 예전에는 오류를 null 로 접어 두어 목록 실패가
+   * 빈 화면(저장이 안 된 것처럼)으로 보였다(실기기 재현 2026-11-03).
+   */
+  artifactsError: string | null
   /** `build/` 개정 트리 — 검토본 기준 N(진행 규칙 §4-4)을 여기서 읽는다. */
   buildTree: StageBuildTree | null
   /** 정본 전체(`project.load`) — 파일 현재성은 여기 `outputs[*].stale` 뿐이다(v2 §4-1). */
@@ -206,6 +212,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   sections: null,
   materials: null,
   artifacts: null,
+  artifactsError: null,
   buildTree: null,
   projectLoad: null,
   refreshSeq: 0,
@@ -248,16 +255,23 @@ export const useProject = create<ProjectState>((set, get) => ({
   setWindowWidth: (windowWidth) => set({ windowWidth }),
   loadLists: async () => {
     const root = get().root
-    if (!root) { set({ materials: null, artifacts: null, buildTree: null, projectLoad: null }); return }
+    if (!root) { set({ materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null }); return }
     const mine = visitOf(root)
     const [m, a, tree, load] = await Promise.all([
       rpc.materials(root).catch(() => null),
-      rpc.artifacts(root).catch(() => null),
+      // 목록 실패를 빈 목록과 구분해 남긴다 — 화면이 "저장이 안 됐다"와 "읽지 못했다"를
+      // 같은 공백으로 보여 주면 학생은 파일이 사라졌다고 읽는다(실기기 재현 2026-11-03).
+      rpc.artifacts(root).then((v) => ({ v })).catch((e: unknown) => ({ e })),
       rpc.buildTree(root).catch(() => null),
       rpc.load(root).catch(() => null)
     ])
     if (!mine()) return
-    set({ materials: m, artifacts: a ? a.items : null, buildTree: tree, projectLoad: load })
+    set({
+      materials: m,
+      artifacts: 'v' in a ? a.v.items : null,
+      artifactsError: 'e' in a ? (a.e instanceof Error ? a.e.message : String(a.e)) : null,
+      buildTree: tree, projectLoad: load
+    })
   },
   setPaneView: (paneView) => set({ paneView }),
   focusSection: (focusedSection) => set({ focusedSection }),
@@ -310,7 +324,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.
     sectionHashes = null
-    set({ events: [], sections: null, materials: null, artifacts: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat' })
+    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat' })
     canonPoll = setInterval(() => { void get().watchCanon() }, 2000)
     // 도우미가 하위 폴더에 init한 경우 — 빈 화면으로 두지 않고 어디에 만들었는지 알린다.
     const nested = opened.nestedProject

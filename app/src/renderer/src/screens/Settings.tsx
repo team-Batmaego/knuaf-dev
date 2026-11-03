@@ -176,7 +176,7 @@ export function SettingsScreen() {
         {info && <div className="row app-build-info" style={{ marginTop: 'var(--sp-2)' }}>
           <code title={`${info.buildDate} ${info.buildCommit}`}>{SETTINGS.buildInfo(info.buildDate, info.buildCommit)}</code>
           <button className="quiet" onClick={() => void copyBuildInfo()} aria-label={SETTINGS.copyBuildInfo}>{buildCopy === 'copied' ? SETTINGS.buildInfoCopied : SETTINGS.copyBuildInfo}</button>
-          <button onClick={() => window.knuaf.openPath(info.logs)}>로그 폴더 열기</button>
+          <button onClick={() => void window.knuaf.folderOpen('logs')}>로그 폴더 열기</button>
           {buildCopy === 'failed' && <span role="alert" className="caption">{SETTINGS.buildInfoCopyFailed}</span>}
         </div>}
         <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>{PRIVACY_NOTE}</p>

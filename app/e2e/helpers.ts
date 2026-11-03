@@ -103,6 +103,54 @@ export async function closeSheet(page: Page): Promise<void> {
 }
 
 /**
+ * 메인의 shell 호출을 한 파일에 기록한다 — 시험이 실제 탐색기·기본 프로그램을 띄우지 않게.
+ * `openFailure` 를 주면 openPath 가 그 문자열(열기 실패)을 돌려준다. `swapOnOpen` 은 openPath
+ * 가 불린 **그 순간** 폴더를 바꿔치기한다 — 열기 응답을 기다리는 사이 대상이 바뀌는 경우
+ * (검토 ATTACH-R1-03)를 파일 시스템 조작으로 재현한다. 기록 한 줄은 `open<TAB>경로` 또는
+ * `reveal<TAB>경로` 다.
+ */
+export async function spyShell(
+  electronApp: ElectronApplication,
+  log: string,
+  opts: { openFailure?: string; swapOnOpen?: { move: string; to: string; symlink: string; target: string } } = {}
+): Promise<void> {
+  await electronApp.evaluate(({ shell }, o: {
+    log: string
+    failure: string
+    swap: { move: string; to: string; symlink: string; target: string } | null
+  }) => {
+    // evaluate 는 메인 프로세스에서 돈다 — 이 앱의 메인 번들은 ESM 이라 `require` 가 없다.
+    const fs = process.getBuiltinModule('node:fs')
+    const note = (line: string): void => fs.appendFileSync(o.log, line + '\n')
+    shell.showItemInFolder = (p: string) => { note(`reveal\t${p}`) }
+    shell.openPath = async (p: string) => {
+      note(`open\t${p}`)
+      // 열기 응답을 기다리는 사이 폴더가 다른 곳을 가리키게 만든다.
+      if (o.swap) {
+        fs.renameSync(o.swap.move, o.swap.to)
+        fs.symlinkSync(o.swap.target, o.swap.symlink)
+      }
+      return o.failure
+    }
+  }, { log, failure: opts.openFailure ?? '', swap: opts.swapOnOpen ?? null })
+}
+
+/** `spyShell` 이 남긴 기록(없으면 빈 배열). */
+export function shellCalls(log: string): string[] {
+  return existsSync(log) ? readFileSync(log, 'utf-8').split('\n').filter(Boolean) : []
+}
+
+/** 두 공급자 모두에 같은 도우미 답변을 심는다 — 어느 공급자로 열려도 그 글이 보인다. */
+export function seedChat(root: string, text: string): void {
+  mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
+  for (const p of ['codex', 'claude'])
+    writeFileSync(join(root, '.knuaf-gui', `chat-${p}.json`), JSON.stringify({
+      root, provider: p, state: 'idle',
+      messages: [{ id: 'a1', role: 'assistant', text, at: new Date().toISOString() }]
+    }), 'utf-8')
+}
+
+/**
  * 작업공간 배치가 **멈출 때까지** 기다린다(맥 CI 처방).
  *
  * 폴더를 열면 대화가 먼저 뜨고 그 뒤에 종이 칸이 열리면서(절 목록을 읽은 뒤) **대화 칸 폭이

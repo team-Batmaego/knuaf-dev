@@ -15,6 +15,7 @@ import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
 import { CHAT, CHAT_EVENT, CLOSE_LABEL, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError } from '../copy'
 import { chatSuggestion } from '../suggest'
+import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
 import { zoneOf } from '../../../shared/zone'
 import type { ChatMessage, Provider } from '../../../shared/chat'
@@ -112,11 +113,12 @@ function relativeProjectPath(target: string, root: string | null): string | null
  * 도우미 답변의 파일 링크를 누를 수 있게 만든다 — 마크다운 원문이 그대로 보이고
  * 접근성 역할도 일반 텍스트였다(GUI 감사 GUI-12).
  *
- * 경로는 "파일 얘기구나"를 판단하는 데만 쓰고 **절대 열지 않는다**. 누르면 결과물
- * 시트로 갈 뿐이고, 파일에 닿는 일은 앱이 스스로 목록에서 확인한 경로로만 한다.
- * 안쪽 상대경로가 아닌 링크는 원문 그대로 둔다 — 감추지 않는다.
+ * 경로는 "파일 얘기구나"를 판단하는 데만 쓰고, 누르면 메인이 경로를 다시 확인한 뒤 연다 —
+ * 문서 형식이면 연결 프로그램으로, 아니면 탐색기/Finder 에서 그 파일을 선택해 보여 준다.
+ * 없거나 폴더 밖이면 결과물 시트로 간다 — 무엇을 눌렀는지 알 수 있는 곳으로. 안쪽
+ * 상대경로가 아닌 링크는 원문 그대로 둔다.
  */
-function withLinks(text: string, root: string | null, onGo: () => void): ReactNode {
+function withLinks(text: string, root: string | null, onFile: (relative: string) => void): ReactNode {
   const out: ReactNode[] = []
   let last = 0
   for (const link of markdownLinks(text)) {
@@ -124,7 +126,7 @@ function withLinks(text: string, root: string | null, onGo: () => void): ReactNo
     if (relative === null) continue
     out.push(text.slice(last, link.start))
     const label = isAbsolutePath(link.label) ? (relative.split('/').at(-1) || relative) : (link.label || relative.split('/').at(-1) || relative)
-    out.push(<button key={link.start} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={onGo}>{label}</button>)
+    out.push(<button key={link.start} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
     last = link.end
   }
   if (!out.length) return text
@@ -159,7 +161,7 @@ function Delivery({ m, sending, onResend }: { m: ChatMessage; sending: boolean; 
   return null
 }
 
-function Message({ m, onResend, onGoArtifacts, fold, sending = false }: { m: ChatMessage; onResend?: () => void; onGoArtifacts?: () => void; fold?: FoldOptions; sending?: boolean }) {
+function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMessage; onResend?: () => void; onFileLink?: (relative: string) => void; fold?: FoldOptions; sending?: boolean }) {
   const [open, setOpen] = useState(false)
   const [unfolded, setUnfolded] = useState(false)
   const projectRoot = useProject((s) => s.root)
@@ -172,7 +174,7 @@ function Message({ m, onResend, onGoArtifacts, fold, sending = false }: { m: Cha
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
-      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onGoArtifacts ? withLinks(part, projectRoot, onGoArtifacts) : part) : shown}</div>
+      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, onFileLink) : part) : shown}</div>
       {folding && fold && (
         <div className="q-fold">
           <span className="caption">{CHAT.foldHint(fold.count)}</span>
@@ -326,6 +328,8 @@ export function Chat() {
   const folderOpening = useRef<number | null>(null)
   const [queued, setQueued] = useState<{ root: string; text: string; submission: number } | null>(null)
   const [switchNotice, setSwitchNotice] = useState<Provider | null>(null)
+  /** 파일을 열 프로그램이 없어 폴더에서 대신 보여 준 사실 — 학생이 닫을 수 있는 한 줄. */
+  const [fileNotice, setFileNotice] = useState(false)
   const previous = useRef<{ root: string | null; provider: Provider }>({ root: projectRoot, provider })
   const recordingFirstRun = useRef(false)
   const submitNew = (): void => {
@@ -605,6 +609,22 @@ export function Chat() {
     busy={folderBusy} createError={folderError} onBack={() => { submission.current += 1; setQueued(null); setSubmitted(null); setFolderError(null) }} />
 
   /**
+   * 채팅의 파일 단추(형님 확정 2026-11-03 — GUI-12 를 이 결정으로 고쳐 쓴다).
+   *
+   * ① 논문 폴더 안에 실제로 있는 문서(docx·xlsx·pdf·hwpx·hwp·md·txt·csv·png·jpg)면
+   *    연결 프로그램으로 연다. ② 그 밖의 형식은 열지 않고 폴더에서 보여 준다.
+   * ③ 폴더 밖·없는 파일은 결과물 시트로 간다. 판정은 **메인**이 한다 — 도우미가 쓴 링크
+   * 문자열을 화면이 믿고 열지 않고, 확장자 판정도 한 곳(메인 상수)에만 둔다.
+   */
+  const openFileLink = (relative: string): void => {
+    void window.knuaf.openFileLink(joinPath(projectRoot, relative)).then((r) => {
+      if ('error' in r) { openSheet('artifacts'); return }
+      // 열 프로그램이 없어 폴더에서 대신 보여 줬다 — 왜 안 열렸는지 한 줄로 말한다.
+      if (r.result.reason === 'open_failed') setFileNotice(true)
+    }).catch(() => openSheet('artifacts'))
+  }
+
+  /**
    * 대화 기록과 이벤트 줄을 **시각 순으로** 섞는다 — 이벤트 줄은 저장된 글이 아니라 앱이
    * 그리는 표시라 대화 파일에 없고, 그래서 화면에서만 순서를 맞춘다.
    */
@@ -612,7 +632,7 @@ export function Chat() {
   for (const m of snapshot?.messages ?? []) {
     thread.push({
       key: m.id, at: Date.parse(m.at) || 0,
-      node: <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onGoArtifacts={() => openSheet('artifacts')} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
+      node: <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onFileLink={openFileLink} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
         fold={zone.kind === 'question' && zone.messageId === m.id ? { span: zone.card.span, count: zone.card.options.length } : undefined} />
     })
   }
@@ -653,6 +673,7 @@ export function Chat() {
         {waiting && <ZoneLine tone="wait" title={waiting === 'prep' ? CHAT.preparingLine : CHAT.appBusyTitle}
           sub={waitingPrep ? CHAT.preparingQueued : waiting === 'write' ? CHAT.appBusyWaitSub : undefined} />}
         {pError && <ZoneLine tone={toneOf(pError.kind)} title={pError.title} sub={pError.action} raw={pError.raw} onClose={clearPError} />}
+        {fileNotice && <ZoneLine tone="attn" title={CHAT.openFallback} onClose={() => setFileNotice(false)} />}
         {/* 전역 오류로 같은 실패가 뜨는 자리 — 재시도 대상 root 는 store 가 오류와 함께 보관한
             `openFailure.root` 다(이전 프로젝트 root 가 아니다). */}
         {pError && pOpenFailure && pError.code === pOpenFailure.code && (

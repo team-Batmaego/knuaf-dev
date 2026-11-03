@@ -32,8 +32,9 @@ function CheckBadge({ name, checks }: { name: string; checks: CheckRow[] | null 
  * 미리보기(`Preview`)만 전체 화면에 남는다 — 팝오버에 PDF 를 그릴 수는 없다.
  */
 export function Artifacts() {
-  const { root, status, refresh, loadLists, artifacts, error, clearError, openSettings, closeSheet } = useProject(useShallow((s) => ({
+  const { root, status, refresh, loadLists, artifacts, artifactsError, hasProject, error, clearError, openSettings, closeSheet } = useProject(useShallow((s) => ({
     root: s.root, status: s.status, refresh: s.refresh, loadLists: s.loadLists, artifacts: s.artifacts,
+    artifactsError: s.artifactsError, hasProject: s.hasProject,
     error: s.error, clearError: s.clearError, openSettings: s.openSettings, closeSheet: s.closeSheet
   })))
   const appendDraft = useChat((s) => s.appendDraft)
@@ -41,6 +42,10 @@ export function Artifacts() {
   const [sel, setSel] = useState<string | null>(null)
   const [savedTo, setSavedTo] = useState<string | null>(null)
   const [saveErr, setSaveErr] = useState<DescribedError | null>(null)
+  /** ‘원래 앱으로 열기’가 열지 못했을 때 — 메인이 이미 폴더에서 보여 주고 이유를 돌려준다. */
+  const [openErr, setOpenErr] = useState<string | null>(null)
+  /** ‘논문 폴더 열기’가 실패했을 때 — 단추는 그 자리에 그대로 둔다. */
+  const [folderErr, setFolderErr] = useState(false)
   const items = artifacts
 
   useEffect(() => { void loadLists() }, [loadLists])
@@ -53,11 +58,39 @@ export function Artifacts() {
   const missing = !!status?.lanes.content_review.independent_review_missing
   if (!root) return null
 
+  /**
+   * 목록을 보여 줄 수 없는 이유를 **세 가지로 구분한다**: 논문 기록(정본)이 없음 / 목록 읽기
+   * 실패 / 진짜 빈 목록. 예전에는 앞의 둘이 모두 공백이라 학생이 "저장이 안 됐다"고 읽었다
+   * (실기기 재현 2026-11-03). 목록을 아직 읽는 중(`null`, 오류 없음)에는 아무 말도 하지 않는다.
+   */
+  const listState = !hasProject ? 'noProject'
+    : items === null ? (artifactsError ? 'failed' : 'loading')
+      : items.length === 0 ? 'empty' : 'ready'
+  /**
+   * 탐색기/Finder 에서 **논문 폴더의 내용**을 연다. 경로를 화면이 주지 않고 이름(`project`)만
+   * 준다 — 메인이 정한 폴더만 열리므로 `.app` 같은 실행형 번들이 이 통로로 열리지 않는다.
+   */
+  const openFolder = async (): Promise<void> => {
+    setFolderErr(false)
+    const r = await window.knuaf.folderOpen('project')
+    if ('error' in r) setFolderErr(true)
+  }
+
   const saveAs = async (it: ArtifactItem): Promise<void> => {
     setSavedTo(null); setSaveErr(null)
     const r = await window.knuaf.fileSaveAs(root, it.path)
     if (r.error) setSaveErr(describeError(r.error))
     else if (r.result) setSavedTo(String(r.result))
+  }
+  /**
+   * ‘원래 앱으로 열기’도 대화 파일 단추와 **같은 메인 검사**를 쓴다(폴더 안·실제 파일·허용
+   * 형식). 열 프로그램이 없으면 메인이 폴더에서 보여 주고, 화면은 그 사실을 한 줄로 말한다.
+   */
+  const openInApp = async (it: ArtifactItem): Promise<void> => {
+    setOpenErr(null)
+    const r = await window.knuaf.openPath(joinPath(root, it.path))
+    if ('error' in r) setOpenErr(r.error.code === 'not_openable' ? ARTIFACTS.openNotSupported : r.error.message)
+    else if (r.result.reason === 'open_failed') setOpenErr(ARTIFACTS.openFallback)
   }
   const tellHelper = (lines: string): void => { appendDraft(lines); closeSheet() }
 
@@ -71,6 +104,8 @@ export function Artifacts() {
           넓게 편다. 비활성은 "입력이 없어 실행 자체가 불가능한 경우"뿐이고 이유를 캡션으로 말한다. */}
       <div className="card">
         <div className="card-head"><h2>{ARTIFACTS.make.title}</h2></div>
+        {/* 네 줄이 모두 꺼진 이유 — 이유 없이 회색 단추만 두지 않는다(실기기 재현 2026-11-03). */}
+        {make.blocked && <div className="caption" data-st="make-blocked">{make.blocked}</div>}
         {make.rows.map((r) => (
           <div className="make-row" key={r.kind}>
             <div className="grow"><div>{r.label}</div><div className="caption">{r.body}</div></div>
@@ -87,7 +122,20 @@ export function Artifacts() {
       {make.runner.env?.ok && !make.runner.busy && <ResultCard env={make.runner.env} onReveal={(p) => window.knuaf.reveal(joinPath(root, p))} onOpen={(p) => window.knuaf.openPath(joinPath(root, p))} />}
 
       <h2>{ARTIFACTS.make.madeTitle}</h2>
-      {items && items.length === 0 && <EmptyState icon="box" title={EMPTY.artifacts.title} body={EMPTY.artifacts.body} />}
+      {folderErr && (
+        <Feedback kind="warning" title={ARTIFACTS.folderFailed}
+          actions={<button onClick={() => void openFolder()}>{ARTIFACTS.revealFolder}</button>} />
+      )}
+      {listState === 'noProject' && (
+        <EmptyState icon="box" title={ARTIFACTS.noProject.title} body={ARTIFACTS.noProject.body}
+          action={<button onClick={() => void openFolder()}>{ARTIFACTS.revealFolder}</button>} />
+      )}
+      {listState === 'failed' && (
+        <Feedback kind="error" title={ARTIFACTS.listFailed.title} body={ARTIFACTS.listFailed.body}
+          details={artifactsError ? <code>{artifactsError}</code> : undefined}
+          actions={<><button onClick={() => void loadLists()}>{ARTIFACTS.retry}</button><button onClick={() => void openFolder()}>{ARTIFACTS.revealFolder}</button></>} />
+      )}
+      {listState === 'empty' && <EmptyState icon="box" title={EMPTY.artifacts.title} body={EMPTY.artifacts.body} />}
 
       {items && items.length > 0 && (
         <div className="artifact-grid">
@@ -118,9 +166,15 @@ export function Artifacts() {
                   <span className="row">
                     <button onClick={() => void saveAs(item)}>{ARTIFACTS.save}</button>
                     <button onClick={() => window.knuaf.reveal(joinPath(root, item.path))}>{ARTIFACTS.reveal}</button>
-                    <button onClick={() => window.knuaf.openPath(joinPath(root, item.path))}>{ARTIFACTS.openExternal}</button>
+                    <button onClick={() => void openInApp(item)}>{ARTIFACTS.openExternal}</button>
                   </span>
                 </div>
+                {openErr && (
+                  <div style={{ marginBottom: 'var(--sp-3)' }}>
+                    <Feedback kind="warning" title={ARTIFACTS.openFailedTitle} body={openErr}
+                      actions={<button onClick={() => window.knuaf.reveal(joinPath(root, item.path))}>{ARTIFACTS.reveal}</button>} />
+                  </div>
+                )}
                 {savedTo && <div style={{ marginBottom: 'var(--sp-3)' }}><Feedback kind="completion" title={ARTIFACTS.savedTo} body={<code>{savedTo}</code>} /></div>}
                 {saveErr && <div style={{ marginBottom: 'var(--sp-3)' }}><Feedback kind={saveErr.kind} title={saveErr.title} body={saveErr.action} details={<code>{saveErr.raw}</code>} /></div>}
                 <Preview root={root} item={item} items={items} onRendered={() => { void refresh(); void loadLists() }} />
