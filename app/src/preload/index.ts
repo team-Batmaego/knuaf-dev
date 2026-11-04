@@ -88,6 +88,11 @@ const api = {
   previewRead: (target: string): Promise<RpcResult<PreviewPayload>> => ipcRenderer.invoke('preview:read', target),
   /** Existence check inside the project root → { result: boolean }. */
   fileExists: (root: string, relPath: string): Promise<{ result: boolean } | { error: { code: string; message: string } }> => ipcRenderer.invoke('file:exists', root, relPath),
+  /** Persist the first-seen body for a section under the current project folder. */
+  review: {
+    ensureBaseline: (root: string, sectionId: string, draft: string): Promise<RpcResult<{ draft: string }>> =>
+      ipcRenderer.invoke('review:ensure-baseline', root, sectionId, draft)
+  },
   /** Copy a file inside the project root to a user-chosen location → { result: savedPath | null } | { error }. */
   fileSaveAs: (root: string, relPath: string) => ipcRenderer.invoke('file:save-as', root, relPath),
   windowInfo: () => ipcRenderer.invoke('window:info'),

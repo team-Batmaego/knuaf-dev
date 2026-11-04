@@ -1,13 +1,10 @@
 import { create } from 'zustand'
 import { REVIEW } from '../copy'
+import { sectionDiff } from '../../../shared/diff'
 
 /**
- * 발주 QA2-B 의 검토 상태 — ①종이에서 고른 문장(인용) ②"고친 부분 보기" 켜짐 ③비교 기준 본문.
- *
- * 셋 다 **앱 메모리**에만 산다(정본 폴더에 쓰지 않는다 — 앱을 다시 켜면 초기화된다, REPORT 한계).
- * 다만 ③ 비교 기준은 **이 실행 동안·그 논문에 대해서는** 종이 칸을 닫았다 열어도 남아야 한다
- * (검토 QA2B-R1-03: 종이 칸 지역 상태였을 때 닫기만으로 기준이 사라졌다). 그래서 논문(root)과
- * 절로 키를 잡아 여기 store 에 둔다 — 화면 조각의 수명과 분리한다.
+ * `quote` and `showDiff` are session state. The comparison baseline lives in the
+ * project folder; the last-seen body and per-save edit counts stay in memory.
  */
 export type ReviewQuote = {
   /** 어느 논문에서 골랐는가 — 다른 폴더 대화에 붙지 않게 한다(QA2B-R1-01). */
@@ -20,8 +17,9 @@ export type ReviewQuote = {
   sectionTitle: string
 }
 
-/** 비교 기준 — 절 하나를 이번 실행에서 처음 본 본문. */
+/** Section baseline data shared by the persisted comparison and session edit tracking. */
 export type BaselineDoc = { title: string; draft: string; hash: string }
+export type ReviewEdit = { kind: 'wrote' } | { kind: 'edited'; count: number | null }
 
 interface ReviewState {
   /** 입력칸 위에 붙어 있는 인용. 없으면 null. */
@@ -36,9 +34,41 @@ interface ReviewState {
   baseline: Record<string, BaselineDoc>
   /** 처음 본 순간에만 박는다 — 이후 저장은 모두 이 기준과 견준다. */
   noteBaseline: (key: string, doc: BaselineDoc) => void
+  /** Last body seen per section in this app session. */
+  lastSeen: Record<string, BaselineDoc>
+  /** Change kind/count by section and saved draft hash. */
+  editCounts: Record<string, ReviewEdit>
+  /** Ensure the durable comparison baseline, then record the latest body. */
+  noteSeen: (root: string, sectionId: string, doc: BaselineDoc) => Promise<void>
+  editOf: (root: string, sectionId: string, hash: string) => ReviewEdit | null
 }
 
-export const useReview = create<ReviewState>((set) => ({
+const pendingNotes = new Map<string, Promise<void>>()
+
+/** Count changed runs separated by unchanged text, including a replacement as one run. */
+function countEditedAreas(before: string, after: string): number {
+  let count = 0
+  let inChange = false
+  for (const block of sectionDiff(before, after)) {
+    if (block.kind === 'same') {
+      inChange = false
+    } else if (block.kind === 'segs') {
+      for (const segment of block.segs) {
+        if (segment.kind === 'same') inChange = false
+        else if (!inChange) { count++; inChange = true }
+      }
+    } else if (!inChange) {
+      count++
+      inChange = true
+    }
+  }
+  return count
+}
+
+function editKey(root: string, sectionId: string, hash: string): string {
+  return JSON.stringify([root, sectionId, hash])
+}
+export const useReview = create<ReviewState>((set, get) => ({
   quote: null,
   setQuote: (quote) => set({ quote }),
   clearQuote: () => set({ quote: null }),
@@ -46,7 +76,45 @@ export const useReview = create<ReviewState>((set) => ({
   setShowDiff: (showDiff) => set({ showDiff }),
   toggleDiff: () => set((s) => ({ showDiff: !s.showDiff })),
   baseline: {},
-  noteBaseline: (key, doc) => set((s) => (s.baseline[key] ? s : { baseline: { ...s.baseline, [key]: doc } }))
+  lastSeen: {},
+  editCounts: {},
+  noteBaseline: (key, doc) => set((s) => (s.baseline[key] ? s : { baseline: { ...s.baseline, [key]: doc } })),
+  noteSeen: (root, sectionId, doc) => {
+    const key = baselineKey(root, sectionId)
+    const queued = (pendingNotes.get(key) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        const reply = await window.knuaf.review.ensureBaseline(root, sectionId, doc.draft)
+        const persistedDraft = reply.result?.draft
+        if (typeof persistedDraft !== 'string') {
+          throw new Error(reply.error?.message ?? '비교 기준을 불러오거나 저장하지 못했어요.')
+        }
+        set((state) => {
+          const previous = state.lastSeen[key]
+          const edit = previous && previous.hash !== doc.hash
+            ? previous.draft.length === 0 && doc.draft.length > 0
+              ? { kind: 'wrote' } as const
+              : { kind: 'edited', count: countEditedAreas(previous.draft, doc.draft) } as const
+            : null
+          const saved = state.baseline[key]
+          return {
+            baseline: {
+              ...state.baseline,
+              [key]: { title: saved?.title ?? doc.title, draft: persistedDraft, hash: saved?.hash ?? '' }
+            },
+            lastSeen: { ...state.lastSeen, [key]: doc },
+            ...(edit ? { editCounts: { ...state.editCounts, [editKey(root, sectionId, doc.hash)]: edit } } : {})
+          }
+        })
+      })
+    pendingNotes.set(key, queued)
+    void queued.then(
+      () => { if (pendingNotes.get(key) === queued) pendingNotes.delete(key) },
+      () => { if (pendingNotes.get(key) === queued) pendingNotes.delete(key) }
+    )
+    return queued
+  },
+  editOf: (root, sectionId, hash) => get().editCounts[editKey(root, sectionId, hash)] ?? null,
 }))
 
 /** 비교 기준의 키 — 논문과 절. */
