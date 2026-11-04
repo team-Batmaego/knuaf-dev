@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useProject } from '../store/project'
 import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/chat'
-import { chosenProvider, useConnect } from '../store/connect'
+import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { usePrep, waitKind } from '../store/prep'
 import { withBold } from '../inline'
@@ -23,8 +23,8 @@ import { projectFolderName } from '../../../shared/project-folder'
 import { useShallow } from 'zustand/react/shallow'
 import { create } from 'zustand'
 
-type DraftIntent = { seq: number; root: string | null; title?: string }
-const useReportIntent = create<{ intent: DraftIntent | null }>(() => ({ intent: null }))
+export type DraftIntent = { seq: number; root: string | null; title?: string }
+export const useReportIntent = create<{ intent: DraftIntent | null }>(() => ({ intent: null }))
 let reportSeq = 0
 
 /** TitleBar onReport callback; survives Chat unmounting in a narrow window. */
@@ -37,6 +37,19 @@ export function requestReport(title?: string): void {
 export function reportDraft(draft: string, title?: string): string {
   const prefix = title ? REPORT.prefillError(title) : REPORT.prefill
   return draft ? `${prefix}\n${draft}` : prefix
+}
+
+/** Claim before changing a draft so replayed effects cannot apply an intent twice. */
+export function applyReportIntent(intent: DraftIntent, projectRoot: string | null, chatRoot: string | null, connState: ConnState, disconnected: boolean): 'no-folder' | 'disconnected' | 'status-failed' | 'ready' | null {
+  if (useReportIntent.getState().intent?.seq !== intent.seq) return null
+  if (intent.root === projectRoot && projectRoot && (chatRoot !== projectRoot || connState === 'checking')) return null
+  useReportIntent.setState({ intent: null })
+  if (intent.root !== projectRoot) return null
+  if (!projectRoot) return 'no-folder'
+  if (connState === 'failed' || connState === 'unknown') return 'status-failed'
+  if (disconnected) return 'disconnected'
+  useChat.getState().setDraft(reportDraft(useChat.getState().draft, intent.title))
+  return 'ready'
 }
 
 /** 프로젝트 안 상대경로처럼 생긴 것만. 주소(http:)·절대경로·.. 는 제외한다. */
@@ -353,7 +366,7 @@ export function Chat() {
     }
   }, [])
   const reportIntent = useReportIntent((s) => s.intent)
-  const [reportNotice, setReportNotice] = useState<'normal' | 'offline' | 'disconnected' | 'no-folder' | null>(null)
+  const [reportNotice, setReportNotice] = useState<'normal' | 'offline' | 'disconnected' | 'status-failed' | 'no-folder' | null>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   /** 입력칸 — 한 줄에서 시작해 글이 늘면 자란다(시안 P/L). 최대 높이 뒤에는 스크롤. */
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -636,15 +649,10 @@ export function Chat() {
   useEffect(() => { setReportNotice(null) }, [projectRoot])
   useEffect(() => {
     if (!reportIntent) return
-    if (reportIntent.root !== projectRoot) {
-      useReportIntent.setState((s) => s.intent?.seq === reportIntent.seq ? { intent: null } : s)
-      return
-    }
-    if (projectRoot && root !== projectRoot) return
-    if (!projectRoot) setReportNotice('no-folder')
-    else if (zone.kind === 'disconnected') setReportNotice('disconnected')
+    const result = applyReportIntent(reportIntent, projectRoot, root, connState, zone.kind === 'disconnected')
+    if (!result) return
+    if (result !== 'ready') setReportNotice(result)
     else {
-      setDraft(reportDraft(useChat.getState().draft, reportIntent.title))
       setReportNotice(offline ? 'offline' : 'normal')
       if (zone.kind === 'question') setFreeRequest((prev) => ({ messageId: zone.messageId, seq: (prev?.seq ?? 0) + 1 }))
       else if (zone.kind === 'form') {
@@ -652,8 +660,7 @@ export function Chat() {
         requestAnimationFrame(() => taRef.current?.focus())
       } else if (zone.kind !== 'permission') requestAnimationFrame(() => taRef.current?.focus())
     }
-    useReportIntent.setState((s) => s.intent?.seq === reportIntent.seq ? { intent: null } : s)
-  }, [reportIntent, projectRoot, root, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null, offline, setDraft])
+  }, [reportIntent, projectRoot, root, connState, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null, offline])
   /**
    * 빈 입력칸의 추천 문구 — 지금 상황(`suggest.ts` 의 `situationOf`)이 먼저고, 그 안에서 보낸
    * 말 수로 문구를 돌린다. 대화가 비었거나·인용이 붙었거나·작업 중이거나 1단계면 `null` 이고
@@ -783,8 +790,8 @@ export function Chat() {
         )}
         {snapErr && snapErrKey && !closedNotes.has(snapErrKey) && <ZoneLine tone="bad" title={snapErr.title} sub={snapErr.action} raw={snapErr.raw} onClose={() => closeNote(snapErrKey)} onReport={() => requestReport(snapErr.title)} />}
         {reportNotice && reportNotice !== 'no-folder' && <ZoneLine tone="info"
-          title={reportNotice === 'disconnected' ? REPORT.disconnected : reportNotice === 'offline' ? REPORT.offline : REPORT.notice}
-          sub={zone.kind === 'permission' && reportNotice !== 'disconnected' ? REPORT.permission : undefined}
+          title={reportNotice === 'status-failed' ? CHAT.statusFailTitle : reportNotice === 'disconnected' ? REPORT.disconnected : reportNotice === 'offline' ? REPORT.offline : REPORT.notice}
+          sub={reportNotice === 'status-failed' ? CHAT.statusFailBody : zone.kind === 'permission' && reportNotice !== 'disconnected' ? REPORT.permission : undefined}
           actions={reportNotice === 'disconnected' ? <button type="button" className="lk" onClick={() => {
             const button = document.querySelector<HTMLButtonElement>('.chat-composer .composer-model-host > button.model')
             if (button?.getAttribute('aria-expanded') !== 'true') button?.click()
