@@ -38,26 +38,30 @@ export function attachFailureNote(reason: KordocAttachFailure | null): string {
   return `한글 문서 읽기 도구를 붙이지 못했어요(${detail}). 문서 읽기는 스킬의 스크립트로만 돼요.`
 }
 
+interface PendingAcquire {
+  key: string
+  cancelled: boolean
+}
+
 export class KordocMcpRegistry {
   /** 성공만 담는다(폴더 키 = realpath). */
   private specs = new Map<string, KordocMcpSpec>()
   /** 실패 안내를 이미 말한 폴더. */
   private notified = new Set<string>()
-  /** 안전 검증 실패로 닫힌 canonical 키 및, realpath 실패로 남긴 입력 경로. */
+  /** 안전 검증 실패로 닫힌 canonical 키와 비활성화된 입력 경로. */
   private disabled = new Set<string>()
-  /** 입력 경로별 마지막 realpath 키 — 링크가 사라져도 disable이 캐시 키를 찾는다. */
-  private resolvedKeysByPath = new Map<string, string>()
+  /** 입력 경로별 성공 부착 키 — disable 시 과거 canonical 키까지 처분한다. */
+  private attachedKeysByPath = new Map<string, Set<string>>()
+  /** ensure 대기 중 요청 — disable 시 시작 키도 함께 처분한다. */
+  private pendingByPath = new Map<string, Set<PendingAcquire>>()
 
   constructor(private deps: KordocMcpRegistryDeps) {}
 
   private key(root: string): string {
-    const path = resolve(root)
     try {
-      const key = this.deps.fs ? this.deps.fs.realpathSync(root) : realpathSync(root)
-      this.resolvedKeysByPath.set(path, key)
-      return key
+      return this.deps.fs ? this.deps.fs.realpathSync(root) : realpathSync(root)
     } catch {
-      return path
+      return resolve(root)
     }
   }
 
@@ -67,24 +71,44 @@ export class KordocMcpRegistry {
     const key = this.key(root)
     if (this.disabled.has(path) || this.disabled.has(key)) return null
     const cached = this.specs.get(key)
-    if (cached) return cached
+    if (cached) {
+      this.rememberAttached(path, key)
+      return cached
+    }
 
-    let runtime: KordocRuntime | null
+    const request: PendingAcquire = { key, cancelled: false }
+    let pending = this.pendingByPath.get(path)
+    if (!pending) {
+      pending = new Set()
+      this.pendingByPath.set(path, pending)
+    }
+    pending.add(request)
+
     try {
-      runtime = await this.deps.ensureKordoc(root)
-    } catch {
-      this.reportOnce(key, null)
-      return null
+      let runtime: KordocRuntime | null
+      try {
+        runtime = await this.deps.ensureKordoc(root)
+      } catch {
+        this.reportOnce(key, null)
+        return null
+      }
+      // ensure 대기 중 disable되거나 링크 대상이 바뀌면 이 요청의 키로 사양을 만들지 않는다.
+      if (request.cancelled || this.disabled.has(path) || this.disabled.has(key)) return null
+      const resolution = resolveKordocMcp(runtime, root, this.deps.fs)
+      if (!resolution.ok) {
+        this.reportOnce(key, resolution.reason)
+        return null
+      }
+      const resolvedRoot = resolution.spec.env.KORDOC_ROOT
+      if (resolvedRoot !== key || this.disabled.has(resolvedRoot)) return null
+
+      this.specs.set(key, resolution.spec)
+      this.rememberAttached(path, key)
+      return resolution.spec
+    } finally {
+      pending.delete(request)
+      if (pending.size === 0) this.pendingByPath.delete(path)
     }
-    // ensure 대기 중 disable될 수 있으므로, 사양을 만들기 전에 수명 상태를 다시 확인한다.
-    if (this.disabled.has(path) || this.disabled.has(key)) return null
-    const resolution = resolveKordocMcp(runtime, root, this.deps.fs)
-    if (!resolution.ok) {
-      this.reportOnce(key, resolution.reason)
-      return null
-    }
-    this.specs.set(key, resolution.spec)
-    return resolution.spec
   }
 
   /**
@@ -94,20 +118,40 @@ export class KordocMcpRegistry {
   disable(root: string): void {
     const path = resolve(root)
     const key = this.key(root)
-    const previousKey = this.resolvedKeysByPath.get(path)
+    this.disabled.add(path)
     this.disabled.add(key)
     this.specs.delete(key)
-    if (previousKey) {
-      this.disabled.add(previousKey)
-      this.specs.delete(previousKey)
-    } else {
-      this.disabled.add(path)
+
+    const attachedKeys = this.attachedKeysByPath.get(path)
+    if (attachedKeys) {
+      for (const attachedKey of attachedKeys) {
+        this.disabled.add(attachedKey)
+        this.specs.delete(attachedKey)
+      }
+    }
+
+    const pendingRequests = this.pendingByPath.get(path)
+    if (pendingRequests) {
+      for (const request of pendingRequests) {
+        request.cancelled = true
+        this.disabled.add(request.key)
+        this.specs.delete(request.key)
+      }
     }
   }
 
   isDisabled(root: string): boolean {
     const path = resolve(root)
     return this.disabled.has(path) || this.disabled.has(this.key(root))
+  }
+
+  private rememberAttached(path: string, key: string): void {
+    let keys = this.attachedKeysByPath.get(path)
+    if (!keys) {
+      keys = new Set()
+      this.attachedKeysByPath.set(path, keys)
+    }
+    keys.add(key)
   }
 
   private reportOnce(key: string, reason: KordocAttachFailure | null): void {
