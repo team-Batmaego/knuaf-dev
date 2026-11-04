@@ -1,5 +1,6 @@
 import { Icon } from './Icon'
 import { REVIEW } from '../copy'
+import type { CSSProperties } from 'react'
 import type { ReviewQuote } from '../store/review'
 
 /**
@@ -9,9 +10,9 @@ import type { ReviewQuote } from '../store/review'
  * 임시 이음매(`ReviewQuoteHost` 가 좌표를 재서 `document.body` 로 얹던 것)는 통합에서 지웠다.
  * 문구는 `copy.ts` 의 `REVIEW` 한 곳에 있다.
  */
-export function ReviewQuoteChip({ quote, onRemove }: { quote: ReviewQuote; onRemove: () => void }) {
+export function ReviewQuoteChip({ quote, onRemove, style }: { quote: ReviewQuote; onRemove: () => void; style?: CSSProperties }) {
   return (
-    <div className="review-chip" role="group" aria-label={REVIEW.quoteLabel}>
+    <div className="review-chip" role="group" aria-label={REVIEW.quoteLabel} style={style}>
       <span className="review-chip-w">
         <small>{REVIEW.quoteLead(quote.sectionTitle)}</small>
         <span className="review-chip-t">{quote.text}</span>

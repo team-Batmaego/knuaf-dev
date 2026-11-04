@@ -1405,7 +1405,25 @@ export const MATERIALS_POPOVER = {
  */
 export const CHAT_EVENT = {
   wrote: (title: string) => `${title}${objectParticle(title)} 썼어요`,
-  goPaper: '종이에서 보기'
+  goPaper: '종이에서 보기',
+  edited: (title: string, count: number | null) => count === null
+    ? `${title}${objectParticle(title)} 고쳤어요`
+    : `${title}에서 ${count}곳을 고쳤어요`,
+  showDiff: '고친 부분 보기'
+} as const
+
+/** 문제 신고는 학생의 초안만 채우며 자동 전송하지 않는다. */
+export const REPORT = {
+  button: '문제 신고',
+  inline: '신고',
+  prefill: '신고할래 — ',
+  prefillError: (title: string) => `신고할래 — '${title}'가 떴어요. `,
+  notice: '하고 싶은 말을 덧붙여 보내 주세요. 보내기 전에 도우미가 신고 내용을 보여 드려요. 확인해야만 보내져요.',
+  disconnected: '신고는 도우미가 정리해서 보내요. 먼저 AI를 연결해 주세요.',
+  offline: '지금 인터넷이 끊겨 있어요. 연결되면 보내 주세요 — 신고는 인터넷으로 개발자에게 전해져요.',
+  permission: '허락을 먼저 정해 주세요.',
+  noFolder: '신고는 논문을 연 뒤 대화에서 할 수 있어요.',
+  login: '로그인'
 } as const
 
 /**

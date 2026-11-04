@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode 
 import { useProject } from '../store/project'
 import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/chat'
 import { chosenProvider, useConnect } from '../store/connect'
-import { useReview, buildQuotedMessage } from '../store/review'
+import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { usePrep, waitKind } from '../store/prep'
 import { withBold } from '../inline'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
@@ -13,7 +13,7 @@ import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
-import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
+import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
 import { chatSuggestion } from '../suggest'
 import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
@@ -21,6 +21,23 @@ import { zoneOf } from '../../../shared/zone'
 import type { ChatMessage, Provider } from '../../../shared/chat'
 import { projectFolderName } from '../../../shared/project-folder'
 import { useShallow } from 'zustand/react/shallow'
+import { create } from 'zustand'
+
+type DraftIntent = { seq: number; root: string | null; title?: string }
+const useReportIntent = create<{ intent: DraftIntent | null }>(() => ({ intent: null }))
+let reportSeq = 0
+
+/** TitleBar onReport callback; survives Chat unmounting in a narrow window. */
+export function requestReport(title?: string): void {
+  const project = useProject.getState()
+  useReportIntent.setState({ intent: { seq: ++reportSeq, root: project.root, title } })
+  project.setPaneView('chat')
+}
+
+export function reportDraft(draft: string, title?: string): string {
+  const prefix = title ? REPORT.prefillError(title) : REPORT.prefill
+  return draft ? `${prefix}\n${draft}` : prefix
+}
 
 /** 프로젝트 안 상대경로처럼 생긴 것만. 주소(http:)·절대경로·.. 는 제외한다. */
 const INSIDE_PATH = /^(?![/\\]|[a-zA-Z][a-zA-Z0-9+.-]*:)(?!.*(?:^|[/\\])\.\.(?:[/\\]|$)).+$/
@@ -118,7 +135,7 @@ function relativeProjectPath(target: string, root: string | null): string | null
  * 없거나 폴더 밖이면 결과물 시트로 간다 — 무엇을 눌렀는지 알 수 있는 곳으로. 안쪽
  * 상대경로가 아닌 링크는 원문 그대로 둔다.
  */
-function withLinks(text: string, root: string | null, onFile: (relative: string) => void): ReactNode {
+function withLinks(text: string, root: string | null, messageId: string, onFile: (relative: string) => void): ReactNode {
   const out: ReactNode[] = []
   let last = 0
   for (const link of markdownLinks(text)) {
@@ -126,7 +143,7 @@ function withLinks(text: string, root: string | null, onFile: (relative: string)
     if (relative === null) continue
     out.push(text.slice(last, link.start))
     const label = isAbsolutePath(link.label) ? (relative.split('/').at(-1) || relative) : (link.label || relative.split('/').at(-1) || relative)
-    out.push(<button key={link.start} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
+    out.push(<button key={link.start} data-focus-key={`chat-link:${messageId}:${relative}`} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
     last = link.end
   }
   if (!out.length) return text
@@ -171,10 +188,16 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
   const text = folding && fold ? [...lines.slice(0, fold.span.start), ...lines.slice(fold.span.end + 1)].join('\n') : m.text
   const long = text.length > LONG_MESSAGE
   const shown = long && !open ? text.slice(0, LONG_MESSAGE) : text
+  const quoted = m.role === 'user' ? /^> ([^\n]+)\n\(([^\n]+)에서\)\n\n([\s\S]+)$/.exec(shown) : null
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
-      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, onFileLink) : part) : shown}</div>
+      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, m.id, onFileLink) : part) : quoted ? <>
+        <span className="msg-quote" style={{ display: 'block', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: '1px 0 6px', padding: '6px 10px', background: 'color-mix(in srgb, var(--panel) 70%, transparent)', borderRadius: 10 }}>
+          <b style={{ display: 'block', fontWeight: 500, fontSize: 11.5, color: 'var(--faint)' }}>{REVIEW.quoteLead(quoted[2])}</b>
+          <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{quoted[1]}</span>
+        </span>{quoted[3]}
+      </> : shown}</div>
       {folding && fold && (
         <div className="q-fold">
           <span className="caption">{CHAT.foldHint(fold.count)}</span>
@@ -193,20 +216,21 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
  * 절 제목은 `project.sections`에서 온다(도우미 답변의 머리 배너를 되뇌지 않는다).
  * 대화 기록 파일에는 없다 — 앱을 다시 켜면 이 줄도 사라진다.
  */
-function EventLine({ title, onGo }: { title: string; onGo: () => void }) {
+function EventLine({ title, edit, onGo }: { title: string; edit: ReviewEdit | null; onGo: () => void }) {
+  const edited = edit?.kind === 'edited'
   return (
     <div className="chat-event">
-      <Icon name="doc" size={14} />
-      <span>{CHAT_EVENT.wrote(title)}</span>
-      <button className="lk" onClick={onGo}>{CHAT_EVENT.goPaper}</button>
+      {edited ? <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 20l4-.8L19 8.2 15.8 5 4.8 16zM14.5 6.3l3.2 3.2" /></svg> : <Icon name="doc" size={14} />}
+      <span>{edited ? CHAT_EVENT.edited(title, edit.count) : CHAT_EVENT.wrote(title)}</span>
+      <button className="lk" onClick={onGo}>{edited ? CHAT_EVENT.showDiff : CHAT_EVENT.goPaper}</button>
     </div>
   )
 }
 
-function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, onCreate, busy, createError, onBack }: {
+function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, onCreate, busy, createError, onBack, reportNotice, onCloseReport }: {
   text: string; setText: (text: string) => void; onSubmit: () => void; submitted: string | null
   name: string; setName: (name: string) => void; onPick: () => void; onCreate: () => void
-  busy: boolean; createError: string | null; onBack: () => void
+  busy: boolean; createError: string | null; onBack: () => void; reportNotice: boolean; onCloseReport: () => void
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const error = useProject((s) => s.error)
@@ -218,6 +242,7 @@ function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, o
     <div className="new-chat">
       {!submitted && <><h1>어떤 논문을 쓰고 있어요?</h1>
       <p>주제 한 줄이면 돼요. 도우미가 질문하면서 논문을 같이 채워 갈게요.</p></>}
+      {reportNotice && <ZoneLine tone="info" title={REPORT.noFolder} onClose={onCloseReport} />}
       {error && <ZoneLine tone={toneOf(error.kind)} title={error.title} sub={error.action} raw={error.raw} onClose={clearError} />}
       {failure && <>{retryFailed && <ZoneLine tone="attn" title={RUNTIME.retryFailedTitle} sub={RUNTIME.retryFailedBody} />}<RuntimeFix failure={failure} onRetry={async () => retryOpen(failure.root)} /></>}
       {submitted ? <div className="folder-question">
@@ -260,7 +285,7 @@ function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, o
  * 경고·오류는 아이콘 + ✕ + "자세히"(원문). 허락·질문 카드가 입력칸 자리를 차지하면 그 카드 위에 선다.
  */
 type ZoneTone = 'wait' | 'bad' | 'attn' | 'info'
-function ZoneLine({ tone, title, sub, raw, actions, onClose }: { tone: ZoneTone; title: ReactNode; sub?: ReactNode; raw?: string; actions?: ReactNode; onClose?: () => void }) {
+function ZoneLine({ tone, title, sub, raw, actions, onClose, onReport }: { tone: ZoneTone; title: ReactNode; sub?: ReactNode; raw?: string; actions?: ReactNode; onClose?: () => void; onReport?: () => void }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="zline-wrap">
@@ -269,6 +294,7 @@ function ZoneLine({ tone, title, sub, raw, actions, onClose }: { tone: ZoneTone;
         <span className="grow">{title}{sub && <small>{sub}</small>}</span>
         {actions}
         {raw && <button type="button" className="lk" aria-expanded={open} onClick={() => setOpen(!open)}>{CHAT.details}</button>}
+        {onReport && <button type="button" className="lk" onClick={onReport}>{REPORT.inline}</button>}
         {onClose && <button type="button" className="zx" aria-label={CLOSE_LABEL} title={CLOSE_LABEL} onClick={onClose}>✕</button>}
       </div>
       {raw && open && <code className="zline-raw">{raw}</code>}
@@ -297,6 +323,9 @@ export function Chat() {
   const paperClosed = useProject((s) => s.paperClosed)
   const setPaperClosed = useProject((s) => s.setPaperClosed)
   const setPaneView = useProject((s) => s.setPaneView)
+  const quoteIntent = useProject((s) => s.quoteIntent)
+  const consumeQuoteIntent = useProject((s) => s.consumeQuoteIntent)
+  const setPaneTab = useProject((s) => s.setPaneTab)
   const revision = useProject((s) => s.status?.revision ?? s.peek?.revision ?? null)
   const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, insertPath, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, insertPath: s.insertPath, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
   /** 이 폴더의 준비(.venv) 중인가 — 그동안 보낸 글은 끝날 때까지 기다린다(store/prep.ts). */
@@ -323,6 +352,8 @@ export function Chat() {
       window.removeEventListener('online', sync)
     }
   }, [])
+  const reportIntent = useReportIntent((s) => s.intent)
+  const [reportNotice, setReportNotice] = useState<'normal' | 'offline' | 'disconnected' | 'no-folder' | null>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   /** 입력칸 — 한 줄에서 시작해 글이 늘면 자란다(시안 P/L). 최대 높이 뒤에는 스크롤. */
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -544,11 +575,8 @@ export function Chat() {
     if (q && q.root !== projectRoot) clearQuote()
   }, [projectRoot, clearQuote])
 
-  // 고쳐 달라기를 누르면 인용이 붙는다 — 입력칸으로 초점을 옮겨 바로 쓰게 한다(QA2B-R1-06).
-  useEffect(() => { if (quote) taRef.current?.focus() }, [quote])
-
-  /** 인용만 있어도 보낼 수 있다 — "이 부분을 고쳐 줘"만 원하는 경우(발주 QA2-B §2 (a)). */
-  const canSend = !!draft.trim() || !!quote
+  /** 인용은 현재 논문에서 고른 것만 보낼 수 있다. */
+  const canSend = !!draft.trim() || !!quote && quote.root === projectRoot
 
   const emptyChat = !!snapshot && snapshot.messages.length === 0
   const hasRevision = (revision ?? 0) >= 1
@@ -592,6 +620,40 @@ export function Chat() {
   const zone = zoneOf(snapshot, status, pStatus ?? null)
   const [freeFormId, setFreeFormId] = useState<string | null>(null)
   const freeForm = zone.kind === 'form' && freeFormId === zone.messageId
+  const [freeRequest, setFreeRequest] = useState<{ messageId: string; seq: number } | null>(null)
+  useEffect(() => {
+    if (!quoteIntent || !quote || quote.root !== projectRoot) return
+    if (zone.kind === 'question') setFreeRequest((prev) => ({ messageId: zone.messageId, seq: (prev?.seq ?? 0) + 1 }))
+    else if (zone.kind === 'form') {
+      setFreeFormId(zone.messageId)
+      requestAnimationFrame(() => taRef.current?.focus())
+    } else if (zone.kind === 'composer' || zone.kind === 'running') {
+      requestAnimationFrame(() => taRef.current?.focus())
+    } else return
+    consumeQuoteIntent(quoteIntent.seq)
+  }, [quoteIntent, quote, projectRoot, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null, consumeQuoteIntent])
+
+  useEffect(() => { setReportNotice(null) }, [projectRoot])
+  useEffect(() => {
+    if (!reportIntent) return
+    if (reportIntent.root !== projectRoot) {
+      useReportIntent.setState((s) => s.intent?.seq === reportIntent.seq ? { intent: null } : s)
+      return
+    }
+    if (projectRoot && root !== projectRoot) return
+    if (!projectRoot) setReportNotice('no-folder')
+    else if (zone.kind === 'disconnected') setReportNotice('disconnected')
+    else {
+      setDraft(reportDraft(useChat.getState().draft, reportIntent.title))
+      setReportNotice(offline ? 'offline' : 'normal')
+      if (zone.kind === 'question') setFreeRequest((prev) => ({ messageId: zone.messageId, seq: (prev?.seq ?? 0) + 1 }))
+      else if (zone.kind === 'form') {
+        setFreeFormId(zone.messageId)
+        requestAnimationFrame(() => taRef.current?.focus())
+      } else if (zone.kind !== 'permission') requestAnimationFrame(() => taRef.current?.focus())
+    }
+    useReportIntent.setState((s) => s.intent?.seq === reportIntent.seq ? { intent: null } : s)
+  }, [reportIntent, projectRoot, root, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null, offline, setDraft])
   /**
    * 빈 입력칸의 추천 문구 — 지금 상황(`suggest.ts` 의 `situationOf`)이 먼저고, 그 안에서 보낸
    * 말 수로 문구를 돌린다. 대화가 비었거나·인용이 붙었거나·작업 중이거나 1단계면 `null` 이고
@@ -633,15 +695,18 @@ export function Chat() {
    * 종이도 다시 열고(자동으로 열리지 않는 규칙은 저장·감시에만 적용된다), 좁은 창이면 종이로
    * 넘어간다. 둘 중 하나만 하면 화면이 안 바뀐다(검토 P3-R1-04).
    */
-  const goPaper = (sectionId: string): void => {
+  const goPaper = (sectionId: string, edited: boolean): void => {
+    setPaneTab('paper')
     focusSection(sectionId)
     setPaneView('paper')
     if (paperClosed) setPaperClosed(false)
+    if (edited) useReview.getState().setShowDiff(true)
   }
 
   if (!projectRoot) return <NoFolder text={newText} setText={setNewText} onSubmit={submitNew} submitted={submitted}
     name={folderName} setName={setFolderName} onPick={() => void chooseFolder(false)} onCreate={() => void chooseFolder(true)}
-    busy={folderBusy} createError={folderError} onBack={() => { submission.current += 1; setQueued(null); setSubmitted(null); setFolderError(null) }} />
+    busy={folderBusy} createError={folderError} onBack={() => { submission.current += 1; setQueued(null); setSubmitted(null); setFolderError(null) }}
+    reportNotice={reportNotice === 'no-folder'} onCloseReport={() => setReportNotice(null)} />
 
   /**
    * 문서 링크는 인앱 미리보기를 먼저 연다. 실제 경로·종류 판정과 읽기는 메인의 단일 관문이 맡는다.
@@ -662,7 +727,10 @@ export function Chat() {
         fold={zone.kind === 'question' && zone.messageId === m.id ? { span: zone.card.span, count: zone.card.options.length } : undefined} />
     })
   }
-  for (const e of events) thread.push({ key: `ev-${e.id}`, at: Date.parse(e.at) || 0, node: <EventLine key={`ev-${e.id}`} title={e.title} onGo={() => goPaper(e.sectionId)} /> })
+  for (const e of events) {
+    const edit = e.edit
+    thread.push({ key: `ev-${e.id}`, at: Date.parse(e.at) || 0, node: <EventLine key={`ev-${e.id}`} title={e.title} edit={edit} onGo={() => goPaper(e.sectionId, edit?.kind === 'edited')} /> })
+  }
   thread.sort((a, b) => a.at - b.at)
 
   return (
@@ -698,22 +766,31 @@ export function Chat() {
         {/* 입력칸 위 한 줄 알림 — 기다림·경고·오류가 쓰는 한 자리(알림창 B안). */}
         {waiting && <ZoneLine tone="wait" title={waiting === 'prep' ? CHAT.preparingLine : CHAT.appBusyTitle}
           sub={waitingPrep ? CHAT.preparingQueued : waiting === 'write' ? CHAT.appBusyWaitSub : undefined} />}
-        {pError && <ZoneLine tone={toneOf(pError.kind)} title={pError.title} sub={pError.action} raw={pError.raw} onClose={clearPError} />}
+        {pError && <ZoneLine tone={toneOf(pError.kind)} title={pError.title} sub={pError.action} raw={pError.raw} onClose={clearPError} onReport={toneOf(pError.kind) !== 'info' ? () => requestReport(pError.title) : undefined} />}
         {/* 전역 오류로 같은 실패가 뜨는 자리 — 재시도 대상 root 는 store 가 오류와 함께 보관한
             `openFailure.root` 다(이전 프로젝트 root 가 아니다). */}
         {pError && pOpenFailure && pError.code === pOpenFailure.code && (
           <>
-            {pRetryFailed && <ZoneLine tone="attn" title={RUNTIME.retryFailedTitle} sub={RUNTIME.retryFailedBody} />}
+            {pRetryFailed && <ZoneLine tone="attn" title={RUNTIME.retryFailedTitle} sub={RUNTIME.retryFailedBody} onReport={() => requestReport(RUNTIME.retryFailedTitle)} />}
             <RuntimeFix failure={pOpenFailure} onRetry={async () => retryOpen(pOpenFailure.root)} />
           </>
         )}
-        {chatErr && <ZoneLine tone={toneOf(chatErr.kind)} title={chatErr.title} sub={chatErr.action} raw={chatErr.raw} onClose={clearError} />}
+        {chatErr && <ZoneLine tone={toneOf(chatErr.kind)} title={chatErr.title} sub={chatErr.action} raw={chatErr.raw} onClose={clearError} onReport={toneOf(chatErr.kind) !== 'info' ? () => requestReport(chatErr.title) : undefined} />}
         {snapshot && haltKey && !closedNotes.has(haltKey) && (
           <ZoneLine tone="attn" title={snapshot.state === 'stopped' ? CHAT.stoppedTitle : CHAT.interruptedTitle} sub={snapshot.state === 'stopped' ? CHAT.stoppedBody : CHAT.interruptedBody}
             actions={lastUncertain ? <button type="button" className="lk" onClick={() => void send(lastUncertain.text)} disabled={running || busy || !!waiting}>{CHAT.resend}</button> : undefined}
-            onClose={() => closeNote(haltKey)} />
+            onClose={() => closeNote(haltKey)} onReport={() => requestReport(snapshot.state === 'stopped' ? CHAT.stoppedTitle : CHAT.interruptedTitle)} />
         )}
-        {snapErr && snapErrKey && !closedNotes.has(snapErrKey) && <ZoneLine tone="bad" title={snapErr.title} sub={snapErr.action} raw={snapErr.raw} onClose={() => closeNote(snapErrKey)} />}
+        {snapErr && snapErrKey && !closedNotes.has(snapErrKey) && <ZoneLine tone="bad" title={snapErr.title} sub={snapErr.action} raw={snapErr.raw} onClose={() => closeNote(snapErrKey)} onReport={() => requestReport(snapErr.title)} />}
+        {reportNotice && reportNotice !== 'no-folder' && <ZoneLine tone="info"
+          title={reportNotice === 'disconnected' ? REPORT.disconnected : reportNotice === 'offline' ? REPORT.offline : REPORT.notice}
+          sub={zone.kind === 'permission' && reportNotice !== 'disconnected' ? REPORT.permission : undefined}
+          actions={reportNotice === 'disconnected' ? <button type="button" className="lk" onClick={() => {
+            const button = document.querySelector<HTMLButtonElement>('.chat-composer .composer-model-host > button.model')
+            if (button?.getAttribute('aria-expanded') !== 'true') button?.click()
+            button?.focus()
+          }}>{REPORT.login}</button> : undefined}
+          onClose={() => setReportNotice(null)} />}
         {zone.kind === 'permission' && (
           <div className="askcard" role="alert">
             <div className="askcard-h"><span className="ask-dot" />{CHAT.askTitle}</div>
@@ -738,7 +815,11 @@ export function Chat() {
 
         {zone.kind === 'question' && (
           <>
-            <QuestionCard card={zone.card} draft={draft} onDraft={setDraft} onSend={send} />
+            <div className="qcard-wrap">
+              {quote && quote.root === projectRoot && <ReviewQuoteChip quote={quote} onRemove={clearQuote} style={{ marginTop: 'var(--sp-4)', marginBottom: -8, position: 'relative', zIndex: 1 }} />}
+              <QuestionCard key={zone.messageId} card={zone.card} draft={draft} onDraft={setDraft} onSend={send}
+                onSendFree={() => sendBody()} canSendFree={canSend && !busy && !waiting} freeRequest={freeRequest?.messageId === zone.messageId ? freeRequest.seq : 0} />
+            </div>
             <div className="crow question-model"><ComposerModelChip /></div>
           </>
         )}
