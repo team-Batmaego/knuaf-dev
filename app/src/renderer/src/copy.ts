@@ -1405,7 +1405,11 @@ export const MATERIALS_POPOVER = {
  */
 export const CHAT_EVENT = {
   wrote: (title: string) => `${title}${objectParticle(title)} 썼어요`,
-  goPaper: '종이에서 보기'
+  goPaper: '종이에서 보기',
+  edited: (title: string, count: number | null) => count === null
+    ? `${title}${objectParticle(title)} 고쳤어요`
+    : `${title}에서 ${count}곳을 고쳤어요`,
+  showDiff: '고친 부분 보기'
 } as const
 
 /**

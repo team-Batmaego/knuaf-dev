@@ -2,7 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode 
 import { useProject } from '../store/project'
 import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/chat'
 import { chosenProvider, useConnect } from '../store/connect'
-import { useReview, buildQuotedMessage } from '../store/review'
+import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { usePrep, waitKind } from '../store/prep'
 import { withBold } from '../inline'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
@@ -13,7 +13,7 @@ import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
-import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
+import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
 import { chatSuggestion } from '../suggest'
 import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
@@ -118,7 +118,7 @@ function relativeProjectPath(target: string, root: string | null): string | null
  * 없거나 폴더 밖이면 결과물 시트로 간다 — 무엇을 눌렀는지 알 수 있는 곳으로. 안쪽
  * 상대경로가 아닌 링크는 원문 그대로 둔다.
  */
-function withLinks(text: string, root: string | null, onFile: (relative: string) => void): ReactNode {
+function withLinks(text: string, root: string | null, messageId: string, onFile: (relative: string) => void): ReactNode {
   const out: ReactNode[] = []
   let last = 0
   for (const link of markdownLinks(text)) {
@@ -126,7 +126,7 @@ function withLinks(text: string, root: string | null, onFile: (relative: string)
     if (relative === null) continue
     out.push(text.slice(last, link.start))
     const label = isAbsolutePath(link.label) ? (relative.split('/').at(-1) || relative) : (link.label || relative.split('/').at(-1) || relative)
-    out.push(<button key={link.start} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
+    out.push(<button key={link.start} data-focus-key={`chat-link:${messageId}:${relative}`} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
     last = link.end
   }
   if (!out.length) return text
@@ -171,10 +171,16 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
   const text = folding && fold ? [...lines.slice(0, fold.span.start), ...lines.slice(fold.span.end + 1)].join('\n') : m.text
   const long = text.length > LONG_MESSAGE
   const shown = long && !open ? text.slice(0, LONG_MESSAGE) : text
+  const quoted = m.role === 'user' ? /^> ([^\n]+)\n\(([^\n]+)에서\)\n\n([\s\S]+)$/.exec(shown) : null
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
-      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, onFileLink) : part) : shown}</div>
+      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, m.id, onFileLink) : part) : quoted ? <>
+        <span className="msg-quote" style={{ display: 'block', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: '1px 0 6px', padding: '6px 10px', background: 'color-mix(in srgb, var(--panel) 70%, transparent)', borderRadius: 10 }}>
+          <b style={{ display: 'block', fontWeight: 500, fontSize: 11.5, color: 'var(--faint)' }}>{REVIEW.quoteLead(quoted[2])}</b>
+          <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{quoted[1]}</span>
+        </span>{quoted[3]}
+      </> : shown}</div>
       {folding && fold && (
         <div className="q-fold">
           <span className="caption">{CHAT.foldHint(fold.count)}</span>
@@ -193,12 +199,13 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
  * 절 제목은 `project.sections`에서 온다(도우미 답변의 머리 배너를 되뇌지 않는다).
  * 대화 기록 파일에는 없다 — 앱을 다시 켜면 이 줄도 사라진다.
  */
-function EventLine({ title, onGo }: { title: string; onGo: () => void }) {
+function EventLine({ title, edit, onGo }: { title: string; edit: ReviewEdit | null; onGo: () => void }) {
+  const edited = edit?.kind === 'edited'
   return (
     <div className="chat-event">
-      <Icon name="doc" size={14} />
-      <span>{CHAT_EVENT.wrote(title)}</span>
-      <button className="lk" onClick={onGo}>{CHAT_EVENT.goPaper}</button>
+      {edited ? <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 20l4-.8L19 8.2 15.8 5 4.8 16zM14.5 6.3l3.2 3.2" /></svg> : <Icon name="doc" size={14} />}
+      <span>{edited ? CHAT_EVENT.edited(title, edit.count) : CHAT_EVENT.wrote(title)}</span>
+      <button className="lk" onClick={onGo}>{edited ? CHAT_EVENT.showDiff : CHAT_EVENT.goPaper}</button>
     </div>
   )
 }
@@ -297,6 +304,9 @@ export function Chat() {
   const paperClosed = useProject((s) => s.paperClosed)
   const setPaperClosed = useProject((s) => s.setPaperClosed)
   const setPaneView = useProject((s) => s.setPaneView)
+  // B1-P contract: transient quote request and the active paper/file tab.
+  const quoteIntent = useProject((s) => (s as typeof s & { quoteIntent: { seq: number } | null }).quoteIntent)
+  const setPaneTab = useProject((s) => (s as typeof s & { setPaneTab: (tab: 'paper' | 'file') => void }).setPaneTab)
   const revision = useProject((s) => s.status?.revision ?? s.peek?.revision ?? null)
   const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, insertPath, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, insertPath: s.insertPath, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
   /** 이 폴더의 준비(.venv) 중인가 — 그동안 보낸 글은 끝날 때까지 기다린다(store/prep.ts). */
@@ -544,11 +554,8 @@ export function Chat() {
     if (q && q.root !== projectRoot) clearQuote()
   }, [projectRoot, clearQuote])
 
-  // 고쳐 달라기를 누르면 인용이 붙는다 — 입력칸으로 초점을 옮겨 바로 쓰게 한다(QA2B-R1-06).
-  useEffect(() => { if (quote) taRef.current?.focus() }, [quote])
-
-  /** 인용만 있어도 보낼 수 있다 — "이 부분을 고쳐 줘"만 원하는 경우(발주 QA2-B §2 (a)). */
-  const canSend = !!draft.trim() || !!quote
+  /** 인용은 현재 논문에서 고른 것만 보낼 수 있다. */
+  const canSend = !!draft.trim() || !!quote && quote.root === projectRoot
 
   const emptyChat = !!snapshot && snapshot.messages.length === 0
   const hasRevision = (revision ?? 0) >= 1
@@ -592,6 +599,20 @@ export function Chat() {
   const zone = zoneOf(snapshot, status, pStatus ?? null)
   const [freeFormId, setFreeFormId] = useState<string | null>(null)
   const freeForm = zone.kind === 'form' && freeFormId === zone.messageId
+  const [freeRequest, setFreeRequest] = useState<{ messageId: string; seq: number } | null>(null)
+  useEffect(() => {
+    if (!quoteIntent || !quote || quote.root !== projectRoot) return
+    if (zone.kind === 'question') setFreeRequest({ messageId: zone.messageId, seq: quoteIntent.seq })
+    else if (zone.kind === 'form') {
+      setFreeFormId(zone.messageId)
+      requestAnimationFrame(() => taRef.current?.focus())
+    } else if (zone.kind === 'composer' || zone.kind === 'running') {
+      requestAnimationFrame(() => taRef.current?.focus())
+    } else return
+    // Clear only the request just consumed, not a newer selection.
+    useProject.setState((s) => (s as typeof s & { quoteIntent: { seq: number } | null }).quoteIntent?.seq === quoteIntent.seq
+      ? { quoteIntent: null } as Partial<typeof s> : {})
+  }, [quoteIntent, quote, projectRoot, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null])
   /**
    * 빈 입력칸의 추천 문구 — 지금 상황(`suggest.ts` 의 `situationOf`)이 먼저고, 그 안에서 보낸
    * 말 수로 문구를 돌린다. 대화가 비었거나·인용이 붙었거나·작업 중이거나 1단계면 `null` 이고
@@ -633,10 +654,12 @@ export function Chat() {
    * 종이도 다시 열고(자동으로 열리지 않는 규칙은 저장·감시에만 적용된다), 좁은 창이면 종이로
    * 넘어간다. 둘 중 하나만 하면 화면이 안 바뀐다(검토 P3-R1-04).
    */
-  const goPaper = (sectionId: string): void => {
+  const goPaper = (sectionId: string, edited: boolean): void => {
+    setPaneTab('paper')
     focusSection(sectionId)
     setPaneView('paper')
     if (paperClosed) setPaperClosed(false)
+    if (edited) useReview.getState().setShowDiff(true)
   }
 
   if (!projectRoot) return <NoFolder text={newText} setText={setNewText} onSubmit={submitNew} submitted={submitted}
@@ -662,7 +685,10 @@ export function Chat() {
         fold={zone.kind === 'question' && zone.messageId === m.id ? { span: zone.card.span, count: zone.card.options.length } : undefined} />
     })
   }
-  for (const e of events) thread.push({ key: `ev-${e.id}`, at: Date.parse(e.at) || 0, node: <EventLine key={`ev-${e.id}`} title={e.title} onGo={() => goPaper(e.sectionId)} /> })
+  for (const e of events) {
+    const edit = (e as typeof e & { edit: ReviewEdit | null }).edit
+    thread.push({ key: `ev-${e.id}`, at: Date.parse(e.at) || 0, node: <EventLine key={`ev-${e.id}`} title={e.title} edit={edit} onGo={() => goPaper(e.sectionId, edit?.kind === 'edited')} /> })
+  }
   thread.sort((a, b) => a.at - b.at)
 
   return (
@@ -738,7 +764,11 @@ export function Chat() {
 
         {zone.kind === 'question' && (
           <>
-            <QuestionCard card={zone.card} draft={draft} onDraft={setDraft} onSend={send} />
+            <div className="qcard-wrap">
+              {quote && quote.root === projectRoot && <ReviewQuoteChip quote={quote} onRemove={clearQuote} style={{ marginTop: 'var(--sp-4)', marginBottom: -8, position: 'relative', zIndex: 1 }} />}
+              <QuestionCard key={zone.messageId} card={zone.card} draft={draft} onDraft={setDraft} onSend={send}
+                onSendFree={() => sendBody()} canSendFree={canSend && !busy && !waiting} freeRequest={freeRequest?.messageId === zone.messageId ? freeRequest.seq : 0} />
+            </div>
             <div className="crow question-model"><ComposerModelChip /></div>
           </>
         )}
