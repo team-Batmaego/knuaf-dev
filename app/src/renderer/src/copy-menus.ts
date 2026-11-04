@@ -22,3 +22,13 @@ export const MENUS = {
   reportOffline: '지금 인터넷이 끊겨 있어요. 연결되면 보내 주세요 — 신고는 인터넷으로 개발자에게 전해져요.',
   reportNoFolder: '신고는 논문을 연 뒤 대화에서 할 수 있어요.'
 } as const
+
+export type SettingsSection = 'helper' | 'folder' | 'trouble' | 'tools' | 'python' | 'info'
+export function settingsSectionForFocus(focus: string | null): SettingsSection {
+  if (focus?.startsWith('tools:')) return 'tools'
+  if (focus?.startsWith('fix:')) return 'trouble'
+  if (focus?.startsWith('folder:')) return 'folder'
+  if (focus?.startsWith('python:')) return 'python'
+  if (focus?.startsWith('info:')) return 'info'
+  return 'helper'
+}

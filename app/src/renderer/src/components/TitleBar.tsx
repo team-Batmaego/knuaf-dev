@@ -90,7 +90,7 @@ export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
       {onReport && <button type="button" className="tbtn" style={{ fontSize: 12.5, color: 'var(--ink-2)' }} title={MENUS.reportTitle} onClick={onReport}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: 'var(--muted)' }}><path d="M5 21V4m0 1h12l-2 4 2 4H5" /></svg>{MENUS.report}
       </button>}
-      <button className="tbtn icon" style={{ position: 'relative' }} title={TITLEBAR.settingsTitle} aria-label={hasUpdate ? `${TITLEBAR.settingsTitle} · ${blocked ? UPDATE.appBlockedTitle : UPDATE.newAvailable}` : TITLEBAR.settingsTitle} onClick={() => openSheet('settings')}>
+      <button className="tbtn icon" data-focus-key="settings" style={{ position: 'relative' }} title={TITLEBAR.settingsTitle} aria-label={hasUpdate ? `${TITLEBAR.settingsTitle} · ${blocked ? UPDATE.appBlockedTitle : UPDATE.newAvailable}` : TITLEBAR.settingsTitle} onClick={() => openSheet('settings')}>
         <Icon name="gear" size={17} />
         {hasUpdate && <span aria-hidden="true" style={{ position: 'absolute', right: 3, top: 3, width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)' }} />}
       </button>
