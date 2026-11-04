@@ -30,7 +30,7 @@ PRD(Product Requirements Document, 제품 요구사항 정의서) 한 장 양식
 - macOS 앱 배포 시 유료 애플 개발자 코드 서명 및 공증(연 99달러) 진행 보류 (형님 원문 "다 권고대로, Q4는 보류", 2026-10-31, /Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:77)
 - 인터뷰 진행 시 학생 전공 선택 항목에 임의의 추천 배지나 표시 부여 금지 (형님 원문 "전공에서는 추천 넣지마라. 전공은 이미 자기 전공이 정해져 있는데, 작목 때문에 전공에 추천을 붙일 이유도 없음.", 2026-10-28, /Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:92)
 - 학생 크레딧을 소진시키는 캐시 데우기(warming) 기능 구현 보류 (형님 원문 "ㅇㅇ 권고대로 해보자", 2026-11-04, /Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:30)
-- 앱 내 엑셀 직접 편집 기능 제공 제외: 비어 있음 (10-29 구두 요약 기록 "앱 안에서 엑셀 직접 편집 기능은 필요 없음(채팅으로 고치면 됨)"은 따옴표 원문이 없어 열린 질문으로 분류)
+- 앱 안에서 엑셀 직접 편집 기능은 넣지 않는다 — 고칠 것은 채팅으로 고친다 (요약 근거: 오모냥 기억 요약 "앱 안 엑셀 직접 편집 기능은 필요 없음, 채팅으로 고치면 됨" — 형님 원문 문장 없음, 2026-10-29, /Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:88)
 
 <!-- 5. 단계 (로드맵): 판 번호(버전)별로 배포할 범위를 한 줄씩 적는다. -->
 ## 5. 단계 (Roadmap)
@@ -44,5 +44,4 @@ PRD(Product Requirements Document, 제품 요구사항 정의서) 한 장 양식
 ## 6. 열린 질문 (Open Questions)
 - 대상 사용자의 세부 페르소나(비전공 여부, 컴퓨터/AI 도구 숙련도별 차등 지원 필요성 등)를 어떻게 정의할 것인가? (/Users/nara/knuaf-dev/docs/design/gui-2026-10-opus-v5/DESIGN.md:20, /Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:41)
 - v0.6.0 배포 시 메인 화면 제목줄에 '초기 베타' 표시를 유지할 것인지 여부 (/Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:24)
-- 앱 내 엑셀 직접 편집 기능 제외 방침을 향후에도 계속 유지할 것인지, 아니면 제한적인 셀 수정 기능을 지원할 것인지 여부 (/Users/nara/.omo/memory/agents/xai-grok-4-6-3c17c0d3/repo/system/human.md:88)
 - 인터뷰 시작 시 AI 모델이 첫 질문에서 학교 표준 7개 장(`project.sections`)을 미리 등록하지 않을 경우 빈 목차 UX의 대체 표시 정책 (/Users/nara/work/knuaf-dev/2026-11-04-v060-assemble/DESIGN.md:35)
