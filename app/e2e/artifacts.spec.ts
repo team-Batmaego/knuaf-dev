@@ -55,13 +55,12 @@ test('결과물 화면: 목록, xlsx 표, pdf 페이지, docx 안내', async () 
   await page.waitForSelector('table.preview-table', { timeout: 30_000 })
   await expect(page.locator('text=실제 Excel 재계산이 아직 안 됐어요')).toBeVisible()
   await page.click('button[role="tab"]:has-text("긴 시트")')
-  await expect(page.locator('text=일부만 표시해요')).toBeVisible()
+  await expect(page.getByText(/파일이 길어서 앞부분만 보여 줘요/)).toBeVisible()
 
-  // docx without a staged PDF shows the reason and the external-open path
+  // Empty DOCX stays empty; the shared toolbar offers explicit external open/reveal.
   await page.click('.artifact-list .item:has-text("빈.docx")')
-  await expect(page.locator('text=이 DOCX의 PDF가 아직 없어요')).toBeVisible()
-  await expect(page.locator('button:has-text("Word로 PDF 만들기")')).toBeVisible()
-  await expect(page.locator('button:has-text("원래 앱으로 열기")').first()).toBeVisible()
+  await expect(page.getByText('비어 있는 파일이에요')).toBeVisible()
+  await expect(page.getByRole('button', { name: '원래 앱으로 열기' })).toBeVisible()
 
   mkdirSync(OUT, { recursive: true })
   await page.screenshot({ path: join(OUT, 'artifacts.png') })

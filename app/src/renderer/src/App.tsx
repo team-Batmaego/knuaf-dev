@@ -14,6 +14,7 @@ import { PaperPane } from './components/PaperPane'
 import { Sheet } from './components/Sheet'
 import { FirstProjectGate } from './components/FirstProjectGate'
 import { SheetOver } from './components/SheetOver'
+import { PreviewSheet } from './components/PreviewSheet'
 import { showsPaper, useLayout } from './components/useLayout'
 import { ARTIFACTS, CHECKUP, MATERIALS, SETTINGS } from './copy'
 import { useShallow } from 'zustand/react/shallow'
@@ -134,6 +135,7 @@ export function App() {
             {sheet === 'artifacts' && <Sheet open side screen="artifacts" title={ARTIFACTS.title} onClose={closeSheet}><Artifacts /></Sheet>}
             {sheet === 'settings' && <Sheet open side screen="settings" title={SETTINGS.title} onClose={closeSheet}><SettingsScreen /></Sheet>}
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}
+            <PreviewSheet />
             <FirstProjectGate />
           </>}
         >

@@ -34,6 +34,7 @@ export type Screen = 'materials' | 'artifacts' | 'checkup' | 'settings'
  * "고급 도구에서 직접 실행"이 여기로 간다(Q2: "설정으로 가세요"가 아니라 해당 항목 직결).
  */
 export type SettingsFocus = string | null
+type PreviewFocusReturn = { trigger: HTMLElement | null; fallback: HTMLElement | null }
 
 interface ProjectState {
   root: string | null
@@ -68,10 +69,17 @@ interface ProjectState {
   /** First-folder permission consent is global; the main process gates every project:open caller. */
   firstProjectGate: { root: string; kind: 'permission' | 'write-error' } | null
   sheet: Screen | null
+  /** Absolute target for the single-file preview overlay; it can sit over Checkup without replacing it. */
+  previewPath: string | null
+  previewNotice: { title: string; body: string } | null
+  previewFocusReturn: PreviewFocusReturn | null
   settingsFocus: SettingsFocus
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
   closeSheet: () => void
+  openPreview: (path: string, fallback?: HTMLElement | null) => void
+  closePreview: () => PreviewFocusReturn | null
+  setPreviewNotice: (notice: { title: string; body: string } | null) => void
   /** Save the global choice before retrying the same open request. */
   chooseFirstProjectPermission: (mode: 'trust' | 'ask') => Promise<void>
   cancelFirstProjectGate: () => void
@@ -211,6 +219,9 @@ export const useProject = create<ProjectState>((set, get) => ({
   sidecar: null,
   settings: null,
   sheet: null,
+  previewPath: null,
+  previewNotice: null,
+  previewFocusReturn: null,
   settingsFocus: null,
   logs: [],
   sections: null,
@@ -227,6 +238,17 @@ export const useProject = create<ProjectState>((set, get) => ({
   focusedSection: null,
   openSheet: (sheet) => { set({ sheet, ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
   closeSheet: () => { set({ sheet: null, settingsFocus: null }); location.hash = '' },
+  openPreview: (path, fallback = null) => {
+    const active = typeof document === 'undefined' ? null : document.activeElement
+    const trigger = active instanceof HTMLElement && active !== document.body ? active : null
+    set({ previewPath: path, previewNotice: null, previewFocusReturn: { trigger, fallback } })
+  },
+  closePreview: () => {
+    const focusReturn = get().previewFocusReturn
+    set({ previewPath: null, previewNotice: null, previewFocusReturn: null })
+    return focusReturn
+  },
+  setPreviewNotice: (previewNotice) => set({ previewNotice }),
   openSettings: (focus = null) => { set({ sheet: 'settings', settingsFocus: focus }); location.hash = 'settings' },
   clearSettingsFocus: () => set({ settingsFocus: null }),
   loadSettings: async () => {
@@ -340,6 +362,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 이동은 성공이 확정된 여기서 한다 — 아래 refresh() 는 파이썬 스폰이라 몇 초
     // 걸리는데, 그 사이 학생이 다른 것을 열면 늦게 온 이동이 되돌려 버렸다.
     get().closeSheet()
+    get().closePreview()
     stopCanonPoll()
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.

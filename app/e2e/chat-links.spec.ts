@@ -1,8 +1,6 @@
 /**
- * GUI-12 감사(파일 링크가 원문 텍스트였다) → 형님 확정 2026-11-03 으로 **동작이 넓어졌다**.
- * 누르면 메인이 경로를 다시 확인한 뒤 ① 폴더 안에 실제로 있는 문서면 연결 프로그램으로 열고
- * ② 그 밖의 형식은 열지 않고 폴더에서 보여 주며 ③ 폴더 밖·없는 파일이면 결과물 시트로 간다.
- * 이 시험은 그 갈래를 메인의 shell 호출 기록으로 잠근다(실제 탐색기·프로그램은 띄우지 않는다).
+ * 채팅 파일 링크는 미리보기 시트를 연다. 연결 프로그램·폴더 열기는 시트 안의 명시 단추에서만
+ * 요청된다. 메인 shell 호출 기록으로 인앱 우선 동작을 확인한다(실제 앱은 띄우지 않는다).
  */
 import { expect, test } from '@playwright/test'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
@@ -20,9 +18,9 @@ function plantFile(root: string, rel: string, body = 'ATTACH_REPRO_20261103\n'):
   return rel
 }
 
-test('파일 단추: 폴더 안에 실제로 있는 문서는 연결 프로그램으로 연다', async () => {
+test('파일 단추: 폴더 안 문서는 먼저 미리보기 시트에서 연다', async () => {
   const root = synthProject()
-  const rel = plantFile(root, 'build/검토전_본문.md', '# 본문\n')
+  const rel = plantFile(root, 'build/검토전_본문.md', '# 본문 미리보기\n')
   seedChat(root, `검토본을 만들었어요. [검토전_본문.md](${rel}) 에서 볼 수 있어요.`)
   const log = callLog()
 
@@ -30,12 +28,12 @@ test('파일 단추: 폴더 안에 실제로 있는 문서는 연결 프로그�
   try {
     await openProject(page, root)
     await spyShell(electronApp, log)
-    const link = page.getByRole('button', { name: '검토전_본문.md' })
-    await expect(link).toBeVisible({ timeout: 30_000 })
-    await link.click()
-    // 열었고, 폴더에서 보기로 대신하지 않았고, 결과물 시트로 가지도 않았다.
+    await page.getByRole('button', { name: '검토전_본문.md' }).click()
+    await expect(page.getByRole('heading', { name: '검토전_본문.md' })).toBeVisible()
+    await expect(page.getByText('# 본문 미리보기')).toBeVisible()
+    expect(shellCalls(log)).toEqual([])
+    await page.getByRole('button', { name: '원래 앱으로 열기' }).click()
     await expect.poll(() => shellCalls(log)).toEqual([`open\t${realpathSync(join(root, rel))}`])
-    await expect(page.getByRole('heading', { name: '결과물' })).toHaveCount(0)
   } finally {
     await electronApp.close()
   }
@@ -58,7 +56,7 @@ test('파일 단추: 열지 않는 형식은 열지 않고 폴더에서 보여 �
   }
 })
 
-test('파일 단추: 열 프로그램이 없으면 폴더에서 보여 주고 쉬운 말로 알린다', async () => {
+test('파일 단추: 원래 앱 열기 실패 시 폴더에서 보여 주고 쉬운 말로 알린다', async () => {
   const root = synthProject()
   const rel = plantFile(root, 'build/검토전_본문.md', '# 본문\n')
   seedChat(root, `검토본을 만들었어요. [검토전_본문.md](${rel})`)
@@ -69,6 +67,8 @@ test('파일 단추: 열 프로그램이 없으면 폴더에서 보여 주고 �
     await openProject(page, root)
     await spyShell(electronApp, log, { openFailure: 'no application associated' })
     await page.getByRole('button', { name: '검토전_본문.md' }).click()
+    await expect(page.getByText('# 본문')).toBeVisible()
+    await page.getByRole('button', { name: '원래 앱으로 열기' }).click()
     await expect.poll(() => shellCalls(log)).toEqual([
       `open\t${realpathSync(join(root, rel))}`,
       `reveal\t${realpathSync(join(root, rel))}`
@@ -81,7 +81,7 @@ test('파일 단추: 열 프로그램이 없으면 폴더에서 보여 주고 �
 
 test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 않는다 (GUI-12)', async () => {
   const root = synthProject()
-  // 파일을 만들지 않는다 — 없는 파일은 결과물 시트로 간다(옛 동작 유지).
+  // 파일을 만들지 않는다 — A-02에 따라 결과물 시트와 안내를 연다.
   seedChat(root, '검토본을 만들었어요. [검토전_본문.md](build/검토전_본문.md) 에서 볼 수 있어요.')
 
   const { electronApp, page } = await launch()
@@ -92,11 +92,12 @@ test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 �
     await expect(msg).toBeVisible({ timeout: 30_000 })
 
     expect(await msg.innerText(), '마크다운 원문이 그대로 보인다').not.toContain('](')
-    // 일반 텍스트가 아니라 누를 수 있는 것이어야 한다 — 접근성 트리에도 역할이 생긴다.
     const link = page.getByRole('button', { name: '검토전_본문.md' })
     await expect(link, '파일 이름이 누를 수 있는 것이 아니다').toBeVisible()
     await link.click()
     await expect(page.getByRole('heading', { name: '결과물' })).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText('"검토전_본문.md"을 찾지 못했어요.', { exact: true })).toBeVisible()
+    await expect(page.getByText('아래는 이 논문에서 만든 다른 파일이에요.', { exact: true })).toBeVisible()
   } finally {
     await electronApp.close()
   }

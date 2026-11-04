@@ -48,10 +48,10 @@
   "매번 묻기"는 전역 확인을 켜고 기존 폴더별 예외도 지웁니다. 설정에서 전역 선택을 바꿀 수 있습니다. Windows는 첫 폴더를 열기 전에 임시 파일 쓰기 시험을 합니다.
   - 자료: intake 사실로 기록된 현재 작성물·재무 파일과 sources/ 파일 목록(현재 작성물·참고자료 구분)을 보여 줍니다.
     파일을 골라도 채팅 답변에 경로를 넣을 뿐 현재 작성물로 채택하지 않습니다(intake-selection.md).
-  - 결과물: build/ 아래 DOCX·XLSX·PDF·MD를 목록·미리보기·다른 이름 저장·외부 열기 합니다. PDF는 pdf.js
-    (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아 `legacy` 빌드)로 그리고, DOCX는 같은 이름의 PDF(같은 폴더 또는
-    build/native)가 있을 때만 그 PDF를 보여 주며, 없으면 Office 렌더 버튼과 "원래 앱으로 열기"를 둡니다.
-    XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
+  - 결과물: build/ 아래 DOCX·XLSX·PDF·MD를 목록·미리보기·다른 이름 저장·외부 열기 합니다. 대화·자료·점검의
+    프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
+    `legacy` 빌드)로 그리고, DOCX는 `docx-preview`를 sandbox iframe 안에서 렌더링합니다. 그림·수식·복잡한 서식은
+    일부 다를 수 있다는 안내를 표시합니다. XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
     **재무 엑셀 만들기**는 등록한 학생 재무 파일을 우선 복사하고, 없으면 동봉 기준 양식으로
     새 파일을 만듭니다. 이름 충돌 때는 새 버전 이름을 쓰며 학생 원본·기존 입력값을 덮어쓰지 않습니다.
     양식 정본은 `skills/knuaf-dev/assets/templates/finance-template.xlsx`이고,
