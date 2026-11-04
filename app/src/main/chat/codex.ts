@@ -2,7 +2,7 @@ import { MODEL_SELECTION_COPY } from '../../shared/copy'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
-import { codexSkillConfigOverride } from '../agent'
+import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
@@ -247,8 +247,8 @@ export class CodexConnection implements AgentConnection {
     // history at all (e.g. snapshot file lost while the server thread survived).
     if (replayHistory) for (const turn of r.thread.turns ?? []) for (const item of turn.items ?? []) if (item.type === 'agentMessage') events.message(item.id, item.text)
     this.messages.clear()
-    // 첫 턴에는 작업 루트를 명시한다 — 모델이 하위 폴더(knuaf-work 등)를 추측하지 않게.
-    const prompt = sessionId ? text : `${text}\n\n작업 폴더: ${this.options.root}\n이 폴더 자체가 논문 작업 폴더예요. 하위 폴더를 새로 만들지 말고 여기서 바로 작업해 주세요.`
+    // 첫 턴에는 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
+    const prompt = sessionId ? text : `${text}\n\n${workFolderInstructions(this.options.root)}`
     /**
      * 학생이 고른 모델·생각 깊이. `turn/start` 의 model/effort 는 **이 턴과 그 뒤 턴에**
      * 적용되므로(turnStartParams: "this turn and subsequent turns") 같은 대화의 맥락이
