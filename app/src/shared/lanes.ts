@@ -8,7 +8,6 @@ import {
 } from './chat'
 
 export type PlanTier = 'high' | 'low'
-export type PlanGrade = 'high' | 'mid' | 'low'
 export type LaneHow = 'main' | 'sub' | 'relay'
 
 export type LaneRowId =
@@ -33,11 +32,10 @@ export type LanePlan = Record<WorkLane, LaneEntry | null>
 export interface LaneRow {
   id: LaneRowId
   label: string
-  draft: boolean
   lanes: Record<WorkLane, LaneEntry>
 }
 
-export const DRAFT_REVIEW_EFFORT = 'high'
+export const REVIEW_EFFORT = 'high'
 
 function lane(company: Provider, model: string, how: LaneHow, effort: string | null = null): LaneEntry {
   return { company, model, effort, how }
@@ -46,7 +44,6 @@ function lane(company: Provider, model: string, how: LaneHow, effort: string | n
 function row(
   id: LaneRowId,
   label: string,
-  draft: boolean,
   design: LaneEntry,
   research: LaneEntry,
   writing: LaneEntry,
@@ -56,7 +53,6 @@ function row(
   return {
     id,
     label,
-    draft,
     lanes: { design, research, writing, repeat, review }
   }
 }
@@ -65,82 +61,74 @@ export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
   'codex-low': row(
     'codex-low',
     'ChatGPT 낮음만',
-    false,
     lane('codex', 'terra', 'main'),
+    lane('codex', 'terra', 'relay'),
     lane('codex', 'luna', 'relay'),
     lane('codex', 'luna', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('codex', 'terra', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('codex', 'terra', 'relay', REVIEW_EFFORT)
   ),
   'codex-high': row(
     'codex-high',
     'ChatGPT 높음만',
-    false,
     lane('codex', 'sol', 'main'),
     lane('codex', 'astra', 'relay'),
+    lane('codex', 'sol', 'relay'),
     lane('codex', 'terra', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('codex', 'astra', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('codex', 'astra', 'relay', REVIEW_EFFORT)
   ),
   'claude-low': row(
     'claude-low',
     'Claude 낮음만',
-    false,
     lane('claude', 'sonnet', 'main'),
-    lane('claude', 'haiku', 'sub'),
-    lane('claude', 'haiku', 'sub'),
-    lane('claude', 'haiku', 'sub'),
-    lane('claude', 'sonnet', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('claude', 'haiku', 'relay'),
+    lane('claude', 'sonnet', 'relay'),
+    lane('claude', 'haiku', 'relay'),
+    lane('claude', 'sonnet', 'relay', REVIEW_EFFORT)
   ),
   'claude-high': row(
     'claude-high',
     'Claude 높음만',
-    false,
     lane('claude', 'opus', 'main'),
-    lane('claude', 'sonnet', 'sub'),
-    lane('claude', 'sonnet', 'sub'),
-    lane('claude', 'haiku', 'sub'),
-    lane('claude', 'opus', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('claude', 'sonnet', 'relay'),
+    lane('claude', 'sonnet', 'relay'),
+    lane('claude', 'haiku', 'relay'),
+    lane('claude', 'opus', 'relay', REVIEW_EFFORT)
   ),
   'both-high': row(
     'both-high',
     '둘 다 높음',
-    false,
     lane('claude', 'opus', 'main'),
     lane('codex', 'astra', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('codex', 'astra', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('codex', 'sol', 'relay'),
+    lane('codex', 'terra', 'relay'),
+    lane('codex', 'astra', 'relay', REVIEW_EFFORT)
   ),
   'claude-high-codex-low': row(
     'claude-high-codex-low',
     'Claude 높음 + ChatGPT 낮음',
-    true,
     lane('claude', 'opus', 'main'),
-    lane('claude', 'sonnet', 'sub'),
+    lane('claude', 'sonnet', 'relay'),
+    lane('codex', 'terra', 'relay'),
     lane('codex', 'luna', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('claude', 'opus', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('claude', 'opus', 'relay', REVIEW_EFFORT)
   ),
   'claude-low-codex-high': row(
     'claude-low-codex-high',
     'Claude 낮음 + ChatGPT 높음',
-    true,
     lane('codex', 'sol', 'main'),
     lane('codex', 'astra', 'relay'),
-    lane('claude', 'haiku', 'relay'),
-    lane('claude', 'haiku', 'relay'),
-    lane('codex', 'astra', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('codex', 'sol', 'relay'),
+    lane('codex', 'terra', 'relay'),
+    lane('claude', 'sonnet', 'relay', REVIEW_EFFORT)
   ),
   'both-low': row(
     'both-low',
     '둘 다 낮음',
-    true,
     lane('claude', 'sonnet', 'main'),
+    lane('codex', 'terra', 'relay'),
     lane('codex', 'luna', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('codex', 'luna', 'relay'),
-    lane('codex', 'terra', 'relay', DRAFT_REVIEW_EFFORT)
+    lane('claude', 'haiku', 'relay'),
+    lane('codex', 'terra', 'relay', REVIEW_EFFORT)
   )
 }
 
@@ -224,71 +212,12 @@ const SOLO_ROW: Record<Provider, Record<PlanTier, LaneRowId>> = {
   codex: { low: 'codex-low', high: 'codex-high' }
 }
 
-const MODEL_GRADE: Record<string, PlanGrade> = {
-  opus: 'high',
-  sol: 'high',
-  astra: 'high',
-  sonnet: 'mid',
-  terra: 'mid',
-  haiku: 'low',
-  luna: 'low'
-}
-
 function otherCompany(company: Provider): Provider {
   return company === 'claude' ? 'codex' : 'claude'
 }
 
-function lastToken(text: string): string {
-  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
-  return words[words.length - 1] ?? ''
-}
-
-function gradeOf(model: string): PlanGrade {
-  const grade = MODEL_GRADE[model] ?? MODEL_GRADE[lastToken(model)]
-  if (!grade) throw new Error(`unknown model grade: ${model}`)
-  return grade
-}
-
-export interface DerivedLane {
-  company: Provider
-  model: string
-}
-
-function stronger(a: DerivedLane, b: DerivedLane, tieCompany: Provider): DerivedLane {
-  const left = gradeOf(a.model)
-  const right = gradeOf(b.model)
-  if (left !== right) return left === 'high' || (left === 'mid' && right === 'low') ? a : b
-  if (a.company === tieCompany) return a
-  if (b.company === tieCompany) return b
-  return a
-}
-
-function laneModel(value: LaneRowId, laneName: WorkLane): DerivedLane {
-  const entry = LANE_TABLE[value].lanes[laneName]
-  return { company: entry.company, model: entry.model ?? '' }
-}
-
-export function deriveLaneModels(claudeTier: PlanTier, codexTier: PlanTier): Record<WorkLane, DerivedLane> {
-  const claudeRow = SOLO_ROW.claude[claudeTier]
-  const codexRow = SOLO_ROW.codex[codexTier]
-  const design = stronger(laneModel(claudeRow, 'design'), laneModel(codexRow, 'design'), 'claude')
-  const separated = otherCompany(design.company)
-  const research = stronger(laneModel(claudeRow, 'research'), laneModel(codexRow, 'research'), separated)
-  const review = stronger(laneModel(claudeRow, 'review'), laneModel(codexRow, 'review'), separated)
-  const writing = laneModel(SOLO_ROW[otherCompany(design.company)].low, 'writing')
-  return { design, research, writing, repeat: writing, review }
-}
-
-export function howFor(
-  laneName: WorkLane,
-  company: Provider,
-  mainCompany: Provider,
-  claudeSubAllowed: boolean
-): LaneHow {
-  if (laneName === 'design') return 'main'
-  if (laneName === 'review') return 'relay'
-  if (company === 'codex') return 'relay'
-  return company === mainCompany && claudeSubAllowed ? 'sub' : 'relay'
+export function howFor(laneName: WorkLane): LaneHow {
+  return laneName === 'design' ? 'main' : 'relay'
 }
 
 function findCatalogModel(
@@ -319,7 +248,6 @@ export interface LaneDesignChoice {
 
 export interface LaneContext {
   mainCompany: Provider
-  claudeSubAllowed: boolean
   catalog?: ModelCatalog
   mainLanes?: readonly WorkLane[]
   design?: LaneDesignChoice
@@ -371,7 +299,7 @@ export function resolveLanes(value: LaneRowId | LaneRow, context: LaneContext): 
     } else {
       plan[laneName] = {
         ...entry,
-        how: howFor(laneName, entry.company, context.mainCompany, context.claudeSubAllowed)
+        how: howFor(laneName)
       }
     }
   }
@@ -468,6 +396,39 @@ export function checkLaneRequest(request: LaneRequest, accounts: readonly Accoun
   return { accepted, rejected }
 }
 
+export function continueAfterLimit(
+  failedLane: 'research' | 'writing' | 'repeat' | 'review',
+  failedEntry: LaneEntry,
+  otherAccount: AccountSnapshot | null,
+  otherState: { consented: boolean; basicUsageAllowed: boolean },
+  otherCatalog: ModelCatalog
+): LaneEntry | null {
+  if (!otherAccount || !otherState.consented || !otherState.basicUsageAllowed) return null
+
+  const company = otherCompany(failedEntry.company)
+  if (otherAccount.company !== company || failedEntry.how !== 'relay' || !failedEntry.model) return null
+
+  const judgement = judgePlan(otherAccount)
+  if (!judgement.usable || !judgement.tier) return null
+
+  const candidate = LANE_TABLE[SOLO_ROW[company][judgement.tier]].lanes[failedLane]
+  const models = otherCatalog[company]
+  if (!candidate.model || !models) return null
+
+  const matched = findCatalogModel(models, company, candidate.model)
+  if (!matched) return null
+
+  const effort = failedLane === 'review' ? REVIEW_EFFORT : failedEntry.effort
+  if (failedLane === 'review' && !matched.efforts.includes(REVIEW_EFFORT)) return null
+
+  return {
+    company,
+    model: matched.model,
+    effort: effort !== null && matched.efforts.includes(effort) ? effort : null,
+    how: 'relay'
+  }
+}
+
 export interface LaneProposal {
   quote: string
   scope: RequestScope
@@ -481,8 +442,7 @@ export function proposeLaneRequest(
   request: LaneRequest,
   accounts: readonly AccountSnapshot[],
   base: LanePlan,
-  mainCompany: Provider,
-  claudeSubAllowed: boolean
+  mainCompany: Provider
 ): LaneProposal {
   const check = checkLaneRequest(request, accounts)
   const design = check.accepted.find((entry) => entry.lane === 'design' && !entry.main && entry.company)
@@ -500,7 +460,7 @@ export function proposeLaneRequest(
               company: accepted.company,
               model: accepted.model,
               effort: accepted.effort,
-              how: howFor(lane, accepted.company, nextMainCompany, claudeSubAllowed)
+              how: howFor(lane)
             }
           : current
       continue
@@ -514,7 +474,7 @@ export function proposeLaneRequest(
         current.company === nextMainCompany ? { ...current } : { ...current, company: nextMainCompany }
       continue
     }
-    next[lane] = { ...current, how: howFor(lane, current.company, nextMainCompany, claudeSubAllowed) }
+    next[lane] = { ...current, how: howFor(lane) }
   }
   return {
     quote: request.quote,
