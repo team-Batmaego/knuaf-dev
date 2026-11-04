@@ -238,7 +238,7 @@ test('모델 칩에서 두 AI의 연결 상태를 확인한다', async () => {
   await electronApp.close()
 })
 
-test('자료 팝오버 — 보기 전용: 현재 작성물 + 자료 전체 보기 (설계자 답 Q3)', async () => {
+test('자료 팝오버 — 현재 작성물과 자료 첨부 진입점', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()
   await openProject(page, root)
@@ -250,9 +250,8 @@ test('자료 팝오버 — 보기 전용: 현재 작성물 + 자료 전체 보�
   await expect(pop).toContainText('현재 작성물')
   await expect(pop).toContainText('현재 원고')
   await expect(pop).toContainText('재무 파일')
-  await expect(pop.getByRole('button', { name: '자료 전체 보기' })).toBeVisible()
-  // 자료 넣기(파일 고르기)는 여기 없다 — 입력칸과 자료 시트가 맡는다.
-  await expect(pop.getByRole('button', { name: '파일 고르기…' })).toHaveCount(0)
+  await expect(pop.getByRole('button', { name: '자료 전체 보기' })).toHaveCount(0)
+  await expect(pop.getByRole('button', { name: '파일 고르기…' })).toBeVisible()
   await electronApp.close()
 })
 
