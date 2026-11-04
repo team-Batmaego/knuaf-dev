@@ -8,6 +8,11 @@ import { rpc } from '../rpc'
 import { chatProvider, resolveChatMode, useChat } from './chat'
 import { chosenProvider, useConnect } from './connect'
 import type { Provider } from '../../../shared/chat'
+import { useReview, type ReviewEdit } from './review'
+
+export type DocReturn = { view: 'chat' | 'paper'; key: string }
+export type ListIntent = { seq: number; kind: 'materials' | 'files' }
+export type PaperEvent = { id: string; sectionId: string; title: string; at: string; edit: ReviewEdit | null }
 
 /**
  * 지금 대화할 공급자 — **화면(`Chat`)이 계산하는 것과 같은 규칙**을 쓴다(store/connect 의
@@ -73,6 +78,19 @@ interface ProjectState {
   previewPath: string | null
   previewNotice: { title: string; body: string } | null
   previewFocusReturn: PreviewFocusReturn | null
+  docPath: string | null
+  paneTab: 'paper' | 'file'
+  paneHold: boolean
+  docReturn: DocReturn | null
+  foldNotice: boolean
+  listIntent: ListIntent | null
+  quoteIntent: { seq: number } | null
+  setPaneTab: (tab: 'paper' | 'file') => void
+  openList: (kind: 'materials' | 'files') => void
+  consumeListIntent: (seq: number) => void
+  requestQuote: () => void
+  consumeQuoteIntent: (seq: number) => void
+  setFoldNotice: () => void
   settingsFocus: SettingsFocus
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
@@ -136,7 +154,7 @@ interface ProjectState {
    * 대화 기록 파일(`chat-<provider>.json`)에는 쓰지 않는다. 절 제목은 `section.read`가 아니라
    * `project.sections`에서 가져온다(도우미 글의 머리 배너를 되뇌지 않기 위함).
    */
-  events: { id: string; sectionId: string; title: string; at: string }[]
+  events: PaperEvent[]
   /** 종이에서 어느 장으로 갈지 — 대화 이벤트 줄의 "종이에서 보기"가 세운다. */
   focusedSection: string | null
   focusSection: (id: string | null) => void
@@ -195,6 +213,7 @@ let quietFailures = 0
  * 같아 통과해 지금 방문의 상태를 덮는다. 이전 방문과 지금 방문을 가르는 것은 폴더가 아니라 "몇 번째 열기인가"다.
  */
 let openSeq = 0
+let intentSeq = 0
 /**
  * 지금 시작하는 비동기 단계의 소유자 확인. 시작 시점의 방문과 폴더를 잡아 두고, 응답 뒤에 둘 다 그대로인지
  * 돌려준다 — 열기·갱신·감시·목록 읽기·준비가 모두 **같은 기준**을 쓴다.
@@ -222,6 +241,22 @@ export const useProject = create<ProjectState>((set, get) => ({
   previewPath: null,
   previewNotice: null,
   previewFocusReturn: null,
+  docPath: null,
+  paneTab: 'paper',
+  paneHold: false,
+  docReturn: null,
+  foldNotice: false,
+  listIntent: null,
+  quoteIntent: null,
+  setPaneTab: (paneTab) => set({ paneTab: paneTab === 'file' && !get().docPath ? 'paper' : paneTab }),
+  openList: (kind) => {
+    if (get().paperClosed) get().setPaperClosed(false)
+    set({ paneHold: true, paneTab: 'paper', paneView: 'paper', listIntent: { seq: ++intentSeq, kind } })
+  },
+  consumeListIntent: (seq) => set((s) => s.listIntent?.seq === seq ? { listIntent: null } : s),
+  requestQuote: () => set({ paneView: 'chat', quoteIntent: { seq: ++intentSeq } }),
+  consumeQuoteIntent: (seq) => set((s) => s.quoteIntent?.seq === seq ? { quoteIntent: null } : s),
+  setFoldNotice: () => { if (get().paperClosed) set({ foldNotice: true }) },
   settingsFocus: null,
   logs: [],
   sections: null,
@@ -241,11 +276,18 @@ export const useProject = create<ProjectState>((set, get) => ({
   openPreview: (path, fallback = null) => {
     const active = typeof document === 'undefined' ? null : document.activeElement
     const trigger = active instanceof HTMLElement && active !== document.body ? active : null
-    set({ previewPath: path, previewNotice: null, previewFocusReturn: { trigger, fallback } })
+    const keyed = trigger?.closest<HTMLElement>('[data-focus-key]')
+    const returnTo: DocReturn = keyed?.dataset.focusKey
+      ? { view: keyed.closest('.paperpane') ? 'paper' : 'chat', key: keyed.dataset.focusKey }
+      : { view: get().sheet === 'checkup' || !!fallback ? 'paper' : 'chat', key: get().sheet === 'checkup' ? 'head-action' : fallback?.dataset.focusKey ?? '' }
+    if (get().paperClosed) get().setPaperClosed(false)
+    set({ previewPath: path, docPath: path, paneTab: 'file', paneHold: true, paneView: 'paper', docReturn: returnTo, sheet: null, previewNotice: null, previewFocusReturn: { trigger, fallback } })
   },
   closePreview: () => {
     const focusReturn = get().previewFocusReturn
-    set({ previewPath: null, previewNotice: null, previewFocusReturn: null })
+    const hasSections = !!get().sections?.length
+    const view = hasSections ? get().docReturn?.view ?? 'paper' : 'chat'
+    set({ previewPath: null, docPath: null, paneTab: 'paper', paneHold: hasSections && get().paneHold, paneView: view, docReturn: null, previewNotice: null, previewFocusReturn: null })
     return focusReturn
   },
   setPreviewNotice: (previewNotice) => set({ previewNotice }),
@@ -278,13 +320,30 @@ export const useProject = create<ProjectState>((set, get) => ({
     try {
       const rows = await rpc.sections(root)
       if (!mine()) return
-      set({ sections: rows })
       const prev = sectionHashes
+      const changed = rows.filter((r) => !prev || prev[r.id] !== r.draft_hash)
+      const events: PaperEvent[] = []
+      if (changed.length) {
+        const bodies = await rpc.readAllSections(root)
+        if (!mine()) return
+        for (const row of changed) {
+          const body = bodies.find((item) => item.id === row.id)
+          let edit: ReviewEdit | null = null
+          if (body) {
+            try {
+              await useReview.getState().noteSeen(root, row.id, { title: body.title, draft: body.draft, hash: row.draft_hash })
+              if (!mine()) return
+              edit = useReview.getState().editOf(root, row.id, row.draft_hash)
+            } catch { /* The save still happened even if the comparison baseline could not be read. */ }
+          }
+          if (prev && prev[row.id] !== undefined) {
+            events.push({ id: `${row.id}:${row.revision}`, sectionId: row.id, title: row.title, at: new Date().toISOString(), edit })
+          }
+        }
+      }
+      if (!mine()) return
       sectionHashes = Object.fromEntries(rows.map((r) => [r.id, r.draft_hash]))
-      // 폴더를 연 뒤 첫 판정에서는 알리지 않는다 — 그때는 모든 절이 "처음 보는" 것이다.
-      if (!prev) return
-      const wrote = rows.filter((r) => prev[r.id] !== undefined && prev[r.id] !== r.draft_hash)
-      if (wrote.length) set((s) => ({ events: [...s.events, ...wrote.map((r) => ({ id: `${r.id}:${r.draft_hash}`, sectionId: r.id, title: r.title, at: new Date().toISOString() }))].slice(-20) }))
+      set((s) => ({ sections: rows, events: [...s.events, ...events].slice(-20), foldNotice: s.foldNotice || (s.paperClosed && events.length > 0) }))
     } catch {
       // 읽지 못한 것을 "등록된 절이 없다"로 꾸미지 않는다 — null 은 모른다는 뜻이다.
       if (mine()) set({ sections: null })
@@ -315,7 +374,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   focusSection: (focusedSection) => set({ focusedSection }),
   setPaperClosed: (closed) => {
     const root = get().root
-    set({ paperClosed: closed })
+    set({ paperClosed: closed, ...(!closed ? { foldNotice: false } : {}) })
     if (!root) return
     const prefs = { ...(get().settings?.ui_prefs ?? {}) }
     prefs[root] = { ...prefs[root], paperClosed: closed }
