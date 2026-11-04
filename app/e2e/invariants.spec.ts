@@ -10,21 +10,23 @@ const KORDOC = '문서를 읽는 데 필요한 도구를 준비할게요. 처음
 
 
 /**
- * 앱 이름은 src/shared/name.ts 한 군데에서 온다. electron-builder.yml 은 TS 를 읽지
- * 못해 같은 문자열을 손으로 적어 두므로, 어긋나면 여기서 잡는다 — 어긋나면 화면과
- * Finder 가 서로 다른 이름을 보여 준다.
+ * 표시 이름은 플랫폼별로 바꾸되 데이터·업데이트 식별자는 유지한다.
+ * Windows 실행 파일명은 NSIS의 실행 중 검사·기존 바로가기 보존에도 쓰인다.
  */
-test('the built app is named what the app calls itself', () => {
-  const yml = readFileSync(join(app, 'electron-builder.yml'), 'utf-8')
-  const value = (key: string): string | null => yml.match(new RegExp(`^\\s*${key}:\\s*(.+?)\\s*$`, 'm'))?.[1] ?? null
-  for (const key of ['executableName', 'CFBundleDisplayName', 'title']) {
-    expect(value(key), `electron-builder.yml 의 ${key} 가 APP_NAME 과 다르다`).toBe(APP_NAME)
-  }
-  // 헬퍼 번들 이름과 설치판 userData 폴더 이름이 여기서 온다 — 한글이 섞이면 앱이 죽는다.
-  expect(value('productName')).toBe(APP_NAME_ASCII)
-  expect(APP_NAME_ASCII, 'ASCII 가 아닌 글자가 섞였다').toMatch(/^[A-Za-z0-9._-]+$/)
-  expect(value('artifactName'), '내려받는 파일 이름에 공백·비ASCII 가 있으면 링크가 깨진다')
-    .toMatch(/^[A-Za-z0-9._${}-]+$/)
+test('display names preserve installed data and executable identities', async () => {
+  const packager = new Packager({ projectDir: app })
+  await packager.validateConfig()
+  const config = packager.config
+  expect(config.mac?.executableName).toBe(APP_NAME)
+  expect(config.mac?.extendInfo?.CFBundleDisplayName).toBe(APP_NAME)
+  expect(config.dmg?.title).toBe(APP_NAME)
+  expect(config.executableName).toBe('KNUAF-Dev · 창업논문 작성 도우미')
+  expect(config.win?.executableName).toBeUndefined()
+  expect(config.appId).toBe('kr.ac.knuaf.doc.companion')
+  expect(config.productName).toBe(APP_NAME_ASCII)
+  expect(APP_NAME_ASCII).toBe('knuaf-dev')
+  expect(packager.metadata.name).toBe('knuaf-thesis-helper')
+  expect(config.artifactName).toBe('knuaf-dev-${version}-${arch}.${ext}')
 })
 
 test('Windows installer is configured for a one-click per-user install', async () => {

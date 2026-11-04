@@ -72,14 +72,12 @@ def test_skill_text_carries_no_maker_names():
         hits += ["%s: %s" % (doc.name, m) for m in MAKER_MARK if m in text]
     assert not hits, hits
 
-
 def test_first_entry_still_names_the_tool_and_the_save_location():
     """Dropping the names must not drop the rest of the first-entry notice — for a
     terminal-only user this sentence is the only place the tool identifies itself."""
     head = SKILL.read_text(encoding="utf-8").split("## 시작·재개")[0]
-    assert "KNUAF-Dev · 창업논문 작성 도우미" in head
+    assert "창업논문 도우미" in head
     assert "저장 위치" in head
-
 
 # The app-side AI writes facts from the allowed values it reads in the reference docs.
 # A value outside the core set is rejected, so a doc list that drifted from the code

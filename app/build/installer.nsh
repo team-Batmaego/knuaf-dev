@@ -4,6 +4,14 @@
 # file is included, so a top-level Function calling UAC::/StdUtils:: may compile
 # before plugins exist. customHeader is expanded later by installer.nsi.
 !macro customHeader
+  # common.nsh uses the internal productName for these visible labels.
+  # Do not redefine PRODUCT_NAME: it also participates in data-folder handling.
+  # NSIS warns 6029 for this intentional replacement of common.nsh's Name.
+  !pragma warning push
+  !pragma warning disable 6029
+  Name "${SHORTCUT_NAME}" "${SHORTCUT_NAME}"
+  BrandingText "${SHORTCUT_NAME} ${VERSION}"
+  !pragma warning pop
   # customHeader runs after electron-builder's messages and MUI languages.
   # LangString replacement emits 6030 by design; scope it to these two Korean
   # overrides only. Keep all other NSIS warnings fatal (builder's -WX).
