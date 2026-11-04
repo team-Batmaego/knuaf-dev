@@ -200,6 +200,7 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  * 앱을 켠 직후 첫 읽기에서는 아무 일도 알리지 않는다.
  */
 let sectionHashes: Record<string, string> | null = null
+let sectionRequest = 0
 /** 읽는 중에 또 읽지 않는다 — 감시 타이머가 사이드카를 겹쳐 띄우지 않게. */
 let statusInFlight = false
 /** 조용한 갱신이 잇따라 실패하면 그때는 말한다 — 한 번은 도우미가 쓰는 중일 수 있다. */
@@ -317,7 +318,9 @@ export const useProject = create<ProjectState>((set, get) => ({
     if (!root) { set({ sections: null }); return }
     // 이 읽기를 시작한 방문. A→B→A 에서 첫 A 방문의 늦은 응답은 root 가 같아도 지금 방문의 것이 아니다 —
     // 옛 목록으로 덮으면 지금 방문의 status 는 이미 최신 개정이라 주기 감시가 다시 읽지 않는다(검토 OPEN-STALE-R1-01).
-    const mine = visitOf(root)
+    const visit = visitOf(root)
+    const request = ++sectionRequest
+    const mine = () => visit() && request === sectionRequest
     try {
       const rows = await rpc.sections(root)
       if (!mine()) return

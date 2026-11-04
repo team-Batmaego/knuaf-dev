@@ -18,14 +18,16 @@ export function RightPane({ paper }: { paper: ReactNode }) {
   const fileTab = useRef<HTMLButtonElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
-  useEffect(() => { setError(null); setSaved(null) }, [path])
+  const requestId = useRef(0)
+  useEffect(() => { requestId.current += 1; setError(null); setSaved(null) }, [root, path])
   const close = () => {
+    requestId.current += 1
     const state = useProject.getState()
     const target = state.docReturn
     const fallback = state.closePreview()
     requestAnimationFrame(() => {
       const el = target?.key ? Array.from(document.querySelectorAll<HTMLElement>('[data-focus-key]')).find((node) => node.dataset.focusKey === target.key && node.isConnected && node.offsetParent !== null) : null
-      ;(el ?? (fallback?.trigger?.isConnected && fallback.trigger.offsetParent !== null ? fallback.trigger : null) ?? paperTab.current ?? document.querySelector<HTMLElement>('textarea'))?.focus({ preventScroll: true })
+      ;(el ?? (fallback?.trigger?.isConnected && fallback.trigger.offsetParent !== null ? fallback.trigger : null) ?? (target?.view === 'paper' ? document.querySelector<HTMLElement>('.paperpane button') : null) ?? document.querySelector<HTMLElement>('textarea'))?.focus({ preventScroll: true })
     })
   }
   useEffect(() => {
@@ -51,15 +53,17 @@ export function RightPane({ paper }: { paper: ReactNode }) {
     setError(PREVIEW.readFailedBody)
   }
   const open = async () => {
+    const id = ++requestId.current
     const result = await window.knuaf.openPath(path)
-    if (useProject.getState().docPath !== path) return
+    if (requestId.current !== id || useProject.getState().docPath !== path || useProject.getState().root !== root) return
     if ('error' in result) setError(result.error.message)
     else if (result.result.reason === 'open_failed') setError(ARTIFACTS.openFallback)
   }
   const save = async () => {
     if (!item) return
+    const id = ++requestId.current
     const result = await window.knuaf.fileSaveAs(root, item.path)
-    if (useProject.getState().docPath !== path) return
+    if (requestId.current !== id || useProject.getState().docPath !== path || useProject.getState().root !== root) return
     if (result.error) setError(describeError(result.error).title)
     else if (result.result) setSaved(String(result.result))
   }

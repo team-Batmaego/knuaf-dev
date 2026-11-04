@@ -38,6 +38,14 @@ test('저장 사건은 본문 확인과 noteSeen 완료 뒤 결과를 고정한�
       ['sec:2', { kind: 'edited', count: 2 }],
       ['sec:3', { kind: 'wrote' }]
     ])
+    const delayed = Promise.withResolvers<SectionRow[]>()
+    rpc.sections = () => delayed.promise
+    const older = useProject.getState().loadSections()
+    rpc.sections = async () => [{ ...row, revision: 4, draft_hash: 'c' }]
+    await useProject.getState().loadSections()
+    delayed.resolve([{ ...row, revision: 3, draft_hash: 'a' }])
+    await older
+    expect(useProject.getState().sections?.[0].revision).toBe(4)
   } finally {
     rpc.sections = oldSections; rpc.readAllSections = oldRead
     useReview.setState({ noteSeen: oldNote, editOf: oldEdit })
