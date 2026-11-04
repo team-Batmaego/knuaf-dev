@@ -105,11 +105,14 @@ export interface Settings {
    * 따르고, 없으면(null) 고른 적이 없다는 뜻이라 첫 화면에서 한 번 고르게 한다.
    * 기존 사용자의 `helper_mode` 를 여기로 승격하지 않는다 — 그건 선택이 아니었다.
    */
+  /**
+   * 학생이 **직접 고른** 대화 공급자. 값이 없으면 처음 연결 흐름에서 한 번 고르게 한다.
+   */
   provider_choice?: { provider: 'codex' | 'claude'; at: string } | null
   /**
-   * 첫 실행 화면(온보딩)을 지났음과 그 시각. **공급자 선택의 근거가 아니다** —
-   * 시험이 온보딩을 건너뛰게 하는 표시로도 쓴다(e2e/helpers.ts).
+   * 첫 논문 폴더에서 권한 방식을 고른 시각. 기존 사용자는 키가 없어 첫 새 폴더에서 한 번 고른다.
    */
+  first_project_permission_asked_at?: string | null
   onboarded_at?: string | null
   /**
    * 학생이 "이 폴더에서는 계속 허용"을 고른 작업폴더들(realpath·NFC 로 보관).
@@ -159,8 +162,12 @@ export interface MaterialsData {
 export type ArtifactKind = 'docx' | 'xlsx' | 'pdf' | 'md'
 export interface ArtifactItem { path: string; name: string; kind: ArtifactKind; bytes: number; mtime: number; revision: number | null }
 export interface XlsxSheet { name: string; max_row: number; max_col: number; rows: string[][]; truncated: boolean }
-export type ArtifactPreview =
-  | { kind: 'xlsx'; sheets: XlsxSheet[]; formulas: number; formulas_uncalculated?: boolean }
-  | { kind: 'text'; text: string; truncated: boolean }
-  | { kind: 'pdf' }
-  | { kind: 'unavailable'; reason: string }
+export type PreviewPayload =
+  | { kind: 'pdf' | 'docx'; name: string; bytes: Uint8Array }
+  | { kind: 'xlsx'; name: string; sheets: XlsxSheet[]; formulas: number; formulas_uncalculated?: boolean }
+  | { kind: 'text'; name: string; ext: string; text: string; truncated: boolean }
+  | { kind: 'image'; name: string; mime: 'image/png' | 'image/jpeg'; dataUrl: string }
+  | { kind: 'unsupported'; name: string; ext: string; openable: boolean }
+  | { kind: 'empty'; name: string }
+  | { kind: 'too_large'; name: string; ext: string; bytes: number; limit: number }
+  | { kind: 'preview_error'; name: string; ext: string; reason: 'format' | 'corrupt' | 'too_large' }

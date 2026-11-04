@@ -27,7 +27,7 @@ const isAbs = (p: string) => p.startsWith('/') || /^[A-Za-z]:/.test(p)
  * (03-화면/08); failure feedback deep-links land on `data-preset="tools:<id>"`.
  */
 export function OutputsTools() {
-  const { root, status, refresh } = useProject(useShallow((s) => ({ root: s.root, status: s.status, refresh: s.refresh })))
+  const { root, status, refresh, openPreview } = useProject(useShallow((s) => ({ root: s.root, status: s.status, refresh: s.refresh, openPreview: s.openPreview })))
   const platform = window.knuaf.platform
   const joinPath = (a: string, b: string) => isAbs(b) ? b : `${a}${platform === 'win32' ? '\\' : '/'}${b}`
   const [tree, setTree] = useState<any>(null)
@@ -176,7 +176,7 @@ export function OutputsTools() {
       {runner.cancelled && <div style={{ marginTop: 'var(--sp-4)' }}><Feedback kind="status" title={COMPLETION.cancelled} /></div>}
       <ProgressPanel busy={runner.busy} phase={runner.phase} elapsedMs={runner.elapsedMs} lines={runner.lines} onCancel={runner.cancel} />
       {runner.env && !runner.busy && (() => { const h = officeHint(runner.env.block_reason ?? (runner.env.data as any)?.engine_stderr); return h ? <div style={{ marginTop: 'var(--sp-4)' }}><Feedback kind="warning" title={h.title} body={h.body} /></div> : null })()}
-      {runner.env && !runner.busy && <ResultCard env={runner.env} onReveal={reveal} onOpen={(p) => window.knuaf.openPath(joinPath(root, p))} />}
+      {runner.env && !runner.busy && <ResultCard env={runner.env} onReveal={reveal} onOpen={(p) => openPreview(joinPath(root, p))} />}
     </div>
   )
 }

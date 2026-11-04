@@ -34,6 +34,7 @@ export type Screen = 'materials' | 'artifacts' | 'checkup' | 'settings'
  * "고급 도구에서 직접 실행"이 여기로 간다(Q2: "설정으로 가세요"가 아니라 해당 항목 직결).
  */
 export type SettingsFocus = string | null
+type PreviewFocusReturn = { trigger: HTMLElement | null; fallback: HTMLElement | null }
 
 interface ProjectState {
   root: string | null
@@ -65,13 +66,23 @@ interface ProjectState {
   retryOpen: (root: string, onOpened?: (root: string) => void | Promise<void>) => Promise<boolean>
   sidecar: (SidecarInfo & { basePython?: string; wheelhouse?: string | null }) | null
   settings: Settings | null
-  /** 열려 있는 시트. null이면 논문·대화만 보인다. */
+  /** First-folder permission consent is global; the main process gates every project:open caller. */
+  firstProjectGate: { root: string; kind: 'permission' | 'write-error' } | null
   sheet: Screen | null
+  /** Absolute target for the single-file preview overlay; it can sit over Checkup without replacing it. */
+  previewPath: string | null
+  previewNotice: { title: string; body: string } | null
+  previewFocusReturn: PreviewFocusReturn | null
   settingsFocus: SettingsFocus
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
-  /** 시트를 닫는다 — v5의 "대화로 돌아가기"(자료의 "답변에 첨부", 점검의 "고쳐달라기" 등). */
   closeSheet: () => void
+  openPreview: (path: string, fallback?: HTMLElement | null) => void
+  closePreview: () => PreviewFocusReturn | null
+  setPreviewNotice: (notice: { title: string; body: string } | null) => void
+  /** Save the global choice before retrying the same open request. */
+  chooseFirstProjectPermission: (mode: 'trust' | 'ask') => Promise<void>
+  cancelFirstProjectGate: () => void
   /** Navigate to 설정 with a disclosure preset open (deep link from failure feedback). */
   openSettings: (focus?: SettingsFocus) => void
   clearSettingsFocus: () => void
@@ -88,6 +99,12 @@ interface ProjectState {
    */
   materials: MaterialsData | null
   artifacts: ArtifactItem[] | null
+  /**
+   * 결과물 목록을 **읽지 못한 이유**. `artifacts === null` 이 "아직 안 읽음"인지 "읽기 실패"인지
+   * 화면이 구분하려면 이 값이 필요하다 — 예전에는 오류를 null 로 접어 두어 목록 실패가
+   * 빈 화면(저장이 안 된 것처럼)으로 보였다(실기기 재현 2026-11-03).
+   */
+  artifactsError: string | null
   /** `build/` 개정 트리 — 검토본 기준 N(진행 규칙 §4-4)을 여기서 읽는다. */
   buildTree: StageBuildTree | null
   /** 정본 전체(`project.load`) — 파일 현재성은 여기 `outputs[*].stale` 뿐이다(v2 §4-1). */
@@ -198,14 +215,19 @@ export const useProject = create<ProjectState>((set, get) => ({
   error: null,
   openFailure: null,
   retryFailed: null,
+  firstProjectGate: null,
   sidecar: null,
   settings: null,
   sheet: null,
+  previewPath: null,
+  previewNotice: null,
+  previewFocusReturn: null,
   settingsFocus: null,
   logs: [],
   sections: null,
   materials: null,
   artifacts: null,
+  artifactsError: null,
   buildTree: null,
   projectLoad: null,
   refreshSeq: 0,
@@ -216,6 +238,17 @@ export const useProject = create<ProjectState>((set, get) => ({
   focusedSection: null,
   openSheet: (sheet) => { set({ sheet, ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
   closeSheet: () => { set({ sheet: null, settingsFocus: null }); location.hash = '' },
+  openPreview: (path, fallback = null) => {
+    const active = typeof document === 'undefined' ? null : document.activeElement
+    const trigger = active instanceof HTMLElement && active !== document.body ? active : null
+    set({ previewPath: path, previewNotice: null, previewFocusReturn: { trigger, fallback } })
+  },
+  closePreview: () => {
+    const focusReturn = get().previewFocusReturn
+    set({ previewPath: null, previewNotice: null, previewFocusReturn: null })
+    return focusReturn
+  },
+  setPreviewNotice: (previewNotice) => set({ previewNotice }),
   openSettings: (focus = null) => { set({ sheet: 'settings', settingsFocus: focus }); location.hash = 'settings' },
   clearSettingsFocus: () => set({ settingsFocus: null }),
   loadSettings: async () => {
@@ -224,6 +257,18 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 종이 닫힘도 설정에서 읽는다 — 앱을 다시 켜도 학생이 닫아 둔 것은 닫힌 채다.
     set({ settings, ...(root ? { paperClosed: settings?.ui_prefs?.[root]?.paperClosed === true } : {}) })
   },
+  chooseFirstProjectPermission: async (mode) => {
+    const gate = get().firstProjectGate
+    if (!gate || gate.kind !== 'permission') return
+    await window.knuaf.setSettings({
+      permission_mode: mode,
+      ...(mode === 'ask' ? { trusted_roots: [] } : {}),
+      first_project_permission_asked_at: new Date().toISOString()
+    })
+    await get().loadSettings()
+    await get().open(gate.root)
+  },
+  cancelFirstProjectGate: () => set({ firstProjectGate: null, loading: false }),
   loadSections: async () => {
     const root = get().root
     if (!root) { set({ sections: null }); return }
@@ -248,16 +293,23 @@ export const useProject = create<ProjectState>((set, get) => ({
   setWindowWidth: (windowWidth) => set({ windowWidth }),
   loadLists: async () => {
     const root = get().root
-    if (!root) { set({ materials: null, artifacts: null, buildTree: null, projectLoad: null }); return }
+    if (!root) { set({ materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null }); return }
     const mine = visitOf(root)
     const [m, a, tree, load] = await Promise.all([
       rpc.materials(root).catch(() => null),
-      rpc.artifacts(root).catch(() => null),
+      // 목록 실패를 빈 목록과 구분해 남긴다 — 화면이 "저장이 안 됐다"와 "읽지 못했다"를
+      // 같은 공백으로 보여 주면 학생은 파일이 사라졌다고 읽는다(실기기 재현 2026-11-03).
+      rpc.artifacts(root).then((v) => ({ v })).catch((e: unknown) => ({ e })),
       rpc.buildTree(root).catch(() => null),
       rpc.load(root).catch(() => null)
     ])
     if (!mine()) return
-    set({ materials: m, artifacts: a ? a.items : null, buildTree: tree, projectLoad: load })
+    set({
+      materials: m,
+      artifacts: 'v' in a ? a.v.items : null,
+      artifactsError: 'e' in a ? (a.e instanceof Error ? a.e.message : String(a.e)) : null,
+      buildTree: tree, projectLoad: load
+    })
   },
   setPaneView: (paneView) => set({ paneView }),
   focusSection: (focusedSection) => set({ focusedSection }),
@@ -278,12 +330,16 @@ export const useProject = create<ProjectState>((set, get) => ({
     const r = await window.knuaf.openProject(root)
     if (superseded()) return null
     if (r.error) {
+      if (r.error.code === 'first_project_permission_required' || r.error.code === 'folder_not_writable') {
+        set({ loading: false, firstProjectGate: { root, kind: r.error.code === 'folder_not_writable' ? 'write-error' : 'permission' } })
+        return null
+      }
       const d = describeError(r.error)
       if (!opts?.local) set({ error: d })
       // 실패한 그 선택의 python·kind 와 재시도 대상 root 를 오류와 함께 보관한다(PY-D1-03).
       // 이전 프로젝트의 store.sidecar 로 판단하면 첫 실패에서 버튼이 서지 않고, 다른 논문을
       // 열었던 세션에서는 틀린 kind 로 판단한다.
-      set({ loading: false, openFailure: r.startupFailed && r.sidecar ? { root, sidecar: r.sidecar, code: r.error.code } : null })
+      set({ loading: false, firstProjectGate: null, openFailure: r.startupFailed && r.sidecar ? { root, sidecar: r.sidecar, code: r.error.code } : null })
       return d
     }
     // 위에서 error 분기를 돌려보냈으므로 result 는 반드시 있다 — 없으면 계약 위반이므로
@@ -298,7 +354,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     if (superseded()) return null
     const settings = get().settings
     set({
-      root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek, depsReady: null,
+      root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek, depsReady: null, firstProjectGate: null,
       // 폴더마다 다른 취향이므로 폴더가 바뀌면 여기서 다시 읽는다(전역 settings 는 그대로).
       paperClosed: settings?.ui_prefs?.[root]?.paperClosed === true
     })
@@ -306,11 +362,12 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 이동은 성공이 확정된 여기서 한다 — 아래 refresh() 는 파이썬 스폰이라 몇 초
     // 걸리는데, 그 사이 학생이 다른 것을 열면 늦게 온 이동이 되돌려 버렸다.
     get().closeSheet()
+    get().closePreview()
     stopCanonPoll()
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.
     sectionHashes = null
-    set({ events: [], sections: null, materials: null, artifacts: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat' })
+    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat' })
     canonPoll = setInterval(() => { void get().watchCanon() }, 2000)
     // 도우미가 하위 폴더에 init한 경우 — 빈 화면으로 두지 않고 어디에 만들었는지 알린다.
     const nested = opened.nestedProject

@@ -88,13 +88,34 @@ export class AppUpdates {
   private async checkNow(): Promise<AppUpdateStatus> {
     await this.ready
     if (!this.opts.config.keys.length) return this.set({ phase: 'unavailable', message: '업데이트를 확인할 수 없어요.' })
+    const interruptedCandidate = this.statusValue.phase === 'interrupted' ? this.candidate : null
+    const interrupted = interruptedCandidate ? { candidate: interruptedCandidate, status: { ...this.statusValue } } : null
+    const restoreInterrupted = (): AppUpdateStatus | null => {
+      if (!interrupted) return null
+      this.candidate = interrupted.candidate
+      return this.set({ phase: 'interrupted', latest: interrupted.status.latest, page: interrupted.status.page, message: interrupted.status.message })
+    }
     this.set({ phase: 'checking' })
     try {
-      const channel = await readChannelDocument(this.opts.config, this.opts.fetch, AbortSignal.timeout(15_000)), app = object(channel.app)
+      const channel = await readChannelDocument(this.opts.config, this.opts.fetch, AbortSignal.timeout(15_000))
+      if (!Object.hasOwn(channel, 'app')) {
+        const restored = restoreInterrupted()
+        if (restored) return restored
+        this.candidate = null
+        return this.set({ phase: 'idle', latest: null, page: null })
+      }
+      const app = object(channel.app)
       version(app.latest)
       const page = releasePage(app.latest)
       if (app.page !== page) throw new Error('허용되지 않은 앱 내려받기 페이지예요.')
       if (this.opts.platform === 'win32' && this.opts.arch === 'x64') {
+        if (!Object.hasOwn(app, 'win32-x64')) {
+          const restored = restoreInterrupted()
+          if (restored) return restored
+          this.candidate = null
+          if (compare(app.latest, this.opts.current) <= 0) return this.set({ phase: 'idle', latest: null, page: null })
+          return this.set({ phase: 'unavailable', latest: null, page: null, message: `새 앱 ${app.latest}은 아직 이 컴퓨터용으로 준비 중이에요. 지금 앱은 그대로 쓸 수 있어요.` })
+        }
         const proof = parseApp(app['win32-x64'], this.opts.config.keys)
         if (app.latest !== proof.manifest.version) throw new Error('채널 판과 서명된 앱 판이 달라요.')
         this.candidate = proof

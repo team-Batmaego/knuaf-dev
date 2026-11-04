@@ -54,12 +54,14 @@
   구 `codex_terminal`과 제거된 인앱 터미널 값(`codex-term`/`claude-term`)은 로드 때 채팅으로
   마이그레이션됩니다(`src/main/settings.ts`). 채팅이 막힐 때의 비상구는 설정의
   "앱 밖 터미널로 도우미 열기" 버튼(`.command` + `shell.openPath`)입니다.
+  처음 여는 논문 폴더에서는 진입점과 관계없이 한 번 권한 방식을 묻습니다. "항상 허용"은 모든 논문 폴더에서 요청을 자동 승인합니다(파일 변경 및 폴더 밖 명령 포함).
+  "매번 묻기"는 전역 확인을 켜고 기존 폴더별 예외도 지웁니다. 설정에서 전역 선택을 바꿀 수 있습니다. Windows는 첫 폴더를 열기 전에 임시 파일 쓰기 시험을 합니다.
   - 자료: intake 사실로 기록된 현재 작성물·재무 파일과 sources/ 파일 목록(현재 작성물·참고자료 구분)을 보여 줍니다.
     파일을 골라도 채팅 답변에 경로를 넣을 뿐 현재 작성물로 채택하지 않습니다(intake-selection.md).
-  - 결과물: build/ 아래 DOCX·XLSX·PDF·MD를 목록·미리보기·다른 이름 저장·외부 열기 합니다. PDF는 pdf.js
-    (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아 `legacy` 빌드)로 그리고, DOCX는 같은 이름의 PDF(같은 폴더 또는
-    build/native)가 있을 때만 그 PDF를 보여 주며, 없으면 Office 렌더 버튼과 "원래 앱으로 열기"를 둡니다.
-    XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
+  - 결과물: build/ 아래 DOCX·XLSX·PDF·MD를 목록·미리보기·다른 이름 저장·외부 열기 합니다. 대화·자료·점검의
+    프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
+    `legacy` 빌드)로 그리고, DOCX는 `docx-preview`를 sandbox iframe 안에서 렌더링합니다. 그림·수식·복잡한 서식은
+    일부 다를 수 있다는 안내를 표시합니다. XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
     **재무 엑셀 만들기**는 유효 전공 바인딩을 확인하고 등록한 학생 재무 파일을 우선 복사합니다. 선택한 파일의
     읽기 실패를 동봉본으로 대체하지 않습니다. 등록 파일이 없으면 전공별 양식을 먼저 확인하도록 안내하며,
     특용작물 전공에서 명시적으로 선택한 X01만 동봉 자산으로 만듭니다. H01·X02를 X01로 대체하지 않습니다.
@@ -160,6 +162,24 @@ S0는 동봉 묶음의 `skill.json` 판/API를 읽으며 암묵적 1.0.0 추정�
 재설치 시 학생 수정 사본을 skill 탐색 경로 밖으로 백업합니다.
 프로젝트 `.knuaf-gui/skill-install.json`은 양쪽 설치 경로를 표시하며, 설치본의 `gg_update.py auto`는
 `managed`로 종료하여 앱 업데이트 경로와 경쟁하지 않습니다.
+## 서명된 앱 업데이트 채널 게시
+
+- `.github/workflows/app-release.yml`은 `main`에서 수동 실행하며, 이미 존재하는 릴리스 태그 하나만 받습니다. 설치본 자산 이름은 태그에서 계산합니다. 태그 커밋이 `main`의 조상이고, 태그 시점 앱 버전과 현재 업데이트 공개키가 `main`과 일치해야 합니다.
+- 서명 전 `release.yml`의 `windows-installer` 아티팩트와 릴리스 자산의 바이트·크기를 대조합니다. 실행 아티팩트를 보관 기간 안에 찾지 못하면 멈춥니다. `SHA256SUMS-windows.txt` 대체는 허용하지 않습니다.
+- 서명 job은 `skill-release` 환경의 기존 `SKILL_SIGNING_PRIVATE_KEY`만 사용합니다. 개인키에서 계산한 공개키의 DER 바이트를 앱의 `current` 공개키와 비교하며, 값은 출력하지 않습니다. 불일치하면 서명 전에 실패합니다.
+- 키 비교 기준에는 시점 차이가 있습니다. 준비 job은 checkout 시점 `origin/main`의 `keys.ts`를 태그와 비교하지만, 서명 job은 실행 시작 시점 `github.sha`의 키를 사용합니다. 실행 시작부터 채널 PR 반영 완료까지 `keys.ts` 변경을 머지하지 마세요. 이 구간에 키 변경이 있었다면 실행 결과를 채널에 반영하지 말고, 키 변경이 반영된 `main`에서 새로 실행하세요. 이는 운영상 동결 규칙이며 시점 차이를 코드로 제거한 것은 아닙니다.
+- 성공 시 워크플로는 `app-channel-v<V>` 갈래만 push합니다. PR은 사람이 열고, 자동 PR·태그·릴리스 생성은 하지 않습니다. 열린 채널 PR 또는 `main`에 아직 포함되지 않은 채널 갈래가 있으면 실행을 멈춥니다.
+- `skill-release`의 정기 실행은 열린 앱·스킬 채널 PR이 있으면 새 작업 없이 정상 종료합니다. 수동 실행은 기존처럼 실패하며, 열린 채널 PR 없이 미병합 갈래만 남은 경우에는 정기 실행도 실패합니다. 상태 검사기는 로컬 `origin/main` 없이 원격 main SHA를 조회하므로 SHA만 받은 깊이 1 checkout에서도 동작합니다.
+- 앱·스킬 채널 PR은 **merge commit**으로 머지합니다(squash/rebase 금지). squash/rebase로 원래 갈래 커밋이 `main`에 포함되지 않으면 다음 채널 실행이 안전상 중단됩니다. 이 경우 책임자가 채널 반영을 확인하고 남은 갈래를 정리한 뒤 재실행합니다.
+- PR 전에는 `updates/channel.json`의 앱 항목 외 내용, 특히 기존 `skill` 항목이 `main`과 같은지 확인합니다. 0.6.0은 채널 변경을 릴리스 공개 전에 머지하고, 공개 직후 아래 검사를 실행해 결과를 기록합니다. 0.6.1부터는 공개 뒤 자산 검사를 통과하고 그 결과를 PR에 첨부한 후 머지합니다.
+
+```bash
+node app/scripts/check-app-channel.mjs --channel updates/channel.json
+```
+
+이 검사는 앱 채널의 서명·판·페이지를 확인한 뒤 GitHub 릴리스 자산을 인증 없이 GET하고, 서명된 크기와 SHA-256을 대조합니다. 벡터 회귀와 소비자 검증은 `node --test app/scripts/tests/app-release.test.mjs` 및 `pnpm -C app exec playwright test e2e/app-update-vector.spec.ts`로 실행합니다.
+
+사이드카 프로토콜 테스트는 저장소 루트의 `tests/test_sidecar.py`에 있습니다.
 
 알려진 A안 한계(독립검토 A1): 사용자 문구의 `copy.ts` 중앙관리 AST 검사는 대체 없이 제거되어
 일부 새 화면 문구가 인라인입니다(A1-04). 첫 화면에는 시안의 세 가지 시작 제안 칩이 없습니다(A1-05).
@@ -189,7 +209,7 @@ pnpm dist:mac           # 또는 pnpm dist:win
 ```bash
 pnpm fetch:python       # python-build-standalone 3.12 → resources/python
 pnpm build:wheelhouse   # openpyxl·python-docx·lxml·pypdf 휠 → resources/wheelhouse
-pnpm build:icons        # build/icon.svg → icns·ico·png
+pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png
 pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf
 pnpm stage:skill        # 고정 knuaf-doc + 앱 overlay → 호환 게이트 → resources/skill
 ```

@@ -84,7 +84,7 @@ export function plantStaleLock(root: string): void {
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 
-export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
+export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'kd-userdata-'))
   /**
    * 여는 화면은 켤 때마다 화면을 덮고 2.6초를 쓴다. 대부분의 테스트는 그것을 보려는 게
@@ -106,6 +106,8 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   if (!opts.intro && preset.show_intro === undefined) preset.show_intro = false
   if (opts.onboarded === false) delete preset.onboarded_at
   else if (!preset.onboarded_at) preset.onboarded_at = new Date().toISOString()
+  if (opts.permissionPrompt) delete preset.first_project_permission_asked_at
+  else if (!preset.first_project_permission_asked_at) preset.first_project_permission_asked_at = new Date().toISOString()
   writeFileSync(settingsFile, JSON.stringify(preset), 'utf-8')
   // A shell that exports ELECTRON_RUN_AS_NODE would make the app run as plain Node (require('electron') yields the binary path).
   const env = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }
@@ -149,6 +151,54 @@ export async function closeSheet(page: Page): Promise<void> {
   for (let i = 0; i < 3 && (await page.locator('dialog[open]').count()); i++) {
     await page.locator('dialog[open]').last().press('Escape')
   }
+}
+
+/**
+ * 메인의 shell 호출을 한 파일에 기록한다 — 시험이 실제 탐색기·기본 프로그램을 띄우지 않게.
+ * `openFailure` 를 주면 openPath 가 그 문자열(열기 실패)을 돌려준다. `swapOnOpen` 은 openPath
+ * 가 불린 **그 순간** 폴더를 바꿔치기한다 — 열기 응답을 기다리는 사이 대상이 바뀌는 경우
+ * (검토 ATTACH-R1-03)를 파일 시스템 조작으로 재현한다. 기록 한 줄은 `open<TAB>경로` 또는
+ * `reveal<TAB>경로` 다.
+ */
+export async function spyShell(
+  electronApp: ElectronApplication,
+  log: string,
+  opts: { openFailure?: string; swapOnOpen?: { move: string; to: string; symlink: string; target: string } } = {}
+): Promise<void> {
+  await electronApp.evaluate(({ shell }, o: {
+    log: string
+    failure: string
+    swap: { move: string; to: string; symlink: string; target: string } | null
+  }) => {
+    // evaluate 는 메인 프로세스에서 돈다 — 이 앱의 메인 번들은 ESM 이라 `require` 가 없다.
+    const fs = process.getBuiltinModule('node:fs')
+    const note = (line: string): void => fs.appendFileSync(o.log, line + '\n')
+    shell.showItemInFolder = (p: string) => { note(`reveal\t${p}`) }
+    shell.openPath = async (p: string) => {
+      note(`open\t${p}`)
+      // 열기 응답을 기다리는 사이 폴더가 다른 곳을 가리키게 만든다.
+      if (o.swap) {
+        fs.renameSync(o.swap.move, o.swap.to)
+        fs.symlinkSync(o.swap.target, o.swap.symlink)
+      }
+      return o.failure
+    }
+  }, { log, failure: opts.openFailure ?? '', swap: opts.swapOnOpen ?? null })
+}
+
+/** `spyShell` 이 남긴 기록(없으면 빈 배열). */
+export function shellCalls(log: string): string[] {
+  return existsSync(log) ? readFileSync(log, 'utf-8').split('\n').filter(Boolean) : []
+}
+
+/** 두 공급자 모두에 같은 도우미 답변을 심는다 — 어느 공급자로 열려도 그 글이 보인다. */
+export function seedChat(root: string, text: string): void {
+  mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
+  for (const p of ['codex', 'claude'])
+    writeFileSync(join(root, '.knuaf-gui', `chat-${p}.json`), JSON.stringify({
+      root, provider: p, state: 'idle',
+      messages: [{ id: 'a1', role: 'assistant', text, at: new Date().toISOString() }]
+    }), 'utf-8')
 }
 
 /**

@@ -91,6 +91,7 @@ export function Checkup() {
   const files = useProject((s) => s.artifacts)
   const projectLoad = useProject((s) => s.projectLoad)
   const closeSheet = useProject((s) => s.closeSheet)
+  const openPreview = useProject((s) => s.openPreview)
   const make = useMake()
   const [how, setHow] = useState<UserFinishItem | null>(null)
   const [copied, setCopied] = useState(false)
@@ -142,6 +143,7 @@ export function Checkup() {
                         검토본은 그 파일의 개정 번호, 근거가 없는 파일만 '모름'이다. */}
                     <span className="m caption">{fileStatusText(f.path, projectLoad)}</span>
                     {/* 정본 안 상대경로다 — 다른 화면과 **같은** 구분자 규칙(joinPath)을 거친다. */}
+                    <button className="quiet" onClick={() => openPreview(joinPath(root, f.path))}>미리보기</button>
                     <button className="quiet" onClick={() => void window.knuaf.openPath(joinPath(root, f.path))}>{ARTIFACTS.openExternal}</button>
                   </div>
                 ))}
@@ -218,7 +220,7 @@ export function Checkup() {
 
       {make.feedback && <Feedback kind={make.feedback.kind} title={make.feedback.title} body={make.feedback.body} details={make.feedback.details} actions={make.feedback.actions} />}
       {make.runner.busy && <ProgressPanel busy={make.runner.busy} phase={make.runner.phase} elapsedMs={make.runner.elapsedMs} lines={make.runner.lines} onCancel={make.runner.cancel} />}
-      {make.runner.env?.ok && !make.runner.busy && <ResultCard env={make.runner.env} onReveal={(p) => window.knuaf.reveal(joinPath(root, p))} onOpen={(p) => window.knuaf.openPath(joinPath(root, p))} />}
+      {make.runner.env?.ok && !make.runner.busy && <ResultCard env={make.runner.env} onReveal={(p) => window.knuaf.reveal(joinPath(root, p))} onOpen={(p) => openPreview(joinPath(root, p))} />}
 
       <Sheet open={!!how} title={how ? (USER_FINISH_LABEL[how.id] ?? how.id) : ''} onClose={() => setHow(null)}>
         <p>{how?.reason}</p>

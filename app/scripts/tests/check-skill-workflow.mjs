@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // Resolved with git ls-remote and confirmed through each repository's Git commit API.
@@ -27,11 +27,79 @@ export function checkWorkflowPins(text) {
   if (!refs.length) throw new Error('No pinned action references found')
   return refs
 }
+export function checkChannelWorkflow(text) {
+  if (!/^  group:\s*channel-update\s*$/m.test(text) || !/^  cancel-in-progress:\s*false\s*$/m.test(text) ||
+      !/run:\s*node app\/scripts\/check-channel-update-state\.mjs/.test(text)) {
+    throw new Error('Channel workflows must share channel-update concurrency and the pending-channel guard')
+  }
+  return true
+}
+
+export function checkAppWorkflow(text) {
+  const lines = text.split(/\r?\n/)
+  const onStart = lines.findIndex(line => /^on:\s*$/.test(line))
+  if (onStart < 0) throw new Error('Missing workflow trigger declaration')
+  let onEnd = lines.findIndex((line, index) => index > onStart && /^[A-Za-z_][\w-]*:\s*/.test(line))
+  if (onEnd < 0) onEnd = lines.length
+  const triggerLines = lines.slice(onStart + 1, onEnd)
+  const triggers = triggerLines.flatMap(line => /^  ([A-Za-z_][\w-]*):\s*$/.exec(line)?.[1] ?? [])
+  if (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch') throw new Error('app-release must use workflow_dispatch only')
+  const inputNames = triggerLines.flatMap(line => /^      ([A-Za-z_][\w-]*):\s*$/.exec(line)?.[1] ?? [])
+  if (inputNames.length !== 1 || inputNames[0] !== 'tag' ||
+      !/^        required:\s*true\s*$/m.test(triggerLines.join('\n')) ||
+      !/^        type:\s*string\s*$/m.test(triggerLines.join('\n'))) {
+    throw new Error('app-release must accept only the required tag string input')
+  }
+  checkChannelWorkflow(text)
+
+  const runLines = new Set()
+  for (let i = 0; i < lines.length; i++) {
+    const run = /^(\s*)run:\s*(.*)$/.exec(lines[i])
+    if (!run) continue
+    const indent = run[1].length
+    runLines.add(i)
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() && (lines[j].match(/^\s*/)[0].length <= indent)) break
+      runLines.add(j)
+    }
+  }
+  for (const index of runLines) {
+    if (/\$\{\{\s*inputs\./.test(lines[index])) throw new Error(`Workflow input interpolation inside run block at line ${index + 1}`)
+  }
+  if (!/^\s*APP_RELEASE_TAG:\s*\$\{\{\s*inputs\.tag\s*\}\}\s*$/m.test(text)) throw new Error('Workflow tag input must enter commands through env')
+
+  const jobNames = lines.slice(lines.findIndex(line => /^jobs:\s*$/.test(line)) + 1)
+    .flatMap(line => /^  ([A-Za-z_][\w-]*):\s*$/.exec(line)?.[1] ?? [])
+  if (jobNames.join(',') !== 'prepare,sign,push-channel-branch') throw new Error('app-release must have prepare, sign, and branch-push jobs only')
+  if (!/^  prepare:\n    if: github\.ref == 'refs\/heads\/main'$/m.test(text)) throw new Error('app-release preparation must be restricted to main')
+  if (!/^\s*environment:\s*skill-release\s*$/m.test(text) ||
+      !/^\s*APP_SIGNING_PRIVATE_KEY:\s*\$\{\{\s*secrets\.SKILL_SIGNING_PRIVATE_KEY\s*\}\}\s*$/m.test(text) ||
+      (text.match(/secrets\.SKILL_SIGNING_PRIVATE_KEY/g) ?? []).length !== 1) {
+    throw new Error('app-release must use only the approved skill-release signing secret')
+  }
+  if (/pull-requests:\s*write/i.test(text) || /\bgh\s+workflow\s+run\b/i.test(text) ||
+      /\bgh\s+release\s+(?:create|edit|upload|delete)\b/i.test(text)) {
+    throw new Error('app-release must not create PRs, dispatch workflows, or mutate releases')
+  }
+  return true
+}
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const path = process.argv[2] ?? resolve(import.meta.dirname, '../../../.github/workflows/skill-release.yml')
-    console.log(`Checked ${checkWorkflowPins(readFileSync(path, 'utf8')).length} immutable action references`)
+    const root = resolve(import.meta.dirname, '../../..')
+    const paths = process.argv.slice(2).length ? process.argv.slice(2) : [
+      resolve(root, '.github/workflows/skill-release.yml'),
+      resolve(root, '.github/workflows/app-release.yml')
+    ]
+    let count = 0
+    for (const path of paths) {
+      const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+      count += checkWorkflowPins(text).length
+      const filename = basename(path)
+      if (filename === 'skill-release.yml' || filename === 'app-release.yml') checkChannelWorkflow(text)
+      if (filename === 'app-release.yml') checkAppWorkflow(text)
+    }
+    console.log(`Checked ${count} immutable action references and app-release boundaries`)
   } catch (error) {
     console.error(error.message)
     process.exitCode = 1

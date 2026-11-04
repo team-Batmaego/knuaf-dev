@@ -13,8 +13,9 @@ import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
-import { CHAT, CHAT_EVENT, CLOSE_LABEL, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError } from '../copy'
+import { CHAT, CHAT_EVENT, CLOSE_LABEL, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
 import { chatSuggestion } from '../suggest'
+import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
 import { zoneOf } from '../../../shared/zone'
 import type { ChatMessage, Provider } from '../../../shared/chat'
@@ -112,11 +113,12 @@ function relativeProjectPath(target: string, root: string | null): string | null
  * 도우미 답변의 파일 링크를 누를 수 있게 만든다 — 마크다운 원문이 그대로 보이고
  * 접근성 역할도 일반 텍스트였다(GUI 감사 GUI-12).
  *
- * 경로는 "파일 얘기구나"를 판단하는 데만 쓰고 **절대 열지 않는다**. 누르면 결과물
- * 시트로 갈 뿐이고, 파일에 닿는 일은 앱이 스스로 목록에서 확인한 경로로만 한다.
- * 안쪽 상대경로가 아닌 링크는 원문 그대로 둔다 — 감추지 않는다.
+ * 경로는 "파일 얘기구나"를 판단하는 데만 쓰고, 누르면 메인이 경로를 다시 확인한 뒤 연다 —
+ * 문서 형식이면 연결 프로그램으로, 아니면 탐색기/Finder 에서 그 파일을 선택해 보여 준다.
+ * 없거나 폴더 밖이면 결과물 시트로 간다 — 무엇을 눌렀는지 알 수 있는 곳으로. 안쪽
+ * 상대경로가 아닌 링크는 원문 그대로 둔다.
  */
-function withLinks(text: string, root: string | null, onGo: () => void): ReactNode {
+function withLinks(text: string, root: string | null, onFile: (relative: string) => void): ReactNode {
   const out: ReactNode[] = []
   let last = 0
   for (const link of markdownLinks(text)) {
@@ -124,7 +126,7 @@ function withLinks(text: string, root: string | null, onGo: () => void): ReactNo
     if (relative === null) continue
     out.push(text.slice(last, link.start))
     const label = isAbsolutePath(link.label) ? (relative.split('/').at(-1) || relative) : (link.label || relative.split('/').at(-1) || relative)
-    out.push(<button key={link.start} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={onGo}>{label}</button>)
+    out.push(<button key={link.start} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
     last = link.end
   }
   if (!out.length) return text
@@ -159,7 +161,7 @@ function Delivery({ m, sending, onResend }: { m: ChatMessage; sending: boolean; 
   return null
 }
 
-function Message({ m, onResend, onGoArtifacts, fold, sending = false }: { m: ChatMessage; onResend?: () => void; onGoArtifacts?: () => void; fold?: FoldOptions; sending?: boolean }) {
+function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMessage; onResend?: () => void; onFileLink?: (relative: string) => void; fold?: FoldOptions; sending?: boolean }) {
   const [open, setOpen] = useState(false)
   const [unfolded, setUnfolded] = useState(false)
   const projectRoot = useProject((s) => s.root)
@@ -172,7 +174,7 @@ function Message({ m, onResend, onGoArtifacts, fold, sending = false }: { m: Cha
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
-      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onGoArtifacts ? withLinks(part, projectRoot, onGoArtifacts) : part) : shown}</div>
+      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, onFileLink) : part) : shown}</div>
       {folding && fold && (
         <div className="q-fold">
           <span className="caption">{CHAT.foldHint(fold.count)}</span>
@@ -221,16 +223,16 @@ function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, o
       {submitted ? <div className="folder-question">
         <div className="folder-message">{submitted}</div>
         <section className="folder-card">
-          <h2>{PROJECT_FOLDER.title}</h2>
-          <p>{PROJECT_FOLDER.body}</p>
-          <label>{PROJECT_FOLDER.name}<input value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
-          <button className="folder-option recommended" onClick={onCreate} disabled={busy}>
-            <strong>{PROJECT_FOLDER.create} · {PROJECT_FOLDER.recommended}</strong>
-            <small>{PROJECT_FOLDER.location(projectFolderName(name))}</small>
-          </button>
-          <button className="folder-option" onClick={onPick} disabled={busy}>
-            <strong>{PROJECT_FOLDER.pick}</strong><small>{PROJECT_FOLDER.pickBody}</small>
-          </button>
+            <h2>{PROJECT_FOLDER.title}</h2>
+            <p>{PROJECT_FOLDER.body}</p>
+            <label>{PROJECT_FOLDER.name}<input value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
+            <button className="folder-option recommended" onClick={onCreate} disabled={busy}>
+              <strong>{PROJECT_FOLDER.create} · {PROJECT_FOLDER.recommended}</strong>
+              <small>{PROJECT_FOLDER.location(projectFolderName(name))}</small>
+            </button>
+            <button className="folder-option" onClick={onPick} disabled={busy}>
+              <strong>{PROJECT_FOLDER.pick}</strong><small>{PROJECT_FOLDER.pickBody}</small>
+            </button>
           {createError && <p role="alert">{createError}</p>}
           <button className="quiet" onClick={onBack} disabled={busy}>돌아가기</button>
         </section>
@@ -286,8 +288,10 @@ export function Chat() {
   const pOpenFailure = useProject((s) => s.openFailure)
   const pRetryFailed = useProject((s) => s.retryFailed)
   const retryOpen = useProject((s) => s.retryOpen)
+  const firstProjectGate = useProject((s) => s.firstProjectGate)
   const clearPError = useProject((s) => s.clearError)
   const openSheet = useProject((s) => s.openSheet)
+  const openPreview = useProject((s) => s.openPreview)
   const events = useProject((s) => s.events)
   const focusSection = useProject((s) => s.focusSection)
   const paperClosed = useProject((s) => s.paperClosed)
@@ -366,7 +370,10 @@ export function Chat() {
         else {
           const result = await window.knuaf.createProjectFolder(name)
           if (!live()) return
-          if ('error' in result) { setFolderError(PROJECT_FOLDER.createFailed); return }
+          if ('error' in result) {
+            setFolderError(projectFolderCreationError(window.knuaf.platform, result.error.message))
+            return
+          }
           dir = result.result.root
           createdFolder.current = { name, root: dir }
         }
@@ -374,7 +381,8 @@ export function Chat() {
         dir = await window.knuaf.pickFolder()
         if (!live()) return
       }
-      if (dir && live()) await openFirstFolder(dir, generation, projectSeq)
+      if (!dir || !live()) return
+      await openFirstFolder(dir, generation, projectSeq)
     } catch {
       if (live()) setFolderError(PROJECT_FOLDER.createFailed)
     } finally {
@@ -390,6 +398,24 @@ export function Chat() {
     setFolderBusy(false)
     setNewText(''); setSubmitted(null); setQueued(null); setFolderError(null); createdFolder.current = null
   }, [newProjectSeq])
+  const previousProjectGate = useRef(firstProjectGate)
+  useEffect(() => {
+    const previous = previousProjectGate.current
+    if (
+      previous?.kind === 'write-error' &&
+      firstProjectGate &&
+      firstProjectGate.root !== previous.root &&
+      queued?.root === previous.root &&
+      queued.submission === submission.current &&
+      queued.text === submitted
+    ) {
+      // The student replaced the folder that failed the write probe; continue this request at the selected root.
+      setQueued({ ...queued, root: firstProjectGate.root })
+    } else if (previous && !firstProjectGate && !projectRoot && queued?.root === previous.root) {
+      setQueued(null); setSubmitted(null); setFolderError(null)
+    }
+    previousProjectGate.current = firstProjectGate
+  }, [firstProjectGate, projectRoot, queued, submitted])
   useEffect(() => {
     if (projectRoot && submitted && !queued) setQueued({ root: projectRoot, text: submitted, submission: submission.current })
   }, [projectRoot, submitted, queued])
@@ -605,6 +631,13 @@ export function Chat() {
     busy={folderBusy} createError={folderError} onBack={() => { submission.current += 1; setQueued(null); setSubmitted(null); setFolderError(null) }} />
 
   /**
+   * 문서 링크는 인앱 미리보기를 먼저 연다. 실제 경로·종류 판정과 읽기는 메인의 단일 관문이 맡는다.
+   */
+  const openFileLink = (relative: string): void => {
+    openPreview(joinPath(projectRoot, relative))
+  }
+
+  /**
    * 대화 기록과 이벤트 줄을 **시각 순으로** 섞는다 — 이벤트 줄은 저장된 글이 아니라 앱이
    * 그리는 표시라 대화 파일에 없고, 그래서 화면에서만 순서를 맞춘다.
    */
@@ -612,7 +645,7 @@ export function Chat() {
   for (const m of snapshot?.messages ?? []) {
     thread.push({
       key: m.id, at: Date.parse(m.at) || 0,
-      node: <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onGoArtifacts={() => openSheet('artifacts')} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
+      node: <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onFileLink={openFileLink} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
         fold={zone.kind === 'question' && zone.messageId === m.id ? { span: zone.card.span, count: zone.card.options.length } : undefined} />
     })
   }

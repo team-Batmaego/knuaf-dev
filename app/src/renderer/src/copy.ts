@@ -42,7 +42,7 @@ export const UPDATE = {
   appButton: '앱 업데이트',
   appTitle: (version: string) => `새 앱 ${version}이 나왔어요`,
   appMac: '내려받기 페이지를 열어 새 앱을 설치할 수 있어요.',
-  appWindows: '앱이 닫혔다가 다시 열려요. 관리자 확인 창이 뜨면 ‘예’를 눌러 주세요.',
+  appWindows: '앱이 닫혔다가 다시 열려요. 확인 창이 뜨면 ‘예’를 눌러 주세요.',
   appOpen: '내려받기 페이지 열기',
   appInstall: '지금 설치',
   later: '나중에',
@@ -971,6 +971,12 @@ export function formatBytes(n: number): string {
 /** Office 작업영역이 macOS 개인정보 보호(TCC)에 막혔을 때의 안내. block_reason 텍스트로 판별한다. */
 export function officeHint(reason: string | null | undefined): { title: string; body: string } | null {
   if (!reason) return null
+  if (/-1743|Apple Events?|자동화 권한 오류/i.test(reason)) {
+    return {
+      title: 'Word·Excel 제어를 허용하지 않았어요',
+      body: '시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 Word·Excel을 제어하려는 앱을 허용한 뒤, 지금 하려던 작업을 다시 시도해 주세요.'
+    }
+  }
   if (/Group Containers/.test(reason) && /not permitted|권한/i.test(reason)) {
     return {
       title: 'macOS가 Office 데이터 폴더 접근을 막았어요',
@@ -996,6 +1002,8 @@ export const CHAT = {
   showMore: (n: number) => `${n.toLocaleString('ko-KR')}자 더 보기`,
   showLess: '접기',
   title: '내 논문',
+  /** 파일을 열지 못했을 때(메인이 폴더에서 보여 준 뒤) — 원인을 단정하지 않고 사실만 한 문장. */
+  openFallback: '파일을 열지 못해 폴더에서 보여 줬어요.',
   checking: '연결 확인 중…',
   statusFailTitle: '도우미 상태를 확인하지 못했어요',
   statusFailBody: '"다시 확인"을 눌러 주세요. 계속되면 "설정 > 문제 해결"을 확인해 주세요.',
@@ -1205,6 +1213,29 @@ export const ARTIFACTS = {
   checkFail: '자동 점검 실패',
   checkNone: '자동 점검 기록 없음',
   savedTo: '저장했어요',
+  /**
+   * 목록을 보여 줄 수 없을 때는 **왜 비었는지 사실대로** 말한다. 예전에는 목록 읽기 실패가
+   * 공백으로만 남아 "파일이 저장되지 않았다"고 읽혔다(실기기 재현 2026-11-03).
+   *
+   * 문구 기준(형님 11-03): 한 문장에 한 가지. 지금 할 일 하나만, 단추 이름 그대로. 이유는 짧게.
+   * 그래서 본문은 "왜"가 아니라 **누를 단추**를 말하고, 이유는 제목이 맡는다.
+   */
+  noProject: {
+    title: '아직 논문 준비가 끝나지 않았어요',
+    body: '"논문 폴더 열기"를 눌러 이 폴더를 확인해 보세요.'
+  },
+  listFailed: {
+    title: '파일 목록을 열지 못했어요',
+    body: '"다시 시도"를 눌러 주세요. 잠깐 문제가 생겼어요.'
+  },
+  revealFolder: '논문 폴더 열기',
+  retry: '다시 시도',
+  /** ‘원래 앱으로 열기’가 열지 못했을 때 — 메인은 이미 폴더에서 보여 주고 원인을 단정하지 않는다. */
+  openFailedTitle: '파일을 열지 못했어요',
+  openFallback: '파일을 열지 못해 폴더에서 보여 줬어요.',
+  /** 앱이 열지 않는 형식 — 메인은 아무것도 표시하지 않았다. 그래서 완료형이 아니라 **단추 안내**. */
+  openNotSupported: '이 파일은 앱에서 열지 않아요. "폴더에서 보기"를 눌러 주세요.',
+  folderFailed: '폴더를 열지 못했어요.',
   previewTitle: '미리보기',
   /** 목록에서 아직 아무 파일도 고르지 않았을 때. */
   pickOne: '왼쪽 목록에서 파일을 골라 주세요.',
@@ -1248,7 +1279,14 @@ export const ARTIFACTS = {
     /** 만들기는 됐지만 통과하지 못한 검사가 남았을 때(자세히 안의 한 줄). */
     unverified: (n: number) => `아직 통과하지 않은 검사 ${n}건`,
     xlsxGoto: '고급 도구에서 이어서 만들기',
-    madeTitle: '만들어진 파일'
+    madeTitle: '만들어진 파일',
+    /**
+     * 네 줄이 **모두** 꺼져 있을 때의 이유 한 줄. 예전에는 이유 없이 회색 단추만 있어
+     * 학생이 "고장 났다"로 읽었다(실기기 재현 2026-11-03). 한 문장에 한 가지(형님 11-03) —
+     * 여기서는 이유만 말하고, 누를 단추는 바로 아래 빈 화면 안내가 맡는다.
+     */
+    blockedNoProject: '논문 준비가 끝나면 만들기가 켜져요.',
+    blockedNoStatus: '논문 상태를 아직 읽지 못했어요.'
   }
 }
 
@@ -1257,16 +1295,25 @@ export const PREVIEW = {
   prev: '이전',
   next: '다음',
   docxPdfCaption: '원문 DOCX를 Word로 렌더한 PDF예요. DOCX 원본과 다를 수 있어요.',
+  docxHtmlCaption: '모양이 실제 워드·한글과 조금 다를 수 있어요. 정확한 모양은 "원래 앱으로 열기"로 보세요.',
+  pdfView: 'PDF로 보기',
+  docxView: '문서 보기',
   docxNoPdfTitle: '이 DOCX의 PDF가 아직 없어요',
   docxNoPdfBody: 'Word로 렌더해 PDF를 만들면 여기에서 미리 볼 수 있어요. 컴퓨터에 Microsoft Word가 있어야 해요.',
   docxRender: 'Word로 PDF 만들기',
   docxRendering: 'Word로 렌더하는 중…',
   uncalculatedTitle: '실제 Excel 재계산이 아직 안 됐어요',
   uncalculatedBody: '수식이 많은데 저장된 계산 값이 비어 있어요. Office 렌더 후 실제 값이 달라질 수 있어요.',
-  truncated: '일부만 표시해요',
+  truncated: '파일이 길어서 앞부분만 보여 줘요. 전체는 "원래 앱으로 열기"로 보세요.',
   empty: '비어 있는 파일이에요',
-  unavailable: '이 형식은 미리보기를 지원하지 않아요.',
-  loadFailed: '미리보기를 불러오지 못했어요.'
+  unsupportedTitle: '이 파일은 앱 안에서 아직 못 보여 줘요',
+  unsupportedBody: '"원래 앱으로 열기"를 눌러 확인해 주세요.',
+  tooLargeTitle: '파일이 너무 커서 앱 안에서 미리볼 수 없어요',
+  tooLargeBody: '"원래 앱으로 열기"를 눌러 확인해 주세요.',
+  loadFailed: '미리보기를 불러오지 못했어요.',
+  readFailedBody: '"원래 앱으로 열기"를 누르거나 폴더에서 확인해 주세요.',
+  imageFailedTitle: '이미지를 표시하지 못했어요',
+  imageFailedBody: '"원래 앱으로 열기"를 누르거나 폴더에서 파일을 확인해 주세요.'
 }
 
 export const NAV = {
@@ -1474,13 +1521,13 @@ export const SETTINGS = {
   folderOpenOther: '다른 폴더 열기…',
   folderRecentClear: '목록 지우기',
   /** 유일한 경로 입력칸 — 평소엔 접혀 있고 일반 동선(선택 대화상자·드롭·최근 카드)에는 없다. */
-  trustedTitle: '묻지 않기로 한 폴더',
-  trustedBody: '이 폴더들에서는 도우미가 명령을 실행할 때 확인을 묻지 않아요. 언제든 해제할 수 있어요.',
+  trustedTitle: '이 폴더에서만 항상 허용',
+  trustedBody: '전역 설정이 “매번 묻기”일 때 예외로 허용한 폴더예요. 여기서 해제하면 이 폴더에서도 다시 물어요.',
   trustedOff: '해제',
   folderAdvanced: '고급 — 경로로 열기',
   folderPathLabel: '폴더 경로',
   folderPathOpen: '경로로 열기',
-  // GUI-04 — 열기 실패를 알릴 때 지금 폴더가 어떻게 됐는지를 같이 말한다.
+  // GUI-04 — 폴더 열기 실패를 알릴 때 지금 폴더가 어떻게 됐는지를 같이 말한다.
   folderKeptAfterFail: (name: string) => `"${name}" 폴더는 그대로 열려 있어요.`,
   folderNoneAfterFail: '아직 열려 있는 폴더가 없어요.',
   helperTitle: '도우미 연결',
@@ -1489,15 +1536,13 @@ export const SETTINGS = {
   helperChatClaude: 'Claude',
   helperChatNote: '막히면 아래 "앱 밖 터미널로 도우미 열기"로 같은 도우미를 직접 띄울 수 있어요.',
   /**
-   * 권한 묻기 기본값 — 기본은 '묻지 않기'다. 숨기지 않고 여기 보이는 설정으로 둔다.
-   * tradeoff 는 무엇을 포기하는지 사실만 적는다: 도우미는 논문 폴더 밖의 PDF·웹 문서도 읽고,
-   * 그렇게 읽은 글 안에 섞여 들어온 지시를 앱이 걸러 주지는 않는다. 겁주지 않고,
-   * 근거 없는 안심도 주지 않는다.
+   * 전역 권한 선택은 모든 논문 폴더와 폴더 밖 명령에 적용된다. 설정에서 언제든
+   * 매번 묻게 바꿀 수 있으며, 바꾸면 폴더별 예외도 지운다.
    */
-  permissionWhich: '도우미가 도구를 쓸 때 물어볼까요?',
-  permissionTrust: '묻지 않기 — 기본값',
-  permissionAsk: '쓸 때마다 물어보기',
-  permissionTradeoff: '묻지 않기로 두면 도우미가 명령을 실행하거나 논문 폴더 밖의 파일을 열 때도 확인을 거치지 않아요. 도우미는 참고자료 PDF나 웹 문서도 읽는데, 그렇게 읽은 글 안에 섞여 들어온 지시를 앱이 걸러 주지는 않아요.',
+  permissionWhich: '모든 논문 폴더에서 도우미의 허락 요청을 어떻게 처리할까요?',
+  permissionTrust: '항상 허용 — 모든 논문 폴더에서',
+  permissionAsk: '매번 묻기 — 모든 논문 폴더에서',
+  permissionTradeoff: '항상 허용하면 파일을 고치거나 논문 폴더 밖에 영향을 주는 명령도 확인 없이 실행돼요. 매번 묻기로 바꾸면 폴더별 예외도 해제돼요. 도우미는 참고자료 PDF나 웹 문서도 읽는데, 그렇게 읽은 글 안에 섞여 들어온 지시를 앱이 걸러 주지는 않아요.',
   troubleTitle: '문제 해결',
   toolsTitle: '고급 도구',
   toolsNote: '직접 실행 — 평소엔 필요 없어요',
@@ -1563,8 +1608,22 @@ export const PROJECT_FOLDER = {
   finder: 'Finder에서 열기',
   explorer: '파일 탐색기에서 열기',
   openFailed: '폴더를 열지 못했어요.',
-  createFailed: '폴더를 만들지 못했어요. 다시 시도하거나 내 폴더를 골라 주세요.'
+  createFailed: '폴더를 만들지 못했어요. 다시 시도하거나 내 폴더를 골라 주세요.',
+  permissionTitle: '모든 논문 폴더에서 허락 방식을 골라 주세요.',
+  permissionBody: '항상 허용은 모든 논문 폴더에서 파일 고치기와 폴더 밖 명령까지 자동 승인해요. 매번 묻기는 예전에 허용한 폴더도 다시 물어요. 설정에서 언제든 바꿀 수 있어요.',
+  permissionAlways: '항상 허용',
+  permissionAsk: '매번 묻기',
+  windowsWriteFailed: '지금 하려던 일: 이 폴더를 열어요. 이 폴더에는 임시 파일을 만들 수 없어 열지 않았어요. 해결하려면 내 폴더 고르기로 쓰기 가능한 곳을 골라 주세요. 회사·학교 컴퓨터의 폴더 보호 기능이 막았을 수 있어요.',
+  windowsCreateFailed: '지금 하려던 일: 새 논문 폴더를 만들어요. 이 위치에는 폴더를 만들 수 없어요. 해결하려면 내 폴더 고르기로 쓰기 가능한 폴더를 고르거나 다른 위치를 사용해 주세요. 회사·학교 컴퓨터의 폴더 보호 기능이 막았을 수 있어요.',
+  macFolderDenied: '지금 하려던 일: 새 논문 폴더를 만들어요. macOS가 문서 폴더 접근을 허용하지 않아 아직 만들지 못했어요.',
+  macFolderRecovery: '문서 폴더를 쓰려면 시스템 설정에서 이 앱의 문서 폴더 접근을 허용한 뒤 다시 만들거나, 내 폴더 고르기로 다른 곳을 골라 주세요.',
 } as const
+export function projectFolderCreationError(platform: string, message: string): string {
+  const denied = /\b(EACCES|EPERM)\b|not permitted/i.test(message)
+  if (platform === 'darwin' && denied) return `${PROJECT_FOLDER.macFolderDenied} ${PROJECT_FOLDER.macFolderRecovery}`
+  if (platform === 'win32' && denied) return PROJECT_FOLDER.windowsCreateFailed
+  return PROJECT_FOLDER.createFailed
+}
 
 export const QUESTION_FORM = {
   undecided: '미정',

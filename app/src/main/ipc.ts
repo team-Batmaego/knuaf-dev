@@ -1,9 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, net, shell, systemPreferences } from 'electron'
-import { copyFileSync, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
-import { basename, extname, join, resolve, sep } from 'node:path'
+import { probeProjectWritable } from './project-write'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
+import { insideByFileId } from './file-identity'
 import type { Sidecar } from './sidecar'
-import type { ProjectPeek, WindowInfo } from '../shared/types'
+import type { PreviewPayload, ProjectPeek, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
@@ -23,6 +25,7 @@ import { agentActivity, UpdateSuspendedError } from './update/activity'
 import { AppUpdates } from './update/appService'
 import { AppHandoff } from './update/handoff'
 import { WindowsUpdateRuntime } from './update/windows'
+import { checkDocxZip } from './docx-zip'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -72,6 +75,8 @@ function findNestedProject(root: string): string | null {
 /** Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit. */
 export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService } {
   let currentRoot: string | null = null
+  /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
+  let openSeq = 0
   /** renderer clientId → in-flight sidecar request, for `rpc:cancel` and the agent-busy gate. */
   const inflight = new Map<string, { id: string; method: string }>()
   const config = updateConfig(app.isPackaged)
@@ -121,6 +126,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const agentBusy = (root: string | null): boolean => !!root && chat.busy(root)
 
   ipcMain.handle('rpc', async (_e, method: string, rawParams: Record<string, unknown>, clientId: string) => {
+    if (method === 'artifact.preview') return { error: { code: 'invalid_method', message: '미리보기는 preview:read 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -142,17 +148,32 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   })
 
   ipcMain.handle('project:open', async (_e, root: string) => {
+    // 세대는 **요청이 도착한 순간** 올린다 — 존재 확인 실패로 일찍 돌아가는 요청도 renderer 의
+    // 세대를 올리기 때문이다. 여기서 먼저 올리지 않으면, 늦게 성공한 앞 요청이 지금 화면의
+    // 폴더와 다른 폴더를 허용 기준으로 삼는다(검토 ATTACH-R1-05 2차: B 진행 중 + 없는 C).
+    const seq = ++openSeq
     if (!existsSync(root)) return { error: { code: 'not_found', message: '폴더가 없음: ' + root } }
-    currentRoot = root
     const settings = loadSettings()
+    if (!settings.first_project_permission_asked_at) {
+      if (process.platform === 'win32') {
+        try { await probeProjectWritable(root) }
+        catch (error) { return { error: { code: 'folder_not_writable', message: String(error) } } }
+      }
+      return { error: { code: 'first_project_permission_required', message: '첫 논문 폴더의 전역 권한 방식을 골라 주세요.' } }
+    }
     try {
       const info = await sidecar.configure(root, settings.python_override)
+      // 성공한 전환만 허용 기준을 바꾼다(검토 ATTACH-R1-05). 실패하면 이전 폴더가 그대로
+      // 남아야 메인의 파일 검사 기준과 화면의 현재 폴더가 어긋나지 않는다. 늦게 성공한 옛
+      // 요청(그사이 다른 열기가 시작됨)도 기준을 되돌리지 않는다.
+      if (seq === openSeq) currentRoot = root
       rememberRecent(root)
       onRecentsChanged()
       // 앱이 만든 작업 폴더는 윈도우 탐색기에서 숨긴다 — 학생에게는 자기 자료만 보이게(hidden.ts).
       hideAppDirs(root)
       const w = win()
-      if (w) {
+      // 늦게 성공한 옛 요청은 창 제목도 바꾸지 않는다 — 화면(renderer)이 이미 버린 전환이다.
+      if (w && seq === openSeq) {
         const name = root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || root
         w.setTitle(`${name} — ${APP_NAME}`)
         if (process.platform === 'darwin') w.setRepresentedFilename(root)
@@ -174,7 +195,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('project:pick', async () => {
     const w = win()
     const r = await dialog.showOpenDialog(w!, { properties: ['openDirectory', 'createDirectory'], title: '논문 작업 폴더 선택' })
-    return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
+    if (r.canceled || r.filePaths.length === 0) return null
+    const root = r.filePaths[0]
+    return root
   })
 
   ipcMain.handle('file:pick', async (_e, opts: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }) => {
@@ -183,8 +206,154 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
   })
 
-  ipcMain.handle('shell:reveal', (_e, path: string) => { shell.showItemInFolder(path); return true })
-  ipcMain.handle('shell:open', (_e, path: string) => shell.openPath(path))
+  /**
+   * 학생이 누른 파일 링크·결과물 단추가 여는 **문서 형식** 목록(형님 확정 2026-11-03).
+   * 확장자 하나로 판정하는 곳은 이 상수뿐이고, 판정은 **realpath 를 푼 실제 경로의 마지막
+   * 확장자**로 한다. 이중 확장자는 마지막 것만 본다(`a.txt.exe` → 열지 않음, `a.exe.txt` →
+   * 텍스트로 엶). PDF·이미지·텍스트는 읽기 전용 뷰어, DOCX/XLSX/HWPX/HWP 는 오피스 문서다.
+   * 실행 파일·스크립트·바로가기는 여기에 넣지 않는다. **폴더는 여기로 열지 않는다** —
+   * macOS 의 `.app` 처럼 디렉터리이면서 실행 번들인 것을 `openPath` 에 넘기면 실행 통로가
+   * 된다(검토 ATTACH-R1-01). 폴더는 `folder:open` 의 메인 지정 경로로만 연다.
+   */
+  const OPENABLE_EXTS: Record<string, true> = {
+    '.docx': true, '.xlsx': true, '.pdf': true, '.hwpx': true, '.hwp': true,
+    '.md': true, '.txt': true, '.csv': true, '.png': true, '.jpg': true
+  }
+
+  /**
+   * 파일을 열거나 보여 주기 전의 **마지막 관문**. 화면이 준 경로를 그대로 믿지 않는다 —
+   * 대화 속 링크·도우미 출력에서 온 문자열이므로, 지금 열린 논문 폴더 안에 실제로 있는
+   * 경로인지 메인에서 다시 확인한다.
+   *
+   * ① realpath 로 심링크·정션을 풀고 (없는 경로는 여기서 throw)
+   * ② 포함 관계는 **파일 시스템 신원**(볼륨+파일 ID)으로 판정한다 — 경로 문자열을 NFC/소문자로
+   *    정규화하지 않는다. 서로 다른 이름을 같은 이름으로 합치면 폴더 밖이 통과한다
+   *    (검토 ATTACH-R1-02: 윈도우 `가` vs `가`, 대소문자 구분 디렉터리의 `proj` vs `PROJ`).
+   * `..`·절대경로·다른 드라이브로 폴더 밖을 가리키는 경우는 realpath 결과가 밖이므로 거절된다.
+   */
+  const insideProject = (target: string): string | null => {
+    if (!currentRoot || typeof target !== 'string' || !target) return null
+    try {
+      const rootReal = realpathSync(resolve(currentRoot))
+      // 절대경로는 이 기준으로 다시 푼다 — base 가 심링크(/var → /private/var)여도 같은 규칙을 쓴다.
+      const real = realpathSync(resolve(rootReal, target))
+      return insideByFileId(rootReal, real) ? real : null
+    } catch { return null }
+  }
+  /** Explain a rejected link without weakening the realpath + file-identity read gate. */
+  const outsideProjectTarget = (target: string): boolean => {
+    if (!currentRoot || typeof target !== 'string' || !target) return false
+    let root: string
+    try { root = realpathSync(resolve(currentRoot)) } catch { return false }
+    let candidate = resolve(root, target)
+    while (true) {
+      try { return !insideByFileId(root, realpathSync(candidate)) }
+      catch {
+        const parent = dirname(candidate)
+        if (parent === candidate) return false
+        candidate = parent
+      }
+    }
+  }
+
+  /** 열어도 되는 **문서**인가 — 실제 파일이고 확장자가 위 목록에 있는지만 본다. */
+  const openableDocument = (real: string): boolean => {
+    try { return statSync(real).isFile() && OPENABLE_EXTS[extname(real).toLowerCase()] === true } catch { return false }
+  }
+
+  /**
+   * 열기 응답을 기다린 **뒤** 대체 표시 직전의 재검사(검토 ATTACH-R1-03). 그사이 폴더가
+   * 바뀌거나 파일이 교체됐으면 처음 검사한 경로와 달라진다 — 그러면 대체 표시도 하지 않는다.
+   */
+  const recheckOpen = (target: string, opened: string): string | null => {
+    const again = insideProject(target)
+    return again !== null && again === opened ? again : null
+  }
+
+  const changedError = { error: { code: 'changed', message: '파일 위치가 그사이 바뀌어 열지 않았어요.' } }
+
+  /** 폴더에서 그 항목을 선택해 보여 주기만 한다 — 파일을 실행하지 않는다. */
+  ipcMain.handle('shell:reveal', (_e, target: string) => {
+    const real = insideProject(target)
+    if (!real) return { error: { code: 'invalid_params', message: '논문 폴더 안에 실제로 있는 파일만 폴더에서 보여 줄 수 있어요.' } }
+    shell.showItemInFolder(real)
+    return { result: true }
+  })
+
+  /**
+   * 연결 프로그램으로 열기(문서만). `openPath` 가 오류 문자열을 돌려주면 **재검사 뒤**
+   * 폴더에서 보기로 대신하고 `reason:'open_failed'` 를 담는다. 그 문자열은 연결 프로그램
+   * 부재만 뜻하지 않으므로(검토 ATTACH-R1-07) 화면은 원인을 단정하지 않는다.
+   *
+   * `reason:'extension'` 은 원래 열지 않는 형식. 폴더는 `not_openable` 오류다.
+   */
+  ipcMain.handle('shell:open', async (_e, target: string) => {
+    const real = insideProject(target)
+    if (!real) return { error: { code: 'invalid_params', message: '논문 폴더 안에 실제로 있는 파일만 열 수 있어요.' } }
+    if (!openableDocument(real)) return { error: { code: 'not_openable', message: '앱에서 열지 않는 형식이에요. 폴더에서 볼 수 있어요.' } }
+    const failure = await shell.openPath(real)
+    if (!failure) return { result: { opened: true, revealed: false } }
+    const again = recheckOpen(target, real)
+    if (!again) return changedError
+    shell.showItemInFolder(again)
+    return { result: { opened: false, revealed: true, reason: 'open_failed' } }
+  })
+
+  /**
+   * 대화의 파일 단추 — 열 수 있는 문서면 열고, 아니면(다른 확장자·폴더) 폴더에서 보여 준다.
+   * 화면이 확장자로 판단하지 않는다(판단이 두 곳에 있으면 한 곳만 고쳐진다). 폴더 밖·없는
+   * 파일은 error 로 돌려주고 화면은 결과물 시트로 간다.
+   */
+  ipcMain.handle('shell:open-link', async (_e, target: string) => {
+    const real = insideProject(target)
+    if (!real) return { error: { code: 'invalid_params', message: '논문 폴더 안에 실제로 있는 파일만 열 수 있어요.' } }
+    if (!openableDocument(real)) {
+      shell.showItemInFolder(real)
+      return { result: { opened: false, revealed: true, reason: 'extension' } }
+    }
+    const failure = await shell.openPath(real)
+    if (!failure) return { result: { opened: true, revealed: false } }
+    const again = recheckOpen(target, real)
+    if (!again) return changedError
+    shell.showItemInFolder(again)
+    return { result: { opened: false, revealed: true, reason: 'open_failed' } }
+  })
+
+  /**
+   * 실행형 번들인가 — macOS 앱 번들은 파일 시스템에서 **디렉터리**이고, `openPath` 에 넘기면
+   * LaunchServices 가 실행할 수 있다. 확장자뿐 아니라 `Contents/Info.plist` 구조도 본다
+   * (번들 구조를 다른 이름으로 둔 경우). 이 판정은 폴더 열기 통로에서만 쓴다.
+   */
+  const executableBundle = (real: string): boolean => {
+    if (/\.app$/i.test(real)) return true
+    try { return existsSync(join(real, 'Contents', 'Info.plist')) } catch { return false }
+  }
+
+  /**
+   * 폴더 열기 — **메인이 정한 폴더만**. 화면은 경로를 주지 않고 이름만 준다. 임의 외부 경로가
+   * 이 통로로 들어올 수는 없지만, 그 폴더 자체가 실행형 번들일 수는 있다(사용자가 `.app` 을
+   * 논문 폴더로 고른 경우). 그래서 열기 전에 번들인지 보고, 번들이면 `openPath` 대신
+   * `showItemInFolder` 로 보여 주기만 한다(ATTACH-R1-01 2차).
+   * `project`: 지금 열린 논문 폴더(내용이 열린다 — ATTACH-R1-06). `logs`: 앱 로그 폴더.
+   */
+  ipcMain.handle('folder:open', async (_e, kind: string) => {
+    const target = kind === 'project' ? currentRoot : kind === 'logs' ? app.getPath('logs') : null
+    if (!target) return { error: { code: 'not_found', message: '열 폴더가 없어요. 논문을 먼저 열어 주세요.' } }
+    try {
+      // 로그 폴더는 앱이 만든다 — 처음 열 때 없을 수 있다.
+      mkdirSync(target, { recursive: true })
+      const real = realpathSync(target)
+      if (!statSync(real).isDirectory()) return { error: { code: 'not_found', message: '폴더가 아니에요.' } }
+      if (executableBundle(real)) {
+        shell.showItemInFolder(real)
+        return { result: { revealed: true } }
+      }
+      const failure = await shell.openPath(real)
+      return failure ? { error: { code: 'open_failed', message: failure } } : { result: { revealed: false } }
+    } catch (error) {
+      return { error: { code: 'not_found', message: String(error instanceof Error ? error.message : error) } }
+    }
+  })
 
   /** Resolve relPath inside root; anything escaping the project folder is refused. */
   const insideRoot = (root: string, relPath: string): string | null => {
@@ -197,25 +366,104 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     if (n(p) !== n(base) && !n(p).startsWith(n(base) + sep)) return null
     return p
   }
-  const FILE_READ_EXTS = new Set(['.pdf', '.md', '.txt'])
-  const FILE_READ_MAX = 50 * 1024 * 1024
 
+  // Match a requested path against its supplied project root before exposing existence.
   ipcMain.handle('file:exists', (_e, root: string, relPath: string) => {
     const p = insideRoot(root, relPath)
     return { result: !!p && existsSync(p) }
   })
-
-  ipcMain.handle('file:read', (_e, root: string, relPath: string) => {
-    const p = insideRoot(root, relPath)
-    if (!p) return { error: { code: 'invalid_params', message: '작업 폴더 밖 경로는 읽지 않아요: ' + String(relPath) } }
-    if (!FILE_READ_EXTS.has(extname(p).toLowerCase())) return { error: { code: 'invalid_params', message: '미리보기로 읽을 수 있는 형식이 아니에요: ' + extname(p) } }
+  const PREVIEW_TEXT_MAX = 200 * 1024
+  const PREVIEW_PDF_MAX = 50 * 1024 * 1024
+  const PREVIEW_IMAGE_MAX = 20 * 1024 * 1024
+  const PREVIEW_DOCX_MAX = 15 * 1024 * 1024
+  const readPreviewFile = (path: string, limit: number, truncate = false): { size: number; bytes: Buffer } => {
+    const fd = openSync(path, 'r')
     try {
-      if (statSync(p).size > FILE_READ_MAX) return { error: { code: 'invalid_params', message: '파일이 너무 커서 미리보기하지 않아요(50MB 초과).' } }
-      return { result: readFileSync(p) }
-    } catch (error) {
-      return { error: { code: 'not_found', message: String(error instanceof Error ? error.message : error) } }
+      const opened = fstatSync(fd)
+      const current = statSync(path)
+      if (opened.dev !== current.dev || opened.ino !== current.ino) throw new Error('Preview target changed while opening')
+      const size = opened.size
+      if (size > limit && !truncate) return { size, bytes: Buffer.alloc(0) }
+      const amount = Math.min(size, limit)
+      const bytes = Buffer.allocUnsafe(amount)
+      let read = 0
+      while (read < amount) {
+        const n = readSync(fd, bytes, read, amount - read, read)
+        if (n === 0) break
+        read += n
+      }
+      return { size, bytes: bytes.subarray(0, read) }
+    } finally { closeSync(fd) }
+  }
+
+  ipcMain.handle('preview:read', async (_e, target: string): Promise<{ result: PreviewPayload } | { error: { code: string; message: string } }> => {
+    const rootAtStart = currentRoot
+    const real = insideProject(target)
+    if (!real) return outsideProjectTarget(target)
+      ? { error: { code: 'outside_project', message: '이 논문 폴더 밖의 파일은 열 수 없어요.' } }
+      : { error: { code: 'not_found', message: '파일을 찾지 못했어요.' } }
+    const name = basename(real)
+    if (!openableDocument(real)) {
+      const ext = extname(real).toLowerCase()
+      try {
+        if (!statSync(real).isFile()) return { error: { code: 'not_openable', message: '폴더는 미리볼 수 없어요.' } }
+      } catch { return { error: { code: 'not_found', message: '파일을 찾지 못했어요.' } } }
+      return { result: { kind: 'unsupported', name, ext: extname(real).toLowerCase(), openable: false } }
     }
+    const ext = extname(real).toLowerCase()
+    let size: number
+    try { size = statSync(real).size } catch { return { error: { code: 'not_found', message: '파일을 찾지 못했어요.' } } }
+    const tooLarge = (limit: number, actualSize = size): { result: PreviewPayload } => ({ result: { kind: 'too_large', name, ext, bytes: actualSize, limit } })
+    let result: PreviewPayload
+    try {
+      if (ext === '.hwpx' || ext === '.hwp') result = { kind: 'unsupported', name, ext, openable: true }
+      else if (ext === '.md' || ext === '.txt' || ext === '.csv') {
+        const input = readPreviewFile(real, PREVIEW_TEXT_MAX, true)
+        const text = new TextDecoder('utf-8').decode(input.bytes, { stream: input.size > input.bytes.length })
+        result = input.size === 0 ? { kind: 'empty', name } : { kind: 'text', name, ext, text, truncated: input.size > input.bytes.length }
+      } else if (ext === '.xlsx') {
+        const input = readPreviewFile(real, PREVIEW_PDF_MAX)
+        if (input.size > PREVIEW_PDF_MAX) return tooLarge(PREVIEW_PDF_MAX, input.size)
+        const checked = checkDocxZip(input.bytes)
+        if (!checked.ok) result = { kind: 'preview_error', name, ext, reason: checked.reason }
+        else {
+          const root = rootAtStart
+          if (!root) return { error: { code: 'not_found', message: '열린 논문 폴더가 없어요.' } }
+          const rootReal = realpathSync(root)
+          const rel = relative(rootReal, real)
+          const preview = await sidecar.call('artifact.preview', { root: rootReal, path: rel }) as Extract<PreviewPayload, { kind: 'xlsx' }>
+          if (currentRoot !== rootAtStart || !recheckOpen(target, real)) return changedError
+          result = { ...preview, name }
+        }
+      } else if (ext === '.pdf') {
+        const input = readPreviewFile(real, PREVIEW_PDF_MAX)
+        if (input.size > PREVIEW_PDF_MAX) return tooLarge(PREVIEW_PDF_MAX, input.size)
+        result = { kind: 'pdf', name, bytes: input.bytes }
+      } else if (ext === '.png' || ext === '.jpg') {
+        const input = readPreviewFile(real, PREVIEW_IMAGE_MAX)
+        if (input.size > PREVIEW_IMAGE_MAX) return tooLarge(PREVIEW_IMAGE_MAX, input.size)
+        if (input.size === 0) result = { kind: 'empty', name }
+        else {
+          const mime = ext === '.png' ? 'image/png' : 'image/jpeg'
+          result = { kind: 'image', name, mime, dataUrl: `data:${mime};base64,${input.bytes.toString('base64')}` }
+        }
+      } else if (ext === '.docx') {
+        const input = readPreviewFile(real, PREVIEW_DOCX_MAX)
+        if (input.size === 0) result = { kind: 'empty', name }
+        else if (input.size > PREVIEW_DOCX_MAX) return tooLarge(PREVIEW_DOCX_MAX, input.size)
+        else {
+          const checked = checkDocxZip(input.bytes)
+          if (!checked.ok) result = { kind: 'preview_error', name, ext, reason: checked.reason }
+          else result = { kind: 'docx', name, bytes: input.bytes }
+        }
+      } else result = { kind: 'unsupported', name, ext, openable: false }
+    } catch (error) {
+      return { error: { code: 'preview_read', message: String(error instanceof Error ? error.message : error) } }
+    }
+    if (currentRoot !== rootAtStart || !recheckOpen(target, real)) return changedError
+    return { result }
   })
+
 
   ipcMain.handle('file:save-as', async (_e, root: string, relPath: string) => {
     const p = insideRoot(root, relPath)
@@ -406,7 +654,10 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       const name = projectFolderName(title)
       for (let n = 1; n <= 10000; n++) {
         const root = join(parent, n === 1 ? name : `${name} (${n})`)
-        try { await mkdir(root); return { result: { root } } }
+        try {
+          await mkdir(root)
+          return { result: { root } }
+        }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
       }
       throw new Error('같은 이름의 폴더가 너무 많아요.')

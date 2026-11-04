@@ -68,9 +68,9 @@ export function SettingsScreen() {
     await loadSettings()
     setMode(null)
   }
-  // 설정이 아직 안 읽혔거나 키가 없으면 '묻지 않기' — 디스크 기본값과 같은 쪽으로 읽는다.
+  // Permission mode is global. Ask removes per-folder exceptions; trust leaves the inactive list intact.
   const permission: 'trust' | 'ask' = settings?.permission_mode === 'ask' ? 'ask' : 'trust'
-  const pickPermission = async (m: 'trust' | 'ask') => { await window.knuaf.setSettings({ permission_mode: m }); await loadSettings() }
+  const pickPermission = async (m: 'trust' | 'ask') => { await window.knuaf.setSettings({ permission_mode: m, ...(m === 'ask' ? { trusted_roots: [] } : {}) }); await loadSettings() }
   const pickFolder = async () => { const d = await window.knuaf.pickFolder(); if (d) void tryOpen(d) }
   const base = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
   return (
@@ -93,7 +93,7 @@ export function SettingsScreen() {
             <button className="quiet" onClick={async () => { await window.knuaf.setSettings({ recent: [] }); await loadSettings() }}>{SETTINGS.folderRecentClear}</button>
           </div>
         )}
-        {(settings?.trusted_roots?.length ?? 0) > 0 && (
+        {permission === 'ask' && (settings?.trusted_roots?.length ?? 0) > 0 && (
           <div style={{ marginTop: 'var(--sp-3)' }}>
             <div className="caption"><strong>{SETTINGS.trustedTitle}</strong> — {SETTINGS.trustedBody}</div>
             <div className="row" style={{ marginTop: 'var(--sp-2)', flexWrap: 'wrap' }}>
@@ -128,7 +128,7 @@ export function SettingsScreen() {
           <span>{SETTINGS.helperChatClaude}</span>
         </label>
         <p className="caption">{SETTINGS.helperChatNote}</p>
-        {/* 권한 묻기 기본값은 '묻지 않기'. 숨긴 기본값이 아니라 여기서 보이고 되돌릴 수 있어야 한다. */}
+        {/* 전역 허락 방식은 모든 논문 폴더에 적용되고 여기서 언제든 바꿀 수 있다. */}
         <div className="caption" style={{ marginTop: 'var(--sp-4)', marginBottom: 'var(--sp-1)' }}>{SETTINGS.permissionWhich}</div>
         <label className="opt-row">
           <input type="radio" name="permission-mode" checked={permission === 'trust'} onChange={() => void pickPermission('trust')} />
@@ -176,7 +176,7 @@ export function SettingsScreen() {
         {info && <div className="row app-build-info" style={{ marginTop: 'var(--sp-2)' }}>
           <code title={`${info.buildDate} ${info.buildCommit}`}>{SETTINGS.buildInfo(info.buildDate, info.buildCommit)}</code>
           <button className="quiet" onClick={() => void copyBuildInfo()} aria-label={SETTINGS.copyBuildInfo}>{buildCopy === 'copied' ? SETTINGS.buildInfoCopied : SETTINGS.copyBuildInfo}</button>
-          <button onClick={() => window.knuaf.openPath(info.logs)}>로그 폴더 열기</button>
+          <button onClick={() => void window.knuaf.folderOpen('logs')}>로그 폴더 열기</button>
           {buildCopy === 'failed' && <span role="alert" className="caption">{SETTINGS.buildInfoCopyFailed}</span>}
         </div>}
         <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>{PRIVACY_NOTE}</p>

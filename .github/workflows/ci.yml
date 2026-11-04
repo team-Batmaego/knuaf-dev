@@ -98,6 +98,8 @@ jobs:
           key: ${{ runner.os }}-skill-${{ hashFiles('app/skill-source.json') }}
       - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
       - run: pnpm install --frozen-lockfile
+      - run: node --test scripts/tests/app-release.test.mjs
+      - run: node scripts/tests/check-skill-workflow.mjs
       - run: pnpm typecheck
       - run: pnpm build
       # live-*.spec.ts need a real Claude/Codex login and are excluded without KNUAF_LIVE=1.

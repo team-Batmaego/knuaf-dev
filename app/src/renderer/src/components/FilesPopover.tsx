@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { Icon } from './Icon'
 import { PopHead, Popover, PopRow, PopSep } from './Popover'
 import { useProject } from '../store/project'
@@ -75,16 +76,17 @@ export function MakeRunningLine({ make, fb, compact }: { make: Make; fb?: MakeFe
  * 이어진다. 열림 상태는 종이 칸(`PaperPane`)이 소유한다 — 그래야 중복으로 그리지 않는다.
  */
 export function FilesPopover({ make, open, onOpenChange }: { make: Make; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const { root, artifacts, projectLoad, status, openSheet } = useProject(useShallow((s) => ({ root: s.root, artifacts: s.artifacts, projectLoad: s.projectLoad, status: s.status, openSheet: s.openSheet })))
+  const { root, artifacts, projectLoad, status, openSheet, openPreview } = useProject(useShallow((s) => ({ root: s.root, artifacts: s.artifacts, projectLoad: s.projectLoad, status: s.status, openSheet: s.openSheet, openPreview: s.openPreview })))
   const { derived } = useStage()
   const files = artifacts ?? []
+  const filesButton = useRef<HTMLButtonElement>(null)
   /** 파일마다 한 줄 — 판정은 copy.ts 의 `fileStatusText` 한 곳에 있다(점검 시트도 같은 것을 쓴다). */
   const statusOf = (path: string): string => fileStatusText(path, projectLoad)
   const feedbackFor = (kind: MakeKind): MakeFeedback | null => (make.feedbackKind === kind ? make.feedback : null)
 
   return (
     <div className="pop-host">
-      <button className="lnk" aria-expanded={open} title={PAPER.filesCount(files.length)} onClick={() => onOpenChange(!open)}>
+      <button ref={filesButton} className="lnk" aria-expanded={open} title={PAPER.filesCount(files.length)} onClick={() => onOpenChange(!open)}>
         {/* 다시 만들어야 할 때만 호박색 점 하나(DESIGN §2) — 문구가 아니라 표시라 낭독 이름을 붙인다. */}
         {derived.stale && <span className="dot attn" title={PAPER.staleTitle} aria-label={PAPER.staleTitle} />}
         <Icon name="box" size={14} />{PAPER.filesCount(files.length)}
@@ -112,7 +114,7 @@ export function FilesPopover({ make, open, onOpenChange }: { make: Make; open: b
             ? <div className="pop-empty caption">{FILES_POPOVER.madeNone}</div>
             : files.map((f) => (
               /* 경로는 정본 안 상대경로다 — 플랫폼 구분자 규칙(joinPath)을 거쳐야 윈도우에서도 열린다. */
-              <PopRow key={f.path} icon={<Icon name="doc" size={16} />} onClick={() => void window.knuaf.openPath(joinPath(root, f.path))} meta={statusOf(f.path)}>
+              <PopRow key={f.path} icon={<Icon name="doc" size={16} />} onClick={() => { onOpenChange(false); openPreview(joinPath(root, f.path), filesButton.current) }} meta={statusOf(f.path)}>
                 {f.name}
               </PopRow>
             ))}

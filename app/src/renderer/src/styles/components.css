@@ -455,6 +455,11 @@ dialog.sheet .sheet-foot { display: flex; justify-content: flex-end; gap: var(--
 .preview-table-wrap { overflow: auto; max-height: 60vh; border: var(--hairline) solid var(--line); border-radius: var(--r-md); background: var(--panel); }
 .preview-table { border-collapse: collapse; font-size: var(--fs-caption); min-width: 100%; }
 .preview-table td { border: var(--hairline) solid var(--line); padding: 3px var(--sp-2); white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+/* Shared actions are fixed in the same order in file previews and artifact cards. */
+.preview-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.docx-preview-frame { display: block; width: 100%; height: calc(100vh - 220px); min-height: 320px; border: var(--hairline) solid var(--line); border-radius: var(--r-md); }
+.preview-image { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; }
+.preview-truncation-badge .badge { border-radius: 5px; }
 .artifact-list { max-height: 60vh; overflow: auto; }
 .artifact-list .item { cursor: pointer; }
 .artifact-list .item.active { border-color: var(--accent); background: var(--accent-soft); }

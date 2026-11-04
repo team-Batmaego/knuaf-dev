@@ -1,0 +1,210 @@
+name: app-release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v0.6.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: channel-update
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      version: ${{ steps.source.outputs.version }}
+      asset: ${{ steps.source.outputs.asset }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Enforce workflow pins and input boundaries
+        run: node app/scripts/tests/check-skill-workflow.mjs
+      - name: Regenerate and compare the app signature vector
+        run: node --test app/scripts/tests/app-release.test.mjs
+      - name: Refuse concurrent channel proposals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node app/scripts/check-channel-update-state.mjs
+      - name: Verify tag source and download exact release asset plus build artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, copyFileSync, createReadStream, lstatSync, mkdtempSync, mkdirSync, readdirSync } from 'node:fs'
+          import { createHash } from 'node:crypto'
+          import { execFileSync, spawnSync } from 'node:child_process'
+          import { join } from 'node:path'
+          import { tmpdir } from 'node:os'
+
+          const tag = process.env.APP_RELEASE_TAG
+          const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag ?? '')
+          if (!match || match.slice(1).some(part => !Number.isSafeInteger(Number(part)))) throw new Error('Invalid release tag')
+          const version = tag.slice(1)
+          const asset = `knuaf-dev-${version}-x64.exe`
+          const mainSha = execFileSync('git', ['rev-parse', 'origin/main'], { encoding: 'utf8' }).trim()
+          const tagSha = execFileSync('git', ['rev-parse', `${tag}^{commit}`], { encoding: 'utf8' }).trim()
+          if (spawnSync('git', ['merge-base', '--is-ancestor', tagSha, mainSha], { stdio: 'ignore' }).status !== 0) throw new Error('Release tag is not an ancestor of main')
+          const taggedPackage = JSON.parse(execFileSync('git', ['show', `${tagSha}:app/package.json`], { encoding: 'utf8' }))
+          if (taggedPackage.version !== version) throw new Error('Tag version does not match app/package.json at the tag')
+          const tagKeys = execFileSync('git', ['show', `${tagSha}:app/src/main/update/keys.ts`])
+          const mainKeys = execFileSync('git', ['show', `${mainSha}:app/src/main/update/keys.ts`])
+          if (!tagKeys.equals(mainKeys)) throw new Error('Update public keys at the release tag differ from main')
+
+          const release = JSON.parse(execFileSync('gh', ['release', 'view', tag, '--json', 'tagName,assets'], { encoding: 'utf8' }))
+          if (release.tagName !== tag || release.assets.filter(item => item.name === asset).length !== 1) throw new Error('Expected release asset is missing or duplicated')
+          const temp = mkdtempSync(join(tmpdir(), 'app-release-'))
+          const releaseDir = join(temp, 'release')
+          const artifactDir = join(temp, 'artifact')
+          mkdirSync(releaseDir); mkdirSync(artifactDir)
+          execFileSync('gh', ['release', 'download', tag, '--pattern', asset, '--dir', releaseDir], { stdio: 'inherit' })
+
+          const runs = JSON.parse(execFileSync('gh', ['run', 'list', '--workflow', 'release.yml', '--commit', tagSha, '--json', 'databaseId,headSha,status,conclusion,createdAt', '--limit', '100'], { encoding: 'utf8' }))
+          const run = runs.filter(item => item.headSha === tagSha && item.status === 'completed' && item.conclusion === 'success')
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+          if (!run) throw new Error('No successful release.yml run exists for this tag commit')
+          try {
+            execFileSync('gh', ['run', 'download', String(run.databaseId), '--name', 'windows-installer', '--dir', artifactDir], { stdio: 'inherit' })
+          } catch {
+            throw new Error('Matching windows-installer artifact is unavailable; stop (SHA256SUMS fallback is forbidden)')
+          }
+          function findAsset(root, name) {
+            const found = []
+            const visit = dir => {
+              for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                const path = join(dir, entry.name)
+                if (entry.isDirectory()) visit(path)
+                else if (entry.isFile() && entry.name === name) found.push(path)
+              }
+            }
+            visit(root)
+            if (found.length !== 1) throw new Error('Expected exactly one installer in windows-installer artifact')
+            const stat = lstatSync(found[0])
+            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Artifact installer is not a regular file')
+            return found[0]
+          }
+          async function digest(path) {
+            const stat = lstatSync(path)
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 1024 * 1024 * 1024) throw new Error('Installer size is outside the allowed range')
+            const hash = createHash('sha256')
+            let size = 0
+            for await (const chunk of createReadStream(path)) { size += chunk.length; hash.update(chunk) }
+            if (size !== stat.size) throw new Error('Installer changed while being read')
+            return { size, sha256: hash.digest('hex') }
+          }
+          const releaseAsset = await digest(join(releaseDir, asset))
+          const artifactAsset = await digest(findAsset(artifactDir, asset))
+          if (releaseAsset.size !== artifactAsset.size || releaseAsset.sha256 !== artifactAsset.sha256) throw new Error('Release asset differs from its tag build artifact')
+          const preparedDir = join(process.env.RUNNER_TEMP, 'app-release-installer')
+          mkdirSync(preparedDir)
+          copyFileSync(join(releaseDir, asset), join(preparedDir, asset))
+          appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nversion=${version}\nasset=${asset}\n`)
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `## App release source verified\n\n- Tag: \`${tag}\` (commit \`${tagSha}\`, main commit \`${mainSha}\`)\n- Asset: \`${asset}\`\n- Size: ${releaseAsset.size} bytes\n- SHA-256: \`${releaseAsset.sha256}\`\n- Source workflow run: [${run.databaseId}](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${run.databaseId})\n\nThis summary is produced before the skill-release environment approval job. No checksum-file fallback was used.\n`)
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: app-release-installer
+          path: ${{ runner.temp }}/app-release-installer/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: skill-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: app-release-installer
+          path: ${{ runner.temp }}/app-release-installer
+      - name: Check the signing key and sign the verified installer
+        env:
+          APP_SIGNING_PRIVATE_KEY: ${{ secrets.SKILL_SIGNING_PRIVATE_KEY }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          INSTALLER: ${{ runner.temp }}/app-release-installer/${{ needs.prepare.outputs.asset }}
+          CHANNEL: updates/channel.json
+          OUTPUT: ${{ runner.temp }}/app-release-signed
+        run: node app/scripts/sign-app.mjs --tag "$TAG" --installer "$INSTALLER" --channel "$CHANNEL" --output "$OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-app-channel
+          path: ${{ runner.temp }}/app-release-signed
+          if-no-files-found: error
+          retention-days: 1
+
+  push-channel-branch:
+    needs: [prepare, sign]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-app-channel
+          path: ${{ runner.temp }}/signed-app-channel
+      - name: Push the app channel proposal branch only
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SIGNED_CHANNEL: ${{ runner.temp }}/signed-app-channel/channel.json
+        run: |
+          set -euo pipefail
+          branch="app-channel-v$VERSION"
+          cp "$SIGNED_CHANNEL" updates/channel.json
+          git add -- updates/channel.json
+          if git diff --cached --quiet; then
+            echo "Channel already matches the signed proposal; no branch update needed."
+          else
+            changed=$(git diff --cached --name-only)
+            if [ "$changed" != "updates/channel.json" ]; then
+              echo "::error::Refusing to publish files outside updates/channel.json"
+              exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "release: propose signed app $VERSION"
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+          {
+            printf '## App channel proposal\n\nBranch: %s. No PR, tag, or release was created. Open the PR manually.\n\n' "$branch"
+            printf '%s\n' '- [ ] Confirm channel.json changes only the app entry; the skill entry matches main.'
+            printf '%s\n' '- [ ] For v0.6.0: merge the channel PR before making the release public; immediately after publication run `node app/scripts/check-app-channel.mjs --channel updates/channel.json` and attach its output. If it fails, revert the channel change.'
+            printf '%s\n' '- [ ] For v0.6.1 and later: publish first, run the same anonymous asset check against the proposed channel, and attach its output before merging.'
+          } >> "$GITHUB_STEP_SUMMARY"

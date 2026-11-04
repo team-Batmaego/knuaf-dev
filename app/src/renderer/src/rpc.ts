@@ -1,4 +1,4 @@
-import type { ArtifactItem, ArtifactPreview, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -102,7 +102,6 @@ export const rpc = {
   buildTree: (root: string) => call<StageBuildTree>('fs.build_tree', { root }),
   materials: (root: string) => call<MaterialsData>('materials.list', { root }),
   artifacts: (root: string) => call<{ items: ArtifactItem[] }>('artifact.list', { root }),
-  artifactPreview: (root: string, path: string) => call<ArtifactPreview>('artifact.preview', { root, path }),
   init: (root: string) => call<{ project: unknown }>('project.init', { root }),
   /** Long-running script; pass a `clientId` from `newClientId()` to be able to `cancel` it. */
   script,

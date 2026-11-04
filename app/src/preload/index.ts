@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
-import type { AppInfo, OpenProjectReply, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { AppInfo, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
@@ -13,6 +13,17 @@ export interface AppUpdateStatus {
 }
 
 type UpdateReply<T> = { result: T } | { error: { code: string; message: string } }
+/**
+ * `shell:open`·`shell:open-link` 응답. 열지 못했으면 메인이 이미 폴더에서 보여 주고
+ * `revealed: true` 를 돌려준다 — `open_failed` 는 OS 열기 실패, `extension` 은 원래 열지 않는
+ * 형식이다. 어느 쪽이든 화면은 원인을 단정하지 않고 사실만 말한다.
+ */
+export type OpenFileReply =
+  | { result: { opened: boolean; revealed: boolean; reason?: 'extension' | 'open_failed' } }
+  | { error: { code: string; message: string } }
+
+/** `folder:open` — 화면은 경로가 아니라 이름만 준다(메인이 정한 폴더만 열린다). */
+export type FolderKind = 'project' | 'logs'
 const subscribe = <T>(channel: string, fn: (status: T) => void): (() => void) => {
   const listener = (_event: unknown, status: T): void => fn(status)
   ipcRenderer.on(channel, listener)
@@ -55,11 +66,27 @@ const api = {
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('project:pick'),
   createProjectFolder: (title: string): Promise<{ result: { root: string } } | { error: { code: string; message: string } }> => ipcRenderer.invoke('project:create-folder', title),
   pickFile: (opts: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | null> => ipcRenderer.invoke('file:pick', opts),
-  reveal: (path: string) => ipcRenderer.invoke('shell:reveal', path),
-  openPath: (path: string) => ipcRenderer.invoke('shell:open', path),
-  /** Read a previewable file (.pdf/.md/.txt) inside the project root → { result: Uint8Array } | { error }. */
-  fileRead: (root: string, relPath: string) => ipcRenderer.invoke('file:read', root, relPath),
-  /** Existence check inside the project root → { result: boolean }. Unlike fileRead, any extension. */
+  /**
+   * ‘폴더에서 보기’ — 메인이 지금 연 논문 폴더 안에 실제로 있는 경로인지 다시 확인한 뒤
+   * 탐색기/Finder 에서 그 항목을 선택해 보여 준다. 폴더 밖·심링크로 밖을 가리키는 경로·
+   * 없는 경로는 `{ error }` 로 거절한다. 앱이 파일을 실행하지는 않는다(GUI-12).
+   */
+  reveal: (path: string): Promise<{ result: true } | { error: { code: string; message: string } }> => ipcRenderer.invoke('shell:reveal', path),
+  openPath: (path: string): Promise<OpenFileReply> => ipcRenderer.invoke('shell:open', path),
+  /**
+   * 대화의 파일 단추 — 메인이 경로를 다시 확인한 뒤, 문서 형식이면 연결 프로그램으로 열고
+   * 아니면 폴더에서 보여 준다. 폴더 밖·없는 파일은 error 로 돌아온다(화면은 결과물 시트로).
+   */
+  openFileLink: (path: string): Promise<OpenFileReply> => ipcRenderer.invoke('shell:open-link', path),
+  /**
+   * 폴더 열기 — `project`(지금 논문 폴더) 또는 `logs`(앱 로그 폴더)만. 경로를 넘기지 않으므로
+   * 임의 폴더가 이 통로로 열리지 않는다. 그 폴더가 실행형 번들(`.app` 등)이면 열지 않고
+   * `revealed: true` 로 보여 주기만 한다.
+   */
+  folderOpen: (kind: FolderKind): Promise<{ result: { revealed: boolean } } | { error: { code: string; message: string } }> => ipcRenderer.invoke('folder:open', kind),
+  /** Read an in-app preview using the main process's current project and path guard. */
+  previewRead: (target: string): Promise<RpcResult<PreviewPayload>> => ipcRenderer.invoke('preview:read', target),
+  /** Existence check inside the project root → { result: boolean }. */
   fileExists: (root: string, relPath: string): Promise<{ result: boolean } | { error: { code: string; message: string } }> => ipcRenderer.invoke('file:exists', root, relPath),
   /** Copy a file inside the project root to a user-chosen location → { result: savedPath | null } | { error }. */
   fileSaveAs: (root: string, relPath: string) => ipcRenderer.invoke('file:save-as', root, relPath),

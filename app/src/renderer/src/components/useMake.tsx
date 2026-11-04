@@ -49,6 +49,12 @@ export interface Make {
   feedback: MakeFeedback | null
   /** 그 피드백이 어느 줄에서 났는가. */
   feedbackKind: MakeKind | null
+  /**
+   * 네 줄이 **모두** 꺼져 있는 이유 한 줄(논문 준비 기록 없음·상태 읽기 실패). 각 줄은
+   * `!!status` 를 조건으로 하므로, 정본이 없으면 이유 없이 회색 단추만 남는다.
+   * 켜진 줄이 하나라도 있으면 null.
+   */
+  blocked: string | null
   clearFeedback: () => void
   run: (kind: MakeKind) => Promise<void>
   /** 실패가 가리키는 고급 도구 프리셋(설정 > 고급 도구 딥링크). */
@@ -146,9 +152,9 @@ const runner: MakeRunner = {
  */
 export function useMake(): Make {
   const st = useMakeState()
-  const { root, status, refresh, openSettings, sections, artifacts, materials } = useProject(useShallow((s) => ({
+  const { root, status, refresh, openSettings, sections, artifacts, materials, hasProject } = useProject(useShallow((s) => ({
     root: s.root, status: s.status, refresh: s.refresh, openSettings: s.openSettings,
-    sections: s.sections, artifacts: s.artifacts, materials: s.materials
+    sections: s.sections, artifacts: s.artifacts, materials: s.materials, hasProject: s.hasProject
   })))
   const closeSheet = useProject((s) => s.closeSheet)
   const appendDraft = useChat((s) => s.appendDraft)
@@ -178,17 +184,20 @@ export function useMake(): Make {
   const taken = (p: string): boolean => !!artifacts?.some((i) => i.path === p)
   const missingReview = !!status?.lanes.content_review.independent_review_missing
 
+  // 네 줄의 조건이 전부 `!!status` 라, 정본이 없거나 상태를 못 읽으면 모두 꺼진다.
+  // 그때는 각 줄의 안내도 비운다 — 꺼진 단추를 누르라고 시키지 않는다(검토 ATTACH-R1-08).
+  const blocked = status ? null : hasProject ? ARTIFACTS.make.blockedNoStatus : ARTIFACTS.make.blockedNoProject
   const rows: MakeRow[] = [
-    { kind: 'review', label: ARTIFACTS.make.review, body: ARTIFACTS.make.reviewBody, enabled: !!status && written > 0 },
+    { kind: 'review', label: ARTIFACTS.make.review, body: status ? ARTIFACTS.make.reviewBody : '', enabled: !!status && written > 0 },
     {
       kind: 'docx',
       label: ARTIFACTS.make.docx,
-      body: (hasMdInput || st.hasPaperInput) ? ARTIFACTS.make.docxBody : reviewMd ? ARTIFACTS.make.docxBodyOnly : ARTIFACTS.make.docxNoInput,
+      body: !status ? '' : (hasMdInput || st.hasPaperInput) ? ARTIFACTS.make.docxBody : reviewMd ? ARTIFACTS.make.docxBodyOnly : ARTIFACTS.make.docxNoInput,
       enabled: !!status && (hasMdInput || st.hasPaperInput || derived.hasReview)
     },
     // 제출용은 관문이 막혀도 활성 — 누르는 순간이 고지의 자리다(Q1·#4 기각).
-    { kind: 'submission_candidate', label: ARTIFACTS.make.submit, body: ARTIFACTS.make.submitBody, enabled: !!status },
-    { kind: 'xlsx', label: ARTIFACTS.make.xlsx, body: hasStudentFinance ? ARTIFACTS.make.xlsxBody : OUTPUT_COPY.templateChoice, enabled: !!status }
+    { kind: 'submission_candidate', label: ARTIFACTS.make.submit, body: status ? ARTIFACTS.make.submitBody : '', enabled: !!status },
+    { kind: 'xlsx', label: ARTIFACTS.make.xlsx, body: !status ? '' : hasStudentFinance ? ARTIFACTS.make.xlsxBody : OUTPUT_COPY.templateChoice, enabled: !!status }
   ]
 
   // SKILL.md:34 / Q1 — 고지는 시도와 결과 양쪽의 첫 줄이다.
@@ -410,6 +419,7 @@ export function useMake(): Make {
   }
   return {
     rows,
+    blocked,
     runner: live,
     making: st.making,
     feedback: ownsResult ? st.feedback : null,
