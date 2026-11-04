@@ -6,7 +6,7 @@
 
 ## 구조
 
-- `sidecar/knuaf_sidecar/` — stdlib만 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
+- `sidecar/knuaf_sidecar/` — 프로토콜은 stdlib, XLSX 미리보기는 openpyxl을 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
   JSON-lines(stdin/stdout)로 대화합니다. `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
   CLI 전용 스크립트(build_docx, gg_excel_*, gg_office, gg_deps, gg_kordoc)는 서브프로세스로 실행해 출력을
   `{ok, exit, status, data, path, block_reason, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
@@ -52,6 +52,8 @@
     프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
     `legacy` 빌드)로 그리고, DOCX는 `docx-preview`를 sandbox iframe 안에서 렌더링합니다. 그림·수식·복잡한 서식은
     일부 다를 수 있다는 안내를 표시합니다. XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
+    openpyxl이 없는 실행기를 선택한 경우에는 빈 화면 대신 패키지 준비가 필요하다는 이유와
+    **원래 앱으로 열기** 안내를 표시합니다. 표 시트가 없는 파일도 빈 상태 안내를 표시합니다.
     **재무 엑셀 만들기**는 등록한 학생 재무 파일을 우선 복사하고, 없으면 동봉 기준 양식으로
     새 파일을 만듭니다. 이름 충돌 때는 새 버전 이름을 쓰며 학생 원본·기존 입력값을 덮어쓰지 않습니다.
     양식 정본은 `skills/knuaf-dev/assets/templates/finance-template.xlsx`이고,
@@ -164,13 +166,21 @@ pnpm dist:mac           # 또는 pnpm dist:win
 
 ```bash
 pnpm fetch:python       # python-build-standalone 3.12 → resources/python
-pnpm build:wheelhouse   # openpyxl·python-docx·lxml·pypdf 휠 → resources/wheelhouse
+pnpm build:wheelhouse   # 런타임 휠 → resources/wheelhouse + 동봉 Python에 미리보기용 openpyxl 설치
 pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png
 pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf
 pnpm stage:skill        # ../skills/knuaf-dev → resources/skill
 ```
 
-번들 python은 `gg_deps.py ensure`의 base 인터프리터로만 쓰이고, 패키지는 계약대로 `<프로젝트>/.venv`에 설치됩니다.
+번들 Python은 사이드카 실행과 `gg_deps.py ensure`의 base 인터프리터로 쓰입니다.
+XLSX 미리보기는 프로젝트 패키지 준비 전에도 동작해야 하므로 `build:wheelhouse`가 동봉 Python에
+openpyxl과 그 의존성(et-xmlfile)만 오프라인으로 설치하고 import를 확인합니다. 기존 휠하우스를
+재사용해도 이 설치·확인은 생략하지 않습니다. 논문 작성·문서 도구의 나머지 패키지는 기존대로
+`<프로젝트>/.venv`에 설치됩니다. 명시적 실행기·프로젝트 venv·관리 런타임의 선택 우선순위는 바꾸지 않습니다.
+
+화면을 점유하지 않는 XLSX 렌더러 회귀: `pnpm -C app exec playwright test xlsx-preview.spec.ts`.
+이 스펙은 Electron을 실행하지 않고 headless Chromium에서 실제 미리보기 컴포넌트를 확인합니다.
+Windows 분기는 브리지의 platform 값으로 확인하므로 Windows 설치본 실기기 검증을 대신하지 않습니다.
 
 ## 지키는 규칙 (스킬 문서에서 옴)
 

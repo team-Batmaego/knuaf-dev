@@ -431,7 +431,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
           if (!root) return { error: { code: 'not_found', message: '열린 논문 폴더가 없어요.' } }
           const rootReal = realpathSync(root)
           const rel = relative(rootReal, real)
-          const preview = await sidecar.call('artifact.preview', { root: rootReal, path: rel }) as Extract<PreviewPayload, { kind: 'xlsx' }>
+          const preview = await sidecar.call<Omit<Extract<PreviewPayload, { kind: 'xlsx' }>, 'name'> | Omit<Extract<PreviewPayload, { kind: 'unavailable' }>, 'name'>>('artifact.preview', { root: rootReal, path: rel })
           if (currentRoot !== rootAtStart || !recheckOpen(target, real)) return changedError
           result = { ...preview, name }
         }
