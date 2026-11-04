@@ -1,11 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, net, shell, systemPreferences } from 'electron'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
 import { probeProjectWritable } from './project-write'
-import { basename, extname, join, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { insideByFileId } from './file-identity'
 import type { Sidecar } from './sidecar'
-import type { ProjectPeek, WindowInfo } from '../shared/types'
+import type { PreviewPayload, ProjectPeek, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
@@ -25,6 +25,7 @@ import { agentActivity, UpdateSuspendedError } from './update/activity'
 import { AppUpdates } from './update/appService'
 import { AppHandoff } from './update/handoff'
 import { WindowsUpdateRuntime } from './update/windows'
+import { checkDocxZip } from './docx-zip'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -125,6 +126,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const agentBusy = (root: string | null): boolean => !!root && chat.busy(root)
 
   ipcMain.handle('rpc', async (_e, method: string, rawParams: Record<string, unknown>, clientId: string) => {
+    if (method === 'artifact.preview') return { error: { code: 'invalid_method', message: '미리보기는 preview:read 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -238,6 +240,21 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       return insideByFileId(rootReal, real) ? real : null
     } catch { return null }
   }
+  /** Explain a rejected link without weakening the realpath + file-identity read gate. */
+  const outsideProjectTarget = (target: string): boolean => {
+    if (!currentRoot || typeof target !== 'string' || !target) return false
+    let root: string
+    try { root = realpathSync(resolve(currentRoot)) } catch { return false }
+    let candidate = resolve(root, target)
+    while (true) {
+      try { return !insideByFileId(root, realpathSync(candidate)) }
+      catch {
+        const parent = dirname(candidate)
+        if (parent === candidate) return false
+        candidate = parent
+      }
+    }
+  }
 
   /** 열어도 되는 **문서**인가 — 실제 파일이고 확장자가 위 목록에 있는지만 본다. */
   const openableDocument = (real: string): boolean => {
@@ -349,25 +366,104 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     if (n(p) !== n(base) && !n(p).startsWith(n(base) + sep)) return null
     return p
   }
-  const FILE_READ_EXTS = new Set(['.pdf', '.md', '.txt'])
-  const FILE_READ_MAX = 50 * 1024 * 1024
 
+  // Match a requested path against its supplied project root before exposing existence.
   ipcMain.handle('file:exists', (_e, root: string, relPath: string) => {
     const p = insideRoot(root, relPath)
     return { result: !!p && existsSync(p) }
   })
-
-  ipcMain.handle('file:read', (_e, root: string, relPath: string) => {
-    const p = insideRoot(root, relPath)
-    if (!p) return { error: { code: 'invalid_params', message: '작업 폴더 밖 경로는 읽지 않아요: ' + String(relPath) } }
-    if (!FILE_READ_EXTS.has(extname(p).toLowerCase())) return { error: { code: 'invalid_params', message: '미리보기로 읽을 수 있는 형식이 아니에요: ' + extname(p) } }
+  const PREVIEW_TEXT_MAX = 200 * 1024
+  const PREVIEW_PDF_MAX = 50 * 1024 * 1024
+  const PREVIEW_IMAGE_MAX = 20 * 1024 * 1024
+  const PREVIEW_DOCX_MAX = 15 * 1024 * 1024
+  const readPreviewFile = (path: string, limit: number, truncate = false): { size: number; bytes: Buffer } => {
+    const fd = openSync(path, 'r')
     try {
-      if (statSync(p).size > FILE_READ_MAX) return { error: { code: 'invalid_params', message: '파일이 너무 커서 미리보기하지 않아요(50MB 초과).' } }
-      return { result: readFileSync(p) }
-    } catch (error) {
-      return { error: { code: 'not_found', message: String(error instanceof Error ? error.message : error) } }
+      const opened = fstatSync(fd)
+      const current = statSync(path)
+      if (opened.dev !== current.dev || opened.ino !== current.ino) throw new Error('Preview target changed while opening')
+      const size = opened.size
+      if (size > limit && !truncate) return { size, bytes: Buffer.alloc(0) }
+      const amount = Math.min(size, limit)
+      const bytes = Buffer.allocUnsafe(amount)
+      let read = 0
+      while (read < amount) {
+        const n = readSync(fd, bytes, read, amount - read, read)
+        if (n === 0) break
+        read += n
+      }
+      return { size, bytes: bytes.subarray(0, read) }
+    } finally { closeSync(fd) }
+  }
+
+  ipcMain.handle('preview:read', async (_e, target: string): Promise<{ result: PreviewPayload } | { error: { code: string; message: string } }> => {
+    const rootAtStart = currentRoot
+    const real = insideProject(target)
+    if (!real) return outsideProjectTarget(target)
+      ? { error: { code: 'outside_project', message: '이 논문 폴더 밖의 파일은 열 수 없어요.' } }
+      : { error: { code: 'not_found', message: '파일을 찾지 못했어요.' } }
+    const name = basename(real)
+    if (!openableDocument(real)) {
+      const ext = extname(real).toLowerCase()
+      try {
+        if (!statSync(real).isFile()) return { error: { code: 'not_openable', message: '폴더는 미리볼 수 없어요.' } }
+      } catch { return { error: { code: 'not_found', message: '파일을 찾지 못했어요.' } } }
+      return { result: { kind: 'unsupported', name, ext: extname(real).toLowerCase(), openable: false } }
     }
+    const ext = extname(real).toLowerCase()
+    let size: number
+    try { size = statSync(real).size } catch { return { error: { code: 'not_found', message: '파일을 찾지 못했어요.' } } }
+    const tooLarge = (limit: number, actualSize = size): { result: PreviewPayload } => ({ result: { kind: 'too_large', name, ext, bytes: actualSize, limit } })
+    let result: PreviewPayload
+    try {
+      if (ext === '.hwpx' || ext === '.hwp') result = { kind: 'unsupported', name, ext, openable: true }
+      else if (ext === '.md' || ext === '.txt' || ext === '.csv') {
+        const input = readPreviewFile(real, PREVIEW_TEXT_MAX, true)
+        const text = new TextDecoder('utf-8').decode(input.bytes, { stream: input.size > input.bytes.length })
+        result = input.size === 0 ? { kind: 'empty', name } : { kind: 'text', name, ext, text, truncated: input.size > input.bytes.length }
+      } else if (ext === '.xlsx') {
+        const input = readPreviewFile(real, PREVIEW_PDF_MAX)
+        if (input.size > PREVIEW_PDF_MAX) return tooLarge(PREVIEW_PDF_MAX, input.size)
+        const checked = checkDocxZip(input.bytes)
+        if (!checked.ok) result = { kind: 'preview_error', name, ext, reason: checked.reason }
+        else {
+          const root = rootAtStart
+          if (!root) return { error: { code: 'not_found', message: '열린 논문 폴더가 없어요.' } }
+          const rootReal = realpathSync(root)
+          const rel = relative(rootReal, real)
+          const preview = await sidecar.call('artifact.preview', { root: rootReal, path: rel }) as Extract<PreviewPayload, { kind: 'xlsx' }>
+          if (currentRoot !== rootAtStart || !recheckOpen(target, real)) return changedError
+          result = { ...preview, name }
+        }
+      } else if (ext === '.pdf') {
+        const input = readPreviewFile(real, PREVIEW_PDF_MAX)
+        if (input.size > PREVIEW_PDF_MAX) return tooLarge(PREVIEW_PDF_MAX, input.size)
+        result = { kind: 'pdf', name, bytes: input.bytes }
+      } else if (ext === '.png' || ext === '.jpg') {
+        const input = readPreviewFile(real, PREVIEW_IMAGE_MAX)
+        if (input.size > PREVIEW_IMAGE_MAX) return tooLarge(PREVIEW_IMAGE_MAX, input.size)
+        if (input.size === 0) result = { kind: 'empty', name }
+        else {
+          const mime = ext === '.png' ? 'image/png' : 'image/jpeg'
+          result = { kind: 'image', name, mime, dataUrl: `data:${mime};base64,${input.bytes.toString('base64')}` }
+        }
+      } else if (ext === '.docx') {
+        const input = readPreviewFile(real, PREVIEW_DOCX_MAX)
+        if (input.size === 0) result = { kind: 'empty', name }
+        else if (input.size > PREVIEW_DOCX_MAX) return tooLarge(PREVIEW_DOCX_MAX, input.size)
+        else {
+          const checked = checkDocxZip(input.bytes)
+          if (!checked.ok) result = { kind: 'preview_error', name, ext, reason: checked.reason }
+          else result = { kind: 'docx', name, bytes: input.bytes }
+        }
+      } else result = { kind: 'unsupported', name, ext, openable: false }
+    } catch (error) {
+      return { error: { code: 'preview_read', message: String(error instanceof Error ? error.message : error) } }
+    }
+    if (currentRoot !== rootAtStart || !recheckOpen(target, real)) return changedError
+    return { result }
   })
+
 
   ipcMain.handle('file:save-as', async (_e, root: string, relPath: string) => {
     const p = insideRoot(root, relPath)

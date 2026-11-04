@@ -147,8 +147,12 @@ export interface MaterialsData {
 export type ArtifactKind = 'docx' | 'xlsx' | 'pdf' | 'md'
 export interface ArtifactItem { path: string; name: string; kind: ArtifactKind; bytes: number; mtime: number; revision: number | null }
 export interface XlsxSheet { name: string; max_row: number; max_col: number; rows: string[][]; truncated: boolean }
-export type ArtifactPreview =
-  | { kind: 'xlsx'; sheets: XlsxSheet[]; formulas: number; formulas_uncalculated?: boolean }
-  | { kind: 'text'; text: string; truncated: boolean }
-  | { kind: 'pdf' }
-  | { kind: 'unavailable'; reason: string }
+export type PreviewPayload =
+  | { kind: 'pdf' | 'docx'; name: string; bytes: Uint8Array }
+  | { kind: 'xlsx'; name: string; sheets: XlsxSheet[]; formulas: number; formulas_uncalculated?: boolean }
+  | { kind: 'text'; name: string; ext: string; text: string; truncated: boolean }
+  | { kind: 'image'; name: string; mime: 'image/png' | 'image/jpeg'; dataUrl: string }
+  | { kind: 'unsupported'; name: string; ext: string; openable: boolean }
+  | { kind: 'empty'; name: string }
+  | { kind: 'too_large'; name: string; ext: string; bytes: number; limit: number }
+  | { kind: 'preview_error'; name: string; ext: string; reason: 'format' | 'corrupt' | 'too_large' }

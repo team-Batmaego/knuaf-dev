@@ -291,6 +291,7 @@ export function Chat() {
   const firstProjectGate = useProject((s) => s.firstProjectGate)
   const clearPError = useProject((s) => s.clearError)
   const openSheet = useProject((s) => s.openSheet)
+  const openPreview = useProject((s) => s.openPreview)
   const events = useProject((s) => s.events)
   const focusSection = useProject((s) => s.focusSection)
   const paperClosed = useProject((s) => s.paperClosed)
@@ -329,8 +330,6 @@ export function Chat() {
   const folderOpening = useRef<number | null>(null)
   const [queued, setQueued] = useState<{ root: string; text: string; submission: number } | null>(null)
   const [switchNotice, setSwitchNotice] = useState<Provider | null>(null)
-  /** 파일을 열 프로그램이 없어 폴더에서 대신 보여 준 사실 — 학생이 닫을 수 있는 한 줄. */
-  const [fileNotice, setFileNotice] = useState(false)
   const previous = useRef<{ root: string | null; provider: Provider }>({ root: projectRoot, provider })
   const recordingFirstRun = useRef(false)
   const submitNew = (): void => {
@@ -632,19 +631,10 @@ export function Chat() {
     busy={folderBusy} createError={folderError} onBack={() => { submission.current += 1; setQueued(null); setSubmitted(null); setFolderError(null) }} />
 
   /**
-   * 채팅의 파일 단추(형님 확정 2026-11-03 — GUI-12 를 이 결정으로 고쳐 쓴다).
-   *
-   * ① 논문 폴더 안에 실제로 있는 문서(docx·xlsx·pdf·hwpx·hwp·md·txt·csv·png·jpg)면
-   *    연결 프로그램으로 연다. ② 그 밖의 형식은 열지 않고 폴더에서 보여 준다.
-   * ③ 폴더 밖·없는 파일은 결과물 시트로 간다. 판정은 **메인**이 한다 — 도우미가 쓴 링크
-   * 문자열을 화면이 믿고 열지 않고, 확장자 판정도 한 곳(메인 상수)에만 둔다.
+   * 문서 링크는 인앱 미리보기를 먼저 연다. 실제 경로·종류 판정과 읽기는 메인의 단일 관문이 맡는다.
    */
   const openFileLink = (relative: string): void => {
-    void window.knuaf.openFileLink(joinPath(projectRoot, relative)).then((r) => {
-      if ('error' in r) { openSheet('artifacts'); return }
-      // 열 프로그램이 없어 폴더에서 대신 보여 줬다 — 왜 안 열렸는지 한 줄로 말한다.
-      if (r.result.reason === 'open_failed') setFileNotice(true)
-    }).catch(() => openSheet('artifacts'))
+    openPreview(joinPath(projectRoot, relative))
   }
 
   /**
@@ -696,7 +686,6 @@ export function Chat() {
         {waiting && <ZoneLine tone="wait" title={waiting === 'prep' ? CHAT.preparingLine : CHAT.appBusyTitle}
           sub={waitingPrep ? CHAT.preparingQueued : waiting === 'write' ? CHAT.appBusyWaitSub : undefined} />}
         {pError && <ZoneLine tone={toneOf(pError.kind)} title={pError.title} sub={pError.action} raw={pError.raw} onClose={clearPError} />}
-        {fileNotice && <ZoneLine tone="attn" title={CHAT.openFallback} onClose={() => setFileNotice(false)} />}
         {/* 전역 오류로 같은 실패가 뜨는 자리 — 재시도 대상 root 는 store 가 오류와 함께 보관한
             `openFailure.root` 다(이전 프로젝트 root 가 아니다). */}
         {pError && pOpenFailure && pError.code === pOpenFailure.code && (

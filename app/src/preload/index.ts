@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
-import type { AppInfo, OpenProjectReply, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { AppInfo, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
@@ -84,9 +84,9 @@ const api = {
    * `revealed: true` 로 보여 주기만 한다.
    */
   folderOpen: (kind: FolderKind): Promise<{ result: { revealed: boolean } } | { error: { code: string; message: string } }> => ipcRenderer.invoke('folder:open', kind),
-  /** Read a previewable file (.pdf/.md/.txt) inside the project root → { result: Uint8Array } | { error }. */
-  fileRead: (root: string, relPath: string) => ipcRenderer.invoke('file:read', root, relPath),
-  /** Existence check inside the project root → { result: boolean }. Unlike fileRead, any extension. */
+  /** Read an in-app preview using the main process's current project and path guard. */
+  previewRead: (target: string): Promise<RpcResult<PreviewPayload>> => ipcRenderer.invoke('preview:read', target),
+  /** Existence check inside the project root → { result: boolean }. */
   fileExists: (root: string, relPath: string): Promise<{ result: boolean } | { error: { code: string; message: string } }> => ipcRenderer.invoke('file:exists', root, relPath),
   /** Copy a file inside the project root to a user-chosen location → { result: savedPath | null } | { error }. */
   fileSaveAs: (root: string, relPath: string) => ipcRenderer.invoke('file:save-as', root, relPath),

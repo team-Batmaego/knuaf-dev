@@ -1224,16 +1224,25 @@ export const PREVIEW = {
   prev: '이전',
   next: '다음',
   docxPdfCaption: '원문 DOCX를 Word로 렌더한 PDF예요. DOCX 원본과 다를 수 있어요.',
+  docxHtmlCaption: '모양이 실제 워드·한글과 조금 다를 수 있어요. 정확한 모양은 "원래 앱으로 열기"로 보세요.',
+  pdfView: 'PDF로 보기',
+  docxView: '문서 보기',
   docxNoPdfTitle: '이 DOCX의 PDF가 아직 없어요',
   docxNoPdfBody: 'Word로 렌더해 PDF를 만들면 여기에서 미리 볼 수 있어요. 컴퓨터에 Microsoft Word가 있어야 해요.',
   docxRender: 'Word로 PDF 만들기',
   docxRendering: 'Word로 렌더하는 중…',
   uncalculatedTitle: '실제 Excel 재계산이 아직 안 됐어요',
   uncalculatedBody: '수식이 많은데 저장된 계산 값이 비어 있어요. Office 렌더 후 실제 값이 달라질 수 있어요.',
-  truncated: '일부만 표시해요',
+  truncated: '파일이 길어서 앞부분만 보여 줘요. 전체는 "원래 앱으로 열기"로 보세요.',
   empty: '비어 있는 파일이에요',
-  unavailable: '이 형식은 미리보기를 지원하지 않아요.',
-  loadFailed: '미리보기를 불러오지 못했어요.'
+  unsupportedTitle: '이 파일은 앱 안에서 아직 못 보여 줘요',
+  unsupportedBody: '"원래 앱으로 열기"를 눌러 확인해 주세요.',
+  tooLargeTitle: '파일이 너무 커서 앱 안에서 미리볼 수 없어요',
+  tooLargeBody: '"원래 앱으로 열기"를 눌러 확인해 주세요.',
+  loadFailed: '미리보기를 불러오지 못했어요.',
+  readFailedBody: '"원래 앱으로 열기"를 누르거나 폴더에서 확인해 주세요.',
+  imageFailedTitle: '이미지를 표시하지 못했어요',
+  imageFailedBody: '"원래 앱으로 열기"를 누르거나 폴더에서 파일을 확인해 주세요.'
 }
 
 export const NAV = {
