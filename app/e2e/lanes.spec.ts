@@ -406,7 +406,6 @@ test('L-02 Claude는 목록 ID와 정확히 같을 때만 인정하고 표시 �
     [claude({ models: [model('opus', 'Opus (formerly Sonnet)', ['high'])] })],
     base,
     'claude',
-    true
   )
   expect(proposal.accepted).toEqual([])
   expect(proposal.next.writing).toEqual(base.writing)
