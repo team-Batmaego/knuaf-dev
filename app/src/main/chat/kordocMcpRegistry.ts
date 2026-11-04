@@ -10,8 +10,10 @@
  * `ensureKordoc`(③이 정한 런타임을 가져오는 함수)와 `note`(시스템 줄)는 주입된다 — 이 모듈은
  * 프로세스를 띄우지도, 화면을 알지도 않는다.
  */
+import { realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { KordocFs, KordocMcpSpec, KordocRuntime, KordocAttachFailure } from './kordocMcp'
-import { resolveKordocMcp, rootKey } from './kordocMcp'
+import { resolveKordocMcp } from './kordocMcp'
 
 export interface KordocMcpRegistryDeps {
   /** 폴더 → 런타임. 실패는 `null` 또는 예외(둘 다 "이번엔 못 붙었다"로 같다). */
@@ -41,19 +43,29 @@ export class KordocMcpRegistry {
   private specs = new Map<string, KordocMcpSpec>()
   /** 실패 안내를 이미 말한 폴더. */
   private notified = new Set<string>()
-  /** 안전 검증에 실패해 이 프로세스에서 닫아 둔 폴더(`mcpDisabled`). */
+  /** 안전 검증 실패로 닫힌 canonical 키 및, realpath 실패로 남긴 입력 경로. */
   private disabled = new Set<string>()
+  /** 입력 경로별 마지막 realpath 키 — 링크가 사라져도 disable이 캐시 키를 찾는다. */
+  private resolvedKeysByPath = new Map<string, string>()
 
   constructor(private deps: KordocMcpRegistryDeps) {}
 
   private key(root: string): string {
-    return rootKey(root, this.deps.fs)
+    const path = resolve(root)
+    try {
+      const key = this.deps.fs ? this.deps.fs.realpathSync(root) : realpathSync(root)
+      this.resolvedKeysByPath.set(path, key)
+      return key
+    } catch {
+      return path
+    }
   }
 
   /** 폴더의 MCP 사양. 붙일 수 없으면 `null` — 호출자는 MCP 없이 대화를 계속한다. */
   async acquire(root: string): Promise<KordocMcpSpec | null> {
+    const path = resolve(root)
     const key = this.key(root)
-    if (this.disabled.has(key)) return null
+    if (this.disabled.has(path) || this.disabled.has(key)) return null
     const cached = this.specs.get(key)
     if (cached) return cached
 
@@ -64,6 +76,8 @@ export class KordocMcpRegistry {
       this.reportOnce(key, null)
       return null
     }
+    // ensure 대기 중 disable될 수 있으므로, 사양을 만들기 전에 수명 상태를 다시 확인한다.
+    if (this.disabled.has(path) || this.disabled.has(key)) return null
     const resolution = resolveKordocMcp(runtime, root, this.deps.fs)
     if (!resolution.ok) {
       this.reportOnce(key, resolution.reason)
@@ -78,13 +92,22 @@ export class KordocMcpRegistry {
    * 다시 켜는 시도는 다음 앱 실행 때다.
    */
   disable(root: string): void {
+    const path = resolve(root)
     const key = this.key(root)
+    const previousKey = this.resolvedKeysByPath.get(path)
     this.disabled.add(key)
     this.specs.delete(key)
+    if (previousKey) {
+      this.disabled.add(previousKey)
+      this.specs.delete(previousKey)
+    } else {
+      this.disabled.add(path)
+    }
   }
 
   isDisabled(root: string): boolean {
-    return this.disabled.has(this.key(root))
+    const path = resolve(root)
+    return this.disabled.has(path) || this.disabled.has(this.key(root))
   }
 
   private reportOnce(key: string, reason: KordocAttachFailure | null): void {
