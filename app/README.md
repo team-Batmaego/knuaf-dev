@@ -148,7 +148,7 @@ pnpm dist:mac           # 또는 pnpm dist:win
 ```bash
 pnpm fetch:python       # python-build-standalone 3.12 → resources/python
 pnpm build:wheelhouse   # openpyxl·python-docx·lxml·pypdf 휠 → resources/wheelhouse
-pnpm build:icons        # build/icon.svg → icns·ico·png
+pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png
 pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf
 pnpm stage:skill        # ../skills/knuaf-dev → resources/skill
 ```
