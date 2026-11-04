@@ -14,7 +14,6 @@ import { newBlockIndexes, splitBlocks } from '../../../shared/paper'
 import { fileStateOf, isReviewExport } from '../../../shared/files'
 import { zoneOf } from '../../../shared/zone'
 import { hasChange } from '../../../shared/diff'
-import { chapterOf } from '../../../shared/question'
 import { baselineKey, quoteOf, useReview } from '../store/review'
 import { ReviewSelectBar } from './ReviewSelectBar'
 import { ReviewDiffBlocks } from './ReviewDiff'
@@ -22,6 +21,7 @@ import { MATERIALS, PAPER, REVIEW, fileStatusText } from '../copy'
 import type { SectionRow } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 import { joinPath } from '../paths'
+import { questionSection } from './paperNavigation'
 
 /** 절 하나의 본문. `hash` 는 정본이 말하는 본문 지문이다. */
 type Doc = { title: string; draft: string; hash: string }
@@ -43,15 +43,6 @@ function stateWord(status: string): string {
   return PAPER.stateDone
 }
 
-/**
- * 질문 원문에 적힌 장(`Ⅲ장`)에 해당하는 절. 로마 숫자를 제목 앞머리에서 먼저 찾고,
- * 없으면 등록 순서로 본다 — **등록되지 않은 장은 짐작하지 않는다**(R4 원칙).
- */
-function sectionForChapter(sections: SectionRow[], hint: string): SectionRow | null {
-  const n = chapterOf(hint)
-  if (n === null) return null
-  return sections.find((s) => chapterOf(`${s.title}장`) === n) ?? sections.find((s) => s.order === n) ?? null
-}
 
 /**
  * 내 논문 칸 — 저장된 논문을 종이 그대로 보여 준다 (DESIGN §2, 시안 ④~⑦⑩⑭).
@@ -258,8 +249,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const materialItem = (path: string | null | undefined) => path
     ? { path: joinPath(root, path), name: path.split(/[\\/]/).pop() ?? path }
     : null
-  const questionText = card.kind === 'question' ? snapshot?.messages.find((message) => message.id === card.messageId)?.text : null
-  const slotSection = questionText ? sectionForChapter(sections ?? [], questionText)?.id ?? null : null
+  const slotSection = questionSection(card, sections)?.id ?? null
   const writing = sections?.find((s) => s.status === 'drafting') ?? null
   /** 바뀐 절이 하나라도 있어야 "고친 부분 보기"가 켜진다(발주 §③). */
   const changed = (sections ?? []).some((s) => {

@@ -74,8 +74,6 @@ interface ProjectState {
   /** First-folder permission consent is global; the main process gates every project:open caller. */
   firstProjectGate: { root: string; kind: 'permission' | 'write-error' } | null
   sheet: Screen | null
-  /** Absolute target for the single-file preview overlay; it can sit over Checkup without replacing it. */
-  previewPath: string | null
   previewNotice: { title: string; body: string } | null
   previewFocusReturn: PreviewFocusReturn | null
   docPath: string | null
@@ -239,7 +237,6 @@ export const useProject = create<ProjectState>((set, get) => ({
   sidecar: null,
   settings: null,
   sheet: null,
-  previewPath: null,
   previewNotice: null,
   previewFocusReturn: null,
   docPath: null,
@@ -251,6 +248,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   quoteIntent: null,
   setPaneTab: (paneTab) => set({ paneTab: paneTab === 'file' && !get().docPath ? 'paper' : paneTab }),
   openList: (kind) => {
+    if (get().sheet) get().closeSheet()
     if (get().paperClosed) get().setPaperClosed(false)
     set({ paneHold: true, paneTab: 'paper', paneView: 'paper', listIntent: { seq: ++intentSeq, kind } })
   },
@@ -282,13 +280,13 @@ export const useProject = create<ProjectState>((set, get) => ({
       ? { view: keyed.closest('.paperpane') ? 'paper' : 'chat', key: keyed.dataset.focusKey }
       : { view: get().sheet === 'checkup' || !!fallback ? 'paper' : 'chat', key: get().sheet === 'checkup' ? 'head-action' : fallback?.dataset.focusKey ?? '' }
     if (get().paperClosed) get().setPaperClosed(false)
-    set({ previewPath: path, docPath: path, paneTab: 'file', paneHold: true, paneView: 'paper', docReturn: returnTo, sheet: null, previewNotice: null, previewFocusReturn: { trigger, fallback } })
+    set({ docPath: path, paneTab: 'file', paneHold: true, paneView: 'paper', docReturn: returnTo, sheet: null, previewNotice: null, previewFocusReturn: { trigger, fallback } })
   },
   closePreview: () => {
     const focusReturn = get().previewFocusReturn
     const hasSections = !!get().sections?.length
     const view = hasSections ? get().docReturn?.view ?? 'paper' : 'chat'
-    set({ previewPath: null, docPath: null, paneTab: 'paper', paneHold: hasSections && get().paneHold, paneView: view, docReturn: null, previewNotice: null, previewFocusReturn: null })
+    set({ docPath: null, paneTab: 'paper', paneHold: hasSections && get().paneHold, paneView: view, docReturn: null, previewNotice: null, previewFocusReturn: null })
     return focusReturn
   },
   setPreviewNotice: (previewNotice) => set({ previewNotice }),

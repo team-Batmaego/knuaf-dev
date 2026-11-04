@@ -5,7 +5,7 @@ import { WIDE_MIN } from '../../../shared/layout'
 import { PaneHandle } from './PaneHandle'
 import { useChat } from '../store/chat'
 import { zoneOf } from '../../../shared/zone'
-import { chapterOf } from '../../../shared/question'
+import { foldedQuestionTarget } from './paperNavigation'
 
 /** 전이 시간(`--spring-dur`)과 같게 둔다 — 다 끝난 뒤 클래스를 내린다. */
 const ENTER_MS = 500
@@ -36,12 +36,13 @@ export function Workspace({ chat, paper }: { chat: ReactNode; paper: ReactNode }
   const lastQuestion = useRef<string | null>(null)
   useEffect(() => {
     const zone = zoneOf(snapshot, connection, projectStatus)
-    const message = zone.kind === 'question' ? snapshot?.messages.find((item) => item.id === zone.messageId) : null
-    const chapter = message ? chapterOf(message.text) : null
-    const key = message && chapter !== null && sections?.some((section) => section.order === chapter) ? `${root}:${message.id}` : null
-    if (key && key !== lastQuestion.current) setFoldNotice()
-    lastQuestion.current = key
-  }, [root, sections, snapshot, connection, projectStatus, setFoldNotice])
+    const target = foldedQuestionTarget(zone, sections, root, layout.kind === 'folded', lastQuestion.current)
+    if (target.sectionId) {
+      setFoldNotice()
+      useProject.getState().focusSection(target.sectionId)
+    }
+    lastQuestion.current = target.key
+  }, [root, sections, snapshot, connection, projectStatus, setFoldNotice, layout.kind])
   const [entering, setEntering] = useState(false)
   /** 직전에 본 상태(폴더 + 본문 유무). 첫 판정은 전이 없이 기준만 세운다. */
   const prev = useRef<{ root: string | null; body: boolean } | null>(null)

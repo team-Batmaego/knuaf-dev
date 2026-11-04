@@ -78,6 +78,6 @@ test('장 없는 논문에서 문서와 목록을 열면 칸을 세우고 문서
     useProject.getState().consumeListIntent(intent.seq)
     expect(useProject.getState().listIntent).toBeNull()
   } finally {
-    useProject.setState({ root: null, sections: null, paneHold: false, listIntent: null, docPath: null, previewPath: null })
+    useProject.setState({ root: null, sections: null, paneHold: false, listIntent: null, docPath: null })
   }
 })

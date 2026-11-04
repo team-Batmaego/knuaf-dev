@@ -1,6 +1,7 @@
 import { useEffect, type ReactNode } from 'react'
 import { Icon } from './Icon'
 import { useProject } from '../store/project'
+import { closesPaperOverlay } from './paperNavigation'
 import { CLOSE_LABEL } from '../copy'
 
 /**
@@ -14,7 +15,10 @@ export function SheetOver({ open, title, onClose, children, screen }: { open: bo
   // Esc 로 닫힌다 — `<dialog>`(자료·결과물·설정 시트)와 같은 규칙이다.
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape' && !useProject.getState().previewPath) onClose() }
+    const onKey = (e: KeyboardEvent): void => {
+      const { sheet, paneTab } = useProject.getState()
+      if (closesPaperOverlay(e.key, sheet, paneTab)) onClose()
+    }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [open, onClose])

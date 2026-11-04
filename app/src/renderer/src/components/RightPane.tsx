@@ -6,6 +6,8 @@ import { Feedback } from './Feedback'
 import { ARTIFACTS, PREVIEW, describeError } from '../copy'
 import { PAPER_PANE_COPY as COPY } from '../copy-paper'
 import { joinPath } from '../paths'
+import { firstVisibleFocus } from './paperNavigation'
+import { Icon } from './Icon'
 
 export function RightPane({ paper }: { paper: ReactNode }) {
   const root = useProject((s) => s.root)
@@ -26,8 +28,10 @@ export function RightPane({ paper }: { paper: ReactNode }) {
     const target = state.docReturn
     const fallback = state.closePreview()
     requestAnimationFrame(() => {
-      const el = target?.key ? Array.from(document.querySelectorAll<HTMLElement>('[data-focus-key]')).find((node) => node.dataset.focusKey === target.key && node.isConnected && node.offsetParent !== null) : null
-      ;(el ?? (fallback?.trigger?.isConnected && fallback.trigger.offsetParent !== null ? fallback.trigger : null) ?? (target?.view === 'paper' ? document.querySelector<HTMLElement>('.paperpane button') : null) ?? document.querySelector<HTMLElement>('textarea'))?.focus({ preventScroll: true })
+      const keyed = target?.key ? Array.from(document.querySelectorAll<HTMLElement>('[data-focus-key]')).filter((node) => node.dataset.focusKey === target.key) : []
+      const paperButtons = target?.view === 'paper' ? Array.from(document.querySelectorAll<HTMLElement>('.paperpane button')) : []
+      const chatInputs = Array.from(document.querySelectorAll<HTMLElement>('.chat-zone textarea, .chat-zone input, .chat-zone button, .qcard-wrap textarea, .qcard-wrap input, .qcard-wrap button'))
+      firstVisibleFocus([...keyed, fallback?.trigger, fallback?.fallback, ...paperButtons, ...chatInputs])?.focus({ preventScroll: true })
     })
   }
   useEffect(() => {
@@ -70,12 +74,12 @@ export function RightPane({ paper }: { paper: ReactNode }) {
   const selected = (on: boolean): React.CSSProperties => ({ border: 'var(--hairline) solid', borderColor: on ? 'var(--line)' : 'transparent', background: on ? 'var(--bg)' : 'transparent', fontWeight: on ? 600 : 400, borderRadius: '10px 10px 0 0', padding: '7px 12px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
   return <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
     <div role="tablist" aria-label={COPY.tabList} style={{ display: 'flex', height: 42, alignItems: 'end', padding: '7px 12px 0', background: 'var(--bg-2)', borderBottom: 'var(--hairline) solid var(--line)' }} onKeyDown={(e) => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const next = tab === 'paper' ? 'file' : 'paper'; setTab(next); (next === 'paper' ? paperTab : fileTab).current?.focus() } }}>
-      <button ref={paperTab} role="tab" aria-selected={tab === 'paper'} tabIndex={tab === 'paper' ? 0 : -1} style={selected(tab === 'paper')} onClick={() => setTab('paper')}>{COPY.paperTab}</button>
-      <button ref={fileTab} role="tab" aria-selected={tab === 'file'} tabIndex={tab === 'file' ? 0 : -1} title={name} style={selected(tab === 'file')} onClick={() => setTab('file')}>{name}</button>
+      <button ref={paperTab} role="tab" aria-selected={tab === 'paper'} tabIndex={tab === 'paper' ? 0 : -1} style={selected(tab === 'paper')} onClick={() => setTab('paper')}><Icon name="doc" size={14} /> {COPY.paperTab}</button>
+      <button ref={fileTab} role="tab" aria-selected={tab === 'file'} tabIndex={tab === 'file' ? 0 : -1} title={name} style={selected(tab === 'file')} onClick={() => setTab('file')}><Icon name={/\.(xlsx|xlsm)$/i.test(path) ? 'layout' : 'doc'} size={14} /> {name}</button>
       <button aria-label={COPY.closeFile} onClick={close}>×</button>
     </div>
     {tab === 'paper' ? paper : <section data-doc-content style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 20px', minHeight: 56, borderBottom: 'var(--hairline) solid var(--line)' }}><h2 title={name} style={{ fontSize: 15, margin: 0 }}>{name}</h2><span style={{ flex: 1 }} />{item && <button onClick={() => void save()}>{ARTIFACTS.save}</button>}<PreviewActions path={path} onOpen={() => void open()} /></header>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 20px', minHeight: 56, borderBottom: 'var(--hairline) solid var(--line)' }}><div><h2 title={name} style={{ fontSize: 15, margin: 0 }}>{name}</h2><span className="caption">{COPY.fileType(path)} · {COPY.readOnly}</span></div><span style={{ flex: 1 }} />{item && <button onClick={() => void save()}>{ARTIFACTS.save}</button>}<PreviewActions path={path} onOpen={() => void open()} /></header>
       <div style={{ flex: 1, overflow: 'auto', padding: '22px 26px', background: 'var(--desk)' }}>
         {/\.(xlsx|xlsm)$/i.test(path) && <p className="caption">{COPY.excelHint}</p>}
         {saved && <p role="status">{saved}</p>}{error && <Feedback kind="warning" title={PREVIEW.loadFailed} body={error} />}

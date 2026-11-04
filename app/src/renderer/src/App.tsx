@@ -20,7 +20,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { Provider } from '../../shared/chat'
 
 /** 메뉴 막대(`main/menu.ts`)가 보낼 수 있는 화면 이름 — 'chat' 은 "시트를 닫아라"는 뜻이다. */
-const SHEETS: Screen[] = ['materials', 'artifacts', 'checkup', 'settings']
+const SHEETS: Screen[] = ['checkup', 'settings']
 
 /**
  * 앱 — 제목줄 하나, 작업 공간(대화 | 내 논문) 하나, 그 위에 덮이는 시트들 (IMPL-PLAN §4-5).
