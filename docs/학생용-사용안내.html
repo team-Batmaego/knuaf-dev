@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KNUAF-Dev · 창업논문 작성 도우미 사용 안내</title>
+<title>창업논문 도우미 사용 안내</title>
 <style>
 @page { size: A4; margin: 18mm; }
 html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -38,7 +38,7 @@ figure.diagram svg { max-width: 100%; height: auto; border: 0; }
 </style>
 </head>
 <body><main>
-<h1>KNUAF-Dev · 창업논문 작성 도우미 사용 안내 (학생용)</h1>
+<h1>창업논문 도우미 사용 안내 (학생용)</h1>
 <p>논문은 AI 도우미가 채팅으로 인터뷰하며 써요. 이 앱은 그 옆에서 저장 상태와 점검 결과를 보여 주고, 버튼으로 결과물을 만들어요.</p>
 <h2>1. 이 툴은 무엇인가요</h2>
 <p>먼저 이것만은 꼭 알아 두세요.</p>
@@ -88,9 +88,9 @@ figure.diagram svg { max-width: 100%; height: auto; border: 0; }
 <ul><li><strong>Mac 또는 Windows PC</strong> — macOS 14 이상, 또는 Windows 10/11 64비트예요.</li><li><strong>Microsoft Word, Excel</strong> (선택) — 최종 문서를 실제로 열어 보고 렌더할 때 써요. 없어도 논문 쓰기는 돼요.</li><li><strong>ChatGPT 계정 또는 Claude 계정</strong> — ChatGPT 채팅은 ChatGPT 로그인으로 써요. Claude에는 Pro, Max 같은 <strong>유료 요금제</strong> 계정이 필요해요. 둘 중 하나만 있어도 시작할 수 있어요. <strong>Claude나 ChatGPT의 추가 사용(크레딧)은 켜지 마세요.</strong> 종량제로 돈이 나갈 수 있으니 기본 상태로만 써요.</li><li><strong>Codex 또는 Claude Code</strong> — <strong>Windows 설치본에는 Codex 가 함께 들어 있어 따로 설치하지 않아요</strong>(처음 한 번 ChatGPT 로그인만). 맥은 터미널에서 <code>npm i -g @openai/codex</code> 로 직접 설치해요. Claude Code 는 어느 쪽이든 직접 설치해요 — <code>curl -fsSL https://claude.ai/install.sh | bash</code>.</li></ul>
 <h2>3. 설치</h2>
 <p><strong>macOS</strong></p>
-<ol><li><code>KNUAF Thesis Helper-….dmg</code>를 열어요.</li><li>앱을 <strong>응용 프로그램</strong> 폴더로 끌어다 놓아요.</li></ol>
+<ol><li><code>knuaf-dev-….dmg</code>를 열어요.</li><li><strong>창업논문 도우미.app</strong>을 <strong>응용 프로그램</strong> 폴더로 끌어다 놓아요.</li><li>옛 <strong>KNUAF-Dev · 창업논문 작성 도우미.app</strong>은 파일명이 달라 자동으로 교체되지 않아요. 새 앱에서 기존 설정과 논문 폴더를 확인한 뒤 옛 앱 파일만 휴지통으로 옮기고 Dock 아이콘도 새 앱으로 바꿔요. 자세한 순서는 <a href="https://github.com/team-Batmaego/knuaf-dev/blob/main/docs/%EC%84%A4%EC%B9%98-%EC%95%88%EB%82%B4-macOS.md">설치 안내 (macOS)</a>를 봐요.</li></ol>
 <p><strong>Windows</strong></p>
-<ol><li>릴리스에서 <code>knuaf-dev-….exe</code>를 내려받아 두 번 눌러요. <strong>Chrome으로 받기를 권해요.</strong> Edge에서 &quot;일반적으로 다운로드되지 않습니다&quot;로 막히면 항목 옆 <strong>… → 유지</strong>를 누르거나 Chrome으로 받아 봐요.</li><li><strong>&quot;Windows의 PC 보호&quot;</strong> 창이 뜨면 <strong>추가 정보 → 실행</strong>을 눌러요. &quot;추가 정보&quot;가 안 보이면 파일을 오른쪽 클릭 → <strong>속성</strong> → <strong>차단 해제</strong> → <strong>확인</strong> 뒤 다시 실행해요.</li><li>실행 중인 knuaf-dev에서 작업을 저장하고 앱을 닫아요. 옛 앱이 열려 있으면 제거 중 강제로 닫힐 수 있어요. 설치는 바로 진행돼요. 예전에 <strong>모든 사용자(Program Files)</strong>로 설치한 판이 있으면 제거를 위해 관리자 확인 창이 떠요. <strong>예</strong>를 누르면 옛 판을 제거하고 새 판을 내 계정에 설치해요. 확인을 <strong>취소하면 새 판은 설치되지만 옛 판과 그 바로가기(바탕 화면·시작 메뉴)가 남을 수 있어요.</strong> 옛 바로가기는 설정 → 앱 → 설치된 앱에서 이전 버전의 knuaf-dev를 제거하면 사라져요. 논문 자료와 앱 데이터는 지우지 않아요.</li><li>옛 판 제거 중 취소가 아닌 오류가 나면 설치가 중단돼요. 실행 중인 앱을 닫고 설치 파일을 다시 실행해요. 설치가 끝나면 새 앱이 자동으로 열리고, 바탕 화면과 시작 메뉴에 새 바로가기가 생겨요. (앱을 관리자 권한으로 실행하지 마세요.)</li><li>첫 화면에서 <strong>쓰고 있는 AI를 연결</strong>해요. ChatGPT 계정으로 로그인하거나, 이미 설치한 Claude Code를 연결해요. 이때 <strong>Claude나 ChatGPT의 추가 사용(크레딧 충전)은 켜지 마세요.</strong> 종량제로 추가 요금이 나갈 수 있으니 기본 정액 요금제나 기본 상태로만 사용해요.</li></ol>
+<ol><li>릴리스에서 <code>knuaf-dev-….exe</code>를 내려받아 두 번 눌러요. <strong>Chrome으로 받기를 권해요.</strong> Edge에서 &quot;일반적으로 다운로드되지 않습니다&quot;로 막히면 항목 옆 <strong>… → 유지</strong>를 누르거나 Chrome으로 받아 봐요.</li><li><strong>&quot;Windows의 PC 보호&quot;</strong> 창이 뜨면 <strong>추가 정보 → 실행</strong>을 눌러요. &quot;추가 정보&quot;가 안 보이면 파일을 오른쪽 클릭 → <strong>속성</strong> → <strong>차단 해제</strong> → <strong>확인</strong> 뒤 다시 실행해요.</li><li>실행 중인 창업논문 도우미에서 작업을 저장하고 앱을 닫아요. 옛 앱이 열려 있으면 제거 중 강제로 닫힐 수 있어요. 설치는 바로 진행돼요. 예전에 <strong>모든 사용자(Program Files)</strong>로 설치한 판이 있으면 제거를 위해 관리자 확인 창이 떠요. <strong>예</strong>를 누르면 옛 판을 제거하고 새 판을 내 계정에 설치해요. 확인을 <strong>취소하면 새 판은 설치되지만 옛 판과 그 바로가기(바탕 화면·시작 메뉴)가 남을 수 있어요.</strong> 옛 바로가기는 설정 → 앱 → 설치된 앱에서 이전 버전의 knuaf-dev를 제거하면 사라져요. 논문 자료와 앱 데이터는 지우지 않아요.</li><li>옛 판 제거 중 취소가 아닌 오류가 나면 설치가 중단돼요. 실행 중인 앱을 닫고 설치 파일을 다시 실행해요. 설치가 끝나면 새 앱이 자동으로 열리고, 바탕 화면과 시작 메뉴에 새 바로가기가 생겨요. (앱을 관리자 권한으로 실행하지 마세요.)</li><li>첫 화면에서 <strong>쓰고 있는 AI를 연결</strong>해요. ChatGPT 계정으로 로그인하거나, 이미 설치한 Claude Code를 연결해요. 이때 <strong>Claude나 ChatGPT의 추가 사용(크레딧 충전)은 켜지 마세요.</strong> 종량제로 추가 요금이 나갈 수 있으니 기본 정액 요금제나 기본 상태로만 사용해요.</li></ol>
 <p>사진과 함께 보려면 <a href="https://github.com/team-Batmaego/knuaf-dev/blob/main/docs/%EC%84%A4%EC%B9%98-%EC%95%88%EB%82%B4-Windows.md">설치 안내 (Windows)</a>를 봐요.</p>
 <h2>4. 처음 실행</h2>
 <p>앱은 아직 서명이 없어서 처음에는 경고가 나올 수 있어요.</p>

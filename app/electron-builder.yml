@@ -5,11 +5,10 @@ appId: kr.ac.knuaf.doc.companion
 #  productName    → 헬퍼 번들 이름(knuaf-dev Helper.app). 여기에 한글을 쓰면
 #                   "… 헬퍼 Helper.app" 이 되어 앱이 시작하자마자 SIGTRAP 으로 죽는다.
 #                   설치판의 userData 폴더 이름도 여기서 온다 — 반드시 ASCII.
-#  executableName → .app 번들 파일 이름. Finder·응용 프로그램 목록이 보여주는 이름은
-#                   CFBundleDisplayName 이 아니라 이 파일 이름이다(서명 없는 빌드에서
-#                   확인). 한글을 써야 학생이 한글 이름을 본다. dmg 안에 넣고 봉인을
-#                   재검사해 깨지지 않는 것을 확인했다(전에 dmg 의 한글 파일명이 봉인을
-#                   깬 적이 있어 그냥 넘기지 않았다).
+#  executableName → Windows exe·제거 exe 이름. 무인 업데이트의 실행 중 검사·바로가기
+#                   보존이 이 이름을 쓰므로 기존 값을 유지한다.
+#  mac.executableName → .app 파일 이름. 옛 이름의 앱은 자동 교체되지 않으므로
+#                       docs/설치-안내-macOS.md 의 옛 앱 제거 안내를 함께 배포한다.
 #  artifactName   → 내려받는 파일 이름. 링크에 %20 이 끼지 않도록 공백 없는 ASCII.
 productName: knuaf-dev
 executableName: KNUAF-Dev · 창업논문 작성 도우미
@@ -19,8 +18,7 @@ afterSign: scripts/after-sign.mjs
 # afterSign 훅의 임시(ad-hoc) 서명은 자동으로 건너뛰고, 아래 mac.notarize 설정에 따라
 # 공증까지 진행된다. electron-builder 26에서는 notarize 를 명시하지 않으면 공증하지
 # 않으므로(서명만 된 앱은 Gatekeeper가 계속 막는다) 이 키를 지우지 말 것.
-# 다운로드 링크에 %20 이 끼지 않도록 파일명은 공백 없이 만든다
-# (productName 에는 공백이 있어야 하므로 여기서 따로 지정한다).
+# 다운로드 파일명은 표시 이름과 별개로 유지한다 — 업데이트 채널 URL이 이 이름을 쓴다.
 artifactName: knuaf-dev-${version}-${arch}.${ext}
 directories:
   output: dist
@@ -60,10 +58,11 @@ extraResources:
     to: docs/student-guide.html
     filter: ["*.pdf", "*.html", "*.md", "images/**"]
 mac:
+  executableName: 창업논문 도우미
   icon: build/icon.icns
   category: public.app-category.productivity
   extendInfo:
-    CFBundleDisplayName: KNUAF-Dev · 창업논문 작성 도우미
+    CFBundleDisplayName: 창업논문 도우미
     # 스킬이 osascript/AppleScript 로 Word·Excel 을 직접 몬다
     # (skills/knuaf-dev/scripts/gg_office.py). entitlements 의
     # com.apple.security.automation.apple-events 는 '보낼 수 있다'만 정할 뿐,
@@ -112,9 +111,13 @@ nsis:
   runAfterFinish: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  # Windows 표시 이름만 바꾼다. productName·appId·설치 경로·실행 파일명은 유지한다.
+  # 기존 ShortcutName을 읽어 바로가기를 옮기는 것은 electron-builder의 기본 NSIS가 맡는다.
+  shortcutName: 창업논문 도우미
+  uninstallDisplayName: 창업논문 도우미 ${version}
   include: build/installer.nsh
 dmg:
-  title: KNUAF-Dev · 창업논문 작성 도우미
+  title: 창업논문 도우미
   iconSize: 96
   window:
     width: 540

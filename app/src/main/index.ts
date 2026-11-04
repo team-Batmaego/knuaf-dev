@@ -48,7 +48,7 @@ app.setAboutPanelOptions({
   applicationName: APP_NAME,
   applicationVersion: app.getVersion(),
   version: '',
-  credits: 'KNUAF-Dev · 창업논문 작성 도우미\nprod. 특용작물전공 24학번 김대욱 · 산업곤충전공 24학번 이준재\n\n논문은 연결한 AI 도우미가 채팅으로 쓰고, 이 앱은 저장 상태·검사·산출물·복구를 맡습니다.',
+  credits: `${APP_NAME}\nprod. 특용작물전공 24학번 김대욱 · 산업곤충전공 24학번 이준재\n\n논문은 연결한 AI 도우미가 채팅으로 쓰고, 이 앱은 저장 상태·검사·산출물·복구를 맡습니다.`,
   copyright: 'MIT'
 })
 

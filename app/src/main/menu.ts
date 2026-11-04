@@ -41,7 +41,7 @@ export function installMenu(send: (a: MenuAction) => void): void {
     : [{ label: '최근 폴더 없음', enabled: false }]
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{
-      label: app.name,
+      label: APP_NAME,
       submenu: [
         { label: `${APP_NAME} 정보`, role: 'about' as const },
         { type: 'separator' as const },
