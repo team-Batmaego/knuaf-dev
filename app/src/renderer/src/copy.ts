@@ -740,6 +740,7 @@ export const ONBOARD = {
   recommended: '권장',
   installGuide: '설치 안내',
   loginAs: (name: string) => `${name}로 로그인`,
+  offlineHint: '인터넷에 연결한 뒤 로그인해 주세요.',
   reopenBrowser: '브라우저 다시 열기',
   cancel: '취소',
   connectNext: '다음 — 논문 폴더 고르기',
@@ -958,6 +959,7 @@ export const CHAT = {
   attachHint: '파일을 고르거나 끌어 놓으면 경로가 답변 끝에 추가돼요.',
   // 단축키는 툴팁으로 — placeholder는 실제 기능만 말한다(05-어휘교체표 §10).
   placeholder: '답변을 입력하세요',
+  firstRunPlaceholder: '무엇을 쓰고 싶은지 편하게 적어 주세요. 전공이랑 작목만 말해도 돼요.',
   /**
    * 빈 입력칸의 예시 문구 — **상황별**이다(`suggest.ts` 의 `situationOf` 가 고른다).
    * 학생이 도우미에게 하는 말이므로 '-요'체로 쓰고, 앱 단추가 하는 일(검토본·파일 만들기)은
@@ -1526,6 +1528,7 @@ export const PROJECT_FOLDER = {
   title: '논문 파일을 어디에 둘까요?',
   body: '원고와 자료, 만든 파일이 한 곳에 모여요. 같은 이름이 있으면 번호를 붙여요.',
   name: '논문 이름',
+  defaultName: '새 논문',
   create: '앱이 만들어 둘게요',
   recommended: '추천',
   location: (name: string) => `문서 / knuaf-dev / ${name}`,
