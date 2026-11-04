@@ -55,9 +55,9 @@ function cachedChromiums() {
 
 async function launchChromium() {
   const attempts = [
-    { label: 'bundled chromium', opts: {} },
-    ...cachedChromiums().map((exe) => ({ label: exe, opts: { executablePath: exe } })),
-    { label: 'system chrome', opts: { channel: 'chrome' } },
+    { label: 'bundled chromium', opts: { headless: true } },
+    ...cachedChromiums().map((exe) => ({ label: exe, opts: { executablePath: exe, headless: true } })),
+    { label: 'system chrome', opts: { channel: 'chrome', headless: true } },
   ]
   const errors = []
   for (const { label, opts } of attempts) {
