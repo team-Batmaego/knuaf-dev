@@ -570,10 +570,14 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
 
 // ---------------------------------------------------------------- 7. launch
 
+export function workFolderInstructions(root: string): string {
+  return `작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 논문 작업 파일은 여기서 바로 다루세요. 논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요. 스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(.venv, sources/extracts 등)는 그대로 두어도 됩니다.`
+}
+
 export function firstPromptFor(revision: number | null, root?: string): string {
   const base = revision === null || revision < 1 ? '시작하기' : '이어서 하기'
-  // 루트를 명시해 모델이 하위 폴더(knuaf-work 등)를 추측해 만들지 않게 한다.
-  return root ? `${base}\n\n작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 하위 폴더를 새로 만들지 말고 여기서 바로 작업해 주세요.` : base
+  // 작업 루트를 고정하고, 스킬 스크립트가 정해진 자리에 만드는 폴더는 허용한다.
+  return root ? `${base}\n\n${workFolderInstructions(root)}` : base
 }
 
 export async function launch(o: LaunchOptions, deps: LaunchDeps = {}): Promise<LaunchResult> {

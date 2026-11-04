@@ -5,6 +5,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { query, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
+import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import type { ConnectionStatus } from '../../shared/chat'
@@ -478,8 +479,8 @@ export class ClaudeConnection implements AgentConnection {
   async run(text: string, sessionId: string | undefined, events: AgentEvents) {
     if (!(await this.status()).connected) throw new Error('Claude 구독 계정 로그인을 완료해 주세요.')
     this.controller = new AbortController()
-    // 첫 프롬프트에 작업 루트를 명시 — 모델이 하위 폴더를 추측해 만들지 않게.
-    const q = this.active = query({ prompt: sessionId ? text : `/knuaf-dev ${text}\n\n작업 폴더: ${this.options.root}\n이 폴더 자체가 논문 작업 폴더예요. 하위 폴더를 새로 만들지 말고 여기서 바로 작업해 주세요.`, options: {
+    // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
+    const q = this.active = query({ prompt: sessionId ? text : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`, options: {
       cwd: this.options.root, pathToClaudeCodeExecutable: this.options.binary,
       ...claudeSpawnOptions(this.options.binary),
       // The project's own skill copy stays authoritative — a stale ~/.claude/skills
