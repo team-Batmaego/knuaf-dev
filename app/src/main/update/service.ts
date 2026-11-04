@@ -49,6 +49,10 @@ export class SkillUpdates {
     this.set({ phase: 'checking' })
     try {
       const p = await readChannel(this.opts.config, this.opts.fetch, AbortSignal.timeout(15_000))
+      if (!p) {
+        this.candidate = null
+        return this.set({ phase: 'idle', available: null })
+      }
       this.candidate = p
       if (!compatible(p.manifest, this.store.appVersion)) return this.set({ phase: 'needs-app', available: p.manifest.version, message: '이 규칙집은 앱 새 판이 필요해요.' })
       const kind = this.store.disposition(p)
