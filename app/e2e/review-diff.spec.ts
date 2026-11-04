@@ -5,8 +5,12 @@
  * Node 단위로 먼저 잠근다(Playwright 가 Electron 없이 도는 시험이다 — layout.spec.ts 와 같다).
  */
 import { expect, test } from '@playwright/test'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { diffSentences, hasChange, sectionDiff, splitSentences } from '../src/shared/diff'
-import { buildQuotedMessage, quoteOf } from '../src/renderer/src/store/review'
+import { baselineKey, buildQuotedMessage, quoteOf, useReview } from '../src/renderer/src/store/review'
+import { ensureSectionBaseline } from '../src/main/review-baseline'
 
 // ---------------------------------------------------------------- 문장 자르기
 
@@ -73,4 +77,76 @@ test('학생 글이 비면 "이 부분을 고쳐 줘"가 대신 들어간다', (
 test('여러 줄을 골라도 인용은 한 줄로 눌린다', () => {
   const multi = quoteOf('/tmp/논문A', '첫 줄\n둘째   줄', 'sec-01', 'Ⅰ. 머리말')
   expect(multi.text).toBe('첫 줄 둘째 줄')
+})
+
+test('비교 기준은 .knuaf-gui/section-before에 한 번만 저장한다', () => {
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-review-baseline-'))
+  try {
+    const file = join(root, '.knuaf-gui', 'section-before', 'sec-01.txt')
+    expect(ensureSectionBaseline(root, 'sec-01', '처음 본 본문')).toEqual({ draft: '처음 본 본문' })
+    expect(readFileSync(file, 'utf8')).toBe('처음 본 본문')
+    expect(ensureSectionBaseline(root, 'sec-01', '다음 저장 본문')).toEqual({ draft: '처음 본 본문' })
+    expect(readFileSync(file, 'utf8')).toBe('처음 본 본문')
+    expect(existsSync(join(root, 'sec-01.txt'))).toBe(false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('비교 기준 저장은 경로 탈출과 앱 폴더 심링크를 거부한다', () => {
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-review-root-'))
+  const outside = mkdtempSync(join(tmpdir(), 'knuaf-review-outside-'))
+  const fileRoot = mkdtempSync(join(tmpdir(), 'knuaf-review-file-root-'))
+  const outsideFile = join(outside, 'keep.txt')
+  try {
+    expect(() => ensureSectionBaseline(root, '../escape', '본문')).toThrow()
+    symlinkSync(outside, join(root, '.knuaf-gui'), 'dir')
+    expect(() => ensureSectionBaseline(root, 'sec-01', '본문')).toThrow()
+    expect(existsSync(join(outside, 'section-before'))).toBe(false)
+    mkdirSync(join(fileRoot, '.knuaf-gui', 'section-before'), { recursive: true })
+    writeFileSync(outsideFile, 'unchanged')
+    symlinkSync(outsideFile, join(fileRoot, '.knuaf-gui', 'section-before', 'sec-01.txt'), 'file')
+    expect(() => ensureSectionBaseline(fileRoot, 'sec-01', '본문')).toThrow()
+    expect(readFileSync(outsideFile, 'utf8')).toBe('unchanged')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(fileRoot, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
+test('noteSeen compares successive saved bodies and editOf is scoped by root, section, and hash', async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const saved = new Map<string, string>()
+  useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      knuaf: {
+        review: {
+          ensureBaseline: async (root: string, sectionId: string, draft: string) => {
+            const key = JSON.stringify([root, sectionId])
+            if (!saved.has(key)) saved.set(key, draft)
+            return { result: { draft: saved.get(key) ?? '' } }
+          }
+        }
+      }
+    }
+  })
+  try {
+    const root = '/tmp/review-project'
+    const sectionId = 'sec-01'
+    const noteSeen = useReview.getState().noteSeen
+    await noteSeen(root, sectionId, { title: 'Ⅰ. 장', draft: '', hash: 'h0' })
+    await noteSeen(root, sectionId, { title: 'Ⅰ. 장', draft: '가. 나. 다.', hash: 'h1' })
+    expect(useReview.getState().editOf(root, sectionId, 'h1')).toEqual({ kind: 'wrote' })
+    await noteSeen(root, sectionId, { title: 'Ⅰ. 장', draft: '가. 바. 다. 라.', hash: 'h2' })
+    expect(useReview.getState().editOf(root, sectionId, 'h2')).toEqual({ kind: 'edited', count: 2 })
+    expect(useReview.getState().editOf('/tmp/other-project', sectionId, 'h2')).toBeNull()
+    expect(useReview.getState().baseline[baselineKey(root, sectionId)].draft).toBe('')
+  } finally {
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
 })

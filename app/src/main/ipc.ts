@@ -26,6 +26,7 @@ import { AppUpdates } from './update/appService'
 import { AppHandoff } from './update/handoff'
 import { WindowsUpdateRuntime } from './update/windows'
 import { checkDocxZip } from './docx-zip'
+import { ensureSectionBaseline } from './review-baseline'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -371,6 +372,19 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('file:exists', (_e, root: string, relPath: string) => {
     const p = insideRoot(root, relPath)
     return { result: !!p && existsSync(p) }
+  })
+  ipcMain.handle('review:ensure-baseline', (_e, root: unknown, sectionId: unknown, draft: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof sectionId !== 'string' || typeof draft !== 'string') {
+      return { error: { code: 'invalid_params', message: '비교 기준 인자가 올바르지 않습니다.' } }
+    }
+    try {
+      return { result: ensureSectionBaseline(root, sectionId, draft) }
+    } catch (error) {
+      return { error: { code: 'review_baseline', message: error instanceof Error ? error.message : String(error) } }
+    }
   })
   const PREVIEW_TEXT_MAX = 200 * 1024
   const PREVIEW_PDF_MAX = 50 * 1024 * 1024
