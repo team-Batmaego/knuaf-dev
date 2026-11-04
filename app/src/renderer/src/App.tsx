@@ -15,6 +15,7 @@ import { Sheet } from './components/Sheet'
 import { FirstProjectGate } from './components/FirstProjectGate'
 import { SheetOver } from './components/SheetOver'
 import { PreviewSheet } from './components/PreviewSheet'
+import { Splash } from './components/Splash'
 import { showsPaper, useLayout } from './components/useLayout'
 import { ARTIFACTS, CHECKUP, MATERIALS, SETTINGS } from './copy'
 import { useShallow } from 'zustand/react/shallow'
@@ -38,6 +39,15 @@ export function App() {
   })))
   const layout = useLayout()
   const [dragging, setDragging] = React.useState(false)
+  const [splashVisible, setSplashVisible] = React.useState(true)
+  const finishSplash = React.useCallback(() => setSplashVisible(false), [])
+  const menuBlocked = React.useRef(true)
+  const pendingMenu = React.useRef<Array<() => void>>([])
+  useEffect(() => {
+    if (splashVisible) return
+    menuBlocked.current = false
+    pendingMenu.current.splice(0).forEach((run) => run())
+  }, [splashVisible])
   useEffect(() => {
     const targets = new Set<Provider>()
     let saving = false
@@ -82,18 +92,22 @@ export function App() {
     const off = window.knuaf.onSidecarLog(pushLog)
     const offChat = window.knuaf.onChatSnapshot((s) => useChat.getState().onSnapshot(s))
     const offMenu = window.knuaf.onMenu((a) => {
-      const st = useProject.getState()
-      if (a.type === 'open-folder') void window.knuaf.pickFolder().then((d) => { if (d) void st.open(d) })
-      else if (a.type === 'open-recent' && a.root) void st.open(a.root)
-      else if (a.type === 'refresh') void st.refresh()
-      // 시트가 없는 화면 이름('chat')은 "대화로 돌아가기"다 — 논문은 언제나 깔려 있다.
-      else if (a.type === 'settings') st.openSheet('settings')
-      else if (a.type === 'ai-helper') st.closeSheet()
-      else if (a.type === 'screen') {
-        const name = a.screen as Screen
-        if (SHEETS.includes(name)) st.openSheet(name)
-        else st.closeSheet()
+      const run = () => {
+        const st = useProject.getState()
+        if (a.type === 'open-folder') void window.knuaf.pickFolder().then((d) => { if (d) void st.open(d) })
+        else if (a.type === 'open-recent' && a.root) void st.open(a.root)
+        else if (a.type === 'refresh') void st.refresh()
+        // 시트가 없는 화면 이름('chat')은 "대화로 돌아가기"다 — 논문은 언제나 깔려 있다.
+        else if (a.type === 'settings') st.openSheet('settings')
+        else if (a.type === 'ai-helper') st.closeSheet()
+        else if (a.type === 'screen') {
+          const name = a.screen as Screen
+          if (SHEETS.includes(name)) st.openSheet(name)
+          else st.closeSheet()
+        }
       }
+      if (menuBlocked.current) pendingMenu.current.push(run)
+      else run()
     })
     return () => { off(); offChat(); offMenu() }
   }, [])
@@ -121,7 +135,7 @@ export function App() {
   }, [settings, root])
 
   const paperOnScreen = showsPaper(layout, paneView)
-  const checkup = sheet === 'checkup' && paperOnScreen
+  const checkup = !splashVisible && sheet === 'checkup' && paperOnScreen
     ? <SheetOver open screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></SheetOver>
     : null
 
@@ -130,7 +144,7 @@ export function App() {
       {!settings ? null : (
         <Shell
           titleBar={<TitleBar />}
-          sheets={<>
+          sheets={!splashVisible && <>
             {sheet === 'materials' && <Sheet open side screen="materials" title={MATERIALS.title} onClose={closeSheet}><Materials /></Sheet>}
             {sheet === 'artifacts' && <Sheet open side screen="artifacts" title={ARTIFACTS.title} onClose={closeSheet}><Artifacts /></Sheet>}
             {sheet === 'settings' && <Sheet open side screen="settings" title={SETTINGS.title} onClose={closeSheet}><SettingsScreen /></Sheet>}
@@ -142,6 +156,7 @@ export function App() {
           <Workspace chat={<Chat />} paper={<PaperPane overlay={checkup} />} />
         </Shell>
       )}
+      {splashVisible && <Splash ready={!!settings} onDone={finishSplash} />}
     </div>
   )
 }
