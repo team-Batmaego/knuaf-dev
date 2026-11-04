@@ -488,9 +488,9 @@ function catalogFor(account: AccountSnapshot): ModelCatalog {
   return account.company === 'claude' ? { claude: account.models } : { codex: account.models }
 }
 
-test('한도 이어 하기는 8개 표와 네 담당 역할에서 반대 회사의 혼자 줄을 쓴다', () => {
+test('한도 이어 하기는 8개 표와 다섯 역할에서 반대 회사의 혼자 줄을 쓴다', () => {
   for (const rowId of Object.keys(LANE_TABLE) as LaneRowId[]) {
-    for (const lane of ['research', 'writing', 'repeat', 'review'] as const) {
+    for (const lane of ['design', 'research', 'writing', 'repeat', 'review'] as const) {
       const failedEntry = LANE_TABLE[rowId].lanes[lane]
       const otherCompany = failedEntry.company === 'claude' ? 'codex' : 'claude'
       expect(continueAfterLimit(lane, failedEntry, null, CONTINUATION_STATE, {})).toBeNull()
@@ -514,11 +514,58 @@ test('한도 이어 하기는 8개 표와 네 담당 역할에서 반대 회사�
           company: otherCompany,
           model: listedTarget,
           effort: lane === 'review' ? 'high' : null,
-          how: 'relay'
+          how: lane === 'design' ? 'main' : 'relay'
         })
       }
     }
   }
+})
+
+test('본대화 한도는 동의 카드 없이 반대 회사 모델로 이어 가고 지원하는 깊이를 유지한다', () => {
+  const failedDesign = LANE_TABLE['codex-low'].lanes.design
+  const claudeHigh = claude({ subscriptionType: 'max' })
+  const noConsent = { consented: false, basicUsageAllowed: true }
+  const failedDesignWithDepth = { ...failedDesign, effort: 'max' }
+
+  expect(
+    continueAfterLimit('design', failedDesignWithDepth, claudeHigh, noConsent, catalogFor(claudeHigh))
+  ).toEqual({ company: 'claude', model: 'opus', effort: 'max', how: 'main' })
+  expect(
+    continueAfterLimit(
+      'design',
+      failedDesign,
+      claudeHigh,
+      { ...noConsent, basicUsageAllowed: false },
+      catalogFor(claudeHigh)
+    )
+  ).toBeNull()
+  expect(continueAfterLimit('design', failedDesign, codex(), noConsent, catalogFor(codex()))).toBeNull()
+  expect(
+    continueAfterLimit(
+      'design',
+      failedDesign,
+      claude({ apiKeySource: 'ANTHROPIC_API_KEY' }),
+      noConsent,
+      { claude: CLAUDE_MODELS }
+    )
+  ).toBeNull()
+  expect(continueAfterLimit('design', failedDesign, claudeHigh, noConsent, { claude: null })).toBeNull()
+  expect(
+    continueAfterLimit(
+      'design',
+      failedDesign,
+      claudeHigh,
+      noConsent,
+      { claude: CLAUDE_MODELS.filter((entry) => entry.model !== 'opus') }
+    )
+  ).toBeNull()
+
+  const opusWithoutMax = CLAUDE_MODELS.map((entry) =>
+    entry.model === 'opus' ? { ...entry, efforts: ['low'] } : entry
+  )
+  expect(
+    continueAfterLimit('design', failedDesignWithDepth, claudeHigh, noConsent, { claude: opusWithoutMax })
+  ).toEqual({ company: 'claude', model: 'opus', effort: null, how: 'main' })
 })
 
 test('한도 이어 하기는 동의·기본 사용·구독·대상 모델 목록을 모두 요구한다', () => {

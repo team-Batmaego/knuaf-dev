@@ -397,16 +397,23 @@ export function checkLaneRequest(request: LaneRequest, accounts: readonly Accoun
 }
 
 export function continueAfterLimit(
-  failedLane: 'research' | 'writing' | 'repeat' | 'review',
+  failedLane: 'design' | 'research' | 'writing' | 'repeat' | 'review',
   failedEntry: LaneEntry,
   otherAccount: AccountSnapshot | null,
   otherState: { consented: boolean; basicUsageAllowed: boolean },
   otherCatalog: ModelCatalog
 ): LaneEntry | null {
-  if (!otherAccount || !otherState.consented || !otherState.basicUsageAllowed) return null
+  const isDesign = failedLane === 'design'
+  if (!otherAccount || (!isDesign && !otherState.consented) || !otherState.basicUsageAllowed) return null
 
   const company = otherCompany(failedEntry.company)
-  if (otherAccount.company !== company || failedEntry.how !== 'relay' || !failedEntry.model) return null
+  if (
+    otherAccount.company !== company ||
+    failedEntry.how !== (isDesign ? 'main' : 'relay') ||
+    !failedEntry.model
+  ) {
+    return null
+  }
 
   const judgement = judgePlan(otherAccount)
   if (!judgement.usable || !judgement.tier) return null
@@ -425,7 +432,7 @@ export function continueAfterLimit(
     company,
     model: matched.model,
     effort: effort !== null && matched.efforts.includes(effort) ? effort : null,
-    how: 'relay'
+    how: candidate.how
   }
 }
 
