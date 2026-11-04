@@ -28,18 +28,17 @@ test('기본 창은 세 칸을 담고 작은 작업 영역 안으로 줄어든�
 
 // ------------------------------------------------------------------ 배치·폭
 
-test('본문이 있는 장이 없으면 언제나 한 칸이다 (빈 종이로 진척을 연출하지 않는다)', () => {
+test('오른쪽 칸이 없으면 언제나 한 칸이다', () => {
   for (const width of [900, 1139, 1140, 1280, 1600]) {
-    expect(layoutOf({ hasBody: false, width, closed: false }).kind).toBe('solo')
-    // 닫아 둔 표시가 남아 있어도 본문이 없으면 한 칸이다.
-    expect(layoutOf({ hasBody: false, width, closed: true }).kind).toBe('solo')
+    expect(layoutOf({ pane: false, width, closed: false }).kind).toBe('solo')
+    expect(layoutOf({ pane: false, width, closed: true }).kind).toBe('solo')
   }
 })
 
 test('경계: 1,139 는 바꾸기, 1,140 은 두 칸', () => {
   expect(WIDE_MIN).toBe(1140)
-  expect(layoutOf({ hasBody: true, width: 1139, closed: false }).kind).toBe('switch')
-  expect(layoutOf({ hasBody: true, width: 1140, closed: false })).toEqual({ kind: 'split', chatWidth: 460 })
+  expect(layoutOf({ pane: true, width: 1139, closed: false }).kind).toBe('switch')
+  expect(layoutOf({ pane: true, width: 1140, closed: false })).toEqual({ kind: 'split', chatWidth: 460 })
 })
 
 test('대화 칸은 1,219 까지 줄고 1,220 부터 540 고정이다', () => {
@@ -53,14 +52,13 @@ test('대화 칸은 1,219 까지 줄고 1,220 부터 540 고정이다', () => {
   expect(chatWidthOf(1220)).toBe(CHAT_MAX)
 })
 
-test('넓은 창에서 닫으면 한 칸 + 바꾸기, 다시 저절로 열리지 않는다', () => {
-  const closed = layoutOf({ hasBody: true, width: 1280, closed: true })
-  expect(closed.kind).toBe('solo-with-toggle')
-  expect(showsToggle(closed)).toBe(true)
-  // 좁은 창은 닫힘과 무관하게 바꾸기다.
-  expect(showsToggle(layoutOf({ hasBody: true, width: 900, closed: false }))).toBe(true)
-  expect(showsToggle(layoutOf({ hasBody: true, width: 1280, closed: false }))).toBe(false)
-  expect(showsToggle(layoutOf({ hasBody: false, width: 1280, closed: false }))).toBe(false)
+test('넓은 창에서 접으면 제목줄 바꾸기 없이 접힌다', () => {
+  const closed = layoutOf({ pane: true, width: 1280, closed: true })
+  expect(closed.kind).toBe('folded')
+  expect(showsToggle(closed)).toBe(false)
+  expect(showsToggle(layoutOf({ pane: true, width: 900, closed: true }))).toBe(true)
+  expect(showsToggle(layoutOf({ pane: true, width: 1280, closed: false }))).toBe(false)
+  expect(showsToggle(layoutOf({ pane: false, width: 1280, closed: false }))).toBe(false)
 })
 
 // ---------------------------------------------------- 방금 저장된 문단 판정

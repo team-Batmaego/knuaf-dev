@@ -95,7 +95,7 @@ interface ProjectState {
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
   closeSheet: () => void
-  openPreview: (path: string, fallback?: HTMLElement | null) => void
+  openPreview: (path: string, returnTo?: DocReturn | HTMLElement | null) => void
   closePreview: () => PreviewFocusReturn | null
   setPreviewNotice: (notice: { title: string; body: string } | null) => void
   /** Save the global choice before retrying the same open request. */
@@ -273,11 +273,12 @@ export const useProject = create<ProjectState>((set, get) => ({
   focusedSection: null,
   openSheet: (sheet) => { set({ sheet, ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
   closeSheet: () => { set({ sheet: null, settingsFocus: null }); location.hash = '' },
-  openPreview: (path, fallback = null) => {
+  openPreview: (path, origin = null) => {
     const active = typeof document === 'undefined' ? null : document.activeElement
-    const trigger = active instanceof HTMLElement && active !== document.body ? active : null
+    const trigger = typeof HTMLElement !== 'undefined' && active instanceof HTMLElement && active !== document.body ? active : null
+    const fallback = typeof HTMLElement !== 'undefined' && origin instanceof HTMLElement ? origin : null
     const keyed = trigger?.closest<HTMLElement>('[data-focus-key]')
-    const returnTo: DocReturn = keyed?.dataset.focusKey
+    const returnTo: DocReturn = origin && 'view' in origin ? origin : keyed?.dataset.focusKey
       ? { view: keyed.closest('.paperpane') ? 'paper' : 'chat', key: keyed.dataset.focusKey }
       : { view: get().sheet === 'checkup' || !!fallback ? 'paper' : 'chat', key: get().sheet === 'checkup' ? 'head-action' : fallback?.dataset.focusKey ?? '' }
     if (get().paperClosed) get().setPaperClosed(false)
@@ -324,7 +325,7 @@ export const useProject = create<ProjectState>((set, get) => ({
       const changed = rows.filter((r) => !prev || prev[r.id] !== r.draft_hash)
       const events: PaperEvent[] = []
       if (changed.length) {
-        const bodies = await rpc.readAllSections(root)
+        const bodies = await rpc.readAllSections(root).catch(() => [])
         if (!mine()) return
         for (const row of changed) {
           const body = bodies.find((item) => item.id === row.id)
@@ -336,7 +337,7 @@ export const useProject = create<ProjectState>((set, get) => ({
               edit = useReview.getState().editOf(root, row.id, row.draft_hash)
             } catch { /* The save still happened even if the comparison baseline could not be read. */ }
           }
-          if (prev && prev[row.id] !== undefined) {
+          if (prev && (prev[row.id] !== undefined || (row.draft_chars ?? body?.draft.length ?? 0) > 0)) {
             events.push({ id: `${row.id}:${row.revision}`, sectionId: row.id, title: row.title, at: new Date().toISOString(), edit })
           }
         }
@@ -426,7 +427,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.
     sectionHashes = null
-    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat' })
+    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat', paneHold: false, docReturn: null, foldNotice: false, listIntent: null, quoteIntent: null, paneTab: 'paper', docPath: null })
     canonPoll = setInterval(() => { void get().watchCanon() }, 2000)
     // 도우미가 하위 폴더에 init한 경우 — 빈 화면으로 두지 않고 어디에 만들었는지 알린다.
     const nested = opened.nestedProject

@@ -9,8 +9,8 @@ export { showsToggle }
  * `draft_chars` 를 못 받은 경우(사이드카가 모르는 상태)는 없는 것으로 본다 — 빈 종이를
  * 옆에 열어 진척을 연출하지 않는다는 규칙이 이쪽이 안전하다.
  */
-export function hasBodyOf(sections: SectionRow[] | null): boolean {
-  return !!sections?.some((s) => (s.draft_chars ?? 0) > 0)
+export function hasPaneOf(sections: SectionRow[] | null, paneHold: boolean): boolean {
+  return !!sections?.length || paneHold
 }
 
 /**
@@ -24,7 +24,8 @@ export function useLayout(): Layout {
   const sections = useProject((s) => s.sections)
   const width = useProject((s) => s.windowWidth)
   const closed = useProject((s) => s.paperClosed)
-  return layoutOf({ hasBody: hasBodyOf(sections), width, closed })
+  const paneHold = useProject((s) => s.paneHold)
+  return layoutOf({ pane: hasPaneOf(sections, paneHold), width, closed })
 }
 
 /** 논문 칸이 지금 화면에 있는가 — 점검 한 장을 논문 칸에 덮을지 정한다(시안 ⑫). */

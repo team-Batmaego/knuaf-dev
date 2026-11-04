@@ -79,9 +79,9 @@ test('종이를 닫으면 다시 저절로 열리지 않는다', async () => {
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-  await page.getByRole('button', { name: '내 논문 닫기' }).click()
+  await page.getByRole('button', { name: '내 논문 접기' }).click()
   await expect(page.locator('.paperpane')).toHaveCount(0)
-  await expect(page.locator('.tbar-seg')).toBeVisible()
+  await expect(page.getByRole('button', { name: '내 논문 펴기' })).toBeVisible()
 
   // 기록이 올라도 닫아 둔 것은 닫힌 채다(설계 §4-2).
   addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 농장 소개', body: '새벽빛 농원은 해 뜨기 전에 딴다.', expected: 1 })
@@ -89,7 +89,7 @@ test('종이를 닫으면 다시 저절로 열리지 않는다', async () => {
   await expect(page.locator('.paperpane')).toHaveCount(0)
 
   // 다시 여는 것은 학생의 선택이다 — 설정에 남는다.
-  await page.locator('.tbar-seg').getByRole('tab', { name: '내 논문' }).click()
+  await page.getByRole('button', { name: /내 논문 펴기/ }).click()
   await expect(page.locator('.paperpane')).toBeVisible()
   await electronApp.close()
 })
@@ -263,21 +263,21 @@ test('대화 이벤트의 "종이에서 보기"는 닫아 둔 종이를 실제�
     await openProject(page, root)
     await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-    await page.getByRole('button', { name: '내 논문 닫기' }).click()
+    await page.getByRole('button', { name: '내 논문 접기' }).click()
     await expect(page.locator('.paperpane')).toHaveCount(0)
 
     // 절 본문이 바뀌면 대화에 이벤트 줄이 뜬다 — 그 "종이에서 보기"는 학생이 누른 명시적 이동이다.
     rewriteSection(root, { body: '고친 본문이다.', expected: 1 })
     const ev = page.locator('.chat-event')
     await expect(ev, '이벤트 줄이 없다').toBeVisible({ timeout: 30_000 })
-    await ev.getByRole('button', { name: '종이에서 보기' }).click()
+    await ev.getByRole('button', { name: /고친 부분 보기|종이에서 보기/ }).click()
     await expect(page.locator('.paperpane'), '종이에서 보기를 눌렀는데 종이가 안 열렸다').toBeVisible()
   } finally {
     await electronApp.close()
   }
 })
 
-test('좁은 창의 "내 논문 닫기"는 대화로 돌아간다 (P3-R1-04 B)', async () => {
+test('좁은 창의 제목줄 바꾸기는 대화로 돌아간다 (P3-R1-04 B)', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()
   try {
@@ -288,7 +288,7 @@ test('좁은 창의 "내 논문 닫기"는 대화로 돌아간다 (P3-R1-04 B)',
     await seg.getByRole('tab', { name: '내 논문' }).click()
     await expect(page.locator('.paperpane')).toBeVisible()
 
-    await page.getByRole('button', { name: '내 논문 닫기' }).click()
+    await seg.getByRole('tab', { name: '대화' }).click()
     await expect(page.locator('.paperpane'), '닫기를 눌렀는데 종이가 남아 있다').toHaveCount(0)
     await expect(seg.getByRole('tab', { name: '대화' })).toHaveAttribute('aria-selected', 'true')
   } finally {

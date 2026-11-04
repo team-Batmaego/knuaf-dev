@@ -14,7 +14,7 @@ import { PaperPane } from './components/PaperPane'
 import { Sheet } from './components/Sheet'
 import { FirstProjectGate } from './components/FirstProjectGate'
 import { SheetOver } from './components/SheetOver'
-import { PreviewSheet } from './components/PreviewSheet'
+import { RightPane } from './components/RightPane'
 import { Splash } from './components/Splash'
 import { showsPaper, useLayout } from './components/useLayout'
 import { ARTIFACTS, CHECKUP, MATERIALS, SETTINGS } from './copy'
@@ -102,7 +102,8 @@ export function App() {
         else if (a.type === 'ai-helper') st.closeSheet()
         else if (a.type === 'screen') {
           const name = a.screen as Screen
-          if (SHEETS.includes(name)) st.openSheet(name)
+          if (name === 'materials' || name === 'artifacts') st.openList(name === 'materials' ? 'materials' : 'files')
+          else if (SHEETS.includes(name)) st.openSheet(name)
           else st.closeSheet()
         }
       }
@@ -149,11 +150,10 @@ export function App() {
             {sheet === 'artifacts' && <Sheet open side screen="artifacts" title={ARTIFACTS.title} onClose={closeSheet}><Artifacts /></Sheet>}
             {sheet === 'settings' && <Sheet open side screen="settings" title={SETTINGS.title} onClose={closeSheet}><SettingsScreen /></Sheet>}
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}
-            <PreviewSheet />
             <FirstProjectGate />
           </>}
         >
-          <Workspace chat={<Chat />} paper={<PaperPane overlay={checkup} />} />
+          <Workspace chat={<Chat />} paper={<RightPane paper={<PaperPane overlay={checkup} />} />} />
         </Shell>
       )}
       {splashVisible && <Splash ready={!!settings} onDone={finishSplash} />}
