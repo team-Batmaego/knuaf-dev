@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Packager } from 'electron-builder'
 import { app, launch, navTo, openPreset, openProject, plantStaleLock, synthProject } from './helpers'
 import { APP_NAME, APP_NAME_ASCII } from '../src/shared/name'
 
@@ -26,11 +27,29 @@ test('the built app is named what the app calls itself', () => {
     .toMatch(/^[A-Za-z0-9._${}-]+$/)
 })
 
-test('Windows installer is configured for a one-click per-user install', () => {
+test('Windows installer is configured for a one-click per-user install', async () => {
   const yml = readFileSync(join(app, 'electron-builder.yml'), 'utf-8')
-  const nsisConfig = /^nsis:\r?\n  oneClick: true\r?\n  perMachine: false\r?\n  runAfterFinish: true\r?\n  createDesktopShortcut: true\r?\n  createStartMenuShortcut: true\r?\n  include: build\/installer\.nsh$/m
-  for (const lineEnding of ['\n', '\r\n']) {
-    expect(yml.replace(/\r?\n/g, lineEnding)).toMatch(nsisConfig)
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-installer-config-'))
+  try {
+    for (const lineEnding of ['\n', '\r\n']) {
+      const config = join(root, 'electron-builder.yml')
+      writeFileSync(config, yml.replace(/\r?\n/g, lineEnding))
+      // Use the builder's YAML loader: field order and additional options do not
+      // change these installation requirements, and booleans stay typed.
+      const packager = new Packager({ projectDir: app, config })
+      await packager.validateConfig()
+      const nsis = packager.config.nsis
+      expect(nsis?.oneClick).toBe(true)
+      expect(nsis?.perMachine).toBe(false)
+      expect(nsis?.runAfterFinish).toBe(true)
+      expect(nsis?.createDesktopShortcut).toBe(true)
+      expect(nsis?.createStartMenuShortcut).toBe(true)
+      expect(nsis?.include).toBe('build/installer.nsh')
+      expect(nsis?.shortcutName).toBe(APP_NAME)
+      expect(nsis?.uninstallDisplayName).toBe(APP_NAME + ' ${version}')
+    }
+  } finally {
+    rmSync(root, { recursive: true })
   }
 })
 

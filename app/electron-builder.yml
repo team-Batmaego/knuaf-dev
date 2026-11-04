@@ -112,6 +112,10 @@ nsis:
   runAfterFinish: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  # Windows 표시 이름만 바꾼다. productName·appId·설치 경로·실행 파일명은 유지한다.
+  # 기존 ShortcutName을 읽어 바로가기를 옮기는 것은 electron-builder의 기본 NSIS가 맡는다.
+  shortcutName: KNUAF-Dev · 창업논문 작성 도우미
+  uninstallDisplayName: KNUAF-Dev · 창업논문 작성 도우미 ${version}
   include: build/installer.nsh
 dmg:
   title: KNUAF-Dev · 창업논문 작성 도우미

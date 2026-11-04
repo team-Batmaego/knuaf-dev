@@ -4,6 +4,15 @@
 # file is included, so a top-level Function calling UAC::/StdUtils:: may compile
 # before plugins exist. customHeader is expanded later by installer.nsi.
 !macro customHeader
+  # customHeader runs after electron-builder's messages and MUI languages.
+  # LangString replacement emits 6030 by design; scope it to these two Korean
+  # overrides only. Keep all other NSIS warnings fatal (builder's -WX).
+  !pragma warning push
+  !pragma warning disable 6030
+  LangString areYouSureToUninstall ${LANG_KOREAN} "${SHORTCUT_NAME} 앱을 제거할까요?"
+  LangString appRunning ${LANG_KOREAN} "${SHORTCUT_NAME} 앱이 실행 중이에요.$\r$\n확인을 누르면 앱을 닫고 계속 진행해요.$\r$\n저장하지 않은 내용은 사라질 수 있어요."
+  !pragma warning pop
+
 !ifndef BUILD_UNINSTALLER
 Function CleanupLegacyMachineInstall
   ReadRegStr $6 HKLM "Software\${APP_GUID}" InstallLocation
