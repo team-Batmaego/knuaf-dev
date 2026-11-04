@@ -37,10 +37,11 @@ export function Workspace({ chat, paper }: { chat: ReactNode; paper: ReactNode }
   useEffect(() => {
     const zone = zoneOf(snapshot, connection, projectStatus)
     const message = zone.kind === 'question' ? snapshot?.messages.find((item) => item.id === zone.messageId) : null
-    const key = message && chapterOf(message.text) !== null ? message.id : null
+    const chapter = message ? chapterOf(message.text) : null
+    const key = message && chapter !== null && sections?.some((section) => section.order === chapter) ? `${root}:${message.id}` : null
     if (key && key !== lastQuestion.current) setFoldNotice()
     lastQuestion.current = key
-  }, [snapshot, connection, projectStatus, setFoldNotice])
+  }, [root, sections, snapshot, connection, projectStatus, setFoldNotice])
   const [entering, setEntering] = useState(false)
   /** 직전에 본 상태(폴더 + 본문 유무). 첫 판정은 전이 없이 기준만 세운다. */
   const prev = useRef<{ root: string | null; body: boolean } | null>(null)
