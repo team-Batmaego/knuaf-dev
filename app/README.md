@@ -120,6 +120,23 @@ pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
 ```
 
+## 서명된 앱 업데이트 채널 게시
+
+- `.github/workflows/app-release.yml`은 `main`에서 수동 실행하며, 이미 존재하는 릴리스 태그 하나만 받습니다. 설치본 자산 이름은 태그에서 계산합니다. 태그 커밋이 `main`의 조상이고, 태그 시점 앱 버전과 현재 업데이트 공개키가 `main`과 일치해야 합니다.
+- 서명 전 `release.yml`의 `windows-installer` 아티팩트와 릴리스 자산의 바이트·크기를 대조합니다. 실행 아티팩트를 보관 기간 안에 찾지 못하면 멈춥니다. `SHA256SUMS-windows.txt` 대체는 허용하지 않습니다.
+- 서명 job은 `skill-release` 환경의 기존 `SKILL_SIGNING_PRIVATE_KEY`만 사용합니다. 개인키에서 계산한 공개키의 DER 바이트를 앱의 `current` 공개키와 비교하며, 값은 출력하지 않습니다. 불일치하면 서명 전에 실패합니다.
+- 키 비교 기준에는 시점 차이가 있습니다. 준비 job은 checkout 시점 `origin/main`의 `keys.ts`를 태그와 비교하지만, 서명 job은 실행 시작 시점 `github.sha`의 키를 사용합니다. 실행 시작부터 채널 PR 반영 완료까지 `keys.ts` 변경을 머지하지 마세요. 이 구간에 키 변경이 있었다면 실행 결과를 채널에 반영하지 말고, 키 변경이 반영된 `main`에서 새로 실행하세요. 이는 운영상 동결 규칙이며 시점 차이를 코드로 제거한 것은 아닙니다.
+- 성공 시 워크플로는 `app-channel-v<V>` 갈래만 push합니다. PR은 사람이 열고, 자동 PR·태그·릴리스 생성은 하지 않습니다. 열린 채널 PR 또는 `main`에 아직 포함되지 않은 채널 갈래가 있으면 실행을 멈춥니다.
+- `skill-release`의 정기 실행은 열린 앱·스킬 채널 PR이 있으면 새 작업 없이 정상 종료합니다. 수동 실행은 기존처럼 실패하며, 열린 채널 PR 없이 미병합 갈래만 남은 경우에는 정기 실행도 실패합니다. 상태 검사기는 로컬 `origin/main` 없이 원격 main SHA를 조회하므로 SHA만 받은 깊이 1 checkout에서도 동작합니다.
+- 앱·스킬 채널 PR은 **merge commit**으로 머지합니다(squash/rebase 금지). squash/rebase로 원래 갈래 커밋이 `main`에 포함되지 않으면 다음 채널 실행이 안전상 중단됩니다. 이 경우 책임자가 채널 반영을 확인하고 남은 갈래를 정리한 뒤 재실행합니다.
+- PR 전에는 `updates/channel.json`의 앱 항목 외 내용, 특히 기존 `skill` 항목이 `main`과 같은지 확인합니다. 0.6.0은 채널 변경을 릴리스 공개 전에 머지하고, 공개 직후 아래 검사를 실행해 결과를 기록합니다. 0.6.1부터는 공개 뒤 자산 검사를 통과하고 그 결과를 PR에 첨부한 후 머지합니다.
+
+```bash
+node app/scripts/check-app-channel.mjs --channel updates/channel.json
+```
+
+이 검사는 앱 채널의 서명·판·페이지를 확인한 뒤 GitHub 릴리스 자산을 인증 없이 GET하고, 서명된 크기와 SHA-256을 대조합니다. 벡터 회귀와 소비자 검증은 `node --test app/scripts/tests/app-release.test.mjs` 및 `pnpm -C app exec playwright test e2e/app-update-vector.spec.ts`로 실행합니다.
+
 사이드카 프로토콜 테스트는 저장소 루트의 `tests/test_sidecar.py`에 있습니다.
 
 알려진 A안 한계(독립검토 A1): 사용자 문구의 `copy.ts` 중앙관리 AST 검사는 대체 없이 제거되어

@@ -1,0 +1,46 @@
+{
+  "testPrivateKeySeedHex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "publicKeys": [
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAO2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=\n-----END PUBLIC KEY-----\n",
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAiojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=\n-----END PUBLIC KEY-----\n"
+  ],
+  "tag": "v0.6.1",
+  "installerBase64": "TVqQAEtOVUFGIGFwcCB1cGRhdGUgc2lnbmF0dXJlIHZlY3RvciB2MC42LjEK",
+  "inputChannel": {
+    "schema": 1,
+    "app": {
+      "latest": "0.5.1",
+      "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.5.1"
+    },
+    "skill": {
+      "version": "1.2.3",
+      "manifest": "preserved-test-entry",
+      "sig": "unchanged-test-signature"
+    }
+  },
+  "expectedChannel": {
+    "schema": 1,
+    "app": {
+      "latest": "0.6.1",
+      "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.1",
+      "win32-x64": {
+        "manifest": "eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYtYXBwIiwidmVyc2lvbiI6IjAuNi4xIiwicGxhdGZvcm0iOiJ3aW4zMi14NjQiLCJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vdGVhbS1CYXRtYWVnby9rbnVhZi1kZXYvcmVsZWFzZXMvZG93bmxvYWQvdjAuNi4xL2tudWFmLWRldi0wLjYuMS14NjQuZXhlIiwic2l6ZSI6NDUsInNoYTI1NiI6ImMyMTZkNzc4ODQ3MzMyNmQyOTVkMjAxZWMwYzhiY2RjYjIxMjcwNjU1OGIwY2M0NDE3YjU2ZWZjNjJjNTkwZjYifQ==",
+        "sig": "UxEhw+RSic9nGLCVUh3LM6tWcvpmc4JYljLJTh5Xexlo3TLoJEEO2OAIn6/rhlDlAEyZxOSdVuYU3mxMyhJPBA==",
+        "version": "0.6.1",
+        "platform": "win32-x64",
+        "url": "https://github.com/team-Batmaego/knuaf-dev/releases/download/v0.6.1/knuaf-dev-0.6.1-x64.exe",
+        "size": 45,
+        "sha256": "c216d7788473326d295d201ec0c8bcdcb212706558b0cc4417b56efc62c590f6"
+      }
+    },
+    "skill": {
+      "version": "1.2.3",
+      "manifest": "preserved-test-entry",
+      "sig": "unchanged-test-signature"
+    }
+  },
+  "mutation": {
+    "offset": 3,
+    "xor": 1
+  }
+}
