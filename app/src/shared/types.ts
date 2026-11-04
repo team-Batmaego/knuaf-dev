@@ -153,6 +153,7 @@ export type PreviewPayload =
   | { kind: 'text'; name: string; ext: string; text: string; truncated: boolean }
   | { kind: 'image'; name: string; mime: 'image/png' | 'image/jpeg'; dataUrl: string }
   | { kind: 'unsupported'; name: string; ext: string; openable: boolean }
+  | { kind: 'unavailable'; name: string; reason: string }
   | { kind: 'empty'; name: string }
   | { kind: 'too_large'; name: string; ext: string; bytes: number; limit: number }
   | { kind: 'preview_error'; name: string; ext: string; reason: 'format' | 'corrupt' | 'too_large' }
