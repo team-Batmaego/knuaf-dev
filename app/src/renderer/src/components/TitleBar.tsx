@@ -8,6 +8,7 @@ import { showsToggle, useLayout } from './useLayout'
 import { useShallow } from 'zustand/react/shallow'
 import { AppUpdateDialog, useUpdateSubscription, useUpdates } from './Updates'
 import { UPDATE } from '../copy'
+import { MENUS } from '../copy-menus'
 
 /**
  * 제목줄 (DESIGN §1-3, 시안 ③④⑯).
@@ -21,7 +22,7 @@ import { UPDATE } from '../copy'
  *
  * 가운데 "지금 · ○○ ▾"은 `StageMenu` 다 — 3-A 의 `derive()` 가 정한 "지금" 하나를 말한다.
  */
-export function TitleBar() {
+export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
   useUpdateSubscription()
   const skillUpdate = useUpdates(s => s.skill)
   const appUpdate = useUpdates(s => s.app)
@@ -86,6 +87,9 @@ export function TitleBar() {
       {layout.kind === 'solo' && <span className="tbtn quiet">{TITLEBAR.paperLater}</span>}
 
 
+      {onReport && <button type="button" className="tbtn" style={{ fontSize: 12.5, color: 'var(--ink-2)' }} title={MENUS.reportTitle} onClick={onReport}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: 'var(--muted)' }}><path d="M5 21V4m0 1h12l-2 4 2 4H5" /></svg>{MENUS.report}
+      </button>}
       <button className="tbtn icon" style={{ position: 'relative' }} title={TITLEBAR.settingsTitle} aria-label={hasUpdate ? `${TITLEBAR.settingsTitle} · ${blocked ? UPDATE.appBlockedTitle : UPDATE.newAvailable}` : TITLEBAR.settingsTitle} onClick={() => openSheet('settings')}>
         <Icon name="gear" size={17} />
         {hasUpdate && <span aria-hidden="true" style={{ position: 'absolute', right: 3, top: 3, width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)' }} />}
