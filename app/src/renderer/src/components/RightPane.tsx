@@ -30,7 +30,11 @@ export function RightPane({ paper }: { paper: ReactNode }) {
     requestAnimationFrame(() => {
       const keyed = target?.key ? Array.from(document.querySelectorAll<HTMLElement>('[data-focus-key]')).filter((node) => node.dataset.focusKey === target.key) : []
       const paperButtons = target?.view === 'paper' ? Array.from(document.querySelectorAll<HTMLElement>('.paperpane button')) : []
-      const chatInputs = Array.from(document.querySelectorAll<HTMLElement>('.chat-zone textarea, .chat-zone input, .chat-zone button, .qcard-wrap textarea, .qcard-wrap input, .qcard-wrap button'))
+      const chatInputs = [
+        ...document.querySelectorAll<HTMLElement>('.chat-zone textarea, .chat-zone input'),
+        ...document.querySelectorAll<HTMLElement>('.qcard-wrap button, .chat-zone [role="radiogroup"] button, .chat-zone form button'),
+        ...document.querySelectorAll<HTMLElement>('.chat-zone button')
+      ]
       firstVisibleFocus([...keyed, fallback?.trigger, fallback?.fallback, ...paperButtons, ...chatInputs])?.focus({ preventScroll: true })
     })
   }
