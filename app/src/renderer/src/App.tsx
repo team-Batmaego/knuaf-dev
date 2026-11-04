@@ -2,11 +2,8 @@ import React, { useEffect } from 'react'
 import { useProject, type Screen } from './store/project'
 import { connInfoOf, useConnect } from './store/connect'
 import { useChat } from './store/chat'
-import { Chat } from './screens/Chat'
-import { Materials } from './screens/Materials'
-import { Artifacts } from './screens/Artifacts'
+import { Chat, requestReport } from './screens/Chat'
 import { Checkup } from './screens/Checkup'
-import { SettingsScreen } from './screens/Settings'
 import { Shell } from './components/Shell'
 import { TitleBar } from './components/TitleBar'
 import { Workspace } from './components/Workspace'
@@ -15,9 +12,10 @@ import { Sheet } from './components/Sheet'
 import { FirstProjectGate } from './components/FirstProjectGate'
 import { SheetOver } from './components/SheetOver'
 import { RightPane } from './components/RightPane'
+import { SettingsModal } from './components/SettingsModal'
 import { Splash } from './components/Splash'
 import { showsPaper, useLayout } from './components/useLayout'
-import { ARTIFACTS, CHECKUP, MATERIALS, SETTINGS } from './copy'
+import { CHECKUP } from './copy'
 import { useShallow } from 'zustand/react/shallow'
 import type { Provider } from '../../shared/chat'
 
@@ -144,11 +142,9 @@ export function App() {
     <div style={{ height: '100%' }} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop} data-dragging={dragging || undefined}>
       {!settings ? null : (
         <Shell
-          titleBar={<TitleBar />}
+          titleBar={<TitleBar onReport={() => requestReport()} />}
           sheets={!splashVisible && <>
-            {sheet === 'materials' && <Sheet open side screen="materials" title={MATERIALS.title} onClose={closeSheet}><Materials /></Sheet>}
-            {sheet === 'artifacts' && <Sheet open side screen="artifacts" title={ARTIFACTS.title} onClose={closeSheet}><Artifacts /></Sheet>}
-            {sheet === 'settings' && <Sheet open side screen="settings" title={SETTINGS.title} onClose={closeSheet}><SettingsScreen /></Sheet>}
+            <SettingsModal open={sheet === 'settings'} onClose={closeSheet} />
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}
             <FirstProjectGate />
           </>}

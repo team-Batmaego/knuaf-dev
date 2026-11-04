@@ -95,7 +95,7 @@ interface ProjectState {
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
   closeSheet: () => void
-  openPreview: (path: string, returnTo?: DocReturn | HTMLElement | null) => void
+  openPreview: (path: string, fallback?: HTMLElement | null) => void
   closePreview: () => PreviewFocusReturn | null
   setPreviewNotice: (notice: { title: string; body: string } | null) => void
   /** Save the global choice before retrying the same open request. */
@@ -272,14 +272,13 @@ export const useProject = create<ProjectState>((set, get) => ({
   paneView: 'chat',
   events: [],
   focusedSection: null,
-  openSheet: (sheet) => { set({ sheet, ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
+  openSheet: (sheet) => { set({ sheet, ...(sheet === 'checkup' ? { paneTab: 'paper' as const } : {}), ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
   closeSheet: () => { set({ sheet: null, settingsFocus: null }); location.hash = '' },
-  openPreview: (path, origin = null) => {
+  openPreview: (path, fallback = null) => {
     const active = typeof document === 'undefined' ? null : document.activeElement
     const trigger = typeof HTMLElement !== 'undefined' && active instanceof HTMLElement && active !== document.body ? active : null
-    const fallback = typeof HTMLElement !== 'undefined' && origin instanceof HTMLElement ? origin : null
     const keyed = trigger?.closest<HTMLElement>('[data-focus-key]')
-    const returnTo: DocReturn = origin && 'view' in origin ? origin : keyed?.dataset.focusKey
+    const returnTo: DocReturn = keyed?.dataset.focusKey
       ? { view: keyed.closest('.paperpane') ? 'paper' : 'chat', key: keyed.dataset.focusKey }
       : { view: get().sheet === 'checkup' || !!fallback ? 'paper' : 'chat', key: get().sheet === 'checkup' ? 'head-action' : fallback?.dataset.focusKey ?? '' }
     if (get().paperClosed) get().setPaperClosed(false)

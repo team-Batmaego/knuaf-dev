@@ -63,7 +63,7 @@ test('등록 장 또는 paneHold가 있으면 본문 유무와 관계없이 칸�
 test('장 없는 논문에서 문서와 목록을 열면 칸을 세우고 문서 닫기는 대화로 돌아간다', () => {
   useProject.setState({ root: '/paper', sections: [], paperClosed: false, paneHold: false, paneView: 'chat', docPath: null, paneTab: 'paper' })
   try {
-    useProject.getState().openPreview('/paper/a.pdf', { view: 'chat', key: 'chat-link:1:a.pdf' })
+    useProject.getState().openPreview('/paper/a.pdf')
     expect(useProject.getState()).toMatchObject({ paneHold: true, paneView: 'paper', paneTab: 'file', docPath: '/paper/a.pdf' })
     useProject.getState().setPaneTab('paper')
     useProject.getState().setPaneTab('file')

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from './Icon'
 import { PopHead, Popover, PopRow } from './Popover'
-import { FilesPopover, MakeFeedbackLine, MakeRunningLine } from './FilesPopover'
-import { MaterialsPopover } from './MaterialsPopover'
+import { MakeFeedbackLine, MakeRunningLine } from './FilesPopover'
+import { MaterialsList } from './MaterialsList'
+import { ArtifactsList } from './ArtifactsList'
 import { useProject } from '../store/project'
 import { useChat } from '../store/chat'
 import { rpc } from '../rpc'
 import { renderMarkdown } from '../markdown'
-import { useMake } from './useMake'
+import { useMake, type MakeKind } from './useMake'
 import { useStage } from './useStage'
 import { newBlockIndexes, splitBlocks } from '../../../shared/paper'
 import { fileStateOf, isReviewExport } from '../../../shared/files'
@@ -17,9 +18,10 @@ import { chapterOf } from '../../../shared/question'
 import { baselineKey, quoteOf, useReview } from '../store/review'
 import { ReviewSelectBar } from './ReviewSelectBar'
 import { ReviewDiffBlocks } from './ReviewDiff'
-import { PAPER, REVIEW } from '../copy'
+import { MATERIALS, PAPER, REVIEW, fileStatusText } from '../copy'
 import type { SectionRow } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
+import { joinPath } from '../paths'
 
 /** 절 하나의 본문. `hash` 는 정본이 말하는 본문 지문이다. */
 type Doc = { title: string; draft: string; hash: string }
@@ -70,6 +72,13 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const pStatus = useProject((s) => s.status)
   const projectLoad = useProject((s) => s.projectLoad)
   const openSheet = useProject((s) => s.openSheet)
+  const materials = useProject((s) => s.materials)
+  const artifacts = useProject((s) => s.artifacts)
+  const artifactsError = useProject((s) => s.artifactsError)
+  const previewNotice = useProject((s) => s.previewNotice)
+  const openPreview = useProject((s) => s.openPreview)
+  const loadLists = useProject((s) => s.loadLists)
+  const insertPath = useChat((s) => s.insertPath)
   const make = useMake()
   const { derived, action } = useStage()
   const [docs, setDocs] = useState<Record<string, Doc>>({})
@@ -77,6 +86,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const [toc, setToc] = useState(false)
   /** 파일 팝오버 — 실행 결과를 어디에 그릴지 정하려고 여기서 소유한다(검토 P3-R1-01). */
   const [filesOpen, setFilesOpen] = useState(false)
+  const [materialsOpen, setMaterialsOpen] = useState(false)
   /**
    * 절마다 **직전에 본 본문**. 메모리에만 둔다 — 저장하지 않는다. 그래서 앱을 켠 직후
    * 첫 읽기에는 비교할 것이 없고, 아무것도 칠하지 않는다.
@@ -153,10 +163,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   // 기록이 오르면 다시 읽는다(사이드바 차례와 같은 기준, IMPL-PLAN §4-2).
   useEffect(() => { void load() }, [load, revision])
   useEffect(() => {
-    if (!listIntent || listIntent.kind !== 'files') return
-    const frame = requestAnimationFrame(() => { setFilesOpen(true); consumeListIntent(listIntent.seq) })
-    return () => cancelAnimationFrame(frame)
-  }, [listIntent, consumeListIntent])
+    if (listIntent && root) void loadLists()
+  }, [listIntent, root, loadLists])
 
   // 대화 이벤트 줄의 "종이에서 보기" — 그 장으로 간다.
   useEffect(() => {
@@ -247,6 +255,9 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   }
 
   if (!root) return null
+  const materialItem = (path: string | null | undefined) => path
+    ? { path: joinPath(root, path), name: path.split(/[\\/]/).pop() ?? path }
+    : null
   const questionText = card.kind === 'question' ? snapshot?.messages.find((message) => message.id === card.messageId)?.text : null
   const slotSection = questionText ? sectionForChapter(sections ?? [], questionText)?.id ?? null : null
   const writing = sections?.find((s) => s.status === 'drafting') ?? null
@@ -285,8 +296,18 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
             <Icon name="check" size={14} />{REVIEW.diffToggle}
           </button>
         )}
-        <MaterialsPopover />
-        <FilesPopover make={make} open={filesOpen} onOpenChange={setFilesOpen} />
+        <MaterialsList open={materialsOpen} onOpenChange={setMaterialsOpen} listIntent={listIntent} consumeListIntent={consumeListIntent}
+          count={materials?.files.length ?? 0}
+          current={[{ label: MATERIALS.manuscriptLabel, file: materialItem(materials?.current_manuscript.path) }, { label: MATERIALS.financeLabel, file: materialItem(materials?.current_finance.path) }]}
+          references={(materials?.files ?? []).filter((file) => file.role === 'reference').map((file) => materialItem(file.path)!)}
+          onOpenFile={openPreview} onAttach={(path) => { insertPath(path); useProject.getState().setPaneView('chat') }}
+          onAddMaterial={() => { void window.knuaf.pickFile({ title: MATERIALS.attach }).then((path) => { if (path) { insertPath(path); useProject.getState().setPaneView('chat') } }) }} />
+        <ArtifactsList open={filesOpen} onOpenChange={setFilesOpen} listIntent={listIntent} consumeListIntent={consumeListIntent}
+          items={(artifacts ?? []).map((file) => ({ name: file.name, path: joinPath(root, file.path), status: fileStatusText(file.path, projectLoad) }))}
+          actions={make.rows.map((row) => ({ id: row.kind, label: row.label, description: row.body, disabled: !row.enabled || make.making !== null,
+            feedback: make.making === row.kind ? <MakeRunningLine make={make} fb={make.feedbackKind === row.kind ? make.feedback : null} compact /> : make.feedbackKind === row.kind && make.feedback ? <MakeFeedbackLine fb={make.feedback} compact submission={row.kind === 'submission_candidate'} gate={pStatus?.gate} /> : undefined }))}
+          stale={derived.stale} notice={previewNotice} error={artifactsError} loading={artifacts === null && !artifactsError}
+          onOpenFile={openPreview} onMake={(id) => void make.run(id as MakeKind)} onRetry={() => void loadLists()} onReveal={() => void window.knuaf.folderOpen('project')} />
         {/* 권하는 단추 **하나** — "지금"이 고른 행동이다(1·2단계는 없다: 대화가 이끈다).
             만들기 자체는 "파일" 팝오버에서 언제든 되지만, 화면에 권하는 것은 이 하나뿐이다. */}
         {action && (

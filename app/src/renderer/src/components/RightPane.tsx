@@ -75,7 +75,7 @@ export function RightPane({ paper }: { paper: ReactNode }) {
       <button aria-label={COPY.closeFile} onClick={close}>×</button>
     </div>
     {tab === 'paper' ? paper : <section data-doc-content style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 20px', minHeight: 56, borderBottom: 'var(--hairline) solid var(--line)' }}><strong title={name}>{name}</strong><span style={{ flex: 1 }} />{item && <button onClick={() => void save()}>{ARTIFACTS.save}</button>}<PreviewActions path={path} onOpen={() => void open()} /></header>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 20px', minHeight: 56, borderBottom: 'var(--hairline) solid var(--line)' }}><h2 title={name} style={{ fontSize: 15, margin: 0 }}>{name}</h2><span style={{ flex: 1 }} />{item && <button onClick={() => void save()}>{ARTIFACTS.save}</button>}<PreviewActions path={path} onOpen={() => void open()} /></header>
       <div style={{ flex: 1, overflow: 'auto', padding: '22px 26px', background: 'var(--desk)' }}>
         {/\.(xlsx|xlsm)$/i.test(path) && <p className="caption">{COPY.excelHint}</p>}
         {saved && <p role="status">{saved}</p>}{error && <Feedback kind="warning" title={PREVIEW.loadFailed} body={error} />}
