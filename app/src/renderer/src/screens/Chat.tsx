@@ -13,7 +13,7 @@ import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
-import { CHAT, CHAT_EVENT, CLOSE_LABEL, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
+import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
 import { chatSuggestion } from '../suggest'
 import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
@@ -238,7 +238,7 @@ function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, o
         </section>
       </div> : <>
         <div className="chat-composer">
-          <textarea ref={inputRef} rows={2} aria-label={CHAT.placeholder} value={text} placeholder="예: 카페 창업 계획으로 창업 논문을 쓰려고 해요"
+          <textarea ref={inputRef} rows={2} aria-label={CHAT.placeholder} value={text} placeholder={CHAT.firstRunPlaceholder}
             onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); onSubmit() } }} />
           <div className="crow"><ComposerModelChip placement="down" /><span className="sp" /><button className="send" aria-label={CHAT.send} disabled={!text.trim()} onClick={onSubmit}><Icon name="up" size={17} /></button></div>
         </div>
@@ -313,6 +313,16 @@ export function Chat() {
   const connectSelected = useConnect((s) => s.selected)
   const seg: ChatMode = resolveChatMode(mode, settings)
   const provider: Provider = chosenProvider(connectSelected, settings) ?? chatProvider(seg)
+  const [offline, setOffline] = useState(() => typeof navigator !== 'undefined' && !navigator.onLine)
+  useEffect(() => {
+    const sync = (): void => setOffline(!window.navigator.onLine)
+    window.addEventListener('offline', sync)
+    window.addEventListener('online', sync)
+    return () => {
+      window.removeEventListener('offline', sync)
+      window.removeEventListener('online', sync)
+    }
+  }, [])
   const threadRef = useRef<HTMLDivElement>(null)
   /** 입력칸 — 한 줄에서 시작해 글이 늘면 자란다(시안 P/L). 최대 높이 뒤에는 스크롤. */
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -337,7 +347,7 @@ export function Chat() {
     submission.current += 1
     setQueued(null)
     setSubmitted(newText.trim())
-    setFolderName(projectFolderName(newText))
+    setFolderName(PROJECT_FOLDER.defaultName)
     setFolderError(null)
   }
   const openFirstFolder = async (dir: string, generation: number, projectSeq: number): Promise<void> => {
@@ -568,12 +578,15 @@ export function Chat() {
   const haltKey = snapshot?.state === 'stopped' || snapshot?.state === 'interrupted' ? noteKey(snapshot.state, '') : null
   const snapErrKey = snapErr && snapshot?.error ? noteKey('error', snapshot.error) : null
   /**
-   * 끊긴 자리에서 무엇을 말하고 무엇을 권할지 — 연결 상태 이름 하나로 정한다.
+   * 끊긴 자리에서 무엇을 말하고 무엇을 권할지 — 연결 상태와 브라우저의 오프라인 신호를 쓴다.
    * 확인 실패(failed·unknown)는 로그인 안내가 아니라 "확인하지 못했어요 + 다시 확인"이다.
    */
   const connFailed = connState === 'failed' || connState === 'unknown'
   const chatConnTitle = connFailed ? CHAT.statusFailTitle : connState === 'no-tool' ? CHAT.needInstallTitle : CHAT.needLoginTitleFor(provider)
   const chatConnBody = connFailed ? CHAT.statusFailBody : connState === 'no-tool' ? CHAT.needInstallBody : CHAT.needLoginBody
+  const chatConnSub = offline && connState === 'need-login'
+    ? <>{ONBOARD.offlineHint} {chatConnBody}</>
+    : chatConnBody
 
   // 아래 칸 하나를 정한다 — 허락 · 질문 카드 · 작업 중 · 입력칸 · 미연결(설계 §4-1).
   const zone = zoneOf(snapshot, status, pStatus ?? null)
@@ -740,7 +753,7 @@ export function Chat() {
         {(zone.kind === 'running' || zone.kind === 'composer' || zone.kind === 'disconnected' || freeForm) && (
           <>
             {freeForm && <button type="button" onClick={() => setFreeFormId(null)}>{QUESTION_FORM.back}</button>}
-            {zone.kind === 'disconnected' && <ZoneLine tone="info" title={connState === 'checking' ? CHAT.checking : chatConnTitle} sub={connState === 'checking' ? undefined : chatConnBody} />}
+            {zone.kind === 'disconnected' && <ZoneLine tone="info" title={connState === 'checking' ? CHAT.checking : chatConnTitle} sub={connState === 'checking' ? undefined : chatConnSub} />}
             {/* 작업 중 한 줄 — 입력칸 위. 입력칸은 쓸 수 있게 두고 보내기만 막는다. 마지막 학생 메시지가 아직
                 보내는 중이면 그 말풍선 아래 글자가 진행 표시라 이 줄은 그리지 않는다(작업 중엔 늘 1개). */}
             {zone.kind === 'running' && !lastPending && (
