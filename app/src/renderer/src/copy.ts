@@ -1284,7 +1284,7 @@ export const ARTIFACTS = {
      * 학생이 "고장 났다"로 읽었다(실기기 재현 2026-11-03). 이유와 다음 행동을 따로 말한다.
      */
     blockedNoProject: '논문 준비가 끝나면 만들기가 켜져요.',
-    noProjectNext: '"폴더에서 보기"를 눌러 논문 폴더를 확인해 주세요.',
+    noProjectNext: '도우미에게 이 논문 준비를 도와달라고 말해 주세요.',
     blockedNoStatus: '논문 상태를 아직 읽지 못했어요.'
   }
 }
