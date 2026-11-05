@@ -8,10 +8,8 @@ import { ChatService } from '../src/main/chat/service'
 import { CodexConnection } from '../src/main/chat/codex'
 import { findExecutable, installSkill, skillSource, skillTargets, skillVersion } from '../src/main/agent'
 import { useChat } from '../src/renderer/src/store/chat'
-import {
-  CODEX_TIER_MODELS, codexRecommendations, effectiveModelChoice, isCrossProviderModelId, resolveCodexAlias,
-  type ChatModelInfo, type ModelChoice
-} from '../src/shared/chat'
+import { CODEX_TIER_MODELS, codexRecommendations, isCrossProviderModelId, resolveCodexAlias } from '../src/shared/lanes'
+import { effectiveModelChoice, type ChatModelInfo, type ModelChoice } from '../src/shared/chat'
 import type { AgentConnection, AgentEvents, AgentOptions } from '../src/main/chat/contracts'
 import { subscriptionEnv } from '../src/main/chat/contracts'
 import { fakeCodexEnv } from './fixtures/fake-codex'
@@ -32,13 +30,13 @@ test('추천은 형님 표 그대로 — Sol·Astra 가 보이면 높음 줄', (
   expect(rec.lanes).toEqual([
     { lane: 'design', label: '설계', model: 'gpt-sol' },
     { lane: 'research', label: '자료 찾기', model: 'gpt-astra' },
-    { lane: 'writing', label: '글쓰기', model: 'gpt-terra' },
-    { lane: 'repeat', label: '반복 작업', model: 'gpt-luna' },
+    { lane: 'writing', label: '글쓰기', model: 'gpt-sol' },
+    { lane: 'repeat', label: '반복 작업', model: 'gpt-terra' },
     { lane: 'review', label: '검토(새 대화)', model: 'gpt-astra' }
   ])
-  // 용도 한 줄은 표에서 나온다 — Sol 은 설계, Terra 는 글쓰기.
-  expect(rec.byModel['gpt-sol'].purpose).toBe('설계')
-  expect(rec.byModel['gpt-terra'].purpose).toBe('글쓰기')
+  // Lane usage follows the same canonical recommendation row.
+  expect(rec.byModel['gpt-sol'].purpose).toBe('설계 · 글쓰기')
+  expect(rec.byModel['gpt-terra'].purpose).toBe('반복 작업')
   expect(rec.byModel['gpt-astra'].purpose).toBe('자료 찾기 · 검토(새 대화)')
 })
 
@@ -47,12 +45,14 @@ test('높음 줄 모델이 없으면 낮음 줄로 내려가고, 목록에 없�
   const low = codexRecommendations(terraLuna)
   expect(low.tier).toBe('low')
   expect(low.lanes.map((l) => [l.lane, l.model])).toEqual([
-    ['design', 'gpt-terra'], ['research', 'gpt-luna'], ['writing', 'gpt-luna'], ['repeat', 'gpt-luna'], ['review', 'gpt-terra']
+    ['design', 'gpt-terra'], ['research', 'gpt-terra'], ['writing', 'gpt-luna'], ['repeat', 'gpt-luna'], ['review', 'gpt-terra']
   ])
-  // Luna 만 있는 요금제: Luna 가 추천되는 칸만 남는다.
+  expect(low.byModel['gpt-terra'].purpose).toBe('설계 · 자료 찾기 · 검토(새 대화)')
+  expect(low.byModel['gpt-luna'].purpose).toBe('글쓰기 · 반복 작업')
+  // Luna 만 있는 요금제: Luna 가 추천되는 글쓰기·반복 레인만 남는다.
   const lunaOnly = codexRecommendations([model({ model: 'gpt-luna', name: 'Luna' })])
   expect(lunaOnly.lanes.every((l) => l.model === 'gpt-luna')).toBe(true)
-  expect(lunaOnly.lanes).toHaveLength(3)
+  expect(lunaOnly.lanes).toHaveLength(2)
   // 별칭은 model·name 의 **끝 낱말**로 찾는다(요금제별 실제 id 는 아직 미확인). 끝에 붙는
   // 괄호·한글은 낱말이 아니라 구분자로 쳐서 `GPT Sol (높음)` 도 Sol 이다.
   expect(codexRecommendations([model({ model: 'gpt-5.1', name: 'GPT Sol (높음)' })]).tier).toBe('high')
@@ -76,9 +76,13 @@ test('다른 공급자로 우회되는 모델은 추천에 붙지 않는다 (DQA
     model({ model: 'commandcode-auth/gpt-5.6-terra', name: 'Terra' })
   ]
   const rec = codexRecommendations(mixed)
-  // 높음 줄 Sol 은 그대로. OpenAI Terra 가 목록에 없으니 글쓰기 추천은 사라진다(엉뚱한 안내 금지).
+  // 높음 줄은 설계와 글쓰기가 Sol이다. 다른 공급자의 Terra는 추천에 쓰이지 않는다.
   expect(rec.tier).toBe('high')
-  expect(rec.lanes).toEqual([{ lane: 'design', label: '설계', model: 'GPT-6.1-Sol' }])
+  expect(rec.lanes).toEqual([
+    { lane: 'design', label: '설계', model: 'GPT-6.1-Sol' },
+    { lane: 'writing', label: '글쓰기', model: 'GPT-6.1-Sol' }
+  ])
+  expect(rec.byModel['GPT-6.1-Sol'].purpose).toBe('설계 · 글쓰기')
   expect(rec.byModel['commandcode-auth/gpt-5.6-terra']).toBeUndefined()
   // 목록을 거치지 않은 배열이 들어와도 별칭 찾기 자체가 다른 공급자 id 를 고르지 않는다.
   expect(resolveCodexAlias(mixed, 'terra')).toBeUndefined()
