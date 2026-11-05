@@ -49,6 +49,7 @@ test('Windows owner block replaces install even in an open or in-flight dialog',
     await page.waitForSelector('.titlebar')
     expect(await page.evaluate(() => window.knuaf.platform)).toBe('win32')
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await expect(page.getByRole('region', { name: '업데이트' }).locator('p.caption', { hasText: '앱 판' })).toContainText('확인할 수 없어요')
     await page.locator('dialog[data-screen="settings"] > .sheet-head button[aria-label="닫기"]').click()
     const send = (latest: string | null, phase = 'blocked') => electronApp.evaluate(({ webContents }, payload) => {
@@ -78,6 +79,7 @@ test('Windows owner block replaces install even in an open or in-flight dialog',
     await dialog.getByRole('button', { name: '설치 안내 보기' }).click()
     await dialog.getByRole('button', { name: '나중에' }).click()
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     const section = page.getByRole('region', { name: '업데이트' })
     await expect(section).toContainText('자동 업데이트를 사용할 수 없어요')
     await expect(section).toContainText('다음 업데이트도 같은 방법으로 설치해야 해요')

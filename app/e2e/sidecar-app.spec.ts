@@ -9,8 +9,8 @@ for (const recovery of ['retry_stop', 'external_cleanup'] as const) {
     const { electronApp, page } = await launch()
     try {
       await navTo(page, '설정')
+      await page.locator('dialog[open] nav').getByRole('button', { name: 'Python 실행기', exact: true }).click()
       const pythonCard = page.locator('section.card', { has: page.getByRole('heading', { name: 'Python 실행기', exact: true }) })
-      await pythonCard.locator('summary').filter({ hasText: '고급' }).click()
       await electronApp.evaluate(({ ipcMain }, recovery) => {
         const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> })._invokeHandlers
         const real = handlers.get('sidecar:restart')!

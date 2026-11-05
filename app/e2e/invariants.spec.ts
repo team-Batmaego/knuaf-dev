@@ -67,6 +67,7 @@ test('제작자 정보는 첫 화면을 가리지 않고 설정에서 볼 수 �
   try {
     await expect(page.getByText('어떤 논문을 쓰고 있어요?')).toBeVisible()
     await page.getByRole('button', { name: '설정' }).first().click()
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await expect(page.getByText('GUI: made by 산업곤충전공 이준재')).toBeVisible()
     await expect(page.getByText('prod. 특용작물전공 24학번 김대욱 · 산업곤충전공 24학번 이준재')).toBeVisible()
   } finally { await electronApp.close() }
@@ -91,15 +92,14 @@ test('hard rules hold across screens', async () => {
   const chatCtrls = (await page.locator('.chat-pane label, .chat-pane .field > span, .chat-pane button').allInnerTexts()).join('\n')
   expect(chatCtrls).not.toMatch(/JSON|모델/)
 
-  // The independent-review notice must reach the publish/save points even when the student
-  // never opens 점검 — the notice lives at the moment of the attempt, not behind a screen.
+  // The independent-review notice appears at the publish/save action, even without opening 점검.
   await navTo(page, '결과물')
-  await expect(page.locator('text=다른 사람 검토 기록이 아직 없어요')).toBeVisible()
-  // 파일 만들기: 제출용 버튼은 관문이 막혀도 활성 — 경고가 관문이지 버튼 잠금이 아니다(#4).
-  const submitBtn = page.locator('.make-row:has-text("제출용 후보 만들기") button')
+  const files = page.locator('.paper-head .popover')
+  const submitRow = files.locator('[data-make="submission_candidate"]')
+  const submitBtn = submitRow.getByRole('button')
   await expect(submitBtn).toBeEnabled()
   await submitBtn.click()
-  await expect(page.locator('text=다른 사람 검토 기록이 아직 없어요').first()).toBeVisible()
+  await expect(submitRow).toContainText('다른 사람 검토 기록이 아직 없어요')
   // The same notice reaches the 고급 도구 발행 지점 (설정 > 고급 도구 > 검토본보내기).
   await navTo(page, '설정')
   await openPreset(page, 'tools:export')

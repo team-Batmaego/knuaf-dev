@@ -255,6 +255,7 @@ test('설정의 로그 폴더 열기는 메인이 정한 로그 폴더로 동작
     await spyShell(electronApp, log)
     const logs = await electronApp.evaluate(({ app }) => app.getPath('logs'))
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await page.getByRole('button', { name: '로그 폴더 열기' }).click()
     await expect.poll(() => shellCalls(log)).toEqual([`open\t${realpathSync(logs)}`])
   } finally {

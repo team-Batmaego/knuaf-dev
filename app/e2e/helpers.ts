@@ -248,26 +248,25 @@ export async function paperReady(page: Page, text?: string): Promise<void> {
 }
 
 /**
- * Open a project by pasting its path (the native picker cannot be driven). The only path
- * input lives in 설정 > 고급 — the folder-less 내 논문 screen deliberately has none.
+ * Open a project by entering its path through Settings > Folder > Advanced.
+ * The path input is hidden until the Folder section is selected and its disclosure is expanded.
  *
- * v5 에서 설정은 **제목줄의 ⚙** 가 연다(왼쪽 사이드바가 없다). 폴더가 열리면 앱이 시트를
- * 닫고 작업 공간으로 돌아온다(store/project.ts open → closeSheet).
- *
- * `ready` 는 **호출자가 실제로 쓸 요소**(종이에서 고를 문단 = `paperReady`, 최종 두 칸 배치 =
- * `splitReady`)가 준비됐음을 확인하는 함수다. 배치 안정 확인은 그 **뒤에** 한다 — 그 전에
- * 보면 아직 오지 않은 절 목록이 배치를 바꾸는데도 "정착"으로 받아들인다(MACR3-R1-02).
- * 준비 조건을 주지 않으면 배치가 지금 조용한지만 본다.
+ * `ready` waits for the element the caller will use before workspace layout settles. The
+ * project section list can still change the layout after the initial open.
  */
 export async function openProject(page: Page, root: string, ready?: (p: Page) => Promise<unknown>): Promise<void> {
   await page.getByRole('button', { name: '설정' }).first().click()
   await page.waitForSelector('dialog[open]', { timeout: 30_000 })
-  const disclosure = page.locator('details:has(input[aria-label="폴더 경로"])')
+  await page.locator('dialog[open] nav').getByRole('button', { name: '폴더', exact: true }).click()
+  const disclosure = page.locator('dialog[open] details:has(input[aria-label="폴더 경로"])')
   await expect(disclosure).toHaveCount(1)
-  await disclosure.first().evaluate((d) => { (d as HTMLDetailsElement).open = true })
-  await page.fill('input[aria-label="폴더 경로"]', root)
-  await page.click('button:has-text("경로로 열기")')
-  // 열렸다 — 시트가 닫히고 대화 칸이 남는다.
+  await expect(disclosure).toBeVisible()
+  await disclosure.evaluate((d) => { (d as HTMLDetailsElement).open = true })
+  const pathInput = page.getByRole('textbox', { name: '폴더 경로' })
+  await expect(pathInput).toBeVisible()
+  await pathInput.fill(root)
+  await disclosure.getByRole('button', { name: '경로로 열기', exact: true }).click()
+  // 폴더 열기가 시작됐다 — 시트가 닫히고 대화 칸이 남는다.
   await page.waitForSelector(CHAT_READY, { timeout: 30_000 })
   await page.waitForSelector('dialog[open]', { state: 'detached', timeout: 30_000 }).catch(() => {})
   // 호출자가 쓸 요소가 준비된 뒤에, 배치가 멈춘 것을 확인하고 돌려준다.
@@ -276,17 +275,19 @@ export async function openProject(page: Page, root: string, ready?: (p: Page) =>
 }
 
 /**
- * v5 의 다섯 목적지로 간다. 이름은 v4 사이드바와 같게 두어 11개 spec 이 그대로 부르게 했다
- * (책임자 의견 ② — 한 곳에서 흡수한다):
- *   · '내 논문' — 시트를 닫는다(대화는 언제나 깔려 있다)
- *   · '설정' — 제목줄 ⚙
- *   · '자료' — 종이 머리 "자료 N" 팝오버 → 자료 전체 보기
- *   · '결과물' — 종이 머리 "파일 N" 팝오버 → 결과물 전체 보기
- *   · '점검' — 제목줄 "지금 ▾" → 전체 과정 → 제출 점검·마무리
+ * Navigate to the shared workspace surfaces. '자료' and '결과물' open their paper-header lists;
+ * the removed full-screen list views are not navigation destinations.
+ *
+ * '내 논문' selects the paper tab when a file preview is open; '설정' opens its modal and
+ * '점검' opens the paper overlay from the titlebar menu.
  */
 export async function navTo(page: Page, label: string): Promise<void> {
   await closeSheet(page)
-  if (label === '내 논문') return
+  if (label === '내 논문') {
+    const paperTab = page.getByRole('tab', { name: '내 논문' })
+    if (await paperTab.isVisible()) await paperTab.click()
+    return
+  }
   if (label === '설정') {
     await page.getByRole('button', { name: '설정' }).first().click()
     return
@@ -297,11 +298,14 @@ export async function navTo(page: Page, label: string): Promise<void> {
     return
   }
   if (label === '자료' || label === '결과물') {
+    const paper = page.locator('.paper-head')
     const paperTab = page.getByRole('tab', { name: '내 논문' })
-    if (!(await page.locator('.paper-head').isVisible()) && await paperTab.isVisible()) await paperTab.click()
+    if (!(await paper.isVisible()) && await paperTab.isVisible()) await paperTab.click()
     const head = label === '자료' ? /자료/ : /파일/
-    await page.locator('.paper-head').getByRole('button', { name: head }).first().click()
-    await page.locator('.paper-head .popover').getByRole('button', { name: label === '자료' ? '자료 전체 보기' : '결과물 전체 보기' }).click()
+    const button = paper.getByRole('button', { name: head }).first()
+    const popover = paper.locator('.popover')
+    if (!(await popover.isVisible()) || await button.getAttribute('aria-expanded') !== 'true') await button.click()
+    await expect(popover).toBeVisible()
     return
   }
   throw new Error(`모르는 목적지: ${label}`)
@@ -309,9 +313,19 @@ export async function navTo(page: Page, label: string): Promise<void> {
 
 
 
-/** Open a 설정 disclosure by its deep-link preset (tools:export, fix:lock, folder:path…). */
+/** Open a Settings disclosure by its deep-link preset (`tools:export`, `fix:lock`, `folder:path`…). */
 export async function openPreset(page: Page, preset: string): Promise<void> {
-  await page.locator(`details[data-preset="${preset}"]`).evaluate((d) => { (d as HTMLDetailsElement).open = true })
+  const family = preset.slice(0, preset.indexOf(':'))
+  const section = family === 'tools' ? '고급 도구'
+    : family === 'fix' ? '문제 해결'
+      : family === 'folder' ? '폴더'
+        : family === 'python' ? 'Python 실행기'
+          : family === 'info' ? '앱 정보'
+            : null
+  if (section) await page.locator('dialog[open] nav').getByRole('button', { name: section, exact: true }).click()
+  const disclosure = page.locator(`dialog[open] details[data-preset="${preset}"]`)
+  await expect(disclosure).toBeVisible()
+  await disclosure.evaluate((d) => { (d as HTMLDetailsElement).open = true })
 }
 
 

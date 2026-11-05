@@ -44,14 +44,15 @@ test('같은 개정의 검토본을 다시 만들면 이미 있는 파일을 목
     await openProject(page, root)
     await page.waitForSelector('.chat-pane', { timeout: 30_000 })
     await navTo(page, '결과물')
-    const sheet = page.locator('[data-screen="artifacts"]')
-    await page.click('.make-row:has-text("검토본 만들기") button')
-    // 같은 문구가 결과물 시트와 종이 머리 아래 만들기 한 줄 두 곳에 뜬다 — 시트로 좁힌다.
-    await expect(sheet).toContainText('검토본을 만들었어요', { timeout: 60_000 })
+    const pop = page.locator('.paper-head .popover')
+    const reviewRow = pop.locator('[data-make="review"]')
+    await reviewRow.getByRole('button').click()
+    await expect(reviewRow).toContainText('검토본을 만들었어요', { timeout: 60_000 })
 
     // 같은 개정·같은 내용에서 한 번 더 — 원본은 receipt로 중복 제거해 existing을 돌려준다.
-    await page.click('.make-row:has-text("검토본 만들기") button')
-    const fb = sheet.locator('.feedback').filter({ hasText: '이미 만든 파일이에요' }).first()
+    await reviewRow.getByRole('button').click()
+    // 화면에는 독립검토 미실행 고지도 있다 — 기존 파일 안내만 집는다.
+    const fb = reviewRow.locator('.make-fb').filter({ hasText: '이미 만든 파일이에요' }).first()
     await expect(fb).toBeVisible({ timeout: 60_000 })
 
     const text = await fb.innerText()
@@ -61,7 +62,7 @@ test('같은 개정의 검토본을 다시 만들면 이미 있는 파일을 목
     // 실제로 일어난 일을 말하고, 실제로 있는 곳을 가리켜야 한다.
     expect(text, '같은 내용이라 새로 만들지 않았다는 사실을 말해야 한다').toContain('새로 만들지 않았어요')
     expect(text, '안내가 가리키는 목록에 그 파일이 있어야 한다').toContain('목록')
-    await expect(sheet).toContainText('검토용.md')
+    await expect(pop.getByRole('button', { name: /검토용\.md/ })).toBeVisible()
   } finally {
     await electronApp.close()
   }
@@ -81,11 +82,12 @@ test('목적지에 receipt 없는 파일이 있으면 원본이 거절하고 안
     await openProject(page, root)
     await page.waitForSelector('.chat-pane', { timeout: 30_000 })
     await navTo(page, '결과물')
-    const sheet = page.locator('[data-screen="artifacts"]')
+    const pop = page.locator('.paper-head .popover')
+    const reviewRow = pop.locator('[data-make="review"]')
     // 이 경우 파일은 실제로 목록에 있다 — 그래도 안내는 그 존재를 단정하지 않는다.
-    await expect(sheet).toContainText('검토용.md', { timeout: 30_000 })
-    await page.click('.make-row:has-text("검토본 만들기") button')
-    const fb = sheet.locator('.feedback').filter({ hasText: '같은 자리에 이미 무언가' }).first()
+    await expect(pop.getByRole('button', { name: /검토용\.md/ })).toBeVisible()
+    await reviewRow.getByRole('button').click()
+    const fb = reviewRow.locator('.make-fb').filter({ hasText: '같은 자리에 이미 무언가' }).first()
     await expect(fb).toBeVisible({ timeout: 60_000 })
     await expectConflictGuidance(fb)
     // 거절은 보존이다 — 미리 둔 파일을 건드리지 않는다.
@@ -107,14 +109,15 @@ test('목적지에 빈 폴더만 있어도 존재를 단정하지 않고 폴더�
     await openProject(page, root)
     await page.waitForSelector('.chat-pane', { timeout: 30_000 })
     await navTo(page, '결과물')
-    const sheet = page.locator('[data-screen="artifacts"]')
-    await expect(sheet).toContainText('아직 결과물이 없어요', { timeout: 30_000 })
-    await page.click('.make-row:has-text("검토본 만들기") button')
-    const fb = sheet.locator('.feedback').filter({ hasText: '같은 자리에 이미 무언가' }).first()
-    await expect(fb).toBeVisible({ timeout: 60_000 })
+    const pop = page.locator('.paper-head .popover')
+    const list = pop.locator('.pop-scroll')
+    const reviewRow = pop.locator('[data-make="review"]')
+    await expect(list.getByText('아직 없어요', { exact: true })).toBeVisible()
+    await reviewRow.getByRole('button').click()
+    const fb = reviewRow.locator('.make-fb').filter({ hasText: '같은 자리에 이미 무언가' }).first()
     await expectConflictGuidance(fb)
     // 안내와 화면이 모순되지 않는다 — 여전히 목록은 비어 있다.
-    await expect(sheet).toContainText('아직 결과물이 없어요')
+    await expect(list.getByText('아직 없어요', { exact: true })).toBeVisible()
     // 거절은 보존이다 — 빈 폴더가 그대로 있고 새 파일도 없다.
     expect(readdirSync(dest)).toEqual([])
   } finally {
