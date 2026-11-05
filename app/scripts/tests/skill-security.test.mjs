@@ -224,6 +224,7 @@ function pinnedRuntimeFixture(t, protection) {
   cpSync(join(import.meta.dirname, 'run-skill-compat.mjs'), join(scripts, 'tests/run-skill-compat.mjs'))
   cpSync(f.overlay, join(f.repo, 'app/skill-overlay'), { recursive: true })
   writeFileSync(join(f.repo, 'app/skill-source.json'), jsonBytes({ ...source, commit }))
+  writeFileSync(join(f.repo, 'app/package.json'), jsonBytes({ skillVersion: '1.0.1' }))
   mkdirSync(join(f.repo, 'updates'))
   writeFileSync(join(f.repo, 'updates/channel.json'), jsonBytes({ skill: { version: '1.0.0' } }))
   const cache = join(f.repo, 'app/resources/skill-upstreams', commit)

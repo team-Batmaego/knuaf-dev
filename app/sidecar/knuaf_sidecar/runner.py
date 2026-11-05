@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -23,7 +24,12 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = CREATE_NO_WINDOW
+    else:
+        # The ensure process can spawn pip; cancellation owns the whole child group.
+        kwargs["start_new_session"] = True
     started = time.monotonic()
+    if ctx.cancelled.is_set():
+        raise RpcError("cancelled", "request cancelled before script start")
     ctx.progress("start", argv=argv, cwd=str(cwd))
     proc = subprocess.Popen(
         argv,
@@ -40,6 +46,8 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
         **kwargs,
     )
     ctx.process = proc
+    if ctx.cancelled.is_set():
+        _kill(proc)
     out_buf, err_buf = [], []
 
     def pump(stream, buf, name):
@@ -73,17 +81,37 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
 
 
 def _kill(proc):
-    try:
-        proc.terminate()
-        proc.wait(timeout=3)
-    except (subprocess.TimeoutExpired, OSError):
+    """Stop the owned script tree, not just the Python parent of a running pip."""
+    if sys.platform == "win32":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or r"C:\Windows"
+        killed = subprocess.run(
+            [os.path.join(system_root, "System32", "taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True, timeout=10,
+        )
+        if killed.returncode and proc.poll() is None:
+            raise RpcError("process_stop_failed", "script tree termination was not confirmed")
+    else:
+        # Do not wait/reap the session leader between signals: its PID is the
+        # process-group id, and reaping could let an unrelated group reuse it.
         try:
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
-            else:
-                proc.kill()
-        except OSError:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
             pass
+        except PermissionError as error:
+            raise RpcError("process_stop_failed", "script tree termination was not confirmed") from error
+        else:
+            try:
+                # Cancellation is a hard boundary: terminate descendants even if
+                # the script leader exits first or ignores SIGTERM.
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError as error:
+                raise RpcError("process_stop_failed", "script tree termination was not confirmed") from error
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired as error:
+        raise RpcError("process_stop_failed", "script exit was not confirmed") from error
 
 
 def project_python(project: Path):

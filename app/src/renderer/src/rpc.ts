@@ -1,4 +1,4 @@
-import type { ArtifactItem, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, DependencyReport, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -56,7 +56,7 @@ async function outputParams(params: Record<string, unknown>, clientId?: string):
 const preflightCancels = new Map<string, () => boolean>()
 
 async function script(method: string, params: Record<string, unknown>, onEvent?: EventHandler, clientId?: string): Promise<Envelope> {
-  if (OUTPUT_METHODS[method] !== true) return call<Envelope>(method, params, onEvent, clientId)
+  if (OUTPUT_METHODS[method] !== true && !(method === 'excel.inspect' && !params.source)) return call<Envelope>(method, params, onEvent, clientId)
   const id = clientId ?? rpc.newClientId()
   let interrupt!: (error: RpcFailure) => void
   const interrupted = new Promise<never>((_resolve, reject) => { interrupt = reject })
@@ -69,7 +69,21 @@ async function script(method: string, params: Record<string, unknown>, onEvent?:
     return true
   })
   try {
-    const selected = await Promise.race([outputParams(params, id), interrupted])
+    let selected = params
+    if (method === 'excel.inspect') {
+      const materials = await Promise.race([call<MaterialsData>('materials.list', { root: params.root }, undefined, id), interrupted])
+      if (cancellation) throw cancellation
+      selected = { ...params }
+      delete selected.source // The UI's empty input is absence, not a file path.
+      const finance = materials.current_finance
+      if (finance.provided) {
+        if (!finance.path) throw new RpcFailure({ code: 'invalid_params', message: '선택한 재무 파일 경로가 없음' })
+        selected.source = finance.path
+      }
+    }
+    if (OUTPUT_METHODS[method] === true || !selected.source) {
+      selected = await Promise.race([outputParams(selected, id), interrupted])
+    }
     if (cancellation) throw cancellation // Cancellation may win just after the read promise settled.
     preparing = false
     return await call<Envelope>(method, selected, onEvent, id)
@@ -94,6 +108,16 @@ export const rpc = {
   lockInfo: (root: string, probe = false) => call<LockInfo>('lock.info', { root, probe }),
   unlock: (root: string) => call<OwnerCleanup>('lock.unlock', { root }),
   doctor: (root: string) => call<Record<string, any>>('doctor.all', { root }),
+  depsDoctor: async (root: string, clientId?: string, onEvent?: EventHandler): Promise<DependencyReport> => {
+    const env = await call<Envelope>('deps.doctor', { root }, onEvent, clientId)
+    const data = env?.data as DependencyReport | null
+    if (!env?.ok || !data || typeof data.ready !== 'boolean' || !Array.isArray(data.dependencies) || !data.dependencies.length
+      || data.dependencies.some(row => !row || typeof row.dist !== 'string' || typeof row.status !== 'string')
+      || (data.ready && (!data.venv_python || data.selected_python !== data.venv_python))) {
+      throw new RpcFailure({ code: 'deps_doctor', message: env?.block_reason || env?.stderr || '패키지 진단 응답이 없거나 손상됐어요.', data: env })
+    }
+    return data
+  },
   /**
    * `build/` 아래 개정별 폴더. 검토본 기준 N 은 여기서 읽는다(진행 규칙 §4-4) —
    * `artifact.list` 의 `revision` 은 미등록 검토본에서 null 이라 쓰지 않는다.

@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
-import { checkSource, composeFiles, readTree, writeTree, zipBytes, sha256 } from './compose-skill.mjs'
+import { checkSource, composeFiles, readTree, writeTree, zipBytes, sha256, validVersion } from './compose-skill.mjs'
 import { runCompatibility } from './tests/run-skill-compat.mjs'
 import { fetchPinnedSkill } from './fetch-skill.mjs'
 
@@ -33,10 +33,18 @@ export function stageComposed({ files, upstream, output, python = defaultPython 
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const channel = JSON.parse(readFileSync(resolve(app, '../updates/channel.json'), 'utf8'))
+  const packageMetadata = JSON.parse(readFileSync(resolve(app, 'package.json'), 'utf8'))
+  const versions = [packageMetadata.skillVersion, ...(channel.skill ? [channel.skill.version] : [])]
+  if (versions.some(version => !validVersion(version))) throw new Error('Invalid reserved/channel stage version')
+  versions.sort((a, b) => {
+    const aa = a.split('.').map(Number), bb = b.split('.').map(Number)
+    for (let i = 0; i < 3; i++) if (aa[i] !== bb[i]) return aa[i] - bb[i]
+    return 0
+  })
   const { values } = parseArgs({ options: {
     upstream: { type: 'string', default: process.env.KNUAF_SKILL_UPSTREAM },
     output: { type: 'string', default: resolve(app, 'resources/skill') },
-    version: { type: 'string', default: channel.skill?.version ?? '1.0.0' },
+    version: { type: 'string', default: versions.at(-1) },
     python: { type: 'string', default: defaultPython },
     offline: { type: 'boolean', default: false }
   } })

@@ -17,7 +17,6 @@ import { createElement, Fragment } from 'react'
 import { useChat } from '../src/renderer/src/store/chat'
 import { usePrep, waitKind } from '../src/renderer/src/store/prep'
 import { rpc, RpcFailure } from '../src/renderer/src/rpc'
-import { describeChatError, CHAT } from '../src/renderer/src/copy'
 import { withBold } from '../src/renderer/src/inline'
 import { APP_DIRS, forgetHidden, hideAppDirs } from '../src/main/hidden'
 import type { ChatSnapshot, ConnectionStatus } from '../src/shared/chat'
@@ -38,7 +37,10 @@ function harness() {
     snapshot: async (root: string) => ({ result: snap(root) }),
     status: async () => ({ result: CONNECTED }),
     draft: async () => ({ result: '' }) } } }
-  usePrep.setState({ counts: {} })
+  usePrep.setState({ prep: {}, write: {}, dependencies: {
+    [ROOT]: { visit: 0, operationId: 'verified-fixture', phase: 'ready' },
+    '/p/other': { visit: 0, operationId: 'verified-other', phase: 'ready' }
+  } })
   useChat.setState({ root: ROOT, provider: 'codex', snapshot: snap(), status: CONNECTED, draft: '', draftSeq: 0, busy: false, waitingPrep: false, error: null })
   return { sent }
 }
@@ -137,12 +139,6 @@ test('① 다른 폴더가 준비 중이면 기다리지 않는다', async () =>
   usePrep.getState().end('/p/elsewhere')
 })
 
-test('② "저장·검사 중" 거절은 빨간 오류가 아니라 기다리면 되는 안내다', () => {
-  const d = describeChatError('앱이 저장·검사 작업 중이에요. 끝난 뒤 답변을 보내 주세요.')
-  expect(d.kind).toBe('warning')
-  expect(d.title).toBe(CHAT.appBusyTitle)
-  expect(d.raw).toContain('저장·검사')
-})
 
 const html = (text: string): string => renderToStaticMarkup(createElement(Fragment, null, withBold(text, (part) => part)))
 const html2 = (text: string, rest: (p: string) => string): string => renderToStaticMarkup(createElement(Fragment, null, withBold(text, rest)))

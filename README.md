@@ -101,7 +101,7 @@ pnpm -C app install --frozen-lockfile --offline
 .venv-dev/bin/pip install pytest pytest-timeout -r "$(node app/scripts/fetch-skill.mjs --requirements)"
 node app/scripts/test-with-skill.mjs --offline --python .venv-dev/bin/python
 ```
-`stage:skill`은 `app/skill-source.json`의 정확한 commit/tag만 사용하고 최종 compose bytes로 소비자·원본 내부 시험·이관한 보호별 원본 루트 시험을 실행합니다. 실패하면 이전 동봉 묶음을 보존하고 build도 중단합니다. 현재 고정 v0.3.1은 이 게이트를 통과합니다(소비자 시험 245 passed·2 skipped, 원본 내부·보호 시험 681 passed·25 skipped). 고정값을 바꾸면 같은 게이트를 다시 통과해야 하며, 통과하지 못하면 동봉을 거절합니다.
+`stage:skill`은 `app/skill-source.json`의 정확한 commit/tag만 사용하고 최종 compose bytes로 소비자·원본 내부 시험·이관한 보호별 원본 루트 시험을 실행합니다. 실패하면 이전 동봉 묶음을 보존하고 build도 중단합니다. 현재 고정은 v0.4.2(`60311c1…`)입니다. pin을 바꾸면 시험 제외나 원본 정책 수정 없이 같은 전체 게이트를 다시 통과해야 합니다.
 
 개인 `.harness.conf`는 추적하지 않습니다. 기존 `HARNESS_TEST=.venv-dev/bin/python -m pytest`도 추적된 `tests/conftest.py`의 세션 시작에서 고정 pin을 오프라인으로 준비합니다. 준비가 성공해야 시험 수집으로 넘어가며 실패는 명시적인 비0 종료입니다. 개인 훅·공유 하네스 설정을 바꾸지 않아도 같은 트리의 새 사본에 적용됩니다. CI는 `test-with-skill.mjs`로 같은 stage를 먼저 실행하고 pin별 캐시를 복원합니다. 준비된 런타임을 명시한 내부 시험은 재귀 준비를 하지 않습니다.
 캐시는 `app/resources/skill-upstreams/<commit>/`입니다. 오프라인 의존성 경로 확인은 `node app/scripts/fetch-skill.mjs --offline --requirements`로 합니다. `KNUAF_SKILL_UPSTREAM`에는 고정 commit/tag와 일치하는 로컬 checkout을 지정할 수 있습니다. HEAD/tag·수정/추가/무시 파일뿐 아니라 고정 commit의 blob ID와 실제 파일 바이트를 직접 대조하므로 index의 숨김 플래그로 시험 변조를 감출 수 없습니다. 검증 시 읽은 바이트를 격리 사본으로 만들어 compose·호환 시험이 같은 입력을 사용합니다. 새 clone은 `core.autocrlf=false`, `core.eol=lf`로 준비하며 캐시 안에서 시험을 직접 실행하지 않습니다.

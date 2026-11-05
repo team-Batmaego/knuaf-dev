@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { sha256, zipBytes, readTree } from '../compose-skill.mjs'
 
 export const CONSUMER_TESTS = [
-  'test_sidecar.py', 'test_sidecar_read_all.py', 'test_sidecar_publication.py', 'test_build_docx.py', 'test_excel_template.py',
+  'test_sidecar.py', 'test_sidecar_read_all.py', 'test_sidecar_publication.py', 'test_sidecar_deps.py', 'test_build_docx.py', 'test_excel_template.py',
   'test_excel_fill.py', 'test_excel_formula_patch.py', 'test_finance_save.py', 'test_office_static.py', 'test_deps.py', 'test_kordoc.py',
   'test_skill_docs.py', 'test_cli_gg.py', 'test_core_checks.py', 'test_commands.py'
 ]

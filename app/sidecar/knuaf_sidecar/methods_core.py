@@ -213,11 +213,55 @@ def lock_unlock(ctx, params):
         raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
 
 
+def project_deps_report(report):
+    """Use only the project's probed venv; current Python remains diagnostic evidence."""
+    if not isinstance(report, dict) or report.get("error"):
+        raise RpcError("deps_doctor", "패키지 진단 응답 오류", report)
+    rows = report.get("dependencies")
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        raise RpcError("deps_doctor", "패키지 진단 dependencies가 없거나 손상됨", report)
+    if "venv_python" not in report or not isinstance(report.get("current_python"), str):
+        raise RpcError("deps_doctor", "패키지 진단 실행기 정보가 없거나 손상됨", report)
+    vpy = report.get("venv_python")
+    if vpy is not None and (not isinstance(vpy, str) or not vpy):
+        raise RpcError("deps_doctor", "패키지 진단 venv_python이 손상됨", report)
+    normalized = []
+    for row in rows:
+        if not isinstance(row.get("dist"), str) or not row["dist"] or not isinstance(row.get("current"), dict) or "venv" not in row:
+            raise RpcError("deps_doctor", "패키지 진단 dependency 행이 손상됨", report)
+        venv = row.get("venv")
+        if venv is not None and not isinstance(venv, dict):
+            raise RpcError("deps_doctor", "패키지 진단 venv 행이 손상됨", report)
+        if vpy and (not isinstance(venv, dict) or not {"imported", "version_in_range", "status"} <= venv.keys()):
+            raise RpcError("deps_doctor", "패키지 진단 venv 행이 손상됨", report)
+        if vpy and (
+            type(venv["imported"]) is not bool
+            or (venv["version_in_range"] is not None and type(venv["version_in_range"]) is not bool)
+            or not isinstance(venv["status"], str)
+        ):
+            raise RpcError("deps_doctor", "패키지 진단 venv 검증값이 손상됨", report)
+        installed = bool(vpy) and venv["imported"] is True and venv["version_in_range"] is True and venv["status"] == "installed"
+        status = "installed" if installed else (venv or {}).get("status", "missing")
+        if not installed and status == "installed":
+            status = "missing"
+        normalized.append({**row, "status": status})
+    return {
+        **report,
+        "ready": bool(vpy) and all(row["status"] == "installed" for row in normalized),
+        "selected_python": vpy,
+        "dependencies": normalized,
+    }
+
+
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
     report = core.doctor(root, probe=params.get("probe") is True)
     out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
+    try:
+        out["deps"] = project_deps_report(report["deps"])
+    except RpcError as error:
+        out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
     out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
     return out
 

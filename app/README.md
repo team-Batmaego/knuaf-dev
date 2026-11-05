@@ -66,6 +66,8 @@
     읽기 실패를 동봉본으로 대체하지 않습니다. 등록 파일이 없으면 전공별 양식을 먼저 확인하도록 안내하며,
     특용작물 전공에서 명시적으로 선택한 X01만 동봉 자산으로 만듭니다. H01·X02를 X01로 대체하지 않습니다.
     다른 전공은 원본의 지원 출력·양식 조사 계약을 그대로 따릅니다. 새 사본은 실제 Excel 재계산·본문 대조·제출 승인이 아닙니다.
+    **재무 파일 검사**는 명시한 source → 등록된 학생 재무 파일 → source가 없을 때만 전공별 양식 순서입니다.
+    빈 입력칸도 source 생략으로 처리합니다. 학생 파일 검사는 전공 없이 가능하며, 손상·유실 오류를 동봉 양식으로 대체하지 않습니다.
     설치는 assets와 `version.json`·`skill.json`·`install-manifest.json`을 보존하며, root metadata도 내용 fingerprint에 포함합니다.
     프로젝트 두 공급자 설치 경로는 `.knuaf-gui/skill-install.json`에 기록해 원본 `gg_update.py auto`가 `managed`로 종료하게 합니다.
 
@@ -129,6 +131,11 @@ pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
 ```
 
+`pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
+별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
+`test:e2e`·기본 Playwright 설정은 GUI용입니다. `model-chip.spec.ts`처럼 GUI와 store가 섞인 파일은
+Node 전용 목록에 추가하지 마세요. Node 검사는 정식 stage·설치본·실제 화면 검증의 대체가 아닙니다.
+
 개인 `.harness.conf`나 공유 하네스를 수정할 필요가 없습니다. 종전 훅 명령인
 `.venv-dev/bin/python -m pytest`는 추적된 `tests/conftest.py`를 통해 수집 전에
 고정 pin을 오프라인으로 준비하고, 실패하면 수집 오류 대신 준비 원인과 비0 종료를 냅니다.
@@ -146,11 +153,11 @@ CI의 `test-with-skill.mjs`도 같은 stage를 사용합니다. 직접 실행하
 `resources/skill/`로 동봉하며 dev/build/resource 준비·skill-release CI가 같은 게이트를 사용합니다.
 실패하면 이전 묶음을 보존하며 구판 사본으로 자동 대체하지 않습니다.
 
-현재 공개 pin v0.3.1은 이 게이트를 통과합니다: 소비자 시험 245 passed·2 skipped, 원본 기본 시험 681 passed·25 skipped.
-고정값을 바꾸면 같은 게이트를 다시 통과해야 하며, 통과하지 못하면 동봉을 거절합니다.
+현재 pin은 v0.4.2(`60311c11fbf12fdc04249be8c75eeaf027c06a66`)입니다.
+pin 변경 시 consumer·upstream 내부·보호별 upstream root 전체 게이트를 통과해야 하며, 시험 제외·로컬 원본 패치·낡은 stage로 성공시키지 않습니다.
 문서 소비자 보호는 최종 `SKILL.md`와 하위 `references/**/*.md`에서 퇴역 원장을
 새 기록·쓰기 대상으로 지시하는 문형과 저장 위치 표를 거절합니다. 읽기·보존·쓰기 금지
-언급은 허용합니다. v0.3.1은 이 보호도 통과하며, 이후 원본 판이 다시 위반하면 제외 없이 거절합니다.
+언급은 허용합니다. 이후 원본 판이 다시 위반하면 제외 없이 거절합니다.
 
 로컬 검증용 compose는 `KNUAF_SCRIPTS_DIR=/절대/묶음/scripts`(앱)와
 `KNUAF_TEST_SCRIPTS_DIR=/절대/묶음/scripts`(pytest)로 지정합니다.
@@ -162,6 +169,25 @@ S0는 동봉 묶음의 `skill.json` 판/API를 읽으며 암묵적 1.0.0 추정�
 재설치 시 학생 수정 사본을 skill 탐색 경로 밖으로 백업합니다.
 프로젝트 `.knuaf-gui/skill-install.json`은 양쪽 설치 경로를 표시하며, 설치본의 `gg_update.py auto`는
 `managed`로 종료하여 앱 업데이트 경로와 경쟁하지 않습니다.
+
+### 의존성 준비 계약
+
+- 합성 스킬 판은 채널의 `skill.version`과 `package.json.skillVersion`(이번 배정 1.0.1) 중 높은 값을 stage 입력으로 사용합니다.
+  앱 판·upstream 판·SKILL_API와 별개입니다. overlay.json에는 version을 추가하지 않습니다.
+  skill-release는 게시·초안 최대값의 다음 patch와 배정값을 비교해 기존 번호를 재사용하지 않습니다.
+- 폴더 열기가 성공하면 다음 비동기 조회보다 먼저 방문별 `checking`과 진행 카운터를 등록합니다.
+  `deps.doctor`는 종합 `doctor.all`과 분리하고, current Python이 아닌 프로젝트 `.venv`의 실제 import·버전 확인만 ready로 인정합니다.
+  빈/손상 진단은 blocked이며 설치를 시작하지 않습니다.
+  실패한 다른 폴더 열기는 현재 폴더 방문의 소유권을 취소하지 않습니다. 열기 요청 세대는 별도로 증가해 오래된 성공은 거절합니다.
+  main도 수동 재진단 시작 즉시 전송을 닫습니다. 현재 방문의 모든 진단이 끝나고 최신 진단이 ready일 때만 열며,
+  실패·취소·옛 방문의 응답은 최신 준비 상태를 ready로 덮지 않습니다. 설치 중 진단은 설치 전체 검증의 소유권을 빼앗지 않습니다.
+- 준비 결과는 `checking → installing → verifying → ready | blocked`입니다. 카운터 0은 성공이 아닙니다.
+  자동 준비와 수동 패키지 준비는 같은 action·root별 physical single-flight를 사용합니다. 다시 진단은 설치하지 않습니다.
+  설치 뒤 main 실행기 선택·재진단과 renderer 재조회까지 기다립니다. 오래된 방문은 현재 실행기·화면을 바꾸지 않습니다.
+- 실패·취소·agent_busy면 전송 대기를 끝내되 초안을 보존하고, 준비 오류·다시 준비 동선을 남깁니다.
+  재준비 성공이 거절된 메시지를 자동 전송하지 않습니다. 만들기도 ready 이전에는 실행하지 않습니다.
+  소유한 설치 취소/종료는 자식 pip까지 중단하며, Windows taskkill 경로는 실기기 검증이 별도로 필요합니다.
+
 ## 서명된 앱 업데이트 채널 게시
 
 - `.github/workflows/app-release.yml`은 `main`에서 수동 실행하며, 이미 존재하는 릴리스 태그 하나만 받습니다. 설치본 자산 이름은 태그에서 계산합니다. 태그 커밋이 `main`의 조상이고, 태그 시점 앱 버전과 현재 업데이트 공개키가 `main`과 일치해야 합니다.
@@ -207,14 +233,18 @@ pnpm dist:mac           # 또는 pnpm dist:win
 먼저 준비합니다. 개별로 돌리려면:
 
 ```bash
-pnpm fetch:python       # python-build-standalone 3.12 → resources/python
-pnpm build:wheelhouse   # openpyxl·python-docx·lxml·pypdf 휠 → resources/wheelhouse
-pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png
-pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf
 pnpm stage:skill        # 고정 knuaf-doc + 앱 overlay → 호환 게이트 → resources/skill
+pnpm fetch:python       # python-build-standalone 3.12 → resources/python
+pnpm build:wheelhouse   # 이번 stage의 requirements/runtime-deps → bundled ABI/대상별 resources/wheelhouse
+pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png (Chromium 실행)
+pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf (Chromium 실행)
+pnpm build:guide --html-only  # 브라우저 금지 환경: HTML만 갱신, PDF는 그대로
 ```
 
 번들 python은 `gg_deps.py ensure`의 base 인터프리터로만 쓰이고, 패키지는 계약대로 `<프로젝트>/.venv`에 설치됩니다.
+wheelhouse는 `.Complete`의 요구 파일·manifest·명세·동봉 Python ABI/대상·wheel 해시가 모두 맞을 때만 재사용합니다.
+동봉 Python이 없거나 PYTHON override/교차 대상이면 빌드를 거절합니다. 오프라인 설치 실패 후 온라인 재시도는
+두 단계의 원인을 보존하며, 취소 뒤에는 다음 설치 단계를 시작하지 않습니다.
 
 ## 지키는 규칙 (스킬 문서에서 옴)
 
@@ -222,6 +252,6 @@ pnpm stage:skill        # 고정 knuaf-doc + 앱 overlay → 호환 게이트 �
 - 학생에게 JSON·명령어·모델 선택을 요구하지 않음(`SKILL.md:15`).
 - 기계검사 / 내용검토 / 출력검토 / 교수 승인 4레인을 하나로 합치지 않음(`SKILL.md:34`). 진행률 % 없음.
 - 유효한 독립검토가 없으면 최상단에 `독립검토 미실행` 배너.
-- 잠금은 같은 기기에서 종료된 프로세스의 것만 해제(`section-ledger.md`). 산출물은 절대 덮어쓰지 않음.
+- 잠금 구조·점유 관측은 분리합니다. 실제 guard를 점유할 수 있을 때만 남은 소유 기록을 정리하며 살아 있는 작업을 끊거나 guard를 삭제하지 않습니다.
 - AI 도우미를 연결하면 답변과 작업 폴더의 내용이 선택한 제공업체(OpenAI 또는 Anthropic)로 전송됨.
   앱 자체는 그 외 어디에도 자료를 보내지 않음.

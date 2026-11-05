@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { useProject } from '../store/project'
+import { preparationFailureTitle, usePrep } from '../store/prep'
 import { useChat } from '../store/chat'
 import { rpc, RpcFailure } from '../rpc'
 import type { Envelope } from '../../../shared/types'
@@ -405,10 +406,19 @@ export function useMake(): Make {
   const run = useCallback(async (kind: MakeKind): Promise<void> => {
     const s = useMakeState.getState()
     if (s.making || s.busy) return
+    const preparation = root ? usePrep.getState().dependencies[root] : undefined
+    if (preparation?.phase !== 'ready' || (root && (usePrep.getState().prep[root] ?? 0) > 0)) {
+      patch({ root, feedbackKind: kind, feedback: {
+        kind: 'warning', title: preparation?.phase === 'blocked' ? preparationFailureTitle(preparation.error) : '논문 폴더를 준비하고 있어요',
+        body: '설정 > 문제 해결에서 준비 상태를 확인한 뒤 다시 만들어 주세요.',
+        details: preparation?.error ? <code>{preparation.error.message}</code> : undefined
+      } })
+      return
+    }
     if (kind === 'xlsx') { await doXlsx(); return }
     if (kind === 'docx') { await doDocx(); return }
     await doExport(kind)
-  }, [doExport, doDocx, doXlsx])
+  }, [root, doExport, doDocx, doXlsx])
 
   // A choice callback or result from another project must never be offered here.
   const ownsResult = st.root === root

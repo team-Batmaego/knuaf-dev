@@ -2,6 +2,7 @@
   "name": "knuaf-thesis-helper",
   "productName": "knuaf-dev",
   "version": "0.6.0",
+  "skillVersion": "1.0.1",
   "description": "knuaf-dev 창업논문 작성 도우미의 데스크톱 동반 GUI (에이전트가 작성, 앱은 상태·검사·발행 담당)",
   "main": "./out/main/index.js",
   "private": true,
@@ -21,6 +22,7 @@
     "dist:win": "pnpm build && pnpm prepare:resources && electron-builder --win --publish never",
     "_comment:test:e2e": "e2e는 out/의 빌드 산출물을 띄운다 — build 없이 돌리면 낡은 코드를 검증한다(CI는 build를 선행한다).",
     "test:e2e": "pnpm build && playwright test",
+    "test:node": "playwright test --config playwright.node.config.ts",
     "prepare:resources": "pnpm stage:skill && pnpm fetch:python && pnpm fetch:codex && pnpm build:wheelhouse && pnpm build:icons && pnpm build:guide"
   },
   "dependencies": {

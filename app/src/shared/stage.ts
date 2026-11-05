@@ -42,7 +42,7 @@ export interface StageInputs extends StageFacts {
   root: boolean
   /** 고른 공급자가 연결됐나(`unknown`·`failed` 는 false). */
   connected: boolean
-  /** 도구 준비 실패(`deps_ensure`·`depsReady === false`). */
+  /** 이 방문의 의존성 준비 결과가 blocked인가(진행 중은 실패 아님). */
   depsFailed: boolean
   /** 정본이 있나(`useProject.hasProject`). */
   hasProject: boolean

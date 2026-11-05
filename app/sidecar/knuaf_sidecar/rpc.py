@@ -37,10 +37,9 @@ class Context:
         self.cancelled.set()
         proc = self.process
         if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+            from .runner import _kill
+
+            _kill(proc)
 
 
 class Server:
@@ -90,6 +89,10 @@ class Server:
                 self.write({"id": request.get("id"), "result": {"cancelled": ctx is not None}})
                 continue
             if request.get("method") == "shutdown":
+                with self._pending_lock:
+                    pending = list(self.pending.values())
+                for ctx in pending:
+                    ctx.cancel()
                 self.write({"id": request.get("id"), "result": {"bye": True}})
                 break
             t = threading.Thread(target=self._handle, args=(request,), daemon=True)

@@ -153,7 +153,8 @@ def excel_create(ctx, params):
 def excel_inspect(ctx, params):
     params = _excel_params(ctx, params)
     argv = ["inspect"] + _flags(params, ("source", "out_map", "report", "legacy_map", "template_ref", "reference_inventory"))
-    argv += _output_flags(params, project=True)
+    if params.get("source") is None:
+        argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_template.py", argv)
 
 
@@ -247,7 +248,12 @@ def deps_ensure(ctx, params):
 
 
 def deps_doctor(ctx, params):
-    return _run(ctx, params, "gg_deps.py", ["doctor", str(_root(params))])
+    from .methods_core import project_deps_report
+
+    result = _run(ctx, params, "gg_deps.py", ["doctor", str(_root(params))])
+    if result["ok"]:
+        result["data"] = project_deps_report(result["data"])
+    return result
 
 
 def kordoc_ensure(ctx, params):

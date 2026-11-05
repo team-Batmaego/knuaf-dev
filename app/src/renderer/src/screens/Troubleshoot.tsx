@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProject } from '../store/project'
+import { preparationFailureTitle, usePrep } from '../store/prep'
 import { rpc } from '../rpc'
 import { Disclosure } from '../components/Disclosure'
 import { Feedback } from '../components/Feedback'
@@ -17,7 +18,8 @@ import { useShallow } from 'zustand/react/shallow'
  * Failure feedback deep-links land on `data-preset="fix:<id>"`.
  */
 export function TroubleshootSections() {
-  const { root, hasProject, status, refresh, refreshSidecar, refreshDeps, sidecar, open } = useProject(useShallow((s) => ({ root: s.root, hasProject: s.hasProject, status: s.status, refresh: s.refresh, refreshSidecar: s.refreshSidecar, refreshDeps: s.refreshDeps, sidecar: s.sidecar, open: s.open })))
+  const { root, hasProject, status, refresh, refreshSidecar, sidecar } = useProject(useShallow((s) => ({ root: s.root, hasProject: s.hasProject, status: s.status, refresh: s.refresh, refreshSidecar: s.refreshSidecar, sidecar: s.sidecar })))
+  const preparation = usePrep(s => root ? s.dependencies[root] : undefined)
   const [diagnosis, setDiagnosis] = useState<{ root: string; data: Record<string, any> } | null>(null)
   const doc = diagnosis?.root === root ? diagnosis.data : null
   const requestSeq = useRef(0)
@@ -31,10 +33,12 @@ export function TroubleshootSections() {
     if (!root) return
     const seq = ++requestSeq.current
     setErr(null); setDiagnosis(null); setLockBusy(false)
+    const checked = useProject.getState().prepareDeps(root, { install: false })
     try {
       const data = await rpc.doctor(root)
       if (seq === requestSeq.current) setDiagnosis({ root, data })
     } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
+    finally { await checked }
   }, [root])
   useEffect(() => {
     setErr(null); setMsg(null); setConfirm(null); setLockBusy(false)
@@ -44,27 +48,36 @@ export function TroubleshootSections() {
   if (!root) return <div className="caption">먼저 "내 논문"에서 폴더를 여세요.</div>
   const lock: LockInfo | undefined = doc?.lock
   const hist: HistoryRow[] = Array.isArray(doc?.snapshots) ? doc!.snapshots : []
-  const depsInfo = doc?.deps
+  const depsInfo = preparation?.report
   const act = async () => {
     if (!confirm) return
     const c = confirm; setConfirm(null); setErr(null); setMsg(null); setLockBusy(true)
     const seq = requestSeq.current
+    const visit = preparation?.visit
+    const mine = (): boolean => seq === requestSeq.current && useProject.getState().root === root && usePrep.getState().dependencies[root]?.visit === visit
     try {
       if (c.kind === 'unlock') {
         const r = await rpc.unlock(root)
-        if (seq === requestSeq.current) setMsg({ title: r.owner_cleaned ? LOCK_COPY.cleaned : LOCK_COPY.nothingCleaned })
+        if (mine()) setMsg({ title: r.owner_cleaned ? LOCK_COPY.cleaned : LOCK_COPY.nothingCleaned })
       }
-      if (c.kind === 'restore' && c.rev != null && status) { const r = await rpc.restore(root, c.rev, status.revision); setMsg({ title: COMPLETION.restored, body: `${r.restored_from}번째 기록의 정본을 ${r.revision}번째 기록으로 되돌렸어요. 복원 직전 상태는 ${r.pre_restore_snapshot}에 남아 있어요.` }) }
-      if (c.kind === 'init') { await rpc.init(root); setMsg({ title: COMPLETION.init_done }); await open(root); return }
-      await refresh(); await load()
-    } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
-    finally { if (seq === requestSeq.current) setLockBusy(false) }
+      if (c.kind === 'restore' && c.rev != null && status) {
+        const r = await rpc.restore(root, c.rev, status.revision)
+        if (mine()) setMsg({ title: COMPLETION.restored, body: `${r.restored_from}번째 기록의 정본을 ${r.revision}번째 기록으로 되돌렸어요. 복원 직전 상태는 ${r.pre_restore_snapshot}에 남아 있어요.` })
+      }
+      if (c.kind === 'init') { await rpc.init(root); if (mine()) setMsg({ title: COMPLETION.init_done }) }
+      if (!mine()) return
+      await refresh()
+      if (mine()) await load()
+    } catch (e) { if (mine()) setErr(describeError(e)) }
+    finally { if (mine()) setLockBusy(false) }
   }
   const ensureDeps = async () => {
+    const seq = requestSeq.current
+    const visit = preparation?.visit
     setErr(null); setMsg(null)
-    const env = await deps.runDeps(root)
-    if (env?.ok) { setMsg({ title: COMPLETION.deps_ready, body: '프로젝트 폴더의 .venv에 설치했어요.' }); await refreshSidecar(); await refreshDeps(); await load() }
-    else if (env) setErr(describeError({ code: 'business_rule', message: env.block_reason ?? env.stderr.slice(-300) }))
+    const result = await deps.runDeps(root)
+    if (seq !== requestSeq.current || useProject.getState().root !== root || usePrep.getState().dependencies[root]?.visit !== visit) return
+    if (result?.phase === 'ready') { setMsg({ title: COMPLETION.deps_ready, body: '프로젝트 .venv의 import·버전을 확인했어요.' }); await refreshSidecar(); await load() }
   }
   const prepareKordoc = async () => {
     setErr(null); setMsg(null)
@@ -93,19 +106,21 @@ export function TroubleshootSections() {
       {!hasProject && <Feedback kind="warning" title="이 폴더에는 아직 정본(project.json)이 없어요" body="보통 도우미가 '시작하기'로 만들어요. 새 빈 폴더가 확실하면 여기서 만들 수도 있어요." actions={<button onClick={() => setConfirm({ kind: 'init' })}>빈 정본 만들기</button>} />}
 
       <Disclosure label="준비 상태" preset="fix:deps">
-        <div className="card-head"><h2>준비 상태</h2>{depsInfo && <StatusBadge status={depsInfo.ready ? 'pass' : 'blocked'} label={depsInfo.ready ? '준비됨' : '준비 필요'} />}</div>
+        <div className="card-head"><h2>준비 상태</h2><StatusBadge status={preparation?.phase === 'ready' ? 'pass' : 'blocked'} label={preparation?.phase === 'ready' ? '준비됨' : preparation?.phase === 'blocked' ? '준비 중단' : '확인·준비 중'} /></div>
         <div className="caption">실행기 <code>{sidecar?.python}</code> <Badge label={sidecar?.kind ?? ''} /> {sidecar?.running ? <Badge tone="pass" label="실행 중" /> : <Badge tone="fail" label="꺼짐" />}</div>
-        {depsInfo && !depsInfo.error && (
+        {depsInfo && (
           <table style={{ marginTop: 'var(--sp-3)' }}>
             <thead><tr><th>패키지</th><th>용도</th><th>상태</th></tr></thead>
             <tbody>{(depsInfo.dependencies ?? []).map((d: any) => <tr key={d.dist}><td><code>{d.dist}</code></td><td>{d.purpose}</td><td><StatusBadge status={d.status} /></td></tr>)}</tbody>
           </table>
         )}
+        {preparation?.phase === 'blocked' && <Feedback kind="warning" title={preparationFailureTitle(preparation.error)}
+          body="쓴 글은 그대로 남아 있어요. 원인을 확인하고 다시 준비해 주세요." details={<code>{preparation.error?.message}</code>} />}
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
           <button className="primary" disabled={deps.busy} onClick={ensureDeps}>{deps.busy ? '준비 중…' : '패키지 준비'}</button>
           <span className="caption">프로젝트 폴더 안 <code>.venv</code>에만 설치해요. 전역 Python은 건드리지 않아요.</span>
         </div>
-        <ProgressPanel busy={deps.busy} phase={deps.phase} elapsedMs={deps.elapsedMs} lines={deps.lines} onCancel={deps.cancel} />
+        <ProgressPanel busy={deps.busy} phase={deps.phase} elapsedMs={deps.elapsedMs} lines={deps.lines} onCancel={deps.clientId ? deps.cancel : undefined} />
       </Disclosure>
 
       <Disclosure label={LOCK_COPY.label} preset="fix:lock">

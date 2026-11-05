@@ -61,6 +61,21 @@ export interface Envelope {
   stdout: string; stderr: string; argv: string[]; python: string; duration_ms: number; venv_python?: string | null
   commit_state?: 'committed' | 'not_committed' | 'committed_cleanup_pending' | 'indeterminate' | null
   detail?: unknown
+  attempts?: { offline?: Envelope; online?: Envelope }
+}
+
+export interface DependencyProbe {
+  imported: boolean
+  version: string | null
+  version_in_range: boolean | null
+  status: string
+}
+export interface DependencyReport {
+  ready: boolean
+  current_python: string
+  venv_python: string | null
+  selected_python: string | null
+  dependencies: { dist: string; purpose: string; status: string; current: DependencyProbe; venv: DependencyProbe | null }[]
 }
 export interface SidecarInfo { python: string; kind: 'env' | 'venv' | 'managed' | 'bundled' | 'path'; scriptsDir: string; running: boolean }
 export interface AppInfo {

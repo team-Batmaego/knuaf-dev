@@ -148,3 +148,84 @@ def test_office_clean_accounts_for_every_requested_job(tmp_path, publication_ski
             assert (workspace / job_id / "input.docx").read_bytes() == b"synthetic preserved job input"
     finally:
         sidecar.close()
+
+
+def test_student_workbook_inspection_does_not_require_canonical_or_major(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    source = tmp_path / "학생 재무.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = "학생 매출"
+    workbook.active["B1"] = 12345
+    workbook.save(source)
+    before = source.read_bytes()
+    sidecar = Sidecar()
+    try:
+        inspected = sidecar.ok(
+            "excel.inspect", root=str(tmp_path), source=source.name, out_map="map.json",
+        )["result"]
+        assert inspected["ok"], inspected
+        assert source.read_bytes() == before
+        assert not (tmp_path / "project.json").exists()
+        entries = json.loads((tmp_path / "map.json").read_text(encoding="utf-8"))["entries"]
+        numeric = next(entry for entry in entries if entry["sheet"] == workbook.active.title and entry["range"] == "B1")
+        assert numeric["action"] == "preserve" and numeric["explicit"] is False
+    finally:
+        sidecar.close()
+
+
+@pytest.mark.parametrize("source_param", [{}, {"source": ""}])
+@pytest.mark.parametrize("file_state", ["valid", "missing", "corrupt"])
+def test_registered_finance_inspection_without_major(tmp_path, source_param, file_state):
+    import gg_core as core
+    import openpyxl
+
+    from test_sidecar import _intake_fact
+
+    core.init(tmp_path)
+    source = tmp_path / "sources" / "학생 재무.xlsx"
+    source.parent.mkdir(exist_ok=True)
+    (source.parent / "answers.md").write_text("학생 재무 파일을 등록함\n", encoding="utf-8")
+    if file_state == "valid":
+        workbook = openpyxl.Workbook()
+        workbook.active["B1"] = 12345
+        workbook.save(source)
+    elif file_state == "corrupt":
+        source.write_bytes(b"not an xlsx")
+    core.apply(tmp_path, {"request_id": "test:registered-finance", "ops": [
+        {"collection": "sources", "value": {"id": "src-answers", "path": "sources/answers.md"}},
+        _intake_fact("finance", "intake.current_finance", "sources/학생 재무.xlsx", "provided"),
+    ]}, 0)
+    canonical = (tmp_path / "project.json").read_bytes()
+    original = source.read_bytes() if source.exists() else None
+    sidecar = Sidecar()
+    try:
+        assert sidecar.call("project.major", root=str(tmp_path))["error"]["code"] == "major_required"
+        result = sidecar.ok("excel.inspect", root=str(tmp_path), out_map="map.json", **source_param)["result"]
+        if file_state == "valid":
+            assert result["ok"], result
+            entries = json.loads((tmp_path / "map.json").read_text(encoding="utf-8"))["entries"]
+            assert next(entry for entry in entries if entry["range"] == "B1")["action"] == "preserve"
+        else:
+            explicit = sidecar.ok("excel.inspect", root=str(tmp_path), source="sources/학생 재무.xlsx", out_map="map.json")["result"]
+            assert not result["ok"]
+            assert {key: result[key] for key in ("status", "block_reason", "data", "stderr")} == {
+                key: explicit[key] for key in ("status", "block_reason", "data", "stderr")
+            }
+            assert not (tmp_path / "map.json").exists()
+        assert (source.read_bytes() if source.exists() else None) == original
+        assert (tmp_path / "project.json").read_bytes() == canonical
+    finally:
+        sidecar.close()
+
+
+@pytest.mark.parametrize("source_param", [{}, {"source": ""}])
+def test_inspection_without_student_source_retains_template_major_gate(tmp_path, source_param):
+    import gg_core as core
+
+    core.init(tmp_path)
+    sidecar = Sidecar()
+    try:
+        result = sidecar.ok("excel.inspect", root=str(tmp_path), out_map="map.json", template_ref="X01", **source_param)["result"]
+        assert not result["ok"] and result["block_reason"] == "major_id_required", result
+    finally:
+        sidecar.close()

@@ -8,6 +8,7 @@ import { expect, test } from '@playwright/test'
 import { parseQuestion, optionAnswer, splitOption } from '../src/shared/question'
 import { questionCardOf, waitingQuestionCount, zoneOf } from '../src/shared/zone'
 import { draftAfterSend, useChat } from '../src/renderer/src/store/chat'
+import { usePrep } from '../src/renderer/src/store/prep'
 import type { ChatMessage, ChatSnapshot, ConnectionStatus } from '../src/shared/chat'
 import type { Status } from '../src/shared/types'
 
@@ -314,6 +315,8 @@ test('초안 판정은 편집 번호로 한다 — 같은 문장을 지웠다 �
 const ROOT = '/p/race'
 
 function harness(drafts: Record<string, string> = {}) {
+  usePrep.setState({ prep: {}, write: {}, dependencies: Object.fromEntries([ROOT, '/A', '/B'].map(root =>
+    [root, { visit: 0, operationId: 'verified-fixture', phase: 'ready' as const }])) })
   const persisted: string[] = []
   const writes: { root: string; text: string }[] = []
   const disk: Record<string, string> = { ...drafts }
