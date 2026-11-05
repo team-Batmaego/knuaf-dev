@@ -7,6 +7,7 @@ import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../sa
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexConnection } from './codex'
 import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
+import { chatConnectionKey } from './jobs/key'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
@@ -114,7 +115,7 @@ export class ChatService {
     const bundled = this.opts.bundledPython?.() ?? null
     return [venv, bundled].filter((p): p is string => !!p).map((p) => dirname(p))
   }
-  private key(root: string, provider: Provider) { return `${root}\0${provider}` }
+  private key(root: string, provider: Provider, role = 'main') { return chatConnectionKey(root, provider, role) }
   private file(root: string, provider: Provider) { return join(root, '.knuaf-gui', `chat-${provider}.json`) }
   /**
    * 아직 보내지 않은 입력. 대화 기록과 같은 자리에 두되 공급자별로 나누지 않는다 —

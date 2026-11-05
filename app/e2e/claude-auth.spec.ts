@@ -13,6 +13,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ClaudeConnection, claudeAuthenticationFailed } from '../src/main/chat/claude'
 import { ChatService } from '../src/main/chat/service'
+import { chatConnectionKey } from '../src/main/chat/jobs/key'
 import { skillSource } from '../src/main/agent'
 import { useChat } from '../src/renderer/src/store/chat'
 import { displayState, useConnect } from '../src/renderer/src/store/connect'
@@ -171,7 +172,14 @@ test('W1-4: 재로그인 취소·실패는 옛 loggedIn:true로 복구되지 않
     await r.svc.login(r.root, 'claude')
     await expect.poll(() => r.opened.length).toBe(2)
     writeFileSync(r.complete, 'reject fake login')
-    await expect.poll(() => (r.svc as any).connections.get(`${r.root}\0claude`).loginProcess).toBeUndefined()
+    await expect.poll(() => {
+      const connections: unknown = Reflect.get(r.svc, 'connections')
+      if (!(connections instanceof Map)) throw new Error('Missing connection map')
+      const connection: unknown = connections.get(chatConnectionKey(r.root, 'claude'))
+      if (!(connection instanceof ClaudeConnection)) throw new Error('Missing folder Claude connection')
+      const loginProcess: unknown = Reflect.get(connection, 'loginProcess')
+      return loginProcess
+    }).toBeUndefined()
     expect(existsSync(r.state)).toBe(false)
     expect((await r.svc.globalStatus('claude')).connected).toBe(false)
     // 폴더 로그인 실패 뒤 계정 팝오버에서 성공해도 옛 폴더 연결이 복구를 막으면 안 된다.
