@@ -36,7 +36,7 @@ export function MaterialsList({ open, onOpenChange, listIntent, consumeListInten
       <PopHead>{MENUS.references}</PopHead>
       <div className="pop-scroll">
         {references.map((file) => <div key={file.path} style={{ display: 'flex', alignItems: 'center' }}>
-          <div style={{ flex: 1, minWidth: 0 }}><PopRow icon={<Icon name="doc" size={16} />} onClick={() => openFile(file.path)}><span title={file.path}>{file.name}</span></PopRow></div>
+          <div style={{ flex: 1, minWidth: 0 }}><PopRow icon={<Icon name="doc" size={16} />} onClick={() => openFile(file.path)}><span className="file-name" title={file.path}>{file.name}</span></PopRow></div>
           <button type="button" className="quiet" onClick={() => { onOpenChange(false); onAttach(file.path) }}>{MENUS.attach}</button>
         </div>)}
       </div>

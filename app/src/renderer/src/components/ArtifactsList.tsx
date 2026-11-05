@@ -47,7 +47,7 @@ export function ArtifactsList({ open, onOpenChange, listIntent, consumeListInten
       <PopHead>{MENUS.madeFiles}</PopHead>
       {notice && <div className="pop-empty caption" role="status"><strong>{notice.title}</strong> {notice.body}</div>}
       <div className="pop-scroll">
-        {error ? <div className="pop-empty" role="alert">{error} <button type="button" className="quiet" onClick={onRetry}>{MENUS.retry}</button></div>
+        {error ? <div className="pop-empty" role="alert"><strong>{ARTIFACTS.listFailed.title}</strong> {ARTIFACTS.listFailed.body} <button type="button" className="quiet" onClick={onRetry}>{MENUS.retry}</button></div>
           : !loading && items.length === 0 && hasProject ? <div className="pop-empty caption">{MENUS.noFiles}</div>
             : items.map((file) => <PopRow key={file.path} icon={<Icon name="doc" size={16} />} meta={file.status} onClick={() => { onOpenChange(false); onOpenFile(file.path, button.current) }}>{file.name}</PopRow>)}
       </div>
