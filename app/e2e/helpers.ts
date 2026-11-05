@@ -216,7 +216,8 @@ export async function openProject(page: Page, root: string, ready?: (p: Page) =>
   const pathInput = page.getByRole('textbox', { name: '폴더 경로' })
   await expect(pathInput).toBeVisible()
   await pathInput.fill(root)
-  // 열렸다 — 시트가 닫히고 대화 칸이 남는다.
+  await disclosure.getByRole('button', { name: '경로로 열기', exact: true }).click()
+  // 폴더 열기가 시작됐다 — 시트가 닫히고 대화 칸이 남는다.
   await page.waitForSelector(CHAT_READY, { timeout: 30_000 })
   await page.waitForSelector('dialog[open]', { state: 'detached', timeout: 30_000 }).catch(() => {})
   // 호출자가 쓸 요소가 준비된 뒤에, 배치가 멈춘 것을 확인하고 돌려준다.
