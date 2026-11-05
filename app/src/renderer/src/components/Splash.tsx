@@ -53,20 +53,22 @@ export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }
   }, [onDone])
 
   return <div className="splash" ref={overlay} role="status" aria-label={`${APP_NAME} 여는 중이에요`}>
-    <img className="splash__art" src={art} alt="" />
-    <div className="splash__rays"><i /></div>
-    <div className="splash__particles" aria-hidden="true">{particles.map((style, i) => <i key={i} style={style} />)}</div>
-    <div className="splash__copy">
-      <div className="splash__name">{APP_NAME}</div>
-      <div className="splash__credit">
-        <div className="splash__made">만든 사람</div>
-        <div className="splash__columns">
-          <div><span>특용작물</span><strong>김대욱</strong></div><span>·</span>
-          <div><span>산업곤충</span><strong>이준재</strong></div>
+    <div className="splash__stage">
+      <img className="splash__art" src={art} alt="" />
+      <div className="splash__rays"><i /></div>
+      <div className="splash__particles" aria-hidden="true">{particles.map((style, i) => <i key={i} style={style} />)}</div>
+      <div className="splash__copy">
+        <div className="splash__name">{APP_NAME}</div>
+        <div className="splash__credit">
+          <div className="splash__made">만든 사람</div>
+          <div className="splash__columns">
+            <div><span>특용작물</span><strong>김대욱</strong></div><span>·</span>
+            <div><span>산업곤충</span><strong>이준재</strong></div>
+          </div>
         </div>
+        <div className="splash__track" aria-hidden="true"><div ref={fill} /></div>
+        <div className="splash__note">여는 중이에요…</div>
       </div>
-      <div className="splash__track" aria-hidden="true"><div ref={fill} /></div>
-      <div className="splash__note">여는 중이에요…</div>
     </div>
   </div>
 }
