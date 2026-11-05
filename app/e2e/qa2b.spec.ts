@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { launch, openProject, paperReady, python, rewriteSection, scripts, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
+import { PAPER_PANE_COPY } from '../src/renderer/src/copy-paper'
 import { CHAT } from '../src/renderer/src/copy'
 
 const COMPOSER = `textarea[aria-label="${CHAT.placeholder}"]`
@@ -202,9 +203,9 @@ test('비교 기준은 종이를 닫았다 열어도 남는다 (QA2B-R1-03)', as
     await expect(page.locator('.review-toggle')).toBeVisible()
 
     // 종이를 닫았다 다시 연다(앱은 그대로, 폴더도 그대로).
-    await page.getByRole('button', { name: '내 논문 닫기' }).click()
+    await page.getByRole('button', { name: PAPER_PANE_COPY.collapse }).click()
     await expect(page.locator('.paperpane')).toHaveCount(0)
-    await page.locator('.tbar-seg').getByRole('tab', { name: '내 논문' }).click()
+    await page.getByRole('button', { name: PAPER_PANE_COPY.expand }).click()
     await expect(page.locator('.paperpane')).toBeVisible()
 
     // 기준이 살아 있으니 토글이 다시 서고, 비교가 실제로 된다.
