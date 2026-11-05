@@ -93,6 +93,21 @@ def test_methods_list_reports_write_flags(sidecar):
     assert flags["methods.list"] is False
 
 
+def test_utf8_requests_ignore_inherited_stdio_encoding(monkeypatch, project):
+    import gg_core as core
+
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    sidecar = Sidecar()
+    try:
+        loaded = sidecar.ok("project.load", root=str(project))["result"]
+        assert loaded["project"] == core.load(project)
+        section = sidecar.ok("section.read", root=str(project), id="sec-01")["result"]
+        assert "농장A의 재배 면적은 600평이다." in section["draft"]
+    finally:
+        sidecar.close()
+
+
 def test_status_has_four_lanes_and_banner(sidecar, project):
     st = sidecar.call("project.status", root=str(project))["result"]
     assert st["revision"] == 1

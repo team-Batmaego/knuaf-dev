@@ -7,7 +7,9 @@
 ## 구조
 
 - `sidecar/knuaf_sidecar/` — 프로토콜은 stdlib, XLSX 미리보기는 openpyxl을 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
-  JSON-lines(stdin/stdout)로 대화합니다. `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
+  JSON-lines(stdin/stdout)로 대화합니다. 요청·응답 모두 UTF-8이며, 사이드카가 stdin/stdout/stderr 인코딩을
+  직접 고정하므로 Python의 상속 코드페이지가 달라도 한글·공백 작업 경로를 그대로 처리합니다.
+  `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
   CLI 전용 스크립트(build_docx, gg_excel_*, gg_office, gg_deps, gg_kordoc)는 서브프로세스로 실행해 출력을
   `{ok, exit, status, data, path, block_reason, commit_state, detail, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
   `methods.list`가 각 메서드의 쓰기 여부를 보고합니다. 읽기 전용 조회로 `materials.list`(intake 사실 + sources/ 파일),
