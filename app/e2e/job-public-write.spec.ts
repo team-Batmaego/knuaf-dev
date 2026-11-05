@@ -90,11 +90,12 @@ for (const attack of ['tmp', 'target', 'junction', 'dangling'] as const) test(`f
 })
 
 test('fake Windows rejects ancestor identity replacement between creation and rename', () => {
-  const f = windowsFixture(), originalWrite = f.fs.writeFileSync
+  const f = windowsFixture(), originalClose = f.fs.closeSync
   const outside = join(f.base, 'outside-dir'); nodeFs.mkdirSync(outside)
   nodeFs.writeFileSync(join(outside, 'sentinel'), 'KEEP')
-  f.fs.writeFileSync = (fd, data) => {
-    originalWrite(fd, data)
+  f.fs.closeSync = fd => {
+    // Windows forbids renaming the parent while this handle is open; attack after the real close.
+    originalClose(fd)
     const jobs = f.local(win32.dirname(f.file))
     nodeFs.renameSync(jobs, `${jobs}-old`); nodeFs.symlinkSync(outside, jobs, 'junction')
   }
