@@ -103,6 +103,10 @@ def _kill(proc):
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError as error:
+            # A concurrent waiter may already have reaped the TERM'ed leader.
+            if proc.poll() is None:
+                raise RpcError("process_stop_failed", "script tree termination was not confirmed") from error
     try:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired as error:

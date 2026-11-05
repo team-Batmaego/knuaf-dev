@@ -1,9 +1,14 @@
 """Project readiness must never inherit the host interpreter's packages."""
 import copy
+import errno
+import io
 import json
 import os
 import socket
+import signal
+import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -11,7 +16,8 @@ from conftest import REPO
 
 sys.path.insert(0, str(REPO / "app/sidecar"))
 from knuaf_sidecar.methods_core import project_deps_report  # noqa: E402
-from knuaf_sidecar.rpc import RpcError  # noqa: E402
+from knuaf_sidecar import runner  # noqa: E402
+from knuaf_sidecar.rpc import Context, RpcError, Server  # noqa: E402
 from test_sidecar import Sidecar
 
 
@@ -113,3 +119,111 @@ def test_stopping_ensure_also_stops_its_pip_child(tmp_path, stop):
         listener.close()
         if sidecar.proc.poll() is None:
             sidecar.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX killpg PermissionError regression")
+@pytest.mark.parametrize("alive", [False, True])
+def test_kill_permission_error_requires_confirmed_leader_exit(monkeypatch, alive):
+    code = (
+        "import signal,time; "
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if alive else "")
+        + "print('ready', flush=True); time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code], start_new_session=True,
+        stdout=subprocess.PIPE, text=True,
+    )
+    killpg = os.killpg
+
+    def deny_kill(pid, sig):
+        if pid == proc.pid and sig == signal.SIGKILL:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        return killpg(pid, sig)
+
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        monkeypatch.setattr(runner.os, "killpg", deny_kill)
+        if alive:
+            with pytest.raises(RpcError) as failure:
+                runner._kill(proc)
+            assert failure.value.code == "process_stop_failed"
+            assert proc.poll() is None
+        else:
+            runner._kill(proc)
+            assert proc.returncode == -signal.SIGTERM
+    finally:
+        if proc.poll() is None:
+            killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        proc.stdout.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX cancellation failure regression")
+@pytest.mark.parametrize("stop", ["cancel", "shutdown"])
+def test_stop_failure_answers_and_keeps_running_write_owned(tmp_path, monkeypatch, stop):
+    script = tmp_path / "running.py"
+    script.write_text(
+        "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\ntime.sleep(60)\n", encoding="utf-8",
+    )
+    ready = threading.Event()
+    output = io.StringIO()
+    server = Server(out=output)
+    contexts = []
+    second_started = threading.Event()
+    killpg = os.killpg
+    log = Context.log
+
+    def observe_log(ctx, stream, line):
+        log(ctx, stream, line)
+        if line == "ready":
+            ready.set()
+
+    def deny_kill(pid, sig):
+        if contexts and pid == contexts[0].process.pid and sig == signal.SIGKILL:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        return killpg(pid, sig)
+
+    def work(ctx, params):
+        contexts.append(ctx)
+        return runner.run_script(ctx, sys.executable, script, [], tmp_path, timeout=30)
+
+    def second(ctx, params):
+        assert contexts[0].process.poll() is not None, "write overlapped surviving process"
+        second_started.set()
+        return {"finished": True}
+
+    def requests():
+        yield json.dumps({"id": "work", "method": "work"})
+        assert ready.wait(5), "script did not become ready"
+        yield json.dumps({"id": "stop", "method": stop, "params": {"id": "work"}})
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        reply = next(message for message in replies if message.get("id") == "stop")
+        assert reply["error"]["code"] == "process_stop_failed"
+        assert "result" not in reply
+        assert contexts[0].process.poll() is None
+        assert server.pending["work"] is contexts[0]
+        assert server.write_lock.locked()
+        yield json.dumps({"id": "probe", "method": "methods.list"})
+        yield json.dumps({"id": "second", "method": "second"})
+        assert not second_started.is_set()
+        killpg(contexts[0].process.pid, signal.SIGKILL)
+
+    monkeypatch.setattr(Context, "log", observe_log)
+    monkeypatch.setattr(runner.os, "killpg", deny_kill)
+    server.register("work", work, write=True)
+    server.register("second", second, write=True)
+    server.inp = requests()
+    try:
+        server.serve()
+        replies = {message["id"]: message for message in
+                   map(json.loads, output.getvalue().splitlines()) if "event" not in message}
+        assert replies["work"]["error"]["code"] == "cancelled"
+        assert any(method["name"] == "work" for method in replies["probe"]["result"])
+        assert replies["second"]["result"] == {"finished": True}
+    finally:
+        if contexts and contexts[0].process is not None:
+            proc = contexts[0].process
+            if proc.poll() is None:
+                killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)

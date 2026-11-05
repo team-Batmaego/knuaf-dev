@@ -84,15 +84,23 @@ class Server:
                 target = (request.get("params") or {}).get("id")
                 with self._pending_lock:
                     ctx = self.pending.get(target)
-                if ctx is not None:
-                    ctx.cancel()
+                try:
+                    if ctx is not None:
+                        ctx.cancel()
+                except RpcError as error:
+                    self.write({"id": request.get("id"), "error": {"code": error.code, "message": error.message, "data": error.data}})
+                    continue
                 self.write({"id": request.get("id"), "result": {"cancelled": ctx is not None}})
                 continue
             if request.get("method") == "shutdown":
                 with self._pending_lock:
                     pending = list(self.pending.values())
-                for ctx in pending:
-                    ctx.cancel()
+                try:
+                    for ctx in pending:
+                        ctx.cancel()
+                except RpcError as error:
+                    self.write({"id": request.get("id"), "error": {"code": error.code, "message": error.message, "data": error.data}})
+                    continue
                 self.write({"id": request.get("id"), "result": {"bye": True}})
                 break
             t = threading.Thread(target=self._handle, args=(request,), daemon=True)
