@@ -246,6 +246,8 @@ test('파일 팝오버는 16개에서도 목록만 스크롤하고 아래 이동
     const m = await pop.evaluate((el) => ({ h: el.getBoundingClientRect().height, bottom: el.getBoundingClientRect().bottom }))
     expect(m.h, '팝오버가 창 높이를 넘는다').toBeLessThanOrEqual(800 - 160 + 1)
     expect(m.bottom).toBeLessThanOrEqual(800)
+    const list = pop.locator('.pop-scroll')
+    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight), '목록이 스크롤되지 않는다').toBe(true)
     // The folder action remains visible below the independently scrolling file list.
     await expect(pop.getByRole('button', { name: '폴더에서 보기' })).toBeVisible()
   } finally {

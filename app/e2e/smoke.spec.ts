@@ -19,6 +19,7 @@ test('open a project, see four lanes, export a draft, unlock a stale lock', asyn
   // v5 에서 검사 행은 **자동 점검 행의 "자세히"** 안에 있다(시안 ⑫) — 먼저 펼친다.
   await page.locator('[data-screen="checkup"] summary:has-text("자세히")').first().click()
   await expect(page.locator('text=학교 규칙 등록').first()).toBeVisible()
+  await navTo(page, '결과물')
   // 결과물 > 파일 팝오버 — 검토본은 관문 없이 만든다.
   const files = page.locator('.paper-head .popover')
   await files.locator('[data-make="review"]').getByRole('button').click()

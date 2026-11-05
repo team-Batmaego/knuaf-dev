@@ -19,7 +19,7 @@ async function openFilesFromChat(page: Page): Promise<void> {
   await expect(page.locator('.paper-head .popover')).toBeVisible({ timeout: 30_000 })
 }
 
-test('없는 첨부는 파일 목록에 안내하고 폴더 열기 동작을 제공한다', async () => {
+test('준비 미완료와 실제 빈 결과를 구분하고 만들기 이유 및 다음 행동을 제공한다', async () => {
   const root = mkdtempSync(join(tmpdir(), 'kd-noproj-'))
   seedChat(root, MISSING_LINK)
   const log = join(mkdtempSync(join(tmpdir(), 'kd-shell-')), 'calls.txt')
@@ -34,13 +34,20 @@ test('없는 첨부는 파일 목록에 안내하고 폴더 열기 동작을 제
     const notice = pop.getByRole('status').filter({ hasText: '첨부재현.txt' })
     await expect(notice).toContainText('"첨부재현.txt"을 찾지 못했어요.')
     await expect(notice).toContainText('아래는 이 논문에서 만든 다른 파일이에요.')
+    // Do not freeze copy; the status must explain why creation is unavailable.
+    const blockedGuidance = pop.getByRole('status').filter({ hasText: /준비/ }).filter({ hasText: /만들/ })
     const makeRows = pop.locator('.pop-make-block')
     await expect(makeRows).toHaveCount(4)
     for (const row of await makeRows.all()) await expect(row.getByRole('button')).toBeDisabled()
     const reveal = pop.getByRole('button', { name: '폴더에서 보기', exact: true })
     await expect(reveal).toBeVisible()
+    await expect(reveal).toBeEnabled()
     await reveal.click()
     await expect.poll(() => shellCalls(log)).toEqual([`reveal\t${realpathSync(root)}`])
+    // Keep the distinction and explanation checks independent; the actionable folder behavior above
+    // still runs when either piece of guidance is missing.
+    await expect.soft(pop.getByText('아직 만든 파일이 없어요.', { exact: true })).toHaveCount(0)
+    await expect.soft(blockedGuidance).toBeVisible()
   } finally {
     await electronApp.close()
   }
@@ -57,6 +64,7 @@ test('정본은 있지만 만든 파일이 없으면 파일 목록의 빈 상태
     await openFilesFromChat(page)
     const pop = page.locator('.paper-head .popover')
     await expect(pop.getByText('아직 만든 파일이 없어요.', { exact: true })).toBeVisible()
+    await expect(pop.getByRole('status').filter({ hasText: /준비/ }).filter({ hasText: /만들/ })).toHaveCount(0)
     await expect(pop.getByRole('alert')).toHaveCount(0)
     await expect(pop.getByRole('button', { name: '폴더에서 보기', exact: true })).toBeVisible()
   } finally {

@@ -63,7 +63,9 @@ test('자료 팝오버: 현재 작성물과 참고자료를 구분하고 참고�
   await page.screenshot({ path: join(OUT, 'materials.png') })
 
   // A reference attaches to the answer draft; it does not change the selected manuscript.
-  const answerRow = pop.getByRole('button', { name: /answers\.md/ }).locator('..')
+  const answerRow = pop.locator('.pop-scroll > div').filter({ hasText: 'answers.md' })
+  await expect(answerRow).toHaveCount(1)
+  await expect(answerRow.getByRole('button', { name: /answers\.md/ })).toBeVisible()
   await answerRow.getByRole('button', { name: '답변에 첨부' }).click()
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
   const draftTarget = page.locator('textarea').or(page.locator('.card', { hasText: '도우미에게 보낼 요청' }).locator('.prose'))
@@ -71,5 +73,7 @@ test('자료 팝오버: 현재 작성물과 참고자료를 구분하고 참고�
   const ta = page.locator('textarea')
   if (await ta.count()) expect(await ta.inputValue()).toContain(join('sources', 'answers.md'))
   else await expect(page.locator('.card', { hasText: '도우미에게 보낼 요청' }).locator('.prose')).toContainText(join('sources', 'answers.md'))
+  await navTo(page, '자료')
+  await expect(pop.locator('.pop-row').filter({ hasText: '현재 원고' })).toContainText('초고.docx')
   await electronApp.close()
 })
