@@ -82,8 +82,6 @@ export interface JobResult {
 export interface JobRunnerOptions {
   /** Private app storage, outside the thesis folder. Only the app writes here. */
   stateDir: string
-  /** App-selected CPython; descriptor-relative public writes fail closed if unsupported. */
-  python: string
   approvedPlan: (root: string) => LanePlan | null
   account: (company: Provider) => Promise<ExecutionAccount | null>
   skill: () => { path: string; schema: number; contractVersion: string }

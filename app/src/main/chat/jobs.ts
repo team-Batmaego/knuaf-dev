@@ -102,7 +102,7 @@ export class JobRunner {
   }
   private publish(record: JobRecord): void {
     const file = join(record.root, '.knuaf-gui', 'jobs', `${record.spec.id}.json`)
-    writePublicFile(record.root, file, JSON.stringify({ ...record, ...record.spec, spec: record.spec, outputRefs: record.outputs }), this.options.python)
+    writePublicFile(record.root, file, JSON.stringify({ ...record, ...record.spec, spec: record.spec, outputRefs: record.outputs }))
   }
   private update(record: JobRecord, status: JobStatus, reason?: string): void {
     record.status = status; record.reason = reason; this.persist(); this.publish(record)
@@ -257,7 +257,7 @@ export class JobRunner {
   }
   private audit(record: JobRecord, data: object): void {
     const file = join(record.root, 'audit', 'model-routing', `${record.spec.id}-${randomUUID()}.json`)
-    writePublicFile(record.root, file, JSON.stringify(data), this.options.python)
+    writePublicFile(record.root, file, JSON.stringify(data))
     this.options.diagnostic(data)
   }
   private async deliver(record: JobRecord): Promise<void> {

@@ -23,7 +23,7 @@ function fixture() {
   let account = async (company: 'claude' | 'codex') => structuredClone(accounts[company])
   let behavior = async (request: RelayRequest, events: JobEvents) => { events.session(`s-${request.jobId}`); writeFileSync(join(request.cwd, 'result.md'), 'OK') }
   let engineCalls = 0
-  const runner = new JobRunner({ stateDir, python: join(__dirname, '../../.venv-dev/bin/python'), approvedPlan: () => plan, account: company => account(company),
+  const runner = new JobRunner({ stateDir, approvedPlan: () => plan, account: company => account(company),
     skill: () => ({ path: '/fake', schema: 1, contractVersion: 'v1' }), supportedSchemas: [1],
     connectionFactory: request => { calls.push(request.jobId); return { relayProtocol: 1,
       status: async () => ({ installed: true, connected: true, detail: '', version: 'fake' }),
@@ -57,7 +57,7 @@ test('PUBLIC_TMP_ESCAPE: external bytes unchanged and unsafe public manifest rej
     if (attack === 'ancestor') {
       const outside = join(f.stateDir, 'outside-audit'); mkdirSync(outside)
       symlinkSync(outside, join(f.root, 'audit'))
-      expect(() => writePublicFile(f.root, join(f.root, 'audit/model-routing/probe.json'), 'unsafe', join(__dirname, '../../.venv-dev/bin/python'))).toThrow('ancestor')
+      expect(() => writePublicFile(f.root, join(f.root, 'audit/model-routing/probe.json'), 'unsafe')).toThrow('ancestor')
     }
     if (attack !== 'ancestor') expect(() => f.enqueue()).toThrow('Unsafe public file')
     else expect(readFileSync(victim, 'utf8')).toBe('KEEP')
