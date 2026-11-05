@@ -227,3 +227,119 @@ def test_stop_failure_answers_and_keeps_running_write_owned(tmp_path, monkeypatc
             if proc.poll() is None:
                 killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX surviving descendant regression")
+@pytest.mark.parametrize("stop", ["cancel", "shutdown"])
+def test_stop_failure_when_leader_exits_but_descendant_survives(tmp_path, monkeypatch, stop):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(5)
+    child_code = (
+        "import os,signal,socket; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "s=socket.create_connection(('127.0.0.1',%d)); "
+        "s.sendall(str(os.getpid()).encode()+b'\\n'); s.recv(1)"
+    ) % listener.getsockname()[1]
+    script = tmp_path / "leader.py"
+    script.write_text(
+        "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-c',%r])\ntime.sleep(60)\n"
+        % child_code, encoding="utf-8",
+    )
+    output = io.StringIO()
+    server = Server(out=output)
+    contexts = []
+    connection = None
+    killpg = os.killpg
+    signals = []
+
+    def deny_final_kill(pid, sig):
+        if contexts and pid == contexts[0].process.pid:
+            signals.append(sig)
+            if sig == signal.SIGKILL:
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+        return killpg(pid, sig)
+
+    def work(ctx, params):
+        contexts.append(ctx)
+        return runner.run_script(ctx, sys.executable, script, [], tmp_path, timeout=30)
+
+    def requests():
+        nonlocal connection
+        yield json.dumps({"id": "work", "method": "work"})
+        connection, _ = listener.accept()
+        connection.settimeout(0.1)
+        descendant = int(connection.recv(32).strip())
+        yield json.dumps({"id": "stop", "method": stop, "params": {"id": "work"}})
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        reply = next(message for message in replies if message.get("id") == "stop")
+        assert reply["error"]["code"] == "process_stop_failed"
+        assert "result" not in reply
+        assert contexts[0].process.poll() == -signal.SIGTERM
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        os.kill(descendant, 0)
+        with pytest.raises(socket.timeout):
+            connection.recv(1)
+        yield json.dumps({"id": "probe", "method": "methods.list"})
+        killpg(contexts[0].process.pid, signal.SIGKILL)
+        connection.settimeout(5)
+        assert connection.recv(1) == b""
+
+    monkeypatch.setattr(runner.os, "killpg", deny_final_kill)
+    server.register("work", work, write=True)
+    server.inp = requests()
+    try:
+        server.serve()
+        replies = {message["id"]: message for message in
+                   map(json.loads, output.getvalue().splitlines()) if "event" not in message}
+        assert replies["work"]["error"]["code"] == "cancelled"
+        assert any(method["name"] == "work" for method in replies["probe"]["result"])
+    finally:
+        if contexts and contexts[0].process is not None:
+            proc = contexts[0].process
+            try:
+                killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
+        if connection:
+            connection.close()
+        listener.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process inspection regression")
+@pytest.mark.parametrize("failure", ["unavailable", "nonzero", "timeout", "malformed"])
+def test_kill_permission_error_with_uninspectable_group_fails(monkeypatch, failure):
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "print('ready', flush=True); import time; time.sleep(60)"],
+        start_new_session=True, stdout=subprocess.PIPE, text=True,
+    )
+    killpg = os.killpg
+
+    def deny_final_kill(pid, sig):
+        if pid == proc.pid and sig == signal.SIGKILL:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        return killpg(pid, sig)
+
+    def fail_inspection(*args, **kwargs):
+        if failure == "unavailable":
+            raise FileNotFoundError("ps unavailable")
+        if failure == "nonzero":
+            raise subprocess.CalledProcessError(1, args[0])
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(args[0], 3)
+        return subprocess.CompletedProcess(args[0], 0, stdout="unreadable snapshot\n")
+
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        monkeypatch.setattr(runner.os, "killpg", deny_final_kill)
+        monkeypatch.setattr(runner.subprocess, "run", fail_inspection)
+        with pytest.raises(RpcError) as failure_result:
+            runner._kill(proc)
+        assert failure_result.value.code == "process_stop_failed"
+        assert proc.returncode == -signal.SIGTERM
+    finally:
+        if proc.poll() is None:
+            killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        proc.stdout.close()

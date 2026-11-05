@@ -104,13 +104,29 @@ def _kill(proc):
         except ProcessLookupError:
             pass
         except PermissionError as error:
-            # A concurrent waiter may already have reaped the TERM'ed leader.
-            if proc.poll() is None:
+            # macOS can reject signals when only zombies remain in the group.
+            if _group_has_live_processes(proc.pid):
                 raise RpcError("process_stop_failed", "script tree termination was not confirmed") from error
     try:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired as error:
         raise RpcError("process_stop_failed", "script exit was not confirmed") from error
+
+
+def _group_has_live_processes(pgid):
+    """A reaped leader is not proof that its TERM-resistant children exited."""
+    try:
+        snapshot = subprocess.run(
+            ["/bin/ps", "-axo", "pgid=,stat="],
+            capture_output=True, text=True, check=True, timeout=3,
+        )
+        for row in snapshot.stdout.splitlines():
+            group, state = row.split()
+            if int(group) == pgid and not state.startswith("Z"):
+                return True
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise RpcError("process_stop_failed", "script group exit could not be inspected") from error
+    return False
 
 
 def project_python(project: Path):
