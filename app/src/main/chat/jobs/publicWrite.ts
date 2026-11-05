@@ -49,8 +49,15 @@ export function writePublicFile(root: string, file: string, data: string, option
   }
   for (const ancestor of ancestors) {
     checkAncestors()
-    try { fs.mkdirSync(ancestor) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
-    const stat = fs.lstatSync(ancestor), real = normalize(fs.realpathSync(ancestor))
+    let stat: Stats
+    try { stat = fs.lstatSync(ancestor) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || ancestor === anchor) throw error
+      try { fs.mkdirSync(ancestor) } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
+      }
+      stat = fs.lstatSync(ancestor)
+    }
+    const real = normalize(fs.realpathSync(ancestor))
     if (stat.isSymbolicLink() || !stat.isDirectory() || real !== normalize(ancestor)) throw new Error('Unsafe public ancestor')
     identities.push({ path: ancestor, real, dev: stat.dev, ino: stat.ino })
   }
