@@ -82,6 +82,21 @@ jobs:
       - run: node scripts/tests/check-skill-workflow.mjs
       - run: pnpm typecheck
       - run: pnpm build
+      # xlsx-preview.spec.ts uses Playwright's browser page fixture; cache and install only its headless Chromium shell.
+      - name: Cache Playwright Chromium (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
+      - name: Cache Playwright Chromium (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
+      - name: Install Playwright Chromium headless shell
+        run: pnpm exec playwright install chromium --only-shell
       # live-*.spec.ts need a real Claude/Codex login and are excluded without KNUAF_LIVE=1.
       # 창 촬영(window-shots)은 맥 전용 `screencapture` 라 config 의 testIgnore 가 뺀다.
       # 화면 캡처(screenshots.spec.ts 포함)는 CI 에서도 돌려 `KNUAF_SHOT_DIR` 에 남기고 아래에서
