@@ -15,6 +15,7 @@ import { expect, test, type Locator } from '@playwright/test'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch, navTo, openProject, synthProject } from './helpers'
+import { MENUS } from '../src/renderer/src/copy-menus'
 
 const FORBIDDEN = ['새 버전 경로', '새 경로를 쓰세요']
 
@@ -112,12 +113,13 @@ test('목적지에 빈 폴더만 있어도 존재를 단정하지 않고 폴더�
     const pop = page.locator('.paper-head .popover')
     const list = pop.locator('.pop-scroll')
     const reviewRow = pop.locator('[data-make="review"]')
-    await expect(list.getByText('아직 없어요', { exact: true })).toBeVisible()
+    await expect(list.getByText(MENUS.noFiles, { exact: true })).toBeVisible()
     await reviewRow.getByRole('button').click()
     const fb = reviewRow.locator('.make-fb').filter({ hasText: '같은 자리에 이미 무언가' }).first()
+    await expect(fb).toBeVisible({ timeout: 60_000 })
     await expectConflictGuidance(fb)
     // 안내와 화면이 모순되지 않는다 — 여전히 목록은 비어 있다.
-    await expect(list.getByText('아직 없어요', { exact: true })).toBeVisible()
+    await expect(list.getByText(MENUS.noFiles, { exact: true })).toBeVisible()
     // 거절은 보존이다 — 빈 폴더가 그대로 있고 새 파일도 없다.
     expect(readdirSync(dest)).toEqual([])
   } finally {
