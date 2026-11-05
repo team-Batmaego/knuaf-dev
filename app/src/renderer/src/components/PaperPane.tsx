@@ -66,6 +66,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const materials = useProject((s) => s.materials)
   const artifacts = useProject((s) => s.artifacts)
   const artifactsError = useProject((s) => s.artifactsError)
+  const hasProject = useProject((s) => s.hasProject)
   const previewNotice = useProject((s) => s.previewNotice)
   const openPreview = useProject((s) => s.openPreview)
   const loadLists = useProject((s) => s.loadLists)
@@ -296,7 +297,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
           items={(artifacts ?? []).map((file) => ({ name: file.name, path: joinPath(root, file.path), status: fileStatusText(file.path, projectLoad) }))}
           actions={make.rows.map((row) => ({ id: row.kind, label: row.label, description: row.body, disabled: !row.enabled || make.making !== null,
             feedback: make.making === row.kind ? <MakeRunningLine make={make} fb={make.feedbackKind === row.kind ? make.feedback : null} compact /> : make.feedbackKind === row.kind && make.feedback ? <MakeFeedbackLine fb={make.feedback} compact submission={row.kind === 'submission_candidate'} gate={pStatus?.gate} /> : undefined }))}
-          stale={derived.stale} notice={previewNotice} error={artifactsError} loading={artifacts === null && !artifactsError}
+          blocked={make.blocked} hasProject={hasProject} stale={derived.stale} notice={previewNotice} error={artifactsError} loading={artifacts === null && !artifactsError}
           onOpenFile={openPreview} onMake={(id) => void make.run(id as MakeKind)} onRetry={() => void loadLists()} onReveal={() => void window.knuaf.folderOpen('project')} />
         {/* 권하는 단추 **하나** — "지금"이 고른 행동이다(1·2단계는 없다: 대화가 이끈다).
             만들기 자체는 "파일" 팝오버에서 언제든 되지만, 화면에 권하는 것은 이 하나뿐이다. */}
