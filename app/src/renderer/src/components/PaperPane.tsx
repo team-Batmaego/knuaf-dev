@@ -155,8 +155,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   // 기록이 오르면 다시 읽는다(사이드바 차례와 같은 기준, IMPL-PLAN §4-2).
   useEffect(() => { void load() }, [load, revision])
   useEffect(() => {
-    if (listIntent && root) void loadLists()
-  }, [listIntent, root, loadLists])
+    if ((listIntent || filesOpen) && root) void loadLists()
+  }, [listIntent, filesOpen, root, loadLists])
 
   // 대화 이벤트 줄의 "종이에서 보기" — 그 장으로 간다.
   useEffect(() => {

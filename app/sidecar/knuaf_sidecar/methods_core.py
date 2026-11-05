@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+from itertools import chain
 from pathlib import Path
 
 from .rpc import RpcError
@@ -399,7 +400,7 @@ def materials_list(ctx, params):
 
 
 def artifact_list(ctx, params):
-    """Previewable files under build/, newest first; `revision` from the outputs collection when known."""
+    """Previewable root files and files under build/, newest first."""
     core = _core()
     root = _root(params).resolve()
     p = core.load(root)
@@ -413,7 +414,8 @@ def artifact_list(ctx, params):
         if isinstance(rev, int) and rev > (revisions.get(key) or 0):
             revisions[key] = rev
     items = []
-    for f in _visible_files(root / "build") or ():
+    root_files = (f for f in root.iterdir() if f.is_file() and not f.name.startswith("."))
+    for f in chain(root_files, _visible_files(root / "build") or ()):
         kind = ARTIFACT_KINDS.get(f.suffix.lower())
         if kind is None:
             continue

@@ -198,6 +198,7 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  */
 let sectionHashes: Record<string, string> | null = null
 let sectionRequest = 0
+let listRequest = 0
 /** 읽는 중에 또 읽지 않는다 — 감시 타이머가 사이드카를 겹쳐 띄우지 않게. */
 let statusInFlight = false
 /** 조용한 갱신이 잇따라 실패하면 그때는 말한다 — 한 번은 도우미가 쓰는 중일 수 있다. */
@@ -351,6 +352,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   loadLists: async () => {
     const root = get().root
     if (!root) { set({ materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null }); return }
+    const request = ++listRequest
     const mine = visitOf(root)
     const [m, a, tree, load] = await Promise.all([
       rpc.materials(root).catch(() => null),
@@ -360,7 +362,7 @@ export const useProject = create<ProjectState>((set, get) => ({
       rpc.buildTree(root).catch(() => null),
       rpc.load(root).catch(() => null)
     ])
-    if (!mine()) return
+    if (!mine() || request !== listRequest) return
     set({
       materials: m,
       artifacts: 'v' in a ? a.v.items : null,

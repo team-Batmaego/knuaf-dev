@@ -54,6 +54,13 @@ export function App() {
     let fromChat = false
     const offChat = useChat.subscribe((state, before) => {
       if (quitting) return
+      const previous = before.snapshot
+      const next = state.snapshot
+      if (previous && next && previous.root === next.root && previous.provider === next.provider &&
+          (previous.state === 'running' || previous.state === 'permission') &&
+          next.state !== 'running' && next.state !== 'permission' && next.root === useProject.getState().root) {
+        void useProject.getState().loadLists()
+      }
       if (!state.root || state.connState === 'checking') return
       if (state.status === before.status && state.statusFailed === before.statusFailed && state.connState === before.connState) return
       const info = state.statusFailed || !state.status
