@@ -37,10 +37,9 @@ class Context:
         self.cancelled.set()
         proc = self.process
         if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+            from .runner import _kill
+
+            _kill(proc)
 
 
 class Server:
@@ -90,6 +89,10 @@ class Server:
                 self.write({"id": request.get("id"), "result": {"cancelled": ctx is not None}})
                 continue
             if request.get("method") == "shutdown":
+                with self._pending_lock:
+                    pending = list(self.pending.values())
+                for ctx in pending:
+                    ctx.cancel()
                 self.write({"id": request.get("id"), "result": {"bye": True}})
                 break
             t = threading.Thread(target=self._handle, args=(request,), daemon=True)
@@ -129,7 +132,7 @@ class Server:
                     "error": {
                         "code": classify_exception(error),
                         "message": str(error),
-                        "data": {"type": type(error).__name__, "traceback": traceback.format_exc()[-4000:]},
+                        "data": exception_data(error),
                     },
                 }
             )
@@ -138,7 +141,27 @@ class Server:
                 self.pending.pop(rid, None)
 
 
+
+def exception_data(error: Exception) -> dict:
+    """Keep public operation evidence intact, including uncertain commits."""
+    core = sys.modules.get("gg_core")
+    operation_error = getattr(core, "OperationError", ())
+    if isinstance(error, operation_error):
+        data = dict(error.result)
+        data["exit"] = core.COMMIT_EXIT.get(data.get("commit_state"), 4)
+        if error.detail is not None:
+            data["exception_detail"] = error.detail
+        return data
+    return {"type": type(error).__name__, "traceback": traceback.format_exc()[-4000:]}
+
 def classify_exception(error: Exception) -> str:
+    core = sys.modules.get("gg_core")
+    if isinstance(error, getattr(core, "OperationError", ())):
+        return {
+            "not_committed": "operation_not_committed",
+            "committed_cleanup_pending": "committed_cleanup_pending",
+            "indeterminate": "indeterminate",
+        }.get(error.result.get("commit_state"), "indeterminate")
     text = str(error)
     if isinstance(error, ValueError):
         if text.startswith("쓰기 잠금"):

@@ -3,7 +3,7 @@ import { useProject } from '../store/project'
 import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/chat'
 import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
-import { usePrep, waitKind } from '../store/prep'
+import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
 import { withBold } from '../inline'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
 import { ComposerModelChip } from '../components/ComposerModelChip'
@@ -345,6 +345,7 @@ export function Chat() {
   /** 이 폴더에서 기다리는 것 — 폴더 준비('prep')·저장·검사('write'). 그동안 보내기는 잠긴다. */
   const waiting = usePrep((s) => waitKind(s, projectRoot))
   const waitingPrep = useChat((s) => s.waitingPrep)
+  const preparation = usePrep(s => projectRoot ? s.dependencies[projectRoot] : undefined)
   /** 온보딩 2단계에서 폴더를 고른 순간의 시작 의사 — 한 번만 쓴다(store/chat.ts 주석). */
   const startIntent = useChat((s) => s.startIntent)
   const disarmStart = useChat((s) => s.disarmStart)
@@ -773,6 +774,9 @@ export function Chat() {
         {/* 입력칸 위 한 줄 알림 — 기다림·경고·오류가 쓰는 한 자리(알림창 B안). */}
         {waiting && <ZoneLine tone="wait" title={waiting === 'prep' ? CHAT.preparingLine : CHAT.appBusyTitle}
           sub={waitingPrep ? CHAT.preparingQueued : waiting === 'write' ? CHAT.appBusyWaitSub : undefined} />}
+        {preparation?.phase === 'blocked' && <ZoneLine tone="attn" title={preparationFailureTitle(preparation.error)}
+          sub="쓴 글은 그대로 남아 있어요. 준비한 뒤 다시 보내 주세요." raw={preparation.error?.message}
+          actions={<button type="button" className="lk" onClick={() => projectRoot && void useProject.getState().prepareDeps(projectRoot)}>다시 준비</button>} />}
         {pError && <ZoneLine tone={toneOf(pError.kind)} title={pError.title} sub={pError.action} raw={pError.raw} onClose={clearPError} onReport={toneOf(pError.kind) !== 'info' ? () => requestReport(pError.title) : undefined} />}
         {/* 전역 오류로 같은 실패가 뜨는 자리 — 재시도 대상 root 는 store 가 오류와 함께 보관한
             `openFailure.root` 다(이전 프로젝트 root 가 아니다). */}

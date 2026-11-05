@@ -5,7 +5,7 @@ import { probeProjectWritable } from './project-write'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { insideByFileId } from './file-identity'
 import type { Sidecar } from './sidecar'
-import type { PreviewPayload, ProjectPeek, WindowInfo } from '../shared/types'
+import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
@@ -78,8 +78,16 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   let currentRoot: string | null = null
   /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
   let openSeq = 0
+  /** Published visit survives failed open attempts; openSeq still rejects stale successes. */
+  let currentVisit = 0
   /** renderer clientId → in-flight sidecar request, for `rpc:cancel` and the agent-busy gate. */
   const inflight = new Map<string, { id: string; method: string }>()
+  const dependencyFlights = new Map<string, { clientId: string; cancelled: boolean; promise: Promise<RpcResult<Envelope>> }>()
+  type DependencyGate = { root: string; visit: number; phase: 'checking' | 'ready' | 'blocked' }
+  let dependencyGate: DependencyGate | null = null
+  type DependencyDiagnosis = { gate: DependencyGate; cancelled: boolean }
+  const dependencyDiagnoses = new Map<string, DependencyDiagnosis>()
+  let latestDependencyCheck: DependencyDiagnosis | null = null
   const config = updateConfig(app.isPackaged)
   const store = new SkillStore(app.getPath('userData'), skillSource(APP_ROOT, app.isPackaged, process.resourcesPath), app.getVersion(), config.keys)
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
@@ -132,20 +140,46 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
     if (sidecar.isWrite(method) && agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    const diagnosis: DependencyDiagnosis | null = method === 'deps.doctor' && dependencyGate?.root === root
+      ? { gate: dependencyGate, cancelled: false } : null
+    let diagnosedPhase: 'ready' | 'blocked' = 'blocked'
+    if (diagnosis) {
+      dependencyDiagnoses.set(clientId, diagnosis)
+      diagnosis.gate.phase = 'checking'
+      // An install owns its whole check/install/recheck transaction, including concurrent reads.
+      if (!dependencyFlights.has(root!)) latestDependencyCheck = diagnosis
+    }
     try {
-      const result = await sidecar.call(method, params, (event, data) => w?.webContents.send('rpc:event', { clientId, event, data }), (id) => inflight.set(clientId, { id, method }))
+      const result = await sidecar.call(method, params, (event, data) => w?.webContents.send('rpc:event', { clientId, event, data }), (id) => {
+        inflight.set(clientId, { id, method })
+        if (diagnosis?.cancelled) sidecar.cancel(id)
+      })
+      if (diagnosis?.cancelled) throw { code: 'cancelled', message: '준비 상태 확인을 취소했어요.' }
+      if (diagnosis) {
+        const env = result as Envelope
+        diagnosedPhase = env.ok && (env.data as DependencyReport | null)?.ready === true ? 'ready' : 'blocked'
+      }
       return { result }
     } catch (error) {
       return { error: ipcError(error) }
     } finally {
+      if (diagnosis) {
+        if (dependencyDiagnoses.get(clientId) === diagnosis) dependencyDiagnoses.delete(clientId)
+        if (dependencyGate && dependencyGate === diagnosis.gate && latestDependencyCheck === diagnosis && !dependencyFlights.has(root!)) {
+          dependencyGate.phase = diagnosedPhase
+        }
+      }
       inflight.delete(clientId)
     }
   })
 
   ipcMain.handle('rpc:cancel', (_e, clientId: string) => {
+    for (const flight of dependencyFlights.values()) if (flight.clientId === clientId) flight.cancelled = true
+    const diagnosis = dependencyDiagnoses.get(clientId)
+    if (diagnosis) diagnosis.cancelled = true
     const entry = inflight.get(clientId)
     if (entry) sidecar.cancel(entry.id)
-    return !!entry
+    return !!entry || !!diagnosis
   })
 
   ipcMain.handle('project:open', async (_e, root: string) => {
@@ -167,7 +201,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       // 성공한 전환만 허용 기준을 바꾼다(검토 ATTACH-R1-05). 실패하면 이전 폴더가 그대로
       // 남아야 메인의 파일 검사 기준과 화면의 현재 폴더가 어긋나지 않는다. 늦게 성공한 옛
       // 요청(그사이 다른 열기가 시작됨)도 기준을 되돌리지 않는다.
-      if (seq === openSeq) currentRoot = root
+      if (seq === openSeq) { currentRoot = root; currentVisit = seq; dependencyGate = { root, visit: seq, phase: 'checking' } }
       rememberRecent(root)
       onRecentsChanged()
       // 앱이 만든 작업 폴더는 윈도우 탐색기에서 숨긴다 — 학생에게는 자기 자료만 보이게(hidden.ts).
@@ -527,7 +561,12 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     emit: (s) => win()?.webContents.send('chat:snapshot', s),
     openExternal: (url) => shell.openExternal(url),
     // The reverse gate: while the app holds a write transaction, agent sends must wait.
-    sidecarBusy: () => [...inflight.values()].some((e) => sidecar.isWrite(e.method)),
+    sidecarBusy: () => {
+      if ((dependencyGate?.root === currentRoot && dependencyGate.phase !== 'ready') || dependencyFlights.size > 0) return true
+      for (const diagnosis of dependencyDiagnoses.values()) if (diagnosis.gate === dependencyGate) return true
+      for (const entry of inflight.values()) if (sidecar.isWrite(entry.method)) return true
+      return false
+    },
     // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
     bundledPython,
@@ -635,29 +674,85 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     }
   })
   ipcMain.handle('runtime:cancel', () => ({ result: cancelRuntimeInstall() }))
-  ipcMain.handle('deps:ensure', async (_e, root: string, clientId: string) => {
-    const w = win()
-    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
-    const params: Record<string, unknown> = { root, base_python: basePython(loadSettings().python_override) }
-    const wheels = wheelhouseDir()
-    if (wheels) { params.find_links = wheels; params.no_index = true }
-    const onEvent = (event: string, data: unknown): void => w?.webContents.send('rpc:event', { clientId, event, data })
-    const onId = (id: string): void => { inflight.set(clientId, { id, method: 'deps.ensure' }) }
-    try {
-      let result = await sidecar.call('deps.ensure', params, onEvent, onId)
-      if (wheels && !(result as { ok: boolean }).ok) {
-        // offline wheelhouse failed (e.g. platform mismatch): retry online
-        delete params.find_links; delete params.no_index
-        result = await sidecar.call('deps.ensure', params, onEvent, onId)
-      }
-      if ((result as { ok: boolean }).ok) await sidecar.configure(root, loadSettings().python_override)
-      hideAppDirs(root)   // 준비가 이 폴더의 .venv 를 만든다
-      return { result }
-    } catch (error) {
-      return { error: ipcError(error) }
-    } finally {
-      inflight.delete(clientId)
+  ipcMain.handle('deps:ensure', (_e, root: string, clientId: string): Promise<RpcResult<Envelope>> => {
+    if (root !== currentRoot) return Promise.resolve({ error: { code: 'project_changed', message: '현재 열린 논문 폴더가 아니에요.' } })
+    const existing = dependencyFlights.get(root)
+    if (existing) return existing.promise // Only the original client owns cancellation.
+    if (agentBusy(root)) return Promise.resolve({ error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } })
+    const visit = currentVisit
+    latestDependencyCheck = null
+    if (dependencyGate) dependencyGate.phase = 'checking'
+    const { promise, resolve: finish } = Promise.withResolvers<RpcResult<Envelope>>()
+    const flight = { clientId, cancelled: false, promise }
+    const mine = (): boolean => visit === currentVisit && currentRoot === root
+    const live = (): void => {
+      if (flight.cancelled) throw { code: 'cancelled', message: '준비를 취소했어요.' }
+      if (!mine()) throw { code: 'project_changed', message: '논문 폴더 방문이 바뀌어 준비를 중단했어요.' }
     }
+    const onEvent = (event: string, data: unknown): void => win()?.webContents.send('rpc:event', { clientId, event, data })
+    const onId = (id: string): void => {
+      inflight.set(clientId, { id, method: 'deps.ensure' })
+      if (flight.cancelled) sidecar.cancel(id)
+    }
+    const operation = async (): Promise<RpcResult<Envelope>> => {
+      const params: Record<string, unknown> = { root, base_python: basePython(loadSettings().python_override) }
+      const wheels = wheelhouseDir()
+      if (wheels) { params.find_links = wheels; params.no_index = true }
+      let phase: 'checking' | 'installing' | 'verifying' = 'checking'
+      try {
+        live()
+        const before = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
+        live()
+        const report = before.data as DependencyReport | null
+        if (!before.ok || !report || typeof report.ready !== 'boolean' || !Array.isArray(report.dependencies) || !report.dependencies.length) {
+          throw { code: 'deps_doctor', message: '준비 상태를 확인하지 못했어요.', data: before }
+        }
+        if (report.ready) {
+          if (dependencyGate && mine()) dependencyGate.phase = 'ready'
+          return { result: before }
+        }
+        phase = 'installing'
+        let result = await sidecar.call<Envelope>('deps.ensure', params, onEvent, onId)
+        live()
+        const offline = wheels ? result : undefined
+        if (wheels && !result.ok) {
+          delete params.find_links; delete params.no_index
+          result = await sidecar.call<Envelope>('deps.ensure', params, onEvent, onId)
+          live()
+          result = { ...result, attempts: { offline, online: result } }
+        }
+        if (result.ok) {
+          phase = 'verifying'
+          onEvent('progress', { phase: 'verifying' })
+          await sidecar.configure(root, loadSettings().python_override)
+          live()
+          const checked = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
+          live()
+          if (!checked.ok || (checked.data as DependencyReport | null)?.ready !== true) {
+            throw { code: 'deps_verify', message: '설치 뒤 프로젝트 .venv 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
+          }
+          if (dependencyGate && mine()) dependencyGate.phase = 'ready'
+        } else if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+        hideAppDirs(root)
+        return { result }
+      } catch (error) {
+        if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+        const failure = ipcError(error) as NonNullable<RpcResult['error']>
+        return { error: { code: failure.code ?? 'deps_ensure', message: failure.message ?? String(error),
+          data: { phase, detail: failure.data } } }
+      } finally {
+        inflight.delete(clientId)
+        if (dependencyFlights.get(root) === flight) dependencyFlights.delete(root)
+      }
+    }
+    // Reserve the physical operation before any await; keep source/activity ownership through verification.
+    dependencyFlights.set(root, flight)
+    void agentActivity.run(() => skillSwitch.run(operation)).then(finish, error => {
+      dependencyFlights.delete(root)
+      if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+      finish({ error: ipcError(error) as NonNullable<RpcResult['error']> })
+    })
+    return flight.promise
   })
   ipcMain.handle('project:create-folder', async (_e, title: unknown) => {
     if (typeof title !== 'string') return { error: { code: 'invalid_name', message: '논문 이름을 확인해 주세요.' } }

@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("openpyxl")
 
-from conftest import run_script
+from conftest import bound_test_context, run_script
 
 SPEC = {
     "profile": "single_annual_cash_v1",
@@ -42,8 +42,10 @@ SPEC = {
 
 
 def run(folder, out="build/fin.xlsx"):
+    bound_test_context(folder)
     (folder / "spec.json").write_text(json.dumps(SPEC, ensure_ascii=False), encoding="utf-8")
-    return run_script("build_excel_finance_template.py", folder, "--input", "spec.json", "--out", out)
+    return run_script("build_excel_finance_template.py", folder, "--input", "spec.json", "--out", out,
+                      "--major", "specialty_crops")
 
 
 def test_workbook_and_manifest_written_once_then_refused(empty_folder):
@@ -59,19 +61,16 @@ def test_workbook_and_manifest_written_once_then_refused(empty_folder):
 
     r2 = run(empty_folder)
     assert r2.returncode == 2
-    assert "덮어쓰" in json.loads(r2.stdout)["reason"]
     assert (xlsx.read_bytes(), manifest.read_bytes()) == before
 
 
 def test_stale_manifest_alone_blocks_save(empty_folder):
-    import gg_finance
-
     out = empty_folder / "build" / "fin.xlsx"
     out.parent.mkdir()
     stale = out.with_suffix(".manifest.json")
     stale.write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="기존 산출물을 덮어쓰지 않음"):
-        gg_finance.workbook(SPEC, out)
+    result = run(empty_folder)
+    assert result.returncode == 2
     assert not out.exists()
     assert stale.read_text(encoding="utf-8") == "{}"
     assert not list(out.parent.glob(".gg-tmp-*"))

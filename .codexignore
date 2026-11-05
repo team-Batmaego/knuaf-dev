@@ -1,4 +1,7 @@
-app/
+app/*
+!app/resources/
+app/resources/*
+!app/resources/skill/
 tests/
 .venv-dev/
 .github/

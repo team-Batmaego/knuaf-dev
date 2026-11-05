@@ -9,8 +9,9 @@ import { expect, test, type ElectronApplication } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, markSectionReady, navTo, openProject, python, rewriteSection, scripts, synthProject } from './helpers'
+import { launch, markSectionReady, navTo, openPreset, openProject, python, rewriteSection, scripts, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
+import { ARTIFACTS, OUTPUT_COPY } from '../src/renderer/src/copy'
 
 /** `shell:open` 이 받은 값을 메모리에만 적어 둔다(문서 앱을 실제로 열지 않는다). */
 async function captureOpenPath(electronApp: ElectronApplication): Promise<void> {
@@ -32,7 +33,7 @@ async function triggerRefresh(electronApp: ElectronApplication): Promise<void> {
 
 /** `build/<N>/review/검토용.md` 를 CLI 로 만든다. */
 function exportReview(root: string): void {
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'export', root, '--kind', 'review'], { encoding: 'utf-8' })
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'export', root, '--kind', 'review', '--major', 'specialty_crops'], { encoding: 'utf-8' })
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
 }
 
@@ -332,3 +333,129 @@ test('DOCX 성공 결과가 두 자리에 보인다 (반례 ③)', async () => {
     await electronApp.close()
   }
 })
+
+type PreflightProbe = {
+  held: boolean
+  release: () => void
+  outputs: string[]
+  cancelResults: unknown[]
+  lookupReply?: unknown
+}
+type PreflightHost = typeof globalThis & { __preflightProbe: PreflightProbe }
+
+/** Delay a real lookup reply after main has removed its inflight entry. */
+async function holdMajorReply(app: ElectronApplication, ordinal: number): Promise<void> {
+  await app.evaluate(({ ipcMain }, at) => {
+    // Electron does not publicly type the handler registry used by this existing test seam.
+    const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
+    const real = ipc._invokeHandlers.get('rpc')
+    const cancel = ipc._invokeHandlers.get('rpc:cancel')
+    if (!real || !cancel) throw new Error('missing real RPC handlers')
+    const gate = Promise.withResolvers<void>()
+    const probe: PreflightProbe = { held: false, release: gate.resolve, outputs: [], cancelResults: [] }
+    // The probe belongs only to this isolated Electron test process.
+    const host = globalThis as PreflightHost
+    host.__preflightProbe = probe
+    let lookups = 0
+    ipcMain.removeHandler('rpc')
+    ipcMain.handle('rpc', async (...args: unknown[]) => {
+      if (args[1] === 'excel.create') probe.outputs.push('excel.create')
+      const reply = await real(...args)
+      if (args[1] === 'project.major' && ++lookups === at) {
+        probe.lookupReply = reply
+        probe.held = true
+        await gate.promise
+      }
+      return reply
+    })
+    ipcMain.removeHandler('rpc:cancel')
+    ipcMain.handle('rpc:cancel', async (...args: unknown[]) => {
+      const result = await cancel(...args)
+      probe.cancelResults.push(result)
+      return result
+    })
+  }, ordinal)
+}
+
+async function preflightProbe(app: ElectronApplication) {
+  return app.evaluate(() => {
+    // Installed by holdMajorReply in this process.
+    const host = globalThis as PreflightHost
+    const { held, outputs, cancelResults, lookupReply } = host.__preflightProbe
+    return { held, outputs, cancelResults, lookupReply }
+  })
+}
+
+async function releaseMajorReply(app: ElectronApplication): Promise<void> {
+  await app.evaluate(() => {
+    // Installed by holdMajorReply in this process.
+    const host = globalThis as PreflightHost
+    host.__preflightProbe.release()
+  })
+}
+
+for (const surface of ['make', 'advanced', 'lookup-error'] as const) {
+  test(`R1-02: 실제 ${surface} 조회 뒤 취소·오류가 출력을 남기지 않고 busy를 끝낸다`, async () => {
+    test.skip(!existsSync(join(scripts, 'gg_major_contract.py')), 'current major contract required')
+    const dir = scratch()
+    const home = join(dir, 'home')
+    mkdirSync(home, { recursive: true })
+    const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in', HOME: home, USERPROFILE: home })
+    const root = synthProject({ withContent: surface !== 'lookup-error' })
+    const out = surface === 'make' ? 'build/검토전_재무.xlsx' : 'build/cancelled.xlsx'
+    const { electronApp, page } = await launch({ env })
+    let probeInstalled = false
+    try {
+      await openProject(page, root)
+      if (surface === 'make') {
+        await navTo(page, '결과물')
+      } else {
+        await navTo(page, '설정')
+        await openPreset(page, 'tools:excel')
+        await page.locator('#xl_source').fill(join(scripts, '..', 'assets', 'templates', 'finance-template.xlsx'))
+        await page.locator('#xl_blank').fill(out)
+      }
+      const create = surface === 'make'
+        ? page.locator('.make-row').filter({ hasText: ARTIFACTS.make.xlsx }).getByRole('button')
+        : page.getByRole('button', { name: '사본 만들기', exact: true })
+      const choose = page.locator('dialog[open]').getByRole('button', { name: OUTPUT_COPY.chooseX01 })
+      if (surface === 'make') {
+        await create.click()
+        await expect(choose).toBeVisible()
+      }
+      // useMake also does an explicit template-choice lookup before its runner starts.
+      await holdMajorReply(electronApp, surface === 'make' ? 2 : 1)
+      probeInstalled = true
+      if (surface === 'make') await choose.click()
+      else await create.click()
+      await expect.poll(async () => (await preflightProbe(electronApp)).held).toBe(true)
+      await expect(create).toBeDisabled()
+      if (surface === 'lookup-error') {
+        expect((await preflightProbe(electronApp)).lookupReply).toMatchObject({ error: { code: 'major_required' } })
+        await releaseMajorReply(electronApp)
+      } else {
+        await page.locator('.progress[aria-busy="true"]').getByRole('button', { name: '취소', exact: true }).click()
+        // The UI must finish without waiting for the held read reply.
+        await expect(create).toBeEnabled()
+        expect((await preflightProbe(electronApp)).cancelResults).toEqual([false])
+        await releaseMajorReply(electronApp)
+      }
+      await expect(create).toBeEnabled()
+      await expect(page.locator('.progress[aria-busy="true"]')).toHaveCount(0)
+      // A real read round trip drains the late reply before checking for a resurrected write.
+      await page.evaluate(async (rootPath) => window.knuaf.call('project.load', { root: rootPath }), root)
+      expect((await preflightProbe(electronApp)).outputs).toEqual([])
+      expect(existsSync(join(root, out))).toBe(false)
+      await page.screenshot({ path: test.info().outputPath(`${surface}-settled.png`) })
+      if (surface !== 'lookup-error') {
+        await create.click()
+        if (surface === 'make') await choose.click()
+        await expect.poll(() => existsSync(join(root, out))).toBe(true)
+        await expect(page.locator('.progress[aria-busy="true"]')).toHaveCount(0)
+        expect((await preflightProbe(electronApp)).outputs).toEqual(['excel.create'])
+      }
+    } finally {
+      try { if (probeInstalled) await releaseMajorReply(electronApp) } finally { await electronApp.close() }
+    }
+  })
+}

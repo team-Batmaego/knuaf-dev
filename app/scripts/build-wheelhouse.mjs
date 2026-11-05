@@ -1,49 +1,57 @@
-// Download offline runtime wheels and install the preview reader into bundled Python.
-// Uses the bundled runtime if present, else the interpreter in PYTHON env / python3. Platform tags come from that interpreter.
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
-import { resolve } from 'node:path'
+// Offline wheels belong to the staged manifest and bundled interpreter; preview also needs its reader there.
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { resolve, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 const app = resolve(import.meta.dirname, '..')
-const req = resolve(app, '..', 'skills', 'knuaf-dev', 'scripts', 'requirements-runtime.txt')
-const out = resolve(app, 'resources', 'wheelhouse')
-const bundled = process.platform === 'win32' ? resolve(app, 'resources', 'python', 'python.exe') : resolve(app, 'resources', 'python', 'bin', 'python3')
-const py = process.env.PYTHON ?? (existsSync(bundled) ? bundled : 'python3')
-
-// Idempotent so dist:* can depend on it without re-downloading every build.
+const scripts = resolve(app, 'resources/skill/scripts')
+const req = join(scripts, 'requirements-runtime.txt')
+const out = resolve(app, 'resources/wheelhouse')
+const py = process.platform === 'win32' ? resolve(app, 'resources/python/python.exe') : resolve(app, 'resources/python/bin/python3')
+const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+if (!existsSync(py)) throw new Error('Bundled Python missing; run fetch:python first')
+if (process.env.PYTHON) throw new Error('PYTHON override cannot build the bundled target wheelhouse')
+const probe = spawnSync(py, ['-I', '-c', 'import json,sys,sysconfig,platform; print(json.dumps({"platform":sys.platform,"arch":platform.machine(),"abi":sysconfig.get_config_var("SOABI"),"version":sys.version,"target":sysconfig.get_platform()}))'], { encoding: 'utf8' })
+if (probe.status !== 0) throw new Error(`Bundled Python probe failed: ${probe.stderr}`)
+const runtime = JSON.parse(probe.stdout)
+const target = runtime.platform === 'win32' ? 'x86_64-pc-windows-msvc'
+  : runtime.platform === 'darwin' ? `${runtime.arch === 'arm64' ? 'aarch64' : 'x86_64'}-apple-darwin` : null
+if (!target || (process.env.PBS_TARGET && process.env.PBS_TARGET !== target)) {
+  throw new Error(`Bundled Python target ${target} does not match PBS_TARGET; cross-host wheelhouse builds are forbidden`)
+}
+const key = hash(JSON.stringify({ runtime, target,
+  requirements: hash(readFileSync(req)), manifest: hash(readFileSync(join(scripts, 'runtime-deps.json'))),
+  specification: hash(readFileSync(resolve(app, 'python-runtime.json'))) }))
+const stamp = join(out, '.Complete')
+const wheels = () => Object.fromEntries(readdirSync(out).filter(f => f.endsWith('.whl')).sort()
+  .map(f => [f, hash(readFileSync(join(out, f)))]))
 const force = process.argv.includes('--force') || process.env.WHEELHOUSE_FORCE === '1'
-if (!force && existsSync(out) && readdirSync(out).some((f) => f.endsWith('.whl'))) {
-  console.log('wheelhouse already present →', out, '(use --force to rebuild)')
+let cacheHit = false
+if (!force && existsSync(stamp)) {
+  try {
+    const cached = JSON.parse(readFileSync(stamp, 'utf8'))
+    const actual = wheels()
+    cacheHit = cached.key === key && Object.keys(actual).length > 0 && JSON.stringify(cached.wheels) === JSON.stringify(actual)
+  } catch { /* Incomplete generated cache is rebuilt below. */ }
+}
+if (cacheHit) {
+  console.log('verified wheelhouse →', out, key)
 } else {
-
-  // Wheels carry the platform tag of THIS interpreter, so a macOS host cannot build a
-  // Windows wheelhouse. ipc.ts retries deps.ensure online when the offline install fails,
-  // but that silently turns the offline promise into a network requirement — so say it here.
-  if (process.env.PBS_TARGET && !process.env.PBS_TARGET.includes(process.platform === 'win32' ? 'windows' : 'darwin')) {
-    console.warn('warning: PBS_TARGET is a different platform; these wheels will not match it')
-  }
   rmSync(out, { recursive: true, force: true })
   mkdirSync(out, { recursive: true })
-  const r = spawnSync(py, ['-m', 'pip', 'download', '--only-binary=:all:', '--dest', out, '-r', req, 'pip', 'setuptools'], {
-    stdio: 'inherit',
-    // pip 은 -r 파일을 **로케일 인코딩**으로 읽는다. 파일은 ASCII 로 두는 것이 원칙이지만,
-    // 앞으로 비ASCII 바이트가 들어와도 한국어 Windows(cp949)·서구 Windows(cp1252)에서
-    // UnicodeDecodeError 로 죽지 않도록 자식에 UTF-8 을 강제한다(W2 Windows 빌드 실패).
-    env: { ...process.env, PYTHONUTF8: '1' },
+  const result = spawnSync(py, ['-m', 'pip', 'download', '--only-binary=:all:', '--dest', out, '-r', req, 'pip', 'setuptools'], {
+    stdio: 'inherit', env: { ...process.env, PYTHONUTF8: '1', PYTHONNOUSERSITE: '1' }
   })
-  if (r.status !== 0) process.exit(r.status ?? 1)
-  console.log('wheelhouse →', out)
+  if (result.status !== 0) process.exit(result.status ?? 1)
+  writeFileSync(stamp, JSON.stringify({ key, runtime, target, wheels: wheels() }) + '\n')
+  console.log('wheelhouse →', out, key)
 }
 
-// Preview runs in the sidecar before a new project has its own .venv. Keep only
-// its reader (and transitive dependencies) in bundled Python, not the full toolchain.
-// Run this even on a wheelhouse cache hit: older runtimes may lack the reader.
-if (existsSync(bundled)) {
-  const install = spawnSync(bundled, ['-m', 'pip', 'install', '--no-index', '--find-links', out, '--no-compile', 'openpyxl>=3.1,<4'], {
-    stdio: 'inherit',
-    env: { ...process.env, PYTHONUTF8: '1' },
-  })
-  if (install.status !== 0) process.exit(install.status ?? 1)
-  const check = spawnSync(bundled, ['-c', 'from openpyxl import load_workbook; print("bundled xlsx preview ready")'], { stdio: 'inherit' })
-  if (check.status !== 0) process.exit(check.status ?? 1)
-}
+// Preview precedes a project's .venv. Cache hits must also repair older bundled runtimes.
+const install = spawnSync(py, ['-m', 'pip', 'install', '--no-index', '--find-links', out, '--no-compile', 'openpyxl>=3.1,<4'], {
+  stdio: 'inherit', env: { ...process.env, PYTHONUTF8: '1', PYTHONNOUSERSITE: '1' }
+})
+if (install.status !== 0) process.exit(install.status ?? 1)
+const check = spawnSync(py, ['-I', '-c', 'from openpyxl import load_workbook; print("bundled xlsx preview ready")'], { stdio: 'inherit' })
+if (check.status !== 0) process.exit(check.status ?? 1)

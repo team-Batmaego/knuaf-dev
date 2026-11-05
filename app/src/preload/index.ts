@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
-import type { AppInfo, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
@@ -127,7 +127,7 @@ const api = {
     },
     cancel: (): Promise<{ result: boolean }> => ipcRenderer.invoke('runtime:cancel')
   },
-  depsEnsure: async (root: string, onEvent?: EventHandler, clientId?: string) => {
+  depsEnsure: async (root: string, onEvent?: EventHandler, clientId?: string): Promise<RpcResult<Envelope>> => {
     const id = clientId ?? `c${++seq}`
     if (onEvent) handlers.set(id, onEvent)
     try { return await ipcRenderer.invoke('deps:ensure', root, id) } finally { handlers.delete(id) }

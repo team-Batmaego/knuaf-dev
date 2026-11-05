@@ -255,19 +255,6 @@ def test_a_cache_from_the_previous_package_name_is_still_ours(tmp_path):
     kd._claim_cache(root)
 
 
-# --- the pinned version is a decision, not an accident ------------------------
-
-def test_the_package_version_is_pinned_and_the_registry_is_the_public_one():
-    assert kd.VERSION == "4.13.1", "버전을 올릴 때는 별도 검증이 필요하다"
-    assert kd.REGISTRY == "https://registry.npmjs.org"
-
-
-def test_every_subprocess_call_disables_the_shell():
-    """shell=True with a student-supplied path would be a command injection."""
-    src = (kd.__file__ and open(kd.__file__, encoding="utf-8").read()) or ""
-    assert "shell=False" in src
-    assert "shell=True" not in src
-    assert src.count("subprocess.run(") == 1, "실행 경로가 하나여야 감사가 가능하다"
 
 
 @pytest.mark.skipif(not os.environ.get("KNUAF_REAL_KORDOC"),

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { usePrep } from '../store/prep'
+import { usePrep, type DependencyPreparation } from '../store/prep'
+import { useProject } from '../store/project'
 import { describeError, rpc, RpcFailure } from '../rpc'
-import type { Envelope, RpcResult } from '../../../shared/types'
+import type { Envelope } from '../../../shared/types'
 
 export type RunnerLine = { stream: string; line: string }
 export type RunnerPhase = { phase: string; [k: string]: unknown }
@@ -19,8 +20,8 @@ export interface Runner {
   clientId: string | null
   /** Run a script-backed sidecar method; resolves to the Envelope (or null when it failed/was cancelled). */
   run: (method: string, params: Record<string, unknown>) => Promise<Envelope | null>
-  /** Run `deps.ensure` through main (wheelhouse-aware); resolves to the Envelope or null. */
-  runDeps: (root: string) => Promise<Envelope | null>
+  /** Shared check → install → verify action. Joining another run never owns cancellation. */
+  runDeps: (root: string) => Promise<DependencyPreparation | null>
   cancel: () => Promise<void>
   reset: () => void
 }
@@ -40,6 +41,7 @@ export function useRunner(): Runner {
   const [elapsedMs, setElapsedMs] = useState(0)
   const [clientId, setClientId] = useState<string | null>(null)
   const clientRef = useRef<string | null>(null)
+  const dependencyClient = useRef(false)
   const startedAt = useRef<number>(0)
 
   useEffect(() => {
@@ -56,13 +58,14 @@ export function useRunner(): Runner {
   const begin = useCallback(() => {
     const id = rpc.newClientId()
     clientRef.current = id
+    dependencyClient.current = false
     startedAt.current = Date.now()
     setClientId(id); setBusy(true); setLines([]); setEnv(null); setErr(null); setCancelled(false); setPhase(null); setElapsedMs(0)
     return id
   }, [])
 
   const finish = useCallback((id: string) => {
-    if (clientRef.current === id) clientRef.current = null
+    if (clientRef.current === id) { clientRef.current = null; dependencyClient.current = false }
     setElapsedMs(Date.now() - startedAt.current)
     setBusy(false)
   }, [])
@@ -82,21 +85,20 @@ export function useRunner(): Runner {
   }, [begin, finish, fail, onEvent])
 
   const runDeps = useCallback(async (root: string) => {
+    const joining = (usePrep.getState().prep[root] ?? 0) > 0
     const id = begin()
-    usePrep.getState().begin(root, 'write')   // 그동안 대화 전송은 기다린다(store/prep.ts)
+    if (joining) { clientRef.current = null; setClientId(null) }
+    else dependencyClient.current = true
     try {
-      const r: RpcResult<Envelope> = await window.knuaf.depsEnsure(root, onEvent, id)
-      if (r.error) throw new RpcFailure(r.error)
-      const result = r.result as Envelope
-      setEnv(result)
-      return result
-    } catch (e) { fail(e); return null } finally { finish(id); usePrep.getState().end(root, 'write') }
+      return await useProject.getState().prepareDeps(root, joining ? undefined : { clientId: id, onEvent })
+    } catch (e) { fail(e); return null } finally { finish(id) }
   }, [begin, finish, fail, onEvent])
 
   const cancel = useCallback(async () => {
     const id = clientRef.current
     if (!id) return
-    await rpc.cancel(id)
+    if (dependencyClient.current) await useProject.getState().cancelDeps(id)
+    else await rpc.cancel(id)
   }, [])
 
   const reset = useCallback(() => {

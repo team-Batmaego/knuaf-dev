@@ -281,6 +281,11 @@ const md = readFileSync(SRC, 'utf8')
 const htmlRelative = pageHtml(markdownToHtml(md, (p) => p))
 writeFileSync(HTML, htmlRelative)
 console.log('wrote', HTML)
+// Documentation-only refresh when launching Chromium is not permitted.
+if (process.argv.includes('--html-only')) {
+  console.log('PDF unchanged (--html-only)')
+  process.exit(0)
+}
 
 // PDF render: `setContent` pages are about:blank and may not load file:// images, so embed each
 // screenshot (resolved from docs/) as a data: URI instead.

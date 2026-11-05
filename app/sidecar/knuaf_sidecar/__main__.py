@@ -12,11 +12,11 @@ def default_scripts_dir() -> Path:
     if env:
         return Path(env)
     here = Path(__file__).resolve()
-    for base in (here.parents[3] / "skills" / "knuaf-dev" / "scripts",  # repo layout
-                 here.parents[2] / "skill" / "scripts"):                 # packaged app: resources/
+    for base in (here.parents[2] / "resources" / "skill" / "scripts",  # app checkout
+                 here.parents[2] / "skill" / "scripts"):              # packaged resources/
         if (base / "gg_core.py").is_file():
             return base
-    return here.parents[3] / "skills" / "knuaf-dev" / "scripts"
+    return here.parents[2] / "resources" / "skill" / "scripts"
 
 
 def main(argv=None) -> int:

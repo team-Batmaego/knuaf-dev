@@ -28,7 +28,7 @@ def _root(params) -> Path:
 # result, the school's XLSX template) may legitimately be absolute and are not here.
 CONFINED = frozenset({
     "in", "input", "body", "out", "out_dir", "out_map", "map", "values",
-    "report", "receipt", "receipts", "legacy_map",
+    "report", "receipt", "receipts", "legacy_map", "reference_inventory", "template_receipt", "spec",
 })
 
 
@@ -44,10 +44,11 @@ def _confine(root, params):
         value = params[key]
         if value is None or isinstance(value, bool):
             continue
-        try:
-            gg_core.local(root, str(value))
-        except ValueError as e:
-            raise RpcError("invalid_params", "%s: %s" % (key, e)) from e
+        for item in value if isinstance(value, (list, tuple)) else (value,):
+            try:
+                gg_core.local(root, str(item))
+            except ValueError as e:
+                raise RpcError("invalid_params", "%s: %s" % (key, e)) from e
 
 
 def _flags(params, names, positional=()):
@@ -92,14 +93,20 @@ def _run(ctx, params, script, argv, needs_deps=False, timeout_key="default", pyt
     return run_script(ctx, py, _scripts_dir() / script, argv, cwd=root, timeout=timeout)
 
 
+
+def _output_flags(params, *, project=False):
+    """The project is the RPC root, never an independently supplied path."""
+    argv = ["--project", str(_root(params))] if project else []
+    if params.get("major_id") is not None:
+        argv += ["--major", str(params["major_id"])]
+    return argv
+
 # --- gg.py paper / build_docx ------------------------------------------------
 
 
 def paper_generate(ctx, params):
-    # `body` 는 정본 절을 합친 본문. 주면 생성기의 2020년 판 Ⅰ–Ⅵ 골격 대신 그것을
-    # 싣고 앞머리(겉표지·인준서·목차)만 만든다 — 앱이 겉표지 없는 DOCX 를 내놓던
-    # 길을 막는다(시험주행 발견 15).
     argv = ["paper", str(_root(params))] + _flags(params, ("input", "out", "body"))
+    argv += _output_flags(params)
     return _run(ctx, params, "gg.py", argv)
 
 
@@ -109,6 +116,7 @@ def docx_build(ctx, params):
         argv += ["--in", str(params["in"])]
     # `no_toc` — 앱이 표지 정보 없이 본문만 묶을 때. 안내가 "겉표지·목차 없이"다(실기기 QA-03).
     argv += _flags(params, ("out", "font", "no_toc"))
+    argv += _output_flags(params)
     return _run(ctx, params, "build_docx.py", argv, needs_deps=True)
 
 
@@ -118,8 +126,8 @@ def docx_build(ctx, params):
 def _excel_params(ctx, params):
     """Explicit selection wins; otherwise use the student's registered workbook.
 
-    Only an absent student workbook permits the CLI's bundled default. A missing
-    or unreadable selected file must fail, not silently switch templates.
+    No student path means the CLI must validate an explicit template choice and
+    the major's survey evidence. A selected file failure never falls back.
     """
     if params.get("source"):
         return params
@@ -137,34 +145,41 @@ def _excel_params(ctx, params):
 
 def excel_create(ctx, params):
     params = _excel_params(ctx, params)
-    argv = ["create"] + _flags(params, ("source", "out"))
+    argv = ["create"] + _flags(params, ("source", "out", "template_ref", "reference_inventory"))
+    argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_template.py", argv)
 
 
 def excel_inspect(ctx, params):
     params = _excel_params(ctx, params)
-    argv = ["inspect"] + _flags(params, ("source", "out_map", "report", "legacy_map"))
+    argv = ["inspect"] + _flags(params, ("source", "out_map", "report", "legacy_map", "template_ref", "reference_inventory"))
+    if params.get("source") is None:
+        argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_template.py", argv)
 
 
 def excel_clear(ctx, params):
     params = _excel_params(ctx, params)
-    argv = ["clear"] + _flags(params, ("source", "map", "out", "receipt", "allow_missing"))
+    argv = ["clear"] + _flags(params, ("source", "map", "out", "receipt", "allow_missing", "template_ref", "reference_inventory"))
+    argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_template.py", argv)
 
 
 def excel_fill(ctx, params):
     argv = _flags(params, ("template", "map", "values", "out", "receipt"))
+    argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_fill.py", argv)
 
 
 def excel_formula_patch(ctx, params):
     argv = _flags(params, ("source", "map", "out", "receipt"))
+    argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_formula_patch.py", argv, needs_deps=True)
 
 
 def excel_print(ctx, params):
     argv = _flags(params, ("source", "map", "out", "receipt"))
+    argv += _output_flags(params, project=True)
     return _run(ctx, params, "gg_excel_print.py", argv, needs_deps=True)
 
 
@@ -179,12 +194,14 @@ def office_doctor(ctx, params):
 def office_word(ctx, params):
     argv = ["word"] + _flags(params, ("resources", "timeout", "workspace"), positional=("input",))
     argv += ["--out-dir", str(params.get("out_dir") or "")]
+    argv += _output_flags(params, project=True) + ["--json"]
     return _run(ctx, params, "gg_office.py", argv, needs_deps=True, timeout_key="office")
 
 
 def office_excel(ctx, params):
     argv = ["excel"] + _flags(params, ("resources", "template_receipt", "spec", "timeout", "workspace"), positional=("input",))
     argv += ["--out-dir", str(params.get("out_dir") or "")]
+    argv += _output_flags(params, project=True) + ["--json"]
     return _run(ctx, params, "gg_office.py", argv, needs_deps=True, timeout_key="office")
 
 
@@ -193,6 +210,7 @@ def office_batch(ctx, params):
     if not inputs:
         raise RpcError("invalid_params", "inputs 필요")
     argv = ["batch", *map(str, inputs), "--out-dir", str(params.get("out_dir") or "")] + _flags(params, ("timeout", "workspace"))
+    argv += _output_flags(params, project=True) + ["--json"]
     return _run(ctx, params, "gg_office.py", argv, needs_deps=True, timeout_key="office")
 
 
@@ -210,9 +228,7 @@ def office_clean(ctx, params):
     jobs = params.get("jobs") or []
     if not jobs:
         raise RpcError("invalid_params", "jobs(삭제할 작업 ID 목록) 필요")
-    argv = ["clean"]
-    for job in jobs:
-        argv += ["--job", str(job)]
+    argv = ["clean", "--job", *map(str, jobs)]
     argv += _flags(params, ("workspace",))
     return _run(ctx, params, "gg_office.py", argv)
 
@@ -232,7 +248,12 @@ def deps_ensure(ctx, params):
 
 
 def deps_doctor(ctx, params):
-    return _run(ctx, params, "gg_deps.py", ["doctor", str(_root(params))])
+    from .methods_core import project_deps_report
+
+    result = _run(ctx, params, "gg_deps.py", ["doctor", str(_root(params))])
+    if result["ok"]:
+        result["data"] = project_deps_report(result["data"])
+    return result
 
 
 def kordoc_ensure(ctx, params):

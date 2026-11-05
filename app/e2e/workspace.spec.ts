@@ -163,6 +163,30 @@ test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하
   await electronApp.close()
 })
 
+test('재무 게이트 기록이 없으면 본문이 있어도 2단계에 머물고 대기 질문 1로 센다', async () => {
+  // 원본 계약: 재무 지원 전공에 본문 절이 있는데 finance.gate.state 기록이 없으면
+  // `project.status`가 finance_gate를 needs_user로 내고 점검은 error다. 그래서 본문이
+  // review_ready여도 검토본 단계로 넘어가지 않는다(서버 판정, 앱 규칙 아님).
+  const dir = scratch()
+  const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
+  const root = synthProject({ financeGate: false })
+  const { electronApp, page } = await launch({ env })
+  try {
+    await openProject(page, root)
+    await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
+    markSectionReady(root)
+    // 감시 한 주기(2초)가 지나도 단계는 2다 — 권하는 단추가 생기지 않는다.
+    await page.waitForTimeout(3_500)
+    await expect(page.locator('.titlebar .tbtn.now')).toContainText('인터뷰')
+    await expect(page.locator('.paper-head button.primary')).toHaveCount(0)
+    await page.locator('.titlebar .tbtn.now').click()
+    await expect(page.locator('.titlebar .popover .pop-row').nth(1)).toContainText('질문 1개')
+    await page.keyboard.press('Escape')
+  } finally {
+    await electronApp.close()
+  }
+})
+
 test('팝오버 — 만든 파일과 만들기 네 줄이 종이 머리에서 열린다', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()

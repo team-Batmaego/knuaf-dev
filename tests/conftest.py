@@ -1,5 +1,6 @@
 """Shared fixtures. The skill scripts import each other by bare module name,
 so `scripts/` is put on sys.path and CLI runs use the script path directly."""
+import importlib
 import json
 import os
 import shutil
@@ -10,12 +11,37 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / "skills" / "knuaf-dev" / "scripts"
+SCRIPTS = Path(os.environ.get("KNUAF_TEST_SCRIPTS_DIR") or REPO / "app" / "resources" / "skill" / "scripts").resolve()
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 START, END = "<!-- gg:draft:start -->", "<!-- gg:draft:end -->"
+
+
+def pytest_sessionstart(session):
+    """Old personal hook commands also prepare the pinned runtime before collection."""
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    sys.dont_write_bytecode = True
+    if os.environ.get("KNUAF_TEST_SCRIPTS_DIR"):
+        # Explicit local compose / isolated compatibility runs must not recursively stage.
+        if not SCRIPTS.is_dir():
+            raise pytest.UsageError(f"Explicit KNUAF_TEST_SCRIPTS_DIR is not a directory: {SCRIPTS}")
+        return
+    print("[skill-tests] Preparing pinned runtime offline before pytest collection", file=sys.stderr, flush=True)
+    try:
+        prepared = subprocess.run(
+            ["node", str(REPO / "app/scripts/stage-skill.mjs"), "--offline", "--python", sys.executable],
+            cwd=REPO, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+        )
+    except OSError as error:
+        raise pytest.UsageError(f"Pinned runtime preparation could not start: {error}") from error
+    if prepared.returncode:
+        raise pytest.UsageError(
+            f"Pinned runtime preparation failed before collection (exit {prepared.returncode}); "
+            "see source/cache or compatibility errors above. No stale runtime fallback."
+        )
+    importlib.invalidate_caches()
 
 
 def run_script(script, *args, python=None, env=None, cwd=None, timeout=120):
@@ -79,7 +105,7 @@ def empty_folder(tmp_path):
 
 @pytest.fixture
 def project(empty_folder):
-    """A synthetic project: init + one source + one section + two facts."""
+    """A synthetic project with source-backed facts and an explicit test major."""
     import gg_core as core
 
     root = empty_folder
@@ -89,5 +115,59 @@ def project(empty_folder):
         "# 원답변\n\n재배 면적: 600평\n\n수취가격: 모름\n", encoding="utf-8"
     )
     write_section(root, "sections/01.md", "Ⅰ. 머리말", "농장A의 재배 면적은 600평이다.")
-    core.apply(root, basic_change(), 0)
+    change = basic_change()
+    change["ops"].extend(major_ops(root, 1))
+    core.apply(root, change, 0)
     return root
+
+
+@pytest.fixture
+def publication_skill():
+    """Current publication contracts are mandatory for the composed app bundle."""
+    if not (SCRIPTS / "gg_major_contract.py").is_file():
+        pytest.fail("incompatible app bundle: missing gg_major_contract.py; run stage:skill")
+
+
+def major_ops(root, revision, major_id="specialty_crops"):
+    import gg_major_contract as mc
+
+    (root / "major-answer.txt").write_text("Synthetic explicit major selection\n", encoding="utf-8")
+    fact = {
+        "id": "selected-major", "field_id": "common.major_id", "kind": "reported_fact",
+        "value": major_id, "unit": "", "value_type": "text", "period": None, "scope": "project",
+        "answer_state": "provided", "verification": "claim_supported",
+        "module_version": mc.default_registry().resolve(major_id).module_version,
+        "source_refs": [{"id": "major-answer", "revision": revision, "locator": "L1", "claim_id": "major"}],
+    }
+    claim = {k: fact[k] for k in ("field_id", "value", "unit", "period", "scope", "answer_state", "kind")}
+    return [
+        {"collection": "sources", "value": {
+            "id": "major-answer", "path": "major-answer.txt", "claims": {"major": claim}, "claim_review": "synthetic-review",
+        }},
+        {"collection": "facts", "value": fact},
+    ]
+
+
+def bind_test_major(root, major_id="specialty_crops"):
+    import gg_core as core
+
+    revision = core.load(root)["revision"]
+    core.apply(root, {"request_id": "test:bind:" + major_id,
+                      "ops": major_ops(root, revision + 1, major_id)}, revision)
+
+
+def bound_test_context(root):
+    """Explicit output context for synthetic standalone tool fixtures, never a production default."""
+    import gg_core as core
+    import gg_major_contract as mc
+
+    if not (root / "project.json").exists():
+        core.init(root)
+    if "selected-major" not in core.load(root)["facts"]:
+        bind_test_major(root)
+    return mc.output_context(root, "specialty_crops")
+
+
+@pytest.fixture
+def publication_project(publication_skill, project):
+    return project
