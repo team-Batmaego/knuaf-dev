@@ -1,9 +1,10 @@
 """Protocol tests for app/sidecar (JSON-lines over stdio)."""
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -21,8 +22,26 @@ class Sidecar:
             text=True, encoding="utf-8",
         )
         self.n = 0
-        ready = json.loads(self.proc.stdout.readline())
+        self.lines = queue.Queue()
+        self.reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self.reader.start()
+        ready = json.loads(self._readline(timeout=10))
         assert ready.get("event") == "ready", ready
+
+    def _read_stdout(self):
+        try:
+            for line in self.proc.stdout:
+                self.lines.put(line)
+        finally:
+            self.lines.put("")
+
+    def _readline(self, timeout=None):
+        try:
+            line = self.lines.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError("no sidecar response within %ss" % timeout) from None
+        assert line, "sidecar closed: " + self.proc.stderr.read()
+        return line
 
     def send(self, method, **params):
         """Write one request and return its id without waiting for the answer."""
@@ -37,13 +56,9 @@ class Sidecar:
         events = []
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                assert remaining > 0, "no response for %s within %ss" % (rid, timeout)
-                ready, _, _ = select.select([self.proc.stdout], [], [], remaining)
-                assert ready, "no response for %s within %ss" % (rid, timeout)
-            line = self.proc.stdout.readline()
-            assert line, "sidecar closed: " + self.proc.stderr.read()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            assert remaining is None or remaining > 0, "no response for %s within %ss" % (rid, timeout)
+            line = self._readline(timeout=remaining)
             msg = json.loads(line)
             if msg.get("id") != rid:
                 continue
@@ -68,7 +83,12 @@ class Sidecar:
             self.proc.stdin.flush()
             self.proc.wait(timeout=10)
         finally:
-            self.proc.kill()
+            if self.proc.poll() is None:
+                self.proc.kill()
+            self.proc.wait(timeout=10)
+            self.reader.join(timeout=5)
+            for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                stream.close()
 
 
 @pytest.fixture
@@ -152,9 +172,13 @@ def test_owner_cleanup_cannot_break_a_live_guard(sidecar, publication_project):
     with gg_lock.Lock(root):
         before = owner.read_bytes()
         probe = sidecar.ok("lock.info", root=str(root), probe=True)["result"]
-        assert probe["lock_state"] == "busy", probe
+        # msvcrt cannot distinguish lock contention from permission denial.
+        state, reason, code = (("unavailable", "busy_or_denied", "lock_ambiguous")
+                               if sys.platform == "win32" else ("busy", "guard_busy", "lock_held"))
+        assert (probe["structure"], probe["lock_state"], probe["reason"]) == ("ready", state, reason), probe
         cleanup = sidecar.call("lock.unlock", root=str(root))
-        assert cleanup["error"]["code"] == "lock_held", cleanup
+        assert cleanup["error"]["code"] == code, cleanup
+        assert cleanup["error"]["data"] == {"status": state, "reason": reason}, cleanup
         assert owner.read_bytes() == before
     owner.write_text(json.dumps({"pid": 999999, "host": "synthetic", "token": "stale"}), encoding="utf-8")
     assert sidecar.ok("lock.info", root=str(root))["result"]["lock_state"] == "unprobed"
@@ -293,7 +317,7 @@ def test_artifact_preview_xlsx(sidecar, project):
     assert len(sheets["긴 시트"]["rows"]) == 200
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="sh wrapper + select() on pipes")
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sh wrapper")
 def test_cancel_terminates_running_script(sidecar, project, tmp_path):
     # deps.ensure spawns `base_python gg_deps.py ensure <root>`; a wrapper that just sleeps stands in for it.
     wrapper = tmp_path / "slow-python"

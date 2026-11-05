@@ -159,7 +159,12 @@ CI의 `test-with-skill.mjs`도 같은 stage를 사용합니다. 직접 실행하
 실패하면 이전 묶음을 보존하며 구판 사본으로 자동 대체하지 않습니다.
 호환 실패 메시지의 `consumer`·`upstream` 숫자는 시험 건수가 아니라 pytest 종료코드입니다(`0`은 성공).
 소비자 시험은 Kordoc 차단 예외의 `reason`·`details`(자식 종료코드·stderr 포함)와 live guard의 probe/cleanup
-응답을 실패 보고서에 남깁니다. Windows 원인을 확인하기 위한 출력이며 기대값·시험 목록·stage 차단 조건은 바꾸지 않습니다.
+응답을 실패 보고서에 남깁니다. 이 진단 출력은 stage 차단 조건을 바꾸지 않습니다.
+Windows 가짜 Kordoc은 원본 fixture처럼 shim 옆 `node_modules/kordoc/dist/cli.js`를 제공해 실제 패키지로
+넘어가지 않고 shell-free 경로를 시험합니다. 잠금 시험은 Windows의 `unavailable/busy_or_denied`와
+`lock_ambiguous` 거절을 정확히 확인하고 owner/guard 보존·해제 뒤 정리 검사를 동일하게 수행합니다.
+사이드카 시험 클라이언트는 단일 reader와 queue로 JSON-lines를 받아, 한 번에 도착한 이벤트·완료 응답을
+TextIOWrapper가 미리 읽어도 OS `select()` 대기로 잃지 않습니다. 취소 완료의 5초 제한은 유지합니다.
 
 현재 pin은 v0.4.2(`60311c11fbf12fdc04249be8c75eeaf027c06a66`)입니다.
 pin 변경 시 consumer·upstream 내부·보호별 upstream root 전체 게이트를 통과해야 하며, 시험 제외·로컬 원본 패치·낡은 stage로 성공시키지 않습니다.

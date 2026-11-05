@@ -42,16 +42,25 @@ if out:
 
 
 def write_exe(path, body):
-    """Write a fake CLI that this platform can actually execute.
+    """Write a fake CLI with the same shell-free entry point as Kordoc.
 
-    `body` is Python, not shell. Windows has neither `#!` nor an exec bit, so
-    the same fake has to be reached through a `.cmd` launcher there — writing
-    a `#!/bin/sh` script would make every test that asserts *refusal* pass for
-    the wrong reason (the CLI never ran) and every other test fail.
+    Windows shims must have a sibling cli.js: the adapter intentionally
+    refuses to run .cmd through a shell. Match the pinned upstream fixture
+    so tests never select the real package to parse their synthetic HWP.
     """
     impl = path.with_name(path.name + "-impl.py")
     impl.write_text(body, encoding="utf-8")
     if os.name == "nt":
+        cli_js = path.parent / "node_modules" / "kordoc" / "dist" / "cli.js"
+        cli_js.parent.mkdir(parents=True, exist_ok=True)
+        cli_js.write_text(
+            "const { spawnSync } = require('child_process');\n"
+            "const child = spawnSync(%s, [%s, ...process.argv.slice(2)],\n"
+            "                        { stdio: 'inherit' });\n"
+            "process.exit(child.status === null ? 1 : child.status);\n"
+            % (json.dumps(sys.executable), json.dumps(str(impl))),
+            encoding="utf-8",
+        )
         exe = path.with_name(path.name + ".cmd")
         exe.write_text('@"%s" "%s" %%*\r\n' % (sys.executable, impl), encoding="utf-8")
         return exe
