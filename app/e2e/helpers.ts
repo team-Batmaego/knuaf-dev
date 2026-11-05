@@ -84,18 +84,16 @@ export function plantStaleLock(root: string): void {
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 
-export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
+export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; splash?: 'keep'; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'kd-userdata-'))
   /**
-   * 여는 화면은 켤 때마다 화면을 덮고 2.6초를 쓴다. 대부분의 테스트는 그것을 보려는 게
-   * 아니라 그 뒤의 화면을 보려는 것이므로 기본적으로 꺼 둔다(`intro: true` 면 켠다).
+   * Every app launch shows its startup splash. Ordinary E2E tests send Escape after the overlay
+   * is visible and wait for it to disappear; splash-specific tests pass `splash: 'keep'` to
+   * observe the natural startup. This option belongs only to the test helper, not shipped code.
    *
-   * `onboarded_at` 도 같이 적는다. 첫 실행 화면(AI 연결 → 논문 폴더)이 생기면서, 이 표시가
-   * 없는 폴더에서는 앱이 온보딩을 띄운다 — 그러면 기존 스펙 28개가 전부 폴더 화면 대신
-   * 온보딩을 보게 된다. 첫 실행 자체를 보는 스펙은 `onboarded: false` 로 끈다.
-   *
-   * 스펙이 직접 써 둔 settings.json 은 **덮지 않고 이어 쓴다** — 그 안의 값(옛 helper_mode 등)이
-   * 시험 대상이기 때문이다.
+   * `intro` retains its legacy show_intro fixture behavior; it does not control the startup splash.
+   * `onboarded_at` is set as well. Without it the first-run connect/folder screens replace the
+   * workspace, so tests of first-run behavior opt out with `onboarded: false`.
    */
   const settingsFile = join(userData, 'settings.json')
   mkdirSync(userData, { recursive: true })
@@ -130,6 +128,14 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
   // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
   await page.waitForSelector(opts.waitFor ?? '.titlebar')
+  const splash = page.locator('.splash')
+  if (opts.splash !== 'keep') {
+    await splash.waitFor({ state: 'visible', timeout: 30_000 })
+    // The skip key listener is attached before the first animation frame marks this node.
+    await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
+    await page.keyboard.press('Escape')
+    await splash.waitFor({ state: 'detached' })
+  }
   return { electronApp, page }
 }
 
