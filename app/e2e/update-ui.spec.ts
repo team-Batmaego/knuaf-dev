@@ -67,6 +67,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('시험 응답입니다')).toBeVisible({ timeout: 30000 })
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     const section = page.getByRole('region', { name: '업데이트' })
     await expect(section).toContainText('새 규칙집 1.0.1이 있어요')
     for (const colorScheme of ['light', 'dark'] as const) {
@@ -81,6 +82,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('규칙집이 갱신됐어요', { exact: false })).toBeVisible({ timeout: 30000 })
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await section.getByRole('button', { name: '이전 규칙집으로' }).click()
     await expect(section).toContainText('현재 규칙집 1.0.0')
     needsApp = true
@@ -151,6 +153,7 @@ test('app update progress remains reachable after closing the named dialog', asy
     const startup = await page.evaluate(() => window.knuaf.appUpdate.check())
     expect(startup).toMatchObject({ result: { phase: 'error', latest: null } })
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     const section = page.getByRole('region', { name: '업데이트' })
     await expect(section.locator('p.caption', { hasText: '앱 판' })).toContainText('확인할 수 없어요')
     await page.locator('dialog[data-screen="settings"] > .sheet-head button[aria-label="닫기"]').click()
@@ -192,6 +195,7 @@ test('app update progress remains reachable after closing the named dialog', asy
     expect(await electronApp.evaluate(() => (globalThis as typeof globalThis & { cancelled?: number }).cancelled)).toBe(1)
     await dialog.getByRole('button', { name: '나중에' }).click()
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await expect(section).toContainText('앱을 받고 있어요')
     await emit('preparing')
     await expect(section).toContainText('앱 설치를 준비하고 있어요')
@@ -207,6 +211,7 @@ test('app update progress remains reachable after closing the named dialog', asy
     }
     await dialog.getByRole('button', { name: '나중에' }).click()
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await expect(section).toContainText('앱 설치를 시작하고 있어요')
   } finally { await electronApp.close() }
 })

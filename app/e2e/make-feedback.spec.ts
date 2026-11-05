@@ -84,11 +84,9 @@ test('팝오버를 닫아도 결과가 종이 머리 아래 한 줄로 이어진
     await expect(page.locator('.paperpane .popover')).toHaveCount(0)
     await expect(page.locator('.paper-fb')).toContainText('검토본을 만들었어요')
 
-    // 결과물 전체 보기에서도 같은 실행의 결과가 이어진다(같은 훅 상태).
-    await page.locator('.paper-head').getByRole('button', { name: /파일 \d+$/ }).click()
-    await page.getByRole('button', { name: '결과물 전체 보기' }).click()
-    const sheet = page.locator('[data-screen="artifacts"]')
-    await expect(sheet).toContainText('검토본을 만들었어요')
+    // Reopening the Files list shows the same run result; no separate results screen remains.
+    await navTo(page, '결과물')
+    await expect(pop.locator('[data-make="review"]')).toContainText('검토본을 만들었어요')
   } finally {
     await electronApp.close()
   }
@@ -147,10 +145,6 @@ test('나중에 생긴 표지 입력을 새로고침이 알아챈다 (P3-R1-05)'
     await triggerRefresh(electronApp)
     await expect(docxRow.getByRole('button'), '새로고침 뒤에도 입력을 못 본다').toBeEnabled({ timeout: 20_000 })
 
-    // 결과물 전체 화면도 같은 조건을 본다.
-    await page.getByRole('button', { name: '결과물 전체 보기' }).click()
-    const sheet = page.locator('[data-screen="artifacts"]')
-    await expect(sheet.locator('.make-row:has-text("논문 파일(워드) 만들기") button')).toBeEnabled({ timeout: 20_000 })
   } finally {
     await electronApp.close()
   }

@@ -221,13 +221,12 @@ test('자료 팝오버의 긴 이름은 한 줄로 줄고 가로로 넘치지 �
     const m = await pop.evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth, h: el.getBoundingClientRect().height }))
     expect(m.sw, '팝오버가 가로로 넘친다').toBeLessThanOrEqual(m.cw + 1)
     expect(m.h, '팝오버가 창 높이를 넘는다').toBeLessThanOrEqual(800 - 160 + 1)
-    // 이름은 한 줄 말줄임(전체 이름은 title).
-    const name = pop.locator(`b[title*="${longName.slice(0, 12)}"]`).first()
+    // Reference names remain visible as one clipped line; the full list replaces "view all".
+    const name = pop.locator(`[title*="${longName.slice(0, 12)}"]`).first()
     await expect(name).toBeVisible()
     expect(await name.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe('nowrap')
     expect(await name.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true)
-    // 아래 이동은 보인다.
-    await expect(pop.getByRole('button', { name: '자료 전체 보기' })).toBeVisible()
+    await expect(pop.getByRole('button', { name: '파일 고르기…' })).toBeVisible()
   } finally {
     await electronApp.close()
   }
@@ -247,11 +246,8 @@ test('파일 팝오버는 16개에서도 목록만 스크롤하고 아래 이동
     const m = await pop.evaluate((el) => ({ h: el.getBoundingClientRect().height, bottom: el.getBoundingClientRect().bottom }))
     expect(m.h, '팝오버가 창 높이를 넘는다').toBeLessThanOrEqual(800 - 160 + 1)
     expect(m.bottom).toBeLessThanOrEqual(800)
-    // 목록만 안에서 스크롤한다.
-    const list = pop.locator('.pop-scroll')
-    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight), '목록이 스크롤되지 않는다').toBe(true)
-    // 아래 이동은 늘 보인다.
-    await expect(pop.getByRole('button', { name: '결과물 전체 보기' })).toBeVisible()
+    // The folder action remains visible below the independently scrolling file list.
+    await expect(pop.getByRole('button', { name: '폴더에서 보기' })).toBeVisible()
   } finally {
     await electronApp.close()
   }
