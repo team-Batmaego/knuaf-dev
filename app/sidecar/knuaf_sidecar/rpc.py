@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import sys
-import subprocess
 import threading
 import traceback
 
@@ -24,10 +23,6 @@ class Context:
         self.id = request_id
         self.cancelled = threading.Event()
         self.process = None
-        # Every wait/poll and tree signal shares this lock, including script start.
-        self.process_lock = threading.RLock()
-        self.stop_error = None
-        self.finished = False
 
     def emit(self, event: str, data=None):
         self.server.write({"id": self.id, "event": event, "data": data})
@@ -38,28 +33,13 @@ class Context:
     def log(self, stream: str, line: str):
         self.emit("log", {"stream": stream, "line": line})
 
-    def stop_process(self):
-        with self.process_lock:
-            if self.process is not None:
-                from .runner import _kill
-
-                try:
-                    _kill(self.process)
-                except RpcError as error:
-                    self.stop_error = error
-                    raise
-                except (OSError, subprocess.SubprocessError) as error:
-                    self.stop_error = RpcError("process_stop_failed", "script tree termination was not confirmed")
-                    raise self.stop_error from error
-                self.process = None
-                self.stop_error = None
-
     def cancel(self):
-        with self.process_lock:
-            self.stop_process()
-            # A failed stop is not a successful cancellation. Retain the process
-            # and its error for the worker and a later cancel/shutdown retry.
-            self.cancelled.set()
+        self.cancelled.set()
+        proc = self.process
+        if proc is not None and proc.poll() is None:
+            from .runner import _kill
+
+            _kill(proc)
 
 
 class Server:
@@ -104,39 +84,15 @@ class Server:
                 target = (request.get("params") or {}).get("id")
                 with self._pending_lock:
                     ctx = self.pending.get(target)
-                try:
-                    if ctx is not None:
-                        ctx.cancel()
-                except RpcError as error:
-                    self.write({"id": request.get("id"), "error": {
-                        "code": error.code, "message": error.message, "data": error.data,
-                    }})
-                else:
-                    if ctx is not None:
-                        with self._pending_lock:
-                            if ctx.finished and ctx.process is None:
-                                self.pending.pop(target, None)
-                    self.write({"id": request.get("id"), "result": {"cancelled": ctx is not None}})
+                if ctx is not None:
+                    ctx.cancel()
+                self.write({"id": request.get("id"), "result": {"cancelled": ctx is not None}})
                 continue
             if request.get("method") == "shutdown":
                 with self._pending_lock:
                     pending = list(self.pending.values())
-                failures = []
                 for ctx in pending:
-                    try:
-                        ctx.cancel()
-                    except RpcError as error:
-                        failures.append({"id": ctx.id, "code": error.code, "message": error.message})
-                    else:
-                        with self._pending_lock:
-                            if ctx.finished and ctx.process is None:
-                                self.pending.pop(ctx.id, None)
-                if failures:
-                    self.write({"id": request.get("id"), "error": {
-                        "code": "process_stop_failed", "message": "shutdown could not stop all script trees",
-                        "data": {"failures": failures},
-                    }})
-                    continue
+                    ctx.cancel()
                 self.write({"id": request.get("id"), "result": {"bye": True}})
                 break
             t = threading.Thread(target=self._handle, args=(request,), daemon=True)
@@ -182,11 +138,7 @@ class Server:
             )
         finally:
             with self._pending_lock:
-                ctx.finished = True
-                # A failed stop may outlive its worker. Keep ownership so cancel
-                # and shutdown can retry instead of reporting a false success.
-                if ctx.process is None:
-                    self.pending.pop(rid, None)
+                self.pending.pop(rid, None)
 
 
 

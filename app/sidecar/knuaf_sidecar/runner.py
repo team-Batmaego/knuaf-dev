@@ -28,24 +28,26 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
         # The ensure process can spawn pip; cancellation owns the whole child group.
         kwargs["start_new_session"] = True
     started = time.monotonic()
+    if ctx.cancelled.is_set():
+        raise RpcError("cancelled", "request cancelled before script start")
     ctx.progress("start", argv=argv, cwd=str(cwd))
-    with ctx.process_lock:
-        if ctx.cancelled.is_set():
-            raise RpcError("cancelled", "request cancelled before script start")
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(cwd) if cwd else None,
-            env=env,
-            # The scripts never read stdin: it belongs to the host's RPC pipe.
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **kwargs,
-        )
-        ctx.process = proc
+    proc = subprocess.Popen(
+        argv,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        # The scripts never read stdin. Inheriting the sidecar's stdin would hand
+        # the child the host's request pipe, which it must never see.
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **kwargs,
+    )
+    ctx.process = proc
+    if ctx.cancelled.is_set():
+        _kill(proc)
     out_buf, err_buf = [], []
 
     def pump(stream, buf, name):
@@ -61,26 +63,11 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
     for t in threads:
         t.start()
     timed_out = False
-    deadline = started + timeout
-    while True:
-        with ctx.process_lock:
-            if ctx.stop_error is not None:
-                raise ctx.stop_error
-            try:
-                # Bound lock ownership so cancel can enter, but never reap while
-                # another thread owns the tree-signalling boundary.
-                proc.wait(timeout=max(0, min(0.05, deadline - time.monotonic())))
-            except subprocess.TimeoutExpired:
-                pass
-            else:
-                ctx.process = None
-                break
-        if time.monotonic() >= deadline:
-            timed_out = True
-            ctx.stop_process()
-            break
-        # Yield outside the lifecycle lock to a waiting cancel/shutdown caller.
-        ctx.cancelled.wait(0.01)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill(proc)
     for t in threads:
         t.join(timeout=5)
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -94,7 +81,7 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
 
 
 def _kill(proc):
-    """Stop the script tree. Caller holds Context.process_lock through reap."""
+    """Stop the owned script tree, not just the Python parent of a running pip."""
     if sys.platform == "win32":
         system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or r"C:\Windows"
         killed = subprocess.run(
@@ -104,15 +91,18 @@ def _kill(proc):
         if killed.returncode and proc.poll() is None:
             raise RpcError("process_stop_failed", "script tree termination was not confirmed")
     else:
-        # Cancellation is a hard boundary, not graceful shutdown. One group
-        # signal also avoids signalling a macOS group whose leader TERM exited.
-        # The caller's lock keeps the leader unreaped until signalling is over.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except PermissionError as error:
-            raise RpcError("process_stop_failed", "script tree termination was not confirmed") from error
     try:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired as error:
