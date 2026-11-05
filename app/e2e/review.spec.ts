@@ -148,7 +148,7 @@ test('인용만 있어도 보낼 수 있다 — 빈 초안에서 보내면 "이 
   }
 })
 
-test('질문 카드가 떠 있으면 행동 막대를 띄우지 않는다', async () => {
+test('질문 카드가 떠 있어도 행동 막대가 뜬다', async () => {
   const dir = scratch()
   const root = questionProject()
   seedChat(root, [questionMessage()])
@@ -161,17 +161,16 @@ test('질문 카드가 떠 있으면 행동 막대를 띄우지 않는다', asyn
     await expect(page.locator('.paperpane .sheet')).toContainText('600평', { timeout: 30_000 })
 
     await selectParagraph(page, '600평')
-    // 선택은 됐지만 카드가 자리를 쓰므로 막대는 뜨지 않는다.
-    expect(await page.locator('.selbar').count()).toBe(0)
+    // 질문 카드가 자리를 차지해도 정본은 선택 막대를 표시한다.
+    await expect(page.locator('.selbar')).toBeVisible()
     expect(await page.locator('.review-chip').count()).toBe(0)
   } finally {
     await electronApp.close()
   }
 })
 
-test('작업 중에 고른 선택은 작업이 끝나면 막대가 뜬다 — 다시 고르지 않아도', async () => {
-  // 맥 CI 실패 처방(FIX-CI-MAC-R2 실패 1): 도우미가 아직 작업 중일 때 고르면 선택을 버려서
-  // 작업이 끝난 뒤 처음부터 다시 골라야 막대가 떴다. 이제는 숨기기만 하고 선택을 지킨다.
+test('작업 중에 고른 선택은 막대가 뜨고 작업이 끝난 뒤에도 남는다', async () => {
+  // 선택을 유지하고 작업 중에도 막대를 표시한다. 전송은 작업이 끝날 때까지 막힌다.
   const dir = scratch()
   const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in', FAKE_CODEX_HOLD: '1' })
   const root = synthProject()
@@ -187,11 +186,11 @@ test('작업 중에 고른 선택은 작업이 끝나면 막대가 뜬다 — �
     await expect(page.locator(PROGRESS)).toHaveCount(1, { timeout: 30_000 })   // 작업 중(진행 표시 하나)
     await expect(page.locator(PROGRESS)).toBeVisible()
 
-    // 작업 중에 고른다 — 막대는 뜨지 않지만 선택은 버려지지 않는다.
+    // running 중에도 선택 막대가 뜨며, 선택은 작업 종료 뒤에도 보존된다.
     await selectParagraph(page, '600평')
-    await expect(page.locator('.selbar')).toHaveCount(0)
+    await expect(page.locator('.selbar')).toBeVisible()
 
-    // 작업을 끝낸다(같은 자리가 중단 단추) → 입력칸이 돌아오면 다시 고르지 않아도 막대가 뜬다.
+    // 작업 종료 후에도 같은 선택 위에 막대가 남아 있어 다시 선택할 필요가 없다.
     await page.locator('.chat-composer button.send').click()
     await expect(page.locator(PROGRESS)).toHaveCount(0, { timeout: 30_000 })
     await expect(page.locator('.selbar'), '작업이 끝났는데 그 선택 위에 막대가 뜨지 않는다').toBeVisible({ timeout: 15_000 })
@@ -246,21 +245,21 @@ test('비교 모드를 끄면 화면에서 사라진 옛 문장은 막대·인�
     await toggle.click()
     await expect(sheet.locator('del.rev-del'), '지운 문장이 비교 화면에 없다').toContainText('600평', { timeout: 30_000 })
 
-    // 도우미를 작업 중으로 둔다(막대가 숨는 구역).
+    // 도우미를 작업 중으로 둔다 — running 구역에서도 선택 막대가 뜬다.
     await page.locator(COMPOSER).fill('작업을 시작해 주세요')
     await page.locator('.chat-composer button.send').click()
     await expect(page.locator(PROGRESS)).toHaveCount(1, { timeout: 30_000 })   // 작업 중(진행 표시 하나)
     await expect(page.locator(PROGRESS)).toBeVisible()
 
-    // 비교 화면의 **지운 문장**을 고른다 — 작업 중이라 막대는 뜨지 않는다.
+    // 비교 화면의 **지운 문장**을 고른다 — running 중에도 막대가 뜬다.
     await selectText(page, '600평')
-    await expect(page.locator('.selbar')).toHaveCount(0)
+    await expect(page.locator('.selbar')).toBeVisible()
 
     // 비교를 끈다 → 그 문장이 화면에서 사라진다.
     await toggle.click()
     await expect(sheet.locator('del.rev-del')).toHaveCount(0)
 
-    // 작업을 끝낸다 → 다시 고르지 않았으니 막대도 인용도 없어야 한다.
+    // 비교를 끈 뒤의 선택 유효성 검사는 아래에서 그대로 확인한다.
     await page.locator('.chat-composer button.send').click()
     await expect(page.locator('.chat-composer button.send')).toHaveAttribute('aria-label', CHAT.send, { timeout: 30_000 })
     await expect(page.locator('.selbar'), '화면에 없는 옛 문장으로 막대가 남았다').toHaveCount(0)
@@ -286,19 +285,19 @@ test('절 제목만 바뀌어도 인용 출처는 지금 제목을 쓴다 (MACR2
     await expect(sheet).toContainText('600평', { timeout: 30_000 })
     await expect(page.locator(COMPOSER)).toBeVisible({ timeout: 30_000 })
 
-    // 작업 중으로 둔 뒤 600평 문단을 고른다.
+    // 작업 중에도 선택 막대가 뜬다. 절 제목을 바꿔도 후속 인용 출처는 최신이어야 한다.
     await page.locator(COMPOSER).fill('작업을 시작해 주세요')
     await page.locator('.chat-composer button.send').click()
     await expect(page.locator(PROGRESS)).toHaveCount(1, { timeout: 30_000 })   // 작업 중(진행 표시 하나)
     await expect(page.locator(PROGRESS)).toBeVisible()
     await selectParagraph(page, '600평')
-    await expect(page.locator('.selbar')).toHaveCount(0)
+    await expect(page.locator('.selbar')).toBeVisible()
 
     // 절 **제목만** 바꾼다 — 본문 해시가 같아 선택 무효화(본문 변경)는 서지 않는 경로.
     retitleSection(root, 'Ⅱ. 농장 현황', 1)
     await expect(sheet.locator('h2').first(), '종이 제목이 따라오지 않았다').toContainText('Ⅱ. 농장 현황', { timeout: 30_000 })
 
-    // 작업을 끝낸다 → 선택이 화면에 살아 있으니 막대가 돌아오고, 인용 출처는 지금 제목이다.
+    // 제목 변경 후 작업이 끝나도 선택 막대는 남고, 인용에는 최신 절 제목을 쓴다.
     await page.locator('.chat-composer button.send').click()
     await expect(page.locator('.chat-composer button.send')).toHaveAttribute('aria-label', CHAT.send, { timeout: 30_000 })
     const bar = page.locator('.selbar')
