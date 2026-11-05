@@ -4,17 +4,20 @@ import { useListIntent } from './useListIntent'
 import { Icon } from './Icon'
 import { PopHead, Popover, PopRow, PopSep } from './Popover'
 import { MENUS } from '../copy-menus'
+import { ARTIFACTS } from '../copy'
 
 export type ArtifactListItem = { path: string; name: string; status?: string }
 export type ArtifactMakeAction = { id: string; label: string; description: string; disabled: boolean; feedback?: ReactNode }
 
-export function ArtifactsList({ open, onOpenChange, listIntent, consumeListIntent, items, actions, stale, notice, error, loading, onOpenFile, onMake, onRetry, onReveal }: {
+export function ArtifactsList({ open, onOpenChange, listIntent, consumeListIntent, items, actions, blocked, hasProject, stale, notice, error, loading, onOpenFile, onMake, onRetry, onReveal }: {
   open: boolean
   listIntent: ListIntent | null
   consumeListIntent: (seq: number) => void
   onOpenChange: (open: boolean) => void
   items: ArtifactListItem[]
   actions: ArtifactMakeAction[]
+  blocked: string | null
+  hasProject: boolean
   stale: boolean
   notice?: { title: string; body: string } | null
   error?: string | null
@@ -33,6 +36,7 @@ export function ArtifactsList({ open, onOpenChange, listIntent, consumeListInten
     </button>
     <Popover open={open} onClose={() => onOpenChange(false)} align="right" width={400} label={MENUS.files(items.length)}>
       <PopHead>{MENUS.make}</PopHead>
+      {blocked && <div className="pop-empty caption" role="status">{blocked}{!hasProject && <> {ARTIFACTS.make.noProjectNext}</>}</div>}
       {actions.map((action) => <div key={action.id} className="pop-make-block" data-make={action.id}>
         <div className={`pop-make${action.disabled ? ' off' : ''}`}>
           <span className="c"><b>{action.label}</b><small>{action.description}</small></span>
@@ -44,7 +48,7 @@ export function ArtifactsList({ open, onOpenChange, listIntent, consumeListInten
       {notice && <div className="pop-empty caption" role="status"><strong>{notice.title}</strong> {notice.body}</div>}
       <div className="pop-scroll">
         {error ? <div className="pop-empty" role="alert">{error} <button type="button" className="quiet" onClick={onRetry}>{MENUS.retry}</button></div>
-          : !loading && items.length === 0 ? <div className="pop-empty caption">{MENUS.noFiles}</div>
+          : !loading && items.length === 0 && hasProject ? <div className="pop-empty caption">{MENUS.noFiles}</div>
             : items.map((file) => <PopRow key={file.path} icon={<Icon name="doc" size={16} />} meta={file.status} onClick={() => { onOpenChange(false); onOpenFile(file.path, button.current) }}>{file.name}</PopRow>)}
       </div>
       <PopSep />
