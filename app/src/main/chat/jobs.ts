@@ -66,7 +66,7 @@ export class JobRunner {
   private content(spec: JobSpec, root: string): string {
     return sha256(JSON.stringify({ lane: spec.lane, task: spec.task, inputs: spec.inputs.map(i => ({
       sourceId: i.sourceId, path: i.path, hash: i.hash, actualHash: sha256(readFileSync(i.path)), section: i.section
-    })), outputs: spec.outputs, contractVersion: spec.contractVersion, root }))
+    })), outputs: spec.outputs, contractVersion: spec.contractVersion, root, research: spec.research }))
   }
   private validate(spec: JobSpec, root: string): void {
     const skill = this.options.skill()
@@ -76,6 +76,10 @@ export class JobRunner {
       || (spec.effort !== null && typeof spec.effort !== 'string') || typeof spec.task !== 'string' || !spec.task.trim()
       || !Array.isArray(spec.inputs) || !Array.isArray(spec.outputs) || !spec.outputs.length) throw new Error('Invalid job specification')
     if (new Set(spec.outputs).size !== spec.outputs.length || spec.outputs.some(p => typeof p !== 'string' || !outputName(p))) throw new Error('Invalid output ownership')
+    if (spec.lane === 'research') {
+      if (!spec.research || typeof spec.research !== 'object' || Array.isArray(spec.research)
+        || !spec.outputs.includes(spec.research.output_file)) throw new Error('Invalid research output ownership')
+    } else if (spec.research !== undefined) throw new Error('Research is only allowed in the research lane')
     for (const a of spec.outputs) for (const b of spec.outputs) if (a !== b && b.startsWith(`${a}/`)) throw new Error('Overlapping outputs')
     for (const input of spec.inputs) {
       if (!input || typeof input.sourceId !== 'string' || !input.sourceId || typeof input.section !== 'string'

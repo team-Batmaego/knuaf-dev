@@ -22,6 +22,7 @@ function setup() {
     deliver: async (_owner, result) => { delivered.push(result) }, stopMain: async () => {}, diagnostic: () => {}, shellSandboxAvailable: false }
   const runner = new JobRunner(options)
   const spec: JobSpec = { schema: 1, id: 'root-job', lane: 'research', task: 'task', inputs: [], outputs: ['result.md'], contractVersion: 'v1', company: 'codex', model: 'astra', effort: null }
+  spec.research = { research_type: '생산량', questions: [], routes: [], keywords: [], output_file: 'result.md' }
   runner.enqueue(root, spec, { id: 'main', sessionId: 'main-session', company: 'claude' }, 'author')
   return { root, runner, options, delivered, calls, claude, read: (fn: typeof read) => { read = fn } }
 }

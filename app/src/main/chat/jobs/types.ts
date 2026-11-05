@@ -14,6 +14,15 @@ export interface JobSpec {
   task: string
   inputs: InputReference[]
   outputs: string[]
+  /** Skill-owned research-job.md §1; the app checks only lane presence and output ownership. */
+  research?: {
+    research_type: string
+    questions: unknown[]
+    routes: { doc: string; id_or_name: string; url: string }[]
+    keywords: string[]
+    output_file: string
+    [field: string]: unknown
+  }
   contractVersion: string
   company: Provider
   model: string

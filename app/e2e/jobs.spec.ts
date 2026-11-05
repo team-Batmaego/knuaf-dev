@@ -40,6 +40,8 @@ function fixture() {
   const runner = new JobRunner(options)
   const spec = (id = 'job-one', lane: JobSpec['lane'] = 'research'): JobSpec => ({ schema: 1, id, lane, task: 'Read the source and write the result',
     inputs: [{ sourceId: 'project', path: join(root, 'project.json'), hash: sha256(readFileSync(join(root, 'project.json'))), section: 'one' }],
+    ...(lane === 'research' ? { research: { research_type: '생산량', questions: [{ id: 'Q1', target: '생산량', acceptance: '공식 통계' }],
+      routes: [{ doc: 'research-sources.md', id_or_name: 'KOSIS', url: 'https://kosis.kr/' }], keywords: ['생산량'], output_file: 'result.md' } } : {}),
     outputs: ['result.md'], contractVersion: 'role-v1', company: plan[lane]!.company, model: plan[lane]!.model!, effort: plan[lane]!.effort })
   return { root, stateDir, accounts, plan, requests, deliveries, diagnostics, options, runner, spec,
     behavior: (fn: typeof behavior) => { behavior = fn }, accountRead: (fn: typeof accountRead) => { accountRead = fn },
@@ -66,6 +68,69 @@ test('serial fresh sessions deliver isolated files without touching thesis or ma
   expect(f.deliveries.map(d => readFileSync(d.result.outputs[0], 'utf8'))).toEqual(['a', 'b'])
   expect(readFileSync(join(f.root, 'project.json'), 'utf8')).toBe('{"original":true}')
   expect(JSON.stringify(f.deliveries)).not.toContain('must not appear')
+})
+
+test('research presence follows the lane and its output file must exactly match an owned output', () => {
+  const f = fixture(), valid = f.spec()
+  const missing = { ...valid }; delete missing.research
+  const invalid = [missing, ...[null, [], 'research', {}, { output_file: './result.md' }, { output_file: 'other.md' }]
+    .map(research => ({ ...valid, research }) as JobSpec)]
+  for (const lane of ['writing', 'repeat', 'review'] as const) {
+    invalid.push({ ...f.spec(`invalid-${lane}`, lane), research: valid.research })
+  }
+  for (const spec of invalid) expect(() => f.runner.enqueue(f.root, spec, owner, 'author')).toThrow()
+  expect(f.runner.records()).toEqual([]); expect(f.requests).toEqual([])
+})
+
+test('research semantics stay skill-owned and continuation resolves all outputs in the new job directory', async () => {
+  const f = fixture(), spec = f.spec()
+  spec.outputs = ['tables/result.md', 'source.json']
+  spec.research = { research_type: '', questions: [], routes: [], keywords: [], output_file: 'tables/result.md',
+    conditions: { region: '미확정', year: null }, opened_routes: [{ id: 'D01', reason: '접근 실패' }] }
+  f.accounts.codex.usage = 'limit'
+  f.runner.enqueue(f.root, spec, owner, 'author'); await f.runner.runQueued()
+  const child = (await f.runner.continue(f.runner.proposals()[0].proposalId))!
+  f.behavior(async (request, events) => {
+    events.session(`fresh-${request.jobId}`)
+    const manifest = JSON.parse(readFileSync(join(f.root, '.knuaf-gui/jobs', `${request.jobId}.json`), 'utf8'))
+    mkdirSync(join(request.cwd, 'tables'))
+    writeFileSync(join(request.cwd, manifest.research.output_file), 'Q1: 확인 불가')
+    writeFileSync(join(request.cwd, 'source.json'), '{"status":"unavailable"}')
+  })
+  await f.runner.runQueued()
+  expect(f.deliveries.map(d => d.result.status)).toEqual(['completed'])
+  expect(f.deliveries[0].result.outputs).toEqual(spec.outputs.map(name => join(f.root, '.knuaf-gui/jobs', child.spec.id, 'out', name)))
+  expect(readFileSync(f.deliveries[0].result.outputs[0], 'utf8')).toBe('Q1: 확인 불가')
+  expect(f.runner.records()[1].spec.research).toEqual(spec.research)
+})
+
+const researchChanges: Record<string, (research: NonNullable<JobSpec['research']>) => void> = {
+  type: r => { r.research_type = '법령' },
+  question: r => { r.questions[0] = { id: 'Q1', target: '다른 지표', acceptance: '다른 조건' } },
+  route: r => { r.routes[0].url = 'https://kosis.kr/changed' },
+  keyword: r => { r.keywords.push('다른 품목') },
+  output: r => { r.output_file = 'alternate.md' },
+  extension: r => { r.conditions = { region: '변경된 지역', year: 2026 } }
+}
+
+for (const phase of ['queued', 'before-click', 'after-click'] as const) test(`changed research never executes: ${phase}`, async () => {
+  for (const change of Object.values(researchChanges)) {
+    const f = fixture(), spec = f.spec()
+    spec.outputs.push('alternate.md')
+    spec.research!.conditions = { region: '미확정', year: 2025 }
+    if (phase !== 'queued') f.accounts.codex.usage = 'limit'
+    f.runner.enqueue(f.root, spec, owner, 'author')
+    if (phase !== 'queued') await f.runner.runQueued()
+    if (phase === 'after-click') await f.runner.continue(f.runner.proposals()[0].proposalId)
+    // Inject corruption into app-owned state; public manifests and returned records are only copies.
+    const internal = f.runner as unknown as { state: { jobs: { spec: JobSpec }[] } }
+    change(internal.state.jobs.at(-1)!.spec.research!)
+    if (phase === 'before-click') expect(await f.runner.continue(f.runner.proposals()[0].proposalId)).toBeNull()
+    else await f.runner.runQueued()
+    expect(f.requests).toEqual([])
+    expect(f.deliveries.map(d => d.result.status)).toEqual([phase === 'before-click' ? 'rejected' : 'error'])
+    expect(f.deliveries[0].result.outputs).toEqual([])
+  }
 })
 
 test('untrusted job routing, fake continuation, unknown schema and changed input never execute', async () => {

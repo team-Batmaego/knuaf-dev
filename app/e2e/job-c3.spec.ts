@@ -31,6 +31,7 @@ function fixture() {
       stop: async () => {}, respond: () => {}, login: async () => {}, run: async () => { throw Error('ordinary path') } } },
     deliver: async (target, result) => { deliveries.push({ owner: target, result }) }, stopMain: async () => {}, diagnostic: () => {}, shellSandboxAvailable: false })
   const spec: JobSpec = { schema: 1, id: 'job', lane: 'research', task: 'Read inputs', inputs: [], outputs: ['result.md'], contractVersion: 'v1', company: 'codex', model: 'astra', effort: null }
+  spec.research = { research_type: '생산량', questions: [], routes: [], keywords: [], output_file: 'result.md' }
   return { base, root, stateDir, owner, accounts, deliveries, calls, runner,
     enqueue: () => runner.enqueue(root, spec, owner, 'author'), revoke: () => { plan = null }, engineCalls: () => engineCalls,
     account: (fn: typeof account) => { account = fn }, behavior: (fn: typeof behavior) => { behavior = fn },
