@@ -24,8 +24,13 @@ function fixture() {
   const options = {
     stateDir, maxBytes: 10_000, account: async () => readAccount(),
     open: async (request: { id: string; firstMessage: string }) => { opened.push(request); return { id: request.id, sessionId: 'new-session', company: 'codex' } as ConversationOwner },
-    activate: async (oldOwner: ConversationOwner, newOwner: ConversationOwner) => { activated.push({ oldOwner, newOwner }) },
-    transferJobs: async (root: string, owner: ConversationOwner) => { transfers.push({ root, owner }) }, audit: (record: object) => { audits.push(record) }
+    close: async (_owner: ConversationOwner) => {},
+    prepareActivation: async (oldOwner: ConversationOwner, newOwner: ConversationOwner) => () => { activated.push({ oldOwner, newOwner }) },
+    beginTransition: (root: string) => ({
+      ready: async () => {},
+      commit: (owner: ConversationOwner, activate: () => void) => { activate(); transfers.push({ root, owner }); return true },
+      cancel: () => {}, flush: async () => {}
+    }), audit: (record: object) => { audits.push(record) }
   }
   return { source, account, options, opened, activated, transfers, audits, handoff: new ConversationHandoff(options),
     readAccount: (fn: typeof readAccount) => { readAccount = fn } }

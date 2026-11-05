@@ -7,6 +7,8 @@ import { readRecoverable, writeFileAtomic } from '../safeWrite'
 import { canonical, createOutput, inside, outputName, relayIsolation, sha256, thesisHashes } from './jobs/isolation'
 import { chatConnectionKey } from './jobs/key'
 import { tokenRecord } from './jobs/tokens'
+import { writePublicFile } from './jobs/publicWrite'
+import type { OwnerTransition } from './jobs/transition'
 import { JobFailure, type ContinuationProposal, type ConversationOwner, type ExecutionAccount, type JobConnection, type JobRecord, type JobResult, type JobRunnerOptions, type JobSpec, type JobStatus } from './jobs/types'
 export type * from './jobs/types'
 
@@ -30,6 +32,9 @@ export class JobRunner {
   private active: { record: JobRecord; connection: JobConnection | null; stopped: boolean; failure?: 'limit' | 'unknown' | 'auth' } | null = null
   private draining: Promise<void> | null = null
   private generations = new Map<string, number>()
+  private ownerTransitions = new Map<string, object>()
+  private pendingDeliveries = new Set<JobRecord>()
+  private delivering = new Map<string, Set<Promise<void>>>()
   private file: string
   constructor(private options: JobRunnerOptions) {
     mkdirSync(options.stateDir, { recursive: true, mode: 0o700 })
@@ -92,15 +97,12 @@ export class JobRunner {
     if (!owner.sessionId || !authorSessionId || this.state.jobs.some(j => j.spec.id === spec.id)) throw new Error('Invalid job identity')
     const record: JobRecord = { spec, root, owner: structuredClone(owner), authorSessionId, rootJobId: spec.id,
       status: 'queued', contentHash: this.content(spec, root), outputs: [], createdAt: now() }
-    this.state.jobs.push(record); this.persist(); this.publish(record)
+    this.publish(record); this.state.jobs.push(record); this.persist()
     return structuredClone(record)
   }
   private publish(record: JobRecord): void {
-    const folder = join(record.root, '.knuaf-gui', 'jobs')
-    if (!inside(record.root, canonical(folder))) throw new Error('Job storage escaped thesis folder')
-    mkdirSync(folder, { recursive: true })
-    const result = writeFileAtomic(join(folder, `${record.spec.id}.json`), JSON.stringify({ ...record, ...record.spec, spec: record.spec, outputRefs: record.outputs }), { mode: 0o600 })
-    if (!result.ok) throw result.error
+    const file = join(record.root, '.knuaf-gui', 'jobs', `${record.spec.id}.json`)
+    writePublicFile(record.root, file, JSON.stringify({ ...record, ...record.spec, spec: record.spec, outputRefs: record.outputs }), this.options.python)
   }
   private update(record: JobRecord, status: JobStatus, reason?: string): void {
     record.status = status; record.reason = reason; this.persist(); this.publish(record)
@@ -175,6 +177,7 @@ export class JobRunner {
       if (fingerprint(live) !== fingerprint(account)) { this.update(record, 'rejected'); return }
       // Restore the app-authorized specification immediately before the engine reads its job file.
       if (this.content(spec, record.root) !== record.contentHash) throw new Error('Input changed before start')
+      if (!spec.parent && !this.approved(spec, record.root)) { this.update(record, 'rejected', 'Approved plan changed'); return }
       this.update(record, 'running')
       await connection.runJob(`/knuaf-dev 담당 모드: ${join(record.root, '.knuaf-gui', 'jobs', `${spec.id}.json`)}`, {
         message: () => {}, note: () => {}, skill: () => {},
@@ -253,29 +256,32 @@ export class JobRunner {
     return outputs.map(name => join(cwd, name))
   }
   private audit(record: JobRecord, data: object): void {
-    const folder = join(record.root, 'audit', 'model-routing')
-    if (!inside(record.root, canonical(folder))) throw new Error('Unsafe audit path')
-    mkdirSync(folder, { recursive: true })
-    const result = writeFileAtomic(join(folder, `${record.spec.id}-${randomUUID()}.json`), JSON.stringify(data), { mode: 0o600 })
-    if (!result.ok) throw result.error
+    const file = join(record.root, 'audit', 'model-routing', `${record.spec.id}-${randomUUID()}.json`)
+    writePublicFile(record.root, file, JSON.stringify(data), this.options.python)
     this.options.diagnostic(data)
   }
   private async deliver(record: JobRecord): Promise<void> {
     if (this.state.delivered.includes(record.rootJobId)) return
+    if (this.ownerTransitions.has(record.root)) { this.pendingDeliveries.add(record); return }
     this.state.delivered.push(record.rootJobId)
     for (const p of this.state.proposals) if (p.rootJobId === record.rootJobId && p.state === 'open') p.state = 'discarded'
     this.persist() // At-most-once claim before IPC; a crash never causes automatic replay.
     const result: JobResult = { rootJobId: record.rootJobId, jobId: record.spec.id, status: record.status,
       outputs: record.status === 'completed' ? record.outputs : [], company: record.spec.company, model: record.spec.model, effort: record.spec.effort }
-    await this.options.deliver(structuredClone(record.owner), result)
+    const delivery = this.options.deliver(structuredClone(record.owner), result)
+    const inFlight = this.delivering.get(record.root) ?? new Set<Promise<void>>()
+    inFlight.add(delivery); this.delivering.set(record.root, inFlight)
+    try { await delivery } finally { inFlight.delete(delivery); if (!inFlight.size) this.delivering.delete(record.root) }
   }
   private async propose(record: JobRecord): Promise<ContinuationProposal | null> {
     if (this.state.delivered.includes(record.rootJobId)) return null
     const existing = this.state.proposals.find(p => p.rootJobId === record.rootJobId && p.state === 'open')
     if (existing) return existing
+    const generation = this.generations.get(record.root) ?? 0
     const other = await this.options.account(record.spec.company === 'claude' ? 'codex' : 'claude')
     // Recheck after await: stop/later/delivery may have won the race.
     if (record.status !== 'limit' || this.state.delivered.includes(record.rootJobId)) return null
+    if ((this.generations.get(record.root) ?? 0) !== generation) return null
     if (this.accountFailure(other) || !other) return null
     const entry = continueAfterLimit(record.spec.lane, { company: record.spec.company, model: record.spec.model, effort: record.spec.effort, how: 'relay' }, other.account,
       { consented: other.consented, basicUsageAllowed: other.usage === 'allowed' }, { [other.account.company]: other.account.models })
@@ -330,11 +336,45 @@ export class JobRunner {
   async switchOwner(root: string, owner: ConversationOwner): Promise<void> {
     root = canonical(root)
     this.generations.set(root, (this.generations.get(root) ?? 0) + 1)
+    const pending = this.replaceOwner(root, owner)
+    for (const record of pending) await this.deliver(record)
+  }
+  private replaceOwner(root: string, owner: ConversationOwner): JobRecord[] {
     for (const record of this.state.jobs) if (record.root === root) record.owner = structuredClone(owner)
-    const open = this.state.proposals.filter(p => p.state === 'open' && this.job(p.parentJobId).root === root)
-    for (const p of open) p.state = 'discarded'
+    const latest = new Map<string, JobRecord>()
+    for (const record of this.state.jobs) if (record.root === root) latest.set(record.rootJobId, record)
+    const pending = [...latest.values()].filter(record => record.status === 'limit' && !this.state.delivered.includes(record.rootJobId))
+    for (const p of this.state.proposals) if (this.job(p.parentJobId).root === root && p.state !== 'discarded') p.state = 'discarded'
     this.persist()
-    for (const p of open) await this.deliver(this.job(p.parentJobId))
+    return pending
+  }
+  /** Hold completions without blocking runQueued; activation may itself await the running job. */
+  beginOwnerTransition(root: string): OwnerTransition {
+    root = canonical(root)
+    if (this.ownerTransitions.has(root)) throw new Error('Owner transition already reserved')
+    const token = {}, generation = this.generations.get(root) ?? 0
+    this.ownerTransitions.set(root, token)
+    let finished = false
+    return {
+      ready: async () => { await Promise.all(this.delivering.get(root) ?? []) },
+      commit: (owner, activate) => {
+        if (finished || this.ownerTransitions.get(root) !== token || (this.generations.get(root) ?? 0) !== generation) return false
+        // Preparation is complete; this commit must not yield or start asynchronous activation.
+        activate()
+        if ((this.generations.get(root) ?? 0) !== generation) return false
+        this.generations.set(root, generation + 1)
+        for (const record of this.replaceOwner(root, owner)) this.pendingDeliveries.add(record)
+        finished = true; this.ownerTransitions.delete(root)
+        return true
+      },
+      cancel: () => { finished = true; if (this.ownerTransitions.get(root) === token) this.ownerTransitions.delete(root) },
+      flush: async () => {
+        if (this.ownerTransitions.has(root)) return
+        for (const record of this.pendingDeliveries) if (record.root === root) {
+          this.pendingDeliveries.delete(record); await this.deliver(record)
+        }
+      }
+    }
   }
   /** Explicit user retry only. It is a new root order; no old output or approval is reused. */
   retry(id: string, newJobId: string): JobRecord {

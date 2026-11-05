@@ -25,7 +25,7 @@ function fixture() {
   }
   let accountRead = async (company: 'claude' | 'codex') => structuredClone(accounts[company])
   const options = {
-    stateDir, approvedPlan: () => plan, account: (company: 'claude' | 'codex') => accountRead(company),
+    stateDir, python: join(__dirname, '../../.venv-dev/bin/python'), approvedPlan: () => plan, account: (company: 'claude' | 'codex') => accountRead(company),
     skill: () => ({ path: '/fake/skill', schema: 1, contractVersion: 'role-v1' }), supportedSchemas: [1],
     connectionFactory: (request: RelayRequest): JobConnection => {
       requests.push(request)

@@ -5,6 +5,7 @@ import { continueAfterLimit, type LaneEntry, type LanePlan } from '../../../shar
 import { readRecoverable, writeFileAtomic } from '../../safeWrite'
 import { sha256 } from './isolation'
 import type { ConversationOwner, ExecutionAccount, UsageState } from './types'
+import type { OwnerTransition } from './transition'
 
 export interface HandoffSource {
   rootConversationId: string
@@ -54,12 +55,13 @@ export interface ConversationHandoffOptions {
   stateDir: string
   maxBytes: number
   account: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
-  /** Open a fresh conversation with this exact choice and bundle; never replay the failed turn. */
-  open: (request: { id: string; entry: LaneEntry; firstMessage: string; bundlePath: string }) => Promise<ConversationOwner>
-  /** Atomically make the old conversation read-only and select the new conversation/chip. */
-  activate: (oldOwner: ConversationOwner, newOwner: ConversationOwner, entry: LaneEntry) => Promise<void>
-  /** JobRunner.switchOwner: running/queued jobs transfer without restart. */
-  transferJobs: (root: string, owner: ConversationOwner) => Promise<void>
+  /** Abort must stop in-flight creation; close also cleans a session returned after cancellation. */
+  open: (request: { id: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal }) => Promise<ConversationOwner>
+  close: (owner: ConversationOwner) => Promise<void>
+  /** Async preparation has no visible side effects; returned commit is synchronous. */
+  prepareActivation: (oldOwner: ConversationOwner, newOwner: ConversationOwner, entry: LaneEntry, signal: AbortSignal) => Promise<() => void>
+  /** JobRunner.beginOwnerTransition holds completed results until commit or cancellation. */
+  beginTransition: (root: string) => OwnerTransition
   audit: (record: object) => void
 }
 /** Deterministic mechanical packet. Full source remains in private storage, never an AI summary. */
@@ -108,6 +110,7 @@ export class ConversationHandoff {
   private state: HandoffState
   private file: string
   private generations = new Map<string, number>()
+  private reservations = new Map<string, AbortController>()
   constructor(private options: ConversationHandoffOptions) {
     mkdirSync(options.stateDir, { recursive: true, mode: 0o700 })
     this.file = join(options.stateDir, 'conversation-handoff.json')
@@ -130,6 +133,7 @@ export class ConversationHandoff {
     const generation = this.generations.get(rootId) ?? 0
     const existing = this.state.proposals.find(p => p.rootConversationId === rootId && p.state === 'open')
     if (existing) return structuredClone(existing)
+    if (this.reservations.has(rootId)) return null
     const other = await this.options.account(source.entry.company === 'claude' ? 'codex' : 'claude')
     if ((this.generations.get(rootId) ?? 0) !== generation || !other?.connected || other.usage !== 'allowed') return null
     const entry = continueAfterLimit('design', source.entry, other.account,
@@ -138,6 +142,7 @@ export class ConversationHandoff {
     if (!entry?.model || attempts.includes(`${entry.company}:${entry.model}`)) return null
     const raced = this.state.proposals.find(p => p.rootConversationId === rootId && p.state === 'open')
     if (raced) return structuredClone(raced)
+    if (this.reservations.has(rootId)) return null
     const proposalId = randomUUID(), archivePath = join(this.options.stateDir, `${proposalId}-archive.json`)
     const stored = writeFileAtomic(archivePath, JSON.stringify(source), { mode: 0o600 })
     if (!stored.ok) throw stored.error
@@ -154,37 +159,64 @@ export class ConversationHandoff {
   }
   async continue(proposalId: string): Promise<ConversationOwner | null> {
     const p = this.state.proposals.find(value => value.proposalId === proposalId)
-    if (!p || p.state !== 'open') return null
+    if (!p || p.state !== 'open' || this.reservations.has(p.rootConversationId)) return null
+    const controller = new AbortController()
+    this.reservations.set(p.rootConversationId, controller)
     p.state = 'consumed'; p.clickedAt = new Date().toISOString(); this.persist()
     const generation = this.generations.get(p.rootConversationId) ?? 0
-    const account = await this.options.account(p.entry.company)
-    if ((this.generations.get(p.rootConversationId) ?? 0) !== generation) return null
-    if (!account?.connected || account.usage !== 'allowed' || sha256(JSON.stringify(account)) !== p.accountFingerprint) {
-      p.state = 'discarded'; this.persist()
+    const valid = () => !controller.signal.aborted && this.reservations.get(p.rootConversationId) === controller
+      && (this.generations.get(p.rootConversationId) ?? 0) === generation
+    let owner: ConversationOwner | undefined, transition: OwnerTransition | undefined, committed = false
+    let refresh: HandoffSource | undefined
+    try {
+      const account = await this.options.account(p.entry.company)
+      if (!valid()) return null
+      if (!account?.connected || account.usage !== 'allowed' || sha256(JSON.stringify(account)) !== p.accountFingerprint) {
+        p.state = 'discarded'; this.persist()
+        refresh = JSON.parse(readFileSync(p.archivePath, 'utf8')) as HandoffSource
+        return null
+      }
+      const text = readFileSync(p.bundlePath, 'utf8')
+      if (sha256(text) !== p.bundleHash) { p.state = 'discarded'; this.persist(); throw new Error('이어 받기 묶음이 바뀌었어요.') }
       const source = JSON.parse(readFileSync(p.archivePath, 'utf8')) as HandoffSource
-      await this.propose(source)
-      return null
+      transition = this.options.beginTransition(source.root)
+      await transition.ready()
+      if (!valid()) return null
+      this.state.attempts[p.rootConversationId].push(`${p.entry.company}:${p.entry.model}`)
+      this.persist()
+      owner = await this.options.open({ id: p.newConversationId, entry: structuredClone(p.entry), bundlePath: p.bundlePath,
+        signal: controller.signal,
+        firstMessage: `/knuaf-dev 재개: 논문 폴더가 정본이며 아래 묶음은 대화 맥락 보조입니다. 끊긴 차례를 자동 재전송하거나 이미 한 작업을 반복하지 말고 폴더 상태를 확인하세요. 첫 답에서 “앞 대화를 이어 받았어요 — {마지막으로 하던 일}”이라고 알리세요.\n${text}` })
+      if (!valid()) return null
+      if (owner.id !== p.newConversationId || owner.company !== p.entry.company || !owner.sessionId || owner.sessionId === p.oldOwner.sessionId) throw new Error('이어 받기는 다른 새 세션이어야 해요.')
+      const activate = await this.options.prepareActivation(p.oldOwner, owner, structuredClone(p.entry), controller.signal)
+      if (!valid()) return null
+      committed = transition.commit(owner, activate)
+      if (!committed) return null
+      this.options.audit({ type: 'conversation-continue-after-limit', rootConversationId: p.rootConversationId,
+        oldConversationId: p.oldOwner.id, newConversationId: owner.id, reason: 'limit', clickedAt: p.clickedAt,
+        company: p.entry.company, model: p.entry.model, effort: p.entry.effort, bundleHash: p.bundleHash })
+      return owner
+    } finally {
+      try {
+        if (!committed) {
+          p.state = 'discarded'; this.persist()
+          controller.abort()
+          if (owner) await this.options.close(owner)
+        }
+      } finally {
+        if (!committed) transition?.cancel()
+        if (this.reservations.get(p.rootConversationId) === controller) this.reservations.delete(p.rootConversationId)
+        await transition?.flush()
+      }
+      if (refresh && (this.generations.get(p.rootConversationId) ?? 0) === generation) await this.propose(refresh)
     }
-    const text = readFileSync(p.bundlePath, 'utf8')
-    if (sha256(text) !== p.bundleHash) { p.state = 'discarded'; this.persist(); throw new Error('이어 받기 묶음이 바뀌었어요.') }
-    this.state.attempts[p.rootConversationId].push(`${p.entry.company}:${p.entry.model}`)
-    this.persist() // Approval consumed before opening. Restart cannot re-execute it.
-    const owner = await this.options.open({ id: p.newConversationId, entry: structuredClone(p.entry), bundlePath: p.bundlePath,
-      firstMessage: `/knuaf-dev 재개: 논문 폴더가 정본이며 아래 묶음은 대화 맥락 보조입니다. 끊긴 차례를 자동 재전송하거나 이미 한 작업을 반복하지 말고 폴더 상태를 확인하세요. 첫 답에서 “앞 대화를 이어 받았어요 — {마지막으로 하던 일}”이라고 알리세요.\n${text}` })
-    if ((this.generations.get(p.rootConversationId) ?? 0) !== generation) return null
-    if (owner.id !== p.newConversationId || owner.company !== p.entry.company || !owner.sessionId || owner.sessionId === p.oldOwner.sessionId) throw new Error('이어 받기는 다른 새 세션이어야 해요.')
-    await this.options.activate(p.oldOwner, owner, structuredClone(p.entry))
-    const source = JSON.parse(readFileSync(p.archivePath, 'utf8')) as HandoffSource
-    await this.options.transferJobs(source.root, owner)
-    this.options.audit({ type: 'conversation-continue-after-limit', rootConversationId: p.rootConversationId,
-      oldConversationId: p.oldOwner.id, newConversationId: owner.id, reason: 'limit', clickedAt: p.clickedAt,
-      company: p.entry.company, model: p.entry.model, effort: p.entry.effort, bundleHash: p.bundleHash })
-    return owner
   }
   /** Later, stop, or user conversation switch. Also invalidates an in-flight click/proposal lookup. */
   invalidate(rootConversationId: string): void {
     this.generations.set(rootConversationId, (this.generations.get(rootConversationId) ?? 0) + 1)
-    for (const p of this.state.proposals) if (p.rootConversationId === rootConversationId && p.state === 'open') p.state = 'discarded'
+    this.reservations.get(rootConversationId)?.abort()
+    for (const p of this.state.proposals) if (p.rootConversationId === rootConversationId && p.state !== 'discarded') p.state = 'discarded'
     this.persist()
   }
 }

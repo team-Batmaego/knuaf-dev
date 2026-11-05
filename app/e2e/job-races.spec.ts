@@ -16,7 +16,7 @@ function setup() {
     account: { company: 'codex', accountType: 'chatgpt', models: [{ model: 'astra', name: 'Astra', efforts: ['high'] }] } }
   let read = async (company: 'claude' | 'codex') => structuredClone(company === 'claude' ? claude : codex)
   const delivered: object[] = [], calls: string[] = []
-  const options: JobRunnerOptions = { stateDir: join(base, 'private'), approvedPlan: () => plan,
+  const options: JobRunnerOptions = { stateDir: join(base, 'private'), python: join(__dirname, '../../.venv-dev/bin/python'), approvedPlan: () => plan,
     account: company => read(company), skill: () => ({ path: '/fake', schema: 1, contractVersion: 'v1' }), supportedSchemas: [1],
     connectionFactory: request => { calls.push(request.jobId); throw new Error('must not start') },
     deliver: async (_owner, result) => { delivered.push(result) }, stopMain: async () => {}, diagnostic: () => {}, shellSandboxAvailable: false }
