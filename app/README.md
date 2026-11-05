@@ -155,6 +155,9 @@ CI의 `test-with-skill.mjs`도 같은 stage를 사용합니다. 직접 실행하
 시험이 누락되거나 하나라도 실패하면 동봉을 거절합니다. 모두 성공한 경우에만
 `resources/skill/`로 동봉하며 dev/build/resource 준비·skill-release CI가 같은 게이트를 사용합니다.
 실패하면 이전 묶음을 보존하며 구판 사본으로 자동 대체하지 않습니다.
+호환 실패 메시지의 `consumer`·`upstream` 숫자는 시험 건수가 아니라 pytest 종료코드입니다(`0`은 성공).
+소비자 시험은 Kordoc 차단 예외의 `reason`·`details`(자식 종료코드·stderr 포함)와 live guard의 probe/cleanup
+응답을 실패 보고서에 남깁니다. Windows 원인을 확인하기 위한 출력이며 기대값·시험 목록·stage 차단 조건은 바꾸지 않습니다.
 
 현재 pin은 v0.4.2(`60311c11fbf12fdc04249be8c75eeaf027c06a66`)입니다.
 pin 변경 시 consumer·upstream 내부·보호별 upstream root 전체 게이트를 통과해야 하며, 시험 제외·로컬 원본 패치·낡은 stage로 성공시키지 않습니다.

@@ -136,8 +136,10 @@ def test_owner_cleanup_cannot_break_a_live_guard(sidecar, publication_project):
     owner = root / ".gg-lock" / "owner.json"
     with gg_lock.Lock(root):
         before = owner.read_bytes()
-        assert sidecar.ok("lock.info", root=str(root), probe=True)["result"]["lock_state"] == "busy"
-        assert sidecar.call("lock.unlock", root=str(root))["error"]["code"] == "lock_held"
+        probe = sidecar.ok("lock.info", root=str(root), probe=True)["result"]
+        assert probe["lock_state"] == "busy", probe
+        cleanup = sidecar.call("lock.unlock", root=str(root))
+        assert cleanup["error"]["code"] == "lock_held", cleanup
         assert owner.read_bytes() == before
     owner.write_text(json.dumps({"pid": 999999, "host": "synthetic", "token": "stale"}), encoding="utf-8")
     assert sidecar.ok("lock.info", root=str(root))["result"]["lock_state"] == "unprobed"

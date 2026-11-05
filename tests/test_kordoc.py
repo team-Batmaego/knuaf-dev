@@ -115,7 +115,7 @@ def test_an_output_that_appears_during_the_parse_is_still_not_overwritten(tmp_pa
     out = tmp_path / "지침.md"
     with pytest.raises(kd.KordocBlocked) as caught:
         kd.parse(document, out, kordoc=str(racer))
-    assert caught.value.reason == "output_exists"
+    assert caught.value.reason == "output_exists", caught.value.details
     assert "appeared during parse" in caught.value.details["action"], "늦은 가드에 도달하지 못함"
     assert out.read_text(encoding="utf-8") == "끼어든 내용", "끼어든 파일을 덮어씀"
 

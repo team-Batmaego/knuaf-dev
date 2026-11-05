@@ -43,6 +43,18 @@ def pytest_sessionstart(session):
         )
     importlib.invalidate_caches()
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    blocked = getattr(sys.modules.get("gg_kordoc"), "KordocBlocked", ())
+    if call.excinfo is not None and isinstance(call.excinfo.value, blocked):
+        error = call.excinfo.value
+        report.sections.append(("Kordoc failure evidence", json.dumps(
+            {"reason": error.reason, "details": error.details}, ensure_ascii=True, indent=2,
+        )))
+
+
 
 def run_script(script, *args, python=None, env=None, cwd=None, timeout=120):
     """Run a skill script as a subprocess and return CompletedProcess (text)."""
