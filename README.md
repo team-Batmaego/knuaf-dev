@@ -47,7 +47,7 @@ AI 도우미가 질문을 던지며 함께 쓰고, 앱은 그동안 무엇이 �
 
 ![점검 화면](docs/images/02-checkup.png)
 
-만든 파일은 결과물 화면에 모입니다.
+만든 파일은 결과물 화면에 모입니다. `build/` 아래의 MD·DOCX·XLSX·PDF와 정본 `project.json`의 `outputs`에 등록된 파일을 표시합니다. 논문 폴더 바로 아래 Word도 `build_docx.py`가 만든 동반 `.manifest.json`의 생성 기록과 파일 해시가 일치하면 표시합니다. 기존 원고·참고자료는 루트에 있다는 이유만으로 만든 파일에 포함하지 않습니다. 파일 목록을 열거나 도우미 실행이 완료·중단·오류로 끝날 때 다시 읽으며, 추가 주기 폴링은 하지 않습니다.
 
 ![결과물 화면](docs/images/04b-artifacts-made.png)
 
