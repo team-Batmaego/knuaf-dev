@@ -150,6 +150,10 @@ Node 전용 목록에 추가하지 마세요. Node 검사는 정식 stage·설�
 IPC 성공 응답만으로 준비를 가장하지 않습니다. 의도적으로 준비를 붙잡는 시나리오는 네 번째 인자의
 `{ preparation: 'pending' }`으로 이 전제만 제외하고 실제 `deps.doctor`/`deps:ensure` 경로를 제어합니다.
 `doctor.all`은 종합 진단용이므로 준비 대기 fixture로 쓰지 않습니다.
+잠금 UI 검사는 펼침이 열렸다는 사실과 종합 진단 완료를 구분합니다. 첫 조회는 `fix:lock`의 관측 시각,
+소유 기록을 심은 뒤 **다시 진단**은 **마지막 점유 기록**이 표시될 때까지 기다린 다음 기존 disabled·probe·enabled
+검사를 수행합니다. `doctor.all`은 의존성 import·버전 조회도 끝나야 반환하므로 빈 로딩 화면을 잠금 응답 누락으로
+판정하지 않습니다. 별도 고정 sleep·재시도나 assertion timeout 증가는 쓰지 않습니다.
 
 `navTo(page, '자료' | '결과물')`는 종이 머리의 `head-materials` / `head-files` 단추와 그 단추의
 팝오버만 대상으로 삼습니다. 열린 자료 목록 안의 **파일 고르기…**도 `/파일/`에 걸리므로,
