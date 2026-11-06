@@ -31,6 +31,8 @@ test('open a project, see four lanes, export a draft, clean only owner evidence'
   await openPreset(page, 'fix:lock')
   await page.click('text=다시 진단')
   const cleanup = page.getByRole('button', { name: '소유 기록 정리', exact: true })
+  // Re-diagnosis clears the old report; an owner observation must arrive before probing.
+  await page.getByText('마지막 점유 기록', { exact: true }).waitFor({ state: 'visible' })
   await expect(cleanup).toBeDisabled()
   await page.getByRole('button', { name: '점유 상태 확인', exact: true }).click()
   await expect(cleanup).toBeEnabled()

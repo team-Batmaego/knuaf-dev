@@ -145,9 +145,12 @@ test('hard rules hold across screens', async () => {
   await openPreset(page, 'fix:kordoc')
   await expect(page.locator(`text=${KORDOC}`)).toHaveCount(1)
   const cleanup = page.getByRole('button', { name: '소유 기록 정리', exact: true })
+  // The disclosure mounts before doctor.all returns; wait for its lock observation, not a disabled button.
+  await page.locator('details[data-preset="fix:lock"] time').waitFor({ state: 'visible' })
   await expect(cleanup).toBeDisabled()
   plantStaleLock(root)
   await page.click('text=다시 진단')
+  await page.getByText('마지막 점유 기록', { exact: true }).waitFor({ state: 'visible' })
   await expect(cleanup).toBeDisabled()
   await page.getByRole('button', { name: '점유 상태 확인', exact: true }).click()
   await expect(cleanup).toBeEnabled()
