@@ -38,12 +38,22 @@ async function holdPrep(electronApp: import('@playwright/test').ElectronApplicat
   await electronApp.evaluate(({ ipcMain }, notReady) => {
     const g = globalThis as unknown as Record<string, unknown>
     const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...a: unknown[]) => unknown> })._invokeHandlers
+    let prepared = false
     const rpc = handlers.get('rpc')!
     ipcMain.removeHandler('rpc')
-    ipcMain.handle('rpc', (e, method: string, params: { root?: string }, id: string) =>
-      method === 'doctor.all' ? { result: { deps: { ready: params.root !== notReady } } } : rpc(e, method, params, id))
+    ipcMain.handle('rpc', (e, method: string, params: { root?: string }, id: string) => {
+      if (method !== 'deps.doctor') return rpc(e, method, params, id)
+      const ready = params.root !== notReady || prepared
+      const venv = ready ? `${params.root}/.venv/python` : null
+      return { result: { ok: true, data: { ready, venv_python: venv, selected_python: venv,
+        dependencies: [{ dist: 'python-docx', status: ready ? 'installed' : 'missing' }] } } }
+    })
     ipcMain.removeHandler('deps:ensure')
-    ipcMain.handle('deps:ensure', () => new Promise((resolve) => { g.__finishPrep = () => resolve({ result: { ok: true } }) }))
+    ipcMain.handle('deps:ensure', () => {
+      const { promise, resolve } = Promise.withResolvers<unknown>()
+      g.__finishPrep = () => { prepared = true; resolve({ result: { ok: true } }) }
+      return promise
+    })
     g.__sent = []
     ipcMain.removeHandler('chat:send')
     ipcMain.handle('chat:send', (_e, root: string, _p: string, text: string) => {
@@ -60,7 +70,7 @@ test('질문 카드에서 고른 답이 준비를 기다리면 이유를 보이�
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
     await holdPrep(electronApp, root)
-    await openProject(page, root)
+    await openProject(page, root, undefined, { preparation: 'pending' })
     await expect(page.locator('.qcard')).toBeVisible({ timeout: 30_000 })
     await expect.poll(() => electronApp.evaluate(() => !!(globalThis as unknown as Record<string, unknown>).__finishPrep), { timeout: 30_000 }).toBe(true)
     await page.locator('.qopt').nth(0).click()
@@ -82,7 +92,7 @@ test('A 의 준비를 기다리는 중에 B 를 열면 B 는 잠기지 않고, �
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
     await holdPrep(electronApp, a)
-    await openProject(page, a)
+    await openProject(page, a, undefined, { preparation: 'pending' })
     const ta = page.locator('.chat-composer textarea')
     await expect(ta).toBeVisible({ timeout: 30_000 })
     await ta.fill('A 의 준비가 끝나면 보낼 답')

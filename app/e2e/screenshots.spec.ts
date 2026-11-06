@@ -17,16 +17,6 @@ const SCREENS: [string, string, 'checkup' | 'settings' | 'materials' | 'files' |
   ['08-settings', '설정', 'settings'],
 ]
 
-/**
- * docx.build needs the project .venv (methods_scripts._python_for). deps.ensure is skipped
- * when the running interpreter already satisfies the manifest (dev/e2e), so create the
- * project venv explicitly — same IPC as 설정 > 문제 해결 > 준비 상태.
- */
-async function ensureDeps(page: Page, root: string): Promise<void> {
-  const r = await page.evaluate((p) => window.knuaf.depsEnsure(p), root)
-  const env = (r as { result?: { ok?: boolean } }).result
-  if (!env?.ok) throw new Error(`deps.ensure failed: ${JSON.stringify(r).slice(0, 400)}`)
-}
 
 /**
  * 캡처 동안만 움직임을 끄고 **최종 상태**로 찍는다(QA3-WIN-R02).
@@ -109,7 +99,6 @@ for (const scheme of ['light', 'dark'] as const) {
     }
 
     // 파일 팝오버에서 DOCX 실행 후 같은 줄의 완료 상태를 캡처한다.
-    await ensureDeps(page, root)
     await navTo(page, '결과물')
     const pop = page.locator('.paper-head .popover')
     const docxRow = pop.locator('[data-make="docx"]')

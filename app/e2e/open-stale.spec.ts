@@ -227,15 +227,20 @@ test('A→B: A 의 늦은 준비 확인 응답이 B 의 준비 상태를 바꾸�
       ;(globalThis as unknown as { hold: typeof s }).hold = s
       const rpc = handlers.get('rpc')!
       handlers.set('rpc', async (...a: unknown[]) => {
-        if (a[1] !== 'doctor.all') return rpc(...a)
+        if (a[1] !== 'deps.doctor') return rpc(...a)
         const params = a[2] as { root?: string } | undefined
-        if (!s.held && params?.root === target) { s.held = true; await gate.promise; return { result: { deps: { ready: false } } } }
-        return { result: { deps: { ready: true } } }
+        const report = (ready: boolean) => {
+          const venv = ready ? `${params?.root}/.venv/python` : null
+          return { result: { ok: true, data: { ready, venv_python: venv, selected_python: venv,
+            dependencies: [{ dist: 'python-docx', status: ready ? 'installed' : 'missing' }] } } }
+        }
+        if (!s.held && params?.root === target) { s.held = true; await gate.promise; return report(false) }
+        return report(true)
       })
       handlers.set('deps:ensure', async () => ({ result: { ok: true } }))
     }, a)
     await openProject(page, b, splitReady)
-    await openProject(page, a)                       // A 의 준비 확인이 보류된다
+    await openProject(page, a, undefined, { preparation: 'pending' }) // A 의 준비 확인이 보류된다
     await expect.poll(() => held(electronApp)).toBe(true)
     await pickRecent(page, b)
     await splitReady(page)
@@ -269,10 +274,13 @@ test('A→B→A: 첫 A 방문의 늦은 준비 실패가 지금 방문의 오류
       ;(globalThis as unknown as { hold: typeof s }).hold = s
       const rpc = handlers.get('rpc')!
       handlers.set('rpc', async (...a: unknown[]) => {
-        if (a[1] !== 'doctor.all') return rpc(...a)
+        if (a[1] !== 'deps.doctor') return rpc(...a)
         const params = a[2] as { root?: string } | undefined
-        if (s.firstDoctor && params?.root === target) { s.firstDoctor = false; return { result: { deps: { ready: false } } } }
-        return { result: { deps: { ready: true } } }
+        const ready = !(s.firstDoctor && params?.root === target)
+        if (!ready) s.firstDoctor = false
+        const venv = ready ? `${params?.root}/.venv/python` : null
+        return { result: { ok: true, data: { ready, venv_python: venv, selected_python: venv,
+          dependencies: [{ dist: 'python-docx', status: ready ? 'installed' : 'missing' }] } } }
       })
       handlers.set('deps:ensure', async (_e: unknown, root: unknown) => {
         if (!s.held && root === target) { s.held = true; await gate.promise }
@@ -280,7 +288,7 @@ test('A→B→A: 첫 A 방문의 늦은 준비 실패가 지금 방문의 오류
       })
     }, a)
     await openProject(page, b, splitReady)
-    await openProject(page, a)                       // 첫 A 방문 — 설치가 보류된다
+    await openProject(page, a, undefined, { preparation: 'pending' }) // 첫 A 방문 — 설치가 보류된다
     await expect.poll(() => held(electronApp)).toBe(true)
     await pickRecent(page, b)
     await splitReady(page)

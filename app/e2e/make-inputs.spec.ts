@@ -34,9 +34,7 @@ test('검토본이 나오면 논문 DOCX 버튼이 열린다 (발견 17)', async
     // 표지 정보(paper-input.json)가 없으면 앞머리를 못 붙인다. 본문만 묶인다는 것을
     // 말해야 학생이 그것을 제출본으로 오해하지 않는다.
     await expect(docxRow, '겉표지 없이 나온다는 사실을 말하지 않는다').toContainText('겉표지·목차 없이')
-    // 실제 변환까지는 여기서 돌리지 않는다 — docx.build 는 프로젝트 .venv 를 요구하고
-    // e2e 의 임시 폴더에는 없다(deps_not_ready). 앞머리를 갖춘 본문이 실제로 나오는
-    // 것은 tests/test_sidecar.py 와 tests/test_school_paper.py 가 지킨다.
+    // 이 장면은 단추·안내 계약, 아래 QA-03은 실제 DOCX의 본문·목차 부재까지 확인한다.
   } finally {
     await electronApp.close()
   }
@@ -56,8 +54,6 @@ test('QA-03: 본문만 안내에서 만든 DOCX에는 목차 페이지가 없다
     await expect(reviewRow).toContainText('검토본을 만들었어요', { timeout: 60_000 })
     const docxRow = pop.locator('[data-make="docx"]')
     await expect(docxRow).toContainText('겉표지·목차 없이')
-    const prep = await page.evaluate((root) => window.knuaf.depsEnsure(root), root)
-    expect(prep).toMatchObject({ result: { ok: true } })
     await docxRow.getByRole('button').click()
     await expect(docxRow).toContainText('DOCX를 만들었어요', { timeout: 120_000 })
     // 렌더러 → IPC → 사이드카 → 변환기를 거친 실제 출력. Word 실행/쪽 렌더 검증과는 구분한다.

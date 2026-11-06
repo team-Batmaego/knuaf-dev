@@ -47,11 +47,11 @@ test('같은 개정의 검토본을 다시 만들면 이미 있는 파일을 목
     await navTo(page, '결과물')
     const pop = page.locator('.paper-head .popover')
     const reviewRow = pop.locator('[data-make="review"]')
-    await reviewRow.getByRole('button').click()
+    await reviewRow.getByRole('button', { name: '만들기', exact: true }).click()
     await expect(reviewRow).toContainText('검토본을 만들었어요', { timeout: 60_000 })
 
     // 같은 개정·같은 내용에서 한 번 더 — 원본은 receipt로 중복 제거해 existing을 돌려준다.
-    await reviewRow.getByRole('button').click()
+    await reviewRow.getByRole('button', { name: '만들기', exact: true }).click()
     // 화면에는 독립검토 미실행 고지도 있다 — 기존 파일 안내만 집는다.
     const fb = reviewRow.locator('.make-fb').filter({ hasText: '이미 만든 파일이에요' }).first()
     await expect(fb).toBeVisible({ timeout: 60_000 })
