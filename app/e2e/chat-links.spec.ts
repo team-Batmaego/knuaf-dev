@@ -98,6 +98,7 @@ test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 �
     const pop = page.locator('.paper-head .popover')
     await expect(pop).toBeVisible({ timeout: 30_000 })
     const notice = pop.getByRole('status')
+    await expect(notice).toBeVisible()
     await expect(notice).toContainText('"검토전_본문.md"을 찾지 못했어요.')
     await expect(notice).toContainText('아래는 이 논문에서 만든 다른 파일이에요.')
   } finally {
