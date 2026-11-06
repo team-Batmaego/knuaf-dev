@@ -635,17 +635,18 @@ export function Chat() {
   const [freeFormId, setFreeFormId] = useState<string | null>(null)
   const freeForm = zone.kind === 'form' && freeFormId === zone.messageId
   const [freeRequest, setFreeRequest] = useState<{ messageId: string; seq: number } | null>(null)
-  useEffect(() => {
+  // 초점은 인용을 그린 commit에서 옮긴다. 숨긴 Windows 창의 다음 프레임을 기다리지 않는다.
+  useLayoutEffect(() => {
     if (!quoteIntent || !quote || quote.root !== projectRoot) return
     if (zone.kind === 'question') setFreeRequest((prev) => ({ messageId: zone.messageId, seq: (prev?.seq ?? 0) + 1 }))
-    else if (zone.kind === 'form') {
+    else if (zone.kind === 'form' && !freeForm) {
       setFreeFormId(zone.messageId)
-      requestAnimationFrame(() => taRef.current?.focus())
-    } else if (zone.kind === 'composer' || zone.kind === 'running') {
-      requestAnimationFrame(() => taRef.current?.focus())
+      return // 입력칸이 실제로 마운트된 다음 commit에서 초점을 준다.
+    } else if (zone.kind === 'composer' || zone.kind === 'running' || freeForm) {
+      taRef.current?.focus()
     } else return
     consumeQuoteIntent(quoteIntent.seq)
-  }, [quoteIntent, quote, projectRoot, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null, consumeQuoteIntent])
+  }, [quoteIntent, quote, projectRoot, zone.kind, zone.kind === 'form' || zone.kind === 'question' ? zone.messageId : null, freeForm, consumeQuoteIntent])
 
   useEffect(() => { setReportNotice(null) }, [projectRoot])
   useEffect(() => {

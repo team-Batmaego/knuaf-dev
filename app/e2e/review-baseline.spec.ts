@@ -78,27 +78,52 @@ test('R1-01: existing-file read rejects parent replacement before opening', () =
   })
 })
 
-test('R1-01: post-write parent relocation fails before publication and cleans reachable temp', () => {
-  fixture((root, outside) => {
-    passed(child(root, `
-      const sync = fs.fsyncSync;
-      let injected = false;
-      fs.fsyncSync = function(fd) {
-        const result = sync(fd);
-        if (!injected) {
-          injected = true;
-          const moved = path.join(outside, 'moved');
-          fs.renameSync(dir, moved);
-          fs.symlinkSync(moved, dir, process.platform === 'win32' ? 'junction' : 'dir');
+for (const blocked of [false, true]) {
+  test(`R1-01: post-write parent relocation ${blocked ? 'denied by OS' : 'attempt'} never publishes or leaves temp files`, () => {
+    fixture((root, outside) => {
+      passed(child(root, `
+        const sync = fs.fsyncSync;
+        const moved = path.join(outside, 'moved');
+        const denied = Object.assign(new Error('injected sharing violation'), { code: 'EPERM' });
+        let attempted = false, relocated = false, relocationError = null;
+        fs.fsyncSync = function(fd) {
+          const result = sync(fd);
+          if (!attempted) {
+            attempted = true;
+            assert.equal(fs.fstatSync(fd).isFile(), true);
+            assert.equal(fs.readdirSync(dir).length, 1);
+            try {
+              if (${blocked}) throw denied;
+              fs.renameSync(dir, moved);
+            } catch (error) {
+              // Windows may deny moving a parent while its child file is open.
+              assert.equal(${blocked} || process.platform === 'win32', true);
+              assert.ok(['EPERM', 'EACCES', 'EBUSY'].includes(error.code), error.stack);
+              relocationError = error;
+              throw error;
+            }
+            fs.symlinkSync(moved, dir, process.platform === 'win32' ? 'junction' : 'dir');
+            relocated = true;
+          }
+          return result;
+        };
+        assert.throws(() => ensure(root, 'sec-after-write', 'complete body'), (error) =>
+          relocationError ? error === relocationError : error instanceof Error);
+        assert.equal(attempted, true);
+        if (relocationError) {
+          assert.equal(relocated, false);
+          assert.deepEqual(fs.readdirSync(outside), []);
+          assert.deepEqual(fs.readdirSync(dir), []);
+        } else {
+          assert.equal(relocated, true);
+          assert.deepEqual(fs.readdirSync(outside), ['moved']);
+          assert.deepEqual(fs.readdirSync(moved), []);
         }
-        return result;
-      };
-      assert.throws(() => ensure(root, 'sec-after-write', 'complete body'));
-      assert.equal(injected, true);
-      assert.deepEqual(fs.readdirSync(path.join(outside, 'moved')), []);
-    `, { FIXTURE_OUTSIDE: outside }))
+        assert.equal(fs.existsSync(path.join(dir, 'sec-after-write.txt')), false);
+      `, { FIXTURE_OUTSIDE: outside }))
+    })
   })
-})
+}
 
 for (const point of ['before-write', 'partial-write', 'before-sync', 'after-sync'] as const) {
   test(`R1-02: process termination ${point} never publishes an incomplete baseline`, () => {
