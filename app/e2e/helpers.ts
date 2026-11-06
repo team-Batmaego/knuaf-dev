@@ -1,4 +1,4 @@
-import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test'
+import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -123,6 +123,10 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   writeFileSync(settingsFile, JSON.stringify(preset), 'utf-8')
   // A shell that exports ELECTRON_RUN_AS_NODE would make the app run as plain Node (require('electron') yields the binary path).
   const env: NodeJS.ProcessEnv = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }
+  // Retained even when aggregate diagnosis never answers; no project data is recorded.
+  const doctorTrace = test.info().outputPath(`doctor-${Date.now()}.jsonl`)
+  mkdirSync(join(doctorTrace, '..'), { recursive: true })
+  env.KNUAF_E2E_DOCTOR_TRACE = doctorTrace
   delete env.ELECTRON_RUN_AS_NODE
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).

@@ -226,8 +226,10 @@ export function useMake(): Make {
       // returns the existing path. That is success, but no new file was made — say so.
       const again = r.status === 'existing'
       const unverified = status ? status.gate.filter((g) => g.status !== 'pass' && g.severity === 'error') : []
+      // Keep the run admitted until refresh settles, then publish only its terminal state.
+      await refresh()
       patch({
-        lastOk: true, lastPath: r.path, feedbackKind: kind,
+        making: null, lastOk: true, lastPath: r.path, feedbackKind: kind,
         feedback: missingReview
           ? {
             kind: 'warning',
@@ -245,13 +247,12 @@ export function useMake(): Make {
               : undefined
           }
       })
-      await refresh()
     } catch (e) {
       if (e instanceof RpcFailure && e.code === 'major_required') { requestMajor(kind); return }
       const d = describeError(e)
       if (d.code === 'committed_cleanup_pending' || d.code === 'indeterminate') {
-        patch({ feedbackKind: kind, feedback: { kind: 'warning', title: d.title, body: d.action, details: <pre>{d.raw}</pre> } })
         await refresh()
+        patch({ making: null, feedbackKind: kind, feedback: { kind: 'warning', title: d.title, body: d.action, details: <pre>{d.raw}</pre> } })
         return
       }
       if (kind === 'submission_candidate') {
@@ -338,8 +339,9 @@ export function useMake(): Make {
       if (!env?.ok) { fail(env, 'tools:docx'); return }
       // 성공도 같은 자리에 남긴다 — 결과 한 줄 + 폴더에서 보기(검토 확인 1회째 반례 ③).
       const path = env.path ?? out
+      await refresh()
       patch({
-        lastOk: true, lastPath: path, feedbackKind: 'docx',
+        making: null, lastOk: true, lastPath: path, feedbackKind: 'docx',
         feedback: {
           kind: 'completion',
           title: COMPLETION.docx_built,
@@ -347,7 +349,6 @@ export function useMake(): Make {
           actions: <button onClick={() => window.knuaf.reveal(path)}>{ARTIFACTS.reveal}</button>
         }
       })
-      await refresh()
     } finally { patch({ making: null }) }
   }, [root, hasMdInput, st.hasPaperInput, reviewMd, refresh, openSettings])
 
@@ -385,15 +386,15 @@ export function useMake(): Make {
         return
       }
       const path = env.path ?? out
+      await refresh()
       patch({
-        lastOk: true, lastPath: path, feedbackKind: 'xlsx',
+        making: null, lastOk: true, lastPath: path, feedbackKind: 'xlsx',
         feedback: {
           kind: 'completion', title: ARTIFACTS.make.xlsxCreated,
           body: <><code>{path}</code><br /><span className="caption">{ARTIFACTS.make.xlsxNext}</span></>,
           actions: <button onClick={() => window.knuaf.reveal(path)}>{ARTIFACTS.reveal}</button>
         }
       })
-      await refresh()
     } catch (e) {
       if (e instanceof RpcFailure && e.code === 'major_required') requestMajor('xlsx')
       else {

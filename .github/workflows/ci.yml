@@ -157,6 +157,15 @@ jobs:
           path: app/test-results/e2e-artifacts
           if-no-files-found: warn
           retention-days: 7
+      # Keep stage timing even if independent lock lookup makes the Windows job pass.
+      - name: Aggregate diagnosis timings (Windows)
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctor-timings-windows
+          path: app/test-results/e2e-artifacts/**/doctor-*.jsonl
+          if-no-files-found: warn
+          retention-days: 7
       # 시안 대조용 캡처 — 시험이 실패해도 남긴다(`always()`). 이름에 OS 를 넣어 구분한다.
       - name: UI captures (macOS)
         if: always() && runner.os == 'macOS'

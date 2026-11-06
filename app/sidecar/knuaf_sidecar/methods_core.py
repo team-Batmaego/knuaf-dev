@@ -7,6 +7,7 @@ from itertools import chain
 from pathlib import Path
 
 from .rpc import RpcError
+from .diagnostic_trace import trace_doctor
 
 REVIEW_KINDS = ("content", "logic", "calculation", "docx", "xlsx", "render")
 
@@ -257,14 +258,15 @@ def project_deps_report(report):
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
-    report = core.doctor(root, probe=params.get("probe") is True)
-    out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
-    try:
-        out["deps"] = project_deps_report(report["deps"])
-    except RpcError as error:
-        out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
-    out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
-    return out
+    with trace_doctor(ctx):
+        report = core.doctor(root, probe=params.get("probe") is True)
+        out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
+        try:
+            out["deps"] = project_deps_report(report["deps"])
+        except RpcError as error:
+            out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
+        out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
+        return out
 
 
 # --- materials / artifacts (read-only views over sources/ and build/) --------

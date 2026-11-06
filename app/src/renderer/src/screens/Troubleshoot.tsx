@@ -23,6 +23,9 @@ export function TroubleshootSections() {
   const [diagnosis, setDiagnosis] = useState<{ root: string; data: Record<string, any> } | null>(null)
   const doc = diagnosis?.root === root ? diagnosis.data : null
   const requestSeq = useRef(0)
+  const lockRequestSeq = useRef(0)
+  const [lockObservation, setLockObservation] = useState<{ root: string; data: LockInfo } | null>(null)
+  const [lockErr, setLockErr] = useState<DescribedError | null>(null)
   const [lockBusy, setLockBusy] = useState(false)
   const [err, setErr] = useState<DescribedError | null>(null)
   const [msg, setMsg] = useState<{ title: string; body?: string } | null>(null)
@@ -32,21 +35,31 @@ export function TroubleshootSections() {
   const load = useCallback(async () => {
     if (!root) return
     const seq = ++requestSeq.current
-    setErr(null); setDiagnosis(null); setLockBusy(false)
+    const lockSeq = ++lockRequestSeq.current
+    setErr(null); setDiagnosis(null); setLockObservation(null); setLockErr(null); setLockBusy(true)
+    // Lock inspection must not wait for dependency imports or the aggregate folder scan.
+    const inspected = rpc.lockInfo(root).then((data) => {
+      if (lockSeq === lockRequestSeq.current) setLockObservation({ root, data })
+    }).catch((e: unknown) => {
+      if (lockSeq === lockRequestSeq.current) setLockErr(describeError(e))
+    }).finally(() => {
+      if (lockSeq === lockRequestSeq.current) setLockBusy(false)
+    })
     const checked = useProject.getState().prepareDeps(root, { install: false })
-    try {
-      const data = await rpc.doctor(root)
+    const diagnosed = rpc.doctor(root).then((data) => {
       if (seq === requestSeq.current) setDiagnosis({ root, data })
-    } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
-    finally { await checked }
+    }).catch((e: unknown) => {
+      if (seq === requestSeq.current) setErr(describeError(e))
+    })
+    await Promise.all([inspected, checked, diagnosed])
   }, [root])
   useEffect(() => {
-    setErr(null); setMsg(null); setConfirm(null); setLockBusy(false)
+    setErr(null); setMsg(null); setConfirm(null)
     void load(); void refreshSidecar()
-    return () => { ++requestSeq.current }
+    return () => { ++requestSeq.current; ++lockRequestSeq.current }
   }, [load, status?.revision])
   if (!root) return <div className="caption">먼저 "내 논문"에서 폴더를 여세요.</div>
-  const lock: LockInfo | undefined = doc?.lock
+  const lock = lockObservation?.root === root ? lockObservation.data : undefined
   const hist: HistoryRow[] = Array.isArray(doc?.snapshots) ? doc!.snapshots : []
   const depsInfo = preparation?.report
   const act = async () => {
@@ -86,13 +99,13 @@ export function TroubleshootSections() {
     else if (env) setErr(describeError({ code: 'business_rule', message: env.block_reason ?? env.stderr.slice(-300) }))
   }
   const probe = async () => {
-    const seq = ++requestSeq.current
-    setLockBusy(true); setErr(null); setMsg(null)
+    const seq = ++lockRequestSeq.current
+    setLockBusy(true); setLockErr(null); setMsg(null)
     try {
       const observed = await rpc.lockInfo(root, true)
-      if (seq === requestSeq.current) setDiagnosis((prev) => prev?.root === root ? { root, data: { ...prev.data, lock: observed } } : prev)
-    } catch (e) { if (seq === requestSeq.current) setErr(describeError(e)) }
-    finally { if (seq === requestSeq.current) setLockBusy(false) }
+      if (seq === lockRequestSeq.current) setLockObservation({ root, data: observed })
+    } catch (e) { if (seq === lockRequestSeq.current) setLockErr(describeError(e)) }
+    finally { if (seq === lockRequestSeq.current) setLockBusy(false) }
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
   const orphans: string[] = doc?.gg?.orphan_files ?? []
@@ -128,6 +141,8 @@ export function TroubleshootSections() {
           <h2>{LOCK_COPY.label}</h2>
           {lock && <StatusBadge status={lock.structure === 'ready' ? 'pass' : 'blocked'} label={LOCK_COPY.structure[lock.structure] ?? lock.structure} />}
         </div>
+        {lockBusy && !lock && <div className="caption" role="status" aria-busy="true"><span className="spin" /> {LOCK_COPY.probing}</div>}
+        {lockErr && <Feedback kind={lockErr.kind} title={lockErr.title} body={lockErr.action} details={<code>{lockErr.raw}</code>} />}
         {lock && (
           <div>
             <StatusBadge status={lock.lock_state === 'free' ? 'pass' : lock.lock_state === 'busy' ? 'blocked' : 'pending'} label={LOCK_COPY.state[lock.lock_state] ?? lock.lock_state} />
