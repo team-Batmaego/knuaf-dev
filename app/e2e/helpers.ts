@@ -18,7 +18,7 @@ function seedDependencies(root: string): void {
   if (!dependencySeed) {
     const seed = mkdtempSync(join(tmpdir(), 'kd-deps-'))
     const installed = spawnSync(python, ['-X', 'utf8', join(scripts, 'gg_deps.py'), 'ensure', seed], { encoding: 'utf8' })
-    if (installed.status !== 0) throw new Error(installed.stdout + installed.stderr)
+    if (installed.status !== 0) throw new Error(installed.error ? `${(installed.error as NodeJS.ErrnoException).code ?? 'spawn error'}: ${installed.error.message}` : installed.stdout + installed.stderr)
     dependencySeed = join(seed, '.venv')
   }
   cpSync(dependencySeed, join(root, '.venv'), { recursive: true, dereference: true })

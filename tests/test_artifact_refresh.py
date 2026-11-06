@@ -89,4 +89,4 @@ def test_registered_output_is_listed_from_canonical_managed_path(sidecar, projec
     assert [item["path"] for item in items] == [registered["path"]]
     assert items[0]["revision"] == registered["revision"]
     assert items[0]["kind"] == "md"
-    assert sidecar.ok("artifact.preview", root=str(project), path=registered["path"])["result"]["text"] == output.read_text(encoding="utf-8")
+    assert sidecar.ok("artifact.preview", root=str(project), path=registered["path"])["result"]["text"] == output.read_bytes().decode("utf-8")
