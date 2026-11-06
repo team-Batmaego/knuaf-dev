@@ -308,7 +308,9 @@ test('실제 드래그 뒤 고쳐 달라기를 누르면 입력칸이 초점을 
     await bar.getByRole('button', { name: '고쳐 달라기' }).click()
     await expect(page.locator('.review-chip')).toBeVisible()
     // 입력칸이 초점을 받아 바로 글을 쓸 수 있다.
-    expect(await page.locator(COMPOSER).evaluate((el) => el === document.activeElement), '입력칸으로 초점이 가지 않았다').toBe(true)
+    await expect(page.locator(COMPOSER), '입력칸으로 초점이 가지 않았다').toBeFocused()
+    await page.keyboard.type(' 선택한 문장을 고쳐 줘')
+    await expect(page.locator(COMPOSER)).toHaveValue(' 선택한 문장을 고쳐 줘')
   } finally {
     await electronApp.close()
   }
