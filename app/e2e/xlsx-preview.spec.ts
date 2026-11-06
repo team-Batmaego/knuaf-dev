@@ -14,7 +14,7 @@ let url: string
 let workbook: string
 
 function preview(withPackages: boolean): PreviewPayload {
-  const result = spawnSync(python, [...(withPackages ? [] : ['-S']), '-c', `
+  const result = spawnSync(python, ['-X', 'utf8', ...(withPackages ? [] : ['-S']), '-c', `
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])

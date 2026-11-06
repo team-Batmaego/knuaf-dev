@@ -1,5 +1,5 @@
 import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -9,6 +9,20 @@ export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
 export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
+
+let dependencySeed: string | undefined
+
+/** Install once per worker, then copy real directories; every project still passes the app's doctor. */
+function seedDependencies(root: string): void {
+  if (existsSync(join(root, '.venv'))) return
+  if (!dependencySeed) {
+    const seed = mkdtempSync(join(tmpdir(), 'kd-deps-'))
+    const installed = spawnSync(python, ['-X', 'utf8', join(scripts, 'gg_deps.py'), 'ensure', seed], { encoding: 'utf8' })
+    if (installed.status !== 0) throw new Error(installed.stdout + installed.stderr)
+    dependencySeed = join(seed, '.venv')
+  }
+  cpSync(dependencySeed, join(root, '.venv'), { recursive: true, dereference: true })
+}
 
 /** init-only project (revision 0) or a project with a source, a section and a fact (revision 1). */
 export function synthProject(opts: { withContent?: boolean; financeGate?: boolean } = { withContent: true }): string {
@@ -84,18 +98,16 @@ export function plantStaleLock(root: string): void {
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 
-export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
+export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; splash?: 'keep'; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'kd-userdata-'))
   /**
-   * 여는 화면은 켤 때마다 화면을 덮고 2.6초를 쓴다. 대부분의 테스트는 그것을 보려는 게
-   * 아니라 그 뒤의 화면을 보려는 것이므로 기본적으로 꺼 둔다(`intro: true` 면 켠다).
+   * Every app launch shows its startup splash. Ordinary E2E tests send Escape after the overlay
+   * is visible and wait for it to disappear; splash-specific tests pass `splash: 'keep'` to
+   * observe the natural startup. This option belongs only to the test helper, not shipped code.
    *
-   * `onboarded_at` 도 같이 적는다. 첫 실행 화면(AI 연결 → 논문 폴더)이 생기면서, 이 표시가
-   * 없는 폴더에서는 앱이 온보딩을 띄운다 — 그러면 기존 스펙 28개가 전부 폴더 화면 대신
-   * 온보딩을 보게 된다. 첫 실행 자체를 보는 스펙은 `onboarded: false` 로 끈다.
-   *
-   * 스펙이 직접 써 둔 settings.json 은 **덮지 않고 이어 쓴다** — 그 안의 값(옛 helper_mode 등)이
-   * 시험 대상이기 때문이다.
+   * `intro` retains its legacy show_intro fixture behavior; it does not control the startup splash.
+   * `onboarded_at` is set as well. Without it the first-run connect/folder screens replace the
+   * workspace, so tests of first-run behavior opt out with `onboarded: false`.
    */
   const settingsFile = join(userData, 'settings.json')
   mkdirSync(userData, { recursive: true })
@@ -110,7 +122,7 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   else if (!preset.first_project_permission_asked_at) preset.first_project_permission_asked_at = new Date().toISOString()
   writeFileSync(settingsFile, JSON.stringify(preset), 'utf-8')
   // A shell that exports ELECTRON_RUN_AS_NODE would make the app run as plain Node (require('electron') yields the binary path).
-  const env = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }
+  const env: NodeJS.ProcessEnv = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }
   delete env.ELECTRON_RUN_AS_NODE
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).
@@ -130,6 +142,14 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
   // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
   await page.waitForSelector(opts.waitFor ?? '.titlebar')
+  const splash = page.locator('.splash')
+  if (opts.splash !== 'keep') {
+    await splash.waitFor({ state: 'visible', timeout: 30_000 })
+    // The skip key listener is attached before the first animation frame marks this node.
+    await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
+    await page.keyboard.press('Escape')
+    await splash.waitFor({ state: 'detached' })
+  }
   return { electronApp, page }
 }
 
@@ -253,8 +273,11 @@ export async function paperReady(page: Page, text?: string): Promise<void> {
  *
  * `ready` waits for the element the caller will use before workspace layout settles. The
  * project section list can still change the layout after the initial open.
+ * Ordinary scenarios get an independent .venv and wait for renderer-proven readiness.
+ * Preparation race/failure scenarios opt out explicitly; they own their pending response.
  */
-export async function openProject(page: Page, root: string, ready?: (p: Page) => Promise<unknown>): Promise<void> {
+export async function openProject(page: Page, root: string, ready?: (p: Page) => Promise<unknown>, opts: { preparation?: 'pending' } = {}): Promise<void> {
+  if (opts.preparation !== 'pending') seedDependencies(root)
   await page.getByRole('button', { name: '설정' }).first().click()
   await page.waitForSelector('dialog[open]', { timeout: 30_000 })
   await page.locator('dialog[open] nav').getByRole('button', { name: '폴더', exact: true }).click()
@@ -268,10 +291,21 @@ export async function openProject(page: Page, root: string, ready?: (p: Page) =>
   await disclosure.getByRole('button', { name: '경로로 열기', exact: true }).click()
   // 폴더 열기가 시작됐다 — 시트가 닫히고 대화 칸이 남는다.
   await page.waitForSelector(CHAT_READY, { timeout: 30_000 })
-  await page.waitForSelector('dialog[open]', { state: 'detached', timeout: 30_000 }).catch(() => {})
+  await page.waitForSelector('dialog[open]', { state: 'detached', timeout: 30_000 })
+  if (opts.preparation !== 'pending') await projectPrepared(page)
   // 호출자가 쓸 요소가 준비된 뒤에, 배치가 멈춘 것을 확인하고 돌려준다.
   if (ready) await ready(page)
   await settleWorkspace(page)
+}
+
+/** Observe the renderer's preparation state, not a direct IPC install result. */
+export async function projectPrepared(page: Page): Promise<void> {
+  await navTo(page, '설정')
+  await openPreset(page, 'fix:deps')
+  const preparation = page.locator('dialog[open] details[data-preset="fix:deps"]')
+  await expect(preparation.locator('.card-head')).toContainText('준비됨', { timeout: 30_000 })
+  await closeSheet(page)
+  await expect(page.locator('.chat-zone .zline.wait')).toHaveCount(0, { timeout: 30_000 })
 }
 
 /**

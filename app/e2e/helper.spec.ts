@@ -20,7 +20,8 @@ test('external terminal button installs the skill into the project and writes a 
   // opening lands on "내 논문" once open() settles; wait for it before navigating away
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
   await navTo(page, '설정')
-  await page.click('button:has-text("앱 밖 터미널로 도우미 열기")')
+  await page.locator('dialog[open] nav').getByRole('button', { name: '도우미 연결', exact: true }).click()
+  await page.getByRole('button', { name: '앱 밖 터미널로 도우미 열기' }).click()
   // 설정 시트 위에 도우미 시트가 겹쳐 뜬다 — 가장 위(마지막) dialog 가 도우미 시트다.
   const sheet = page.locator('dialog.sheet[open]').last()
   await expect(sheet).toBeVisible()
@@ -63,7 +64,8 @@ test('Codex 로 열면 성공 안내가 Claude 로그인을 말하지 않는다 
     await openProject(page, root)
     await page.waitForSelector('.chat-pane', { timeout: 30_000 })
     await navTo(page, '설정')
-    await page.click('button:has-text("앱 밖 터미널로 도우미 열기")')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '도우미 연결', exact: true }).click()
+    await page.getByRole('button', { name: '앱 밖 터미널로 도우미 열기' }).click()
     const sheet = page.locator('dialog.sheet[open]').last()
     await expect(sheet).toBeVisible()
     const done = sheet.locator('text=터미널에 AI 도우미 실행을 요청했어요')

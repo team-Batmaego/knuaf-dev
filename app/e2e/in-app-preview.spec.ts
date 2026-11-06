@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, writeFi
 import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { launch, navTo, openProject, python, repo, seedChat, shellCalls, spyShell, synthProject } from './helpers'
+import { OUTPUT_COPY } from '../src/renderer/src/copy'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/4xoAAAAASUVORK5CYII='
 
@@ -260,6 +261,9 @@ test('파일 목록과 점검에서 만든 엑셀을 문서 탭으로 연다', a
     await page.getByRole('button', { name: /파일 \d+/ }).click()
     const list = page.locator('.paper-head .popover')
     await list.locator('[data-make="xlsx"]').getByRole('button', { name: '만들기' }).click()
+    await expect(list.locator('[data-make="xlsx"]')).toContainText(OUTPUT_COPY.templateTitle)
+    expect(existsSync(join(root, 'build', '검토전_재무.xlsx'))).toBe(false)
+    await list.getByRole('button', { name: OUTPUT_COPY.chooseX01, exact: true }).click()
     const workbook = list.getByRole('button', { name: /검토전_재무\.xlsx/ })
     await expect(workbook).toBeVisible({ timeout: 30_000 })
     await workbook.click()

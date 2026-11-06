@@ -144,6 +144,18 @@ pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-elec
 `test:e2e`·기본 Playwright 설정은 GUI용입니다. `model-chip.spec.ts`처럼 GUI와 store가 섞인 파일은
 Node 전용 목록에 추가하지 마세요. Node 검사는 정식 stage·설치본·실제 화면 검증의 대체가 아닙니다.
 
+일반 Electron E2E의 `openProject()`는 worker마다 `gg_deps.py ensure`로 준비한 실제 패키지 환경을
+각 시험 폴더의 독립 `.venv` 디렉터리로 복사한 뒤, 설정 > 문제 해결 > 준비 상태가 **준비됨**일 때 반환합니다.
+최초 seed 설치에는 pip 패키지 공급원이 필요하며 설치 실패는 그대로 시험 실패입니다. `.venv` symlink나
+IPC 성공 응답만으로 준비를 가장하지 않습니다. 의도적으로 준비를 붙잡는 시나리오는 네 번째 인자의
+`{ preparation: 'pending' }`으로 이 전제만 제외하고 실제 `deps.doctor`/`deps:ensure` 경로를 제어합니다.
+`doctor.all`은 종합 진단용이므로 준비 대기 fixture로 쓰지 않습니다.
+
+재무 파일을 등록하지 않은 생성/미리보기 시험은 양식 안내 뒤 **공용 X01 빈 양식 사용**을 명시 선택합니다.
+선택 전 출력이 없고 선택 뒤 실제 통합문서가 문서 탭에서 보이는지 확인하며, 자동 fallback을 요구하지 않습니다.
+서명된 규칙집 업데이트 UI 시험은 현재 동봉 `skill.json`의 다음 patch를 후보로 서명하고 동봉판으로 rollback합니다.
+같은 버전·다른 내용의 정상 거절을 업데이트 실패로 오인하지 않게 하는 fixture 규칙입니다.
+
 개인 `.harness.conf`나 공유 하네스를 수정할 필요가 없습니다. 종전 훅 명령인
 `.venv-dev/bin/python -m pytest`는 추적된 `tests/conftest.py`를 통해 수집 전에
 고정 pin을 오프라인으로 준비하고, 실패하면 수집 오류 대신 준비 원인과 비0 종료를 냅니다.

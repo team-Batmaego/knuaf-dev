@@ -196,9 +196,9 @@ test('a bad folder path reports on settings and says the open folder stays', asy
   // 열린 폴더가 어떻게 됐는지도 같은 자리에서 알려야 한다.
   await expect(fb).toContainText('그대로')
 
-  // 실패한 자리에서 한 번이면 된다 — 내 논문에 같은 오류가 다시 뜨면 안 된다.
+  // 설정 창은 닫혀도 DOM에 남는다 — 다른 화면에 실제로 보이는 오류가 없는지만 확인한다.
   await navTo(page, '내 논문')
-  await expect(page.locator('.feedback.error')).toHaveCount(0)
+  await expect(page.locator('.feedback.error:visible')).toHaveCount(0)
   await electronApp.close()
 })
 

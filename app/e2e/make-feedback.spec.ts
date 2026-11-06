@@ -9,7 +9,7 @@ import { expect, test, type ElectronApplication } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, markSectionReady, navTo, openPreset, openProject, python, rewriteSection, scripts, synthProject } from './helpers'
+import { launch, markSectionReady, navTo, openPreset, openProject, projectPrepared, python, rewriteSection, scripts, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 import { ARTIFACTS, OUTPUT_COPY } from '../src/renderer/src/copy'
 
@@ -221,12 +221,6 @@ async function releaseExport(app: ElectronApplication): Promise<void> {
   await app.evaluate(() => { (globalThis as { __releaseExport?: () => void }).__releaseExport?.() })
 }
 
-/** 준비(deps.ensure)를 실제로 끝낸다 — DOCX 성공 장면에 필요하다(가짜가 아니다). */
-async function ensureDeps(page: import('@playwright/test').Page, root: string): Promise<void> {
-  const r = await page.evaluate((p: string) => window.knuaf.depsEnsure(p), root)
-  const env = (r as { result?: { ok?: boolean } }).result
-  if (!env?.ok) throw new Error(`deps.ensure failed: ${JSON.stringify(r).slice(0, 300)}`)
-}
 
 test('만드는 중에도 시도 시점 고지가 두 자리에 보인다 (반례 ①)', async () => {
   const dir = scratch()
@@ -239,6 +233,7 @@ test('만드는 중에도 시도 시점 고지가 두 자리에 보인다 (반�
     // "지금"이 3단계(검토본)여야 종이 머리에 권하는 단추가 선다 — 장을 다 쓴 상태로 올린다.
     markSectionReady(root)
     await expect(page.locator('.titlebar .tbtn.now')).toContainText('검토본', { timeout: 20_000 })
+    await projectPrepared(page) // 정본 개정 뒤 문제 해결의 자동 재진단도 끝나야 한다.
 
     // export 응답을 보류한다 — 그 동안이 "시도 중"이다.
     await holdExport(electronApp)
@@ -273,11 +268,12 @@ test('DOCX 실패 이유가 두 자리에 보인다 (반례 ②)', async () => {
   const root = synthProject()
   markSectionReady(root)                    // 장을 다 씀 → 3단계
   exportReview(root)                        // 검토본이 있으면 4단계라 종이 머리에 DOCX 단추가 선다
+  // 준비 실패가 아닌 실제 paper.generate 실패: 존재하지만 파싱할 수 없는 표지 입력.
+  writeFileSync(join(root, 'paper-input.json'), '{', 'utf8')
   const { electronApp, page } = await launch({ env })
   try {
     await openProject(page, root)
     await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
-    // 실제 실패를 쓴다: 이 임시 폴더에는 프로젝트 .venv 가 없어 docx.build 가 준비 안 됨으로 끝난다.
     const head = page.locator('.paper-head').getByRole('button', { name: /논문 파일/ })
     await expect(head).toBeVisible({ timeout: 20_000 })
     await head.click()
@@ -306,7 +302,6 @@ test('DOCX 성공 결과가 두 자리에 보인다 (반례 ③)', async () => {
   try {
     await openProject(page, root)
     await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
-    await ensureDeps(page, root)
     const head = page.locator('.paper-head').getByRole('button', { name: /논문 파일/ })
     await expect(head).toBeVisible({ timeout: 20_000 })
     await head.click()
@@ -410,9 +405,9 @@ for (const surface of ['make', 'advanced', 'lookup-error'] as const) {
         await page.locator('#xl_blank').fill(out)
       }
       const create = surface === 'make'
-        ? page.locator('.make-row').filter({ hasText: ARTIFACTS.make.xlsx }).getByRole('button')
+        ? page.locator('.paper-head .popover [data-make="xlsx"]').getByRole('button', { name: '만들기', exact: true })
         : page.getByRole('button', { name: '사본 만들기', exact: true })
-      const choose = page.locator('dialog[open]').getByRole('button', { name: OUTPUT_COPY.chooseX01 })
+      const choose = page.locator('.paper-head .popover').getByRole('button', { name: OUTPUT_COPY.chooseX01, exact: true })
       if (surface === 'make') {
         await create.click()
         await expect(choose).toBeVisible()
@@ -428,14 +423,15 @@ for (const surface of ['make', 'advanced', 'lookup-error'] as const) {
         expect((await preflightProbe(electronApp)).lookupReply).toMatchObject({ error: { code: 'major_required' } })
         await releaseMajorReply(electronApp)
       } else {
-        await page.locator('.progress[aria-busy="true"]').getByRole('button', { name: '취소', exact: true }).click()
+        const progress = surface === 'make' ? page.locator('.make-fb.running[aria-busy="true"]') : page.locator('.progress[aria-busy="true"]')
+        await progress.getByRole('button', { name: '취소', exact: true }).click()
         // The UI must finish without waiting for the held read reply.
         await expect(create).toBeEnabled()
         expect((await preflightProbe(electronApp)).cancelResults).toEqual([false])
         await releaseMajorReply(electronApp)
       }
       await expect(create).toBeEnabled()
-      await expect(page.locator('.progress[aria-busy="true"]')).toHaveCount(0)
+      await expect(page.locator('.progress[aria-busy="true"], .make-fb.running[aria-busy="true"]')).toHaveCount(0)
       // A real read round trip drains the late reply before checking for a resurrected write.
       await page.evaluate(async (rootPath) => window.knuaf.call('project.load', { root: rootPath }), root)
       expect((await preflightProbe(electronApp)).outputs).toEqual([])
@@ -445,7 +441,7 @@ for (const surface of ['make', 'advanced', 'lookup-error'] as const) {
         await create.click()
         if (surface === 'make') await choose.click()
         await expect.poll(() => existsSync(join(root, out))).toBe(true)
-        await expect(page.locator('.progress[aria-busy="true"]')).toHaveCount(0)
+        await expect(page.locator('.progress[aria-busy="true"], .make-fb.running[aria-busy="true"]')).toHaveCount(0)
         expect((await preflightProbe(electronApp)).outputs).toEqual(['excel.create'])
       }
     } finally {
