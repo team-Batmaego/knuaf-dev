@@ -24,6 +24,9 @@ def main(argv=None) -> int:
     ap.add_argument("--scripts-dir", default=None)
     ap.add_argument("--interpreter-kind", default="unknown", help="bundled|venv|custom (informational)")
     a = ap.parse_args(argv)
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if sys.version_info < (3, 10):
         sys.stdout.write('{"id": null, "error": {"code": "python_too_old", "message": "Python 3.10 이상 필요"}}\n')
         return 2
@@ -32,9 +35,6 @@ def main(argv=None) -> int:
         sys.stdout.write('{"id": null, "error": {"code": "scripts_missing", "message": "%s"}}\n' % scripts)
         return 2
     sys.path.insert(0, str(scripts))
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
     from . import methods_core, methods_scripts
     from .rpc import Server
 

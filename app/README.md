@@ -7,7 +7,9 @@
 ## 구조
 
 - `sidecar/knuaf_sidecar/` — 프로토콜은 stdlib, XLSX 미리보기는 openpyxl을 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
-  JSON-lines(stdin/stdout)로 대화합니다. `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
+  JSON-lines(stdin/stdout)로 대화합니다. 요청·응답 모두 UTF-8이며, 사이드카가 stdin/stdout/stderr 인코딩을
+  직접 고정하므로 Python의 상속 코드페이지가 달라도 한글·공백 작업 경로를 그대로 처리합니다.
+  `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
   CLI 전용 스크립트(build_docx, gg_excel_*, gg_office, gg_deps, gg_kordoc)는 서브프로세스로 실행해 출력을
   `{ok, exit, status, data, path, block_reason, commit_state, detail, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
   `methods.list`가 각 메서드의 쓰기 여부를 보고합니다. 읽기 전용 조회로 `materials.list`(intake 사실 + sources/ 파일),
@@ -155,6 +157,14 @@ CI의 `test-with-skill.mjs`도 같은 stage를 사용합니다. 직접 실행하
 시험이 누락되거나 하나라도 실패하면 동봉을 거절합니다. 모두 성공한 경우에만
 `resources/skill/`로 동봉하며 dev/build/resource 준비·skill-release CI가 같은 게이트를 사용합니다.
 실패하면 이전 묶음을 보존하며 구판 사본으로 자동 대체하지 않습니다.
+호환 실패 메시지의 `consumer`·`upstream` 숫자는 시험 건수가 아니라 pytest 종료코드입니다(`0`은 성공).
+소비자 시험은 Kordoc 차단 예외의 `reason`·`details`(자식 종료코드·stderr 포함)와 live guard의 probe/cleanup
+응답을 실패 보고서에 남깁니다. 이 진단 출력은 stage 차단 조건을 바꾸지 않습니다.
+Windows 가짜 Kordoc은 원본 fixture처럼 shim 옆 `node_modules/kordoc/dist/cli.js`를 제공해 실제 패키지로
+넘어가지 않고 shell-free 경로를 시험합니다. 잠금 시험은 Windows의 `unavailable/busy_or_denied`와
+`lock_ambiguous` 거절을 정확히 확인하고 owner/guard 보존·해제 뒤 정리 검사를 동일하게 수행합니다.
+사이드카 시험 클라이언트는 단일 reader와 queue로 JSON-lines를 받아, 한 번에 도착한 이벤트·완료 응답을
+TextIOWrapper가 미리 읽어도 OS `select()` 대기로 잃지 않습니다. 취소 완료의 5초 제한은 유지합니다.
 
 현재 pin은 v0.4.2(`60311c11fbf12fdc04249be8c75eeaf027c06a66`)입니다.
 pin 변경 시 consumer·upstream 내부·보호별 upstream root 전체 게이트를 통과해야 하며, 시험 제외·로컬 원본 패치·낡은 stage로 성공시키지 않습니다.
