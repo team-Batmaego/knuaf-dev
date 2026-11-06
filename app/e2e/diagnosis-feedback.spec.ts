@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { launch, navTo, openPreset, openProject, plantStaleLock, synthProject } from './helpers'
 
 type RpcHandler = (...args: unknown[]) => Promise<unknown>
-type LockProbe = { held: boolean; lockHeld: boolean; armLock: boolean; release: () => void; releaseLock: () => void }
+type LockProbe = { held: boolean; lockHeld: boolean; armLock: boolean; replies: Promise<unknown>[]; release: () => void; releaseLock: () => void }
 type MakeProbe = { built: boolean; held: boolean; release: () => void }
 type ProbeHost = typeof globalThis & { __ci4: LockProbe; __ci4Make: MakeProbe }
 
@@ -23,13 +23,15 @@ test('잠금 관찰·probe·정리는 전체 점검 응답을 기다리지 않�
       const real = ipc._invokeHandlers.get('rpc')!
       const gate = Promise.withResolvers<void>()
       const lockGate = Promise.withResolvers<void>()
-      const state = { held: false, lockHeld: false, armLock: false, release: gate.resolve, releaseLock: lockGate.resolve }
+      const state: LockProbe = { held: false, lockHeld: false, armLock: false, replies: [], release: gate.resolve, releaseLock: lockGate.resolve }
       ;(globalThis as ProbeHost).__ci4 = state
       ipcMain.removeHandler('rpc')
       ipcMain.handle('rpc', async (...args: unknown[]) => {
-        const reply = await real(...args)
+        const pending = real(...args)
+        // Synchronize on request entry, not the duration of real dependency probes.
+        if (args[1] === 'doctor.all') { state.held = true; state.replies.push(pending); await gate.promise }
+        const reply = await pending
         if (args[1] === 'lock.info' && state.armLock) { state.lockHeld = true; await lockGate.promise }
-        if (args[1] === 'doctor.all') { state.held = true; await gate.promise }
         return reply
       })
     })
@@ -67,6 +69,19 @@ test('잠금 관찰·probe·정리는 전체 점검 응답을 기다리지 않�
     expect(existsSync(join(root, '.gg-lock', 'owner.json'))).toBe(false)
     expect(readFileSync(join(root, 'project.json'))).toEqual(before)
     expect(readFileSync(join(root, '.gg-lock', 'guard'))).toEqual(guard)
+    // Only after independent cleanup succeeds, drain real work under the test's existing deadline.
+    // Delivery is still gated; require a real pre-cleanup owner snapshot among the late replies.
+    const owners = await electronApp.evaluate(async () => {
+      const replies = await Promise.all((globalThis as ProbeHost).__ci4.replies)
+      return replies.map((reply) => {
+        if (!reply || typeof reply !== 'object' || !('result' in reply)) return false
+        const report = reply.result
+        if (!report || typeof report !== 'object' || !('lock' in report)) return false
+        const lock = report.lock
+        return !!lock && typeof lock === 'object' && 'owner' in lock && !!lock.owner
+      })
+    })
+    expect(owners).toContain(true)
     await electronApp.evaluate(() => (globalThis as ProbeHost).__ci4.release())
     await openPreset(page, 'fix:orphans')
     await expect(page.locator('details[data-preset="fix:orphans"]')).toContainText('.gg-import-ci4-observation')
