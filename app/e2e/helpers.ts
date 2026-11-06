@@ -335,9 +335,9 @@ export async function navTo(page: Page, label: string): Promise<void> {
     const paper = page.locator('.paper-head')
     const paperTab = page.getByRole('tab', { name: '내 논문' })
     if (!(await paper.isVisible()) && await paperTab.isVisible()) await paperTab.click()
-    const head = label === '자료' ? /자료/ : /파일/
-    const button = paper.getByRole('button', { name: head }).first()
-    const popover = paper.locator('.popover')
+    const trigger = label === '자료' ? 'head-materials' : 'head-files'
+    const button = paper.locator(`[data-focus-key="${trigger}"]`)
+    const popover = button.locator('..').locator('.popover')
     if (!(await popover.isVisible()) || await button.getAttribute('aria-expanded') !== 'true') await button.click()
     await expect(popover).toBeVisible()
     return
