@@ -13,7 +13,7 @@
   CLI 전용 스크립트(build_docx, gg_excel_*, gg_office, gg_deps, gg_kordoc)는 서브프로세스로 실행해 출력을
   `{ok, exit, status, data, path, block_reason, commit_state, detail, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
   `methods.list`가 각 메서드의 쓰기 여부를 보고합니다. 읽기 전용 조회로 `materials.list`(intake 사실 + sources/ 파일),
-  `artifact.list`(build/ 산출물 스캔), `artifact.preview`(xlsx 읽기 전용 표·md 텍스트·pdf 표지)가 있습니다.
+  `artifact.list`(build/ 출력 영역·정본 outputs 등록 경로·생성 receipt와 해시가 일치하는 루트 Word), `artifact.preview`(xlsx 읽기 전용 표·md 텍스트·pdf 표지)가 있습니다.
   `project.major`는 원본의 공개 전공 계약으로 유효 바인딩만 읽습니다. renderer는 그 전공을 출력 요청의 `major_id`로
   명시하고 원본이 정본 바인딩과 다시 대조합니다. 없거나 무효인 바인딩은 전공 확인 요청으로 돌아가며 기본 전공을 만들지 않습니다.
   출력 취소는 전공 사전 조회부터 같은 clientId로 추적합니다. 조회 중 취소하면 main이 이미 읽기를 끝냈어도
@@ -60,8 +60,11 @@
   "매번 묻기"는 전역 확인을 켜고 기존 폴더별 예외도 지웁니다. 설정에서 전역 선택을 바꿀 수 있습니다. Windows는 첫 폴더를 열기 전에 임시 파일 쓰기 시험을 합니다.
   - 자료: intake 사실로 기록된 현재 작성물·재무 파일과 sources/ 파일 목록(현재 작성물·참고자료 구분)을 보여 줍니다.
     파일을 골라도 채팅 답변에 경로를 넣을 뿐 현재 작성물로 채택하지 않습니다(intake-selection.md).
-  - 결과물: build/ 아래 DOCX·XLSX·PDF·MD를 목록·미리보기·다른 이름 저장·외부 열기 합니다. 대화·자료·점검의
-    프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
+  - 결과물: build/ 아래의 DOCX·XLSX·PDF·MD와 `project.json.outputs` 등록 파일을 목록·미리보기·다른 이름 저장·외부 열기 합니다.
+    루트 Word는 `build_docx.py`가 발행한 동반 `.manifest.json`의 `kind: draft`·입력 해시·현재 파일 해시 일치가 있어야 포함합니다.
+    정본 등록은 `adopt_output`이 만든 `.gg-artifacts/` 관리 사본 경로를 사용합니다. 루트 원고·참고자료는 확장자만으로 포함하지 않습니다.
+    파일 목록을 열 때와 도우미 작업이 끝날 때 다시 읽으므로 정본 개정이 바뀌지 않아도 생성 파일이 반영됩니다.
+    대화·자료·점검의 프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
     `legacy` 빌드)로 그리고, DOCX는 `docx-preview`를 sandbox iframe 안에서 렌더링합니다. 그림·수식·복잡한 서식은
     일부 다를 수 있다는 안내를 표시합니다. XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
     openpyxl이 없는 실행기를 선택한 경우에는 빈 화면 대신 패키지 준비가 필요하다는 이유와

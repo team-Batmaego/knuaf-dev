@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+from itertools import chain
 from pathlib import Path
 
 from .rpc import RpcError
@@ -398,8 +399,25 @@ def materials_list(ctx, params):
     }
 
 
+def _has_docx_receipt(file: Path, core):
+    """Recognize build_docx's receipt, not a filename or an input extension."""
+    if file.suffix.lower() != ".docx":
+        return False
+    try:
+        receipt = json.loads(file.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+        return (
+            isinstance(receipt, dict)
+            and receipt.get("kind") == "draft"
+            and isinstance(receipt.get("input_hash"), str)
+            and len(receipt["input_hash"]) == 64
+            and receipt.get("file_hash") == core.digest(file.read_bytes())
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def artifact_list(ctx, params):
-    """Previewable files under build/, newest first; `revision` from the outputs collection when known."""
+    """Build outputs, registered outputs, and receipt-backed root Word files."""
     core = _core()
     root = _root(params).resolve()
     p = core.load(root)
@@ -408,12 +426,23 @@ def artifact_list(ctx, params):
         path = out.get("path")
         if not isinstance(path, str) or not path:
             continue
-        key = Path(path).as_posix()
+        try:
+            key = core.local(root, path).relative_to(root).as_posix()
+        except (ValueError, OSError):
+            continue
         rev = out.get("revision")
         if isinstance(rev, int) and rev > (revisions.get(key) or 0):
             revisions[key] = rev
     items = []
-    for f in _visible_files(root / "build") or ():
+    seen = set()
+    registered_files = (root / path for path in revisions)
+    root_files = (
+        f for f in root.iterdir()
+        if f.is_file() and not f.name.startswith(".") and _has_docx_receipt(f, core)
+    )
+    for f in chain(registered_files, root_files, _visible_files(root / "build") or ()):
+        if not f.is_file():
+            continue
         kind = ARTIFACT_KINDS.get(f.suffix.lower())
         if kind is None:
             continue
@@ -422,6 +451,9 @@ def artifact_list(ctx, params):
             st = f.stat()
         except (ValueError, OSError):
             continue
+        if rel in seen:
+            continue
+        seen.add(rel)
         items.append(
             {
                 "path": rel,
