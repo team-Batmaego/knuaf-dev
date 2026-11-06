@@ -26,4 +26,5 @@
 
 - Implementation commit: `7d83464f8abfa17a80f58a5ab31bf26f18cff948` — `Fix Windows preview test and installer Python path`.
 - This report is a separate documentation commit.
-Not pushed.
+- Report commit: `494f88b618a2474fd686c50a0e1292a661aad31f` — `Document CI fix verification`.
+- Push: not performed.
