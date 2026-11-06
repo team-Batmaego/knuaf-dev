@@ -162,6 +162,7 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .pop-row .c { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
 /* 긴 파일 이름은 한 줄 말줄임 — 전체 이름은 title 로(N-I06). */
 .pop-row .c b, .pop-row .c small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop-row .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-row .c b { font-weight: 600; }
 .pop-row .c small { color: var(--muted); font-size: 12.5px; }
 .pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--serif); text-align: center; }

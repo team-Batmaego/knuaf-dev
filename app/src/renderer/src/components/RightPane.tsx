@@ -18,7 +18,7 @@ export function RightPane({ paper }: { paper: ReactNode }) {
   const loadLists = useProject((s) => s.loadLists)
   const paperTab = useRef<HTMLButtonElement>(null)
   const fileTab = useRef<HTMLButtonElement>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ title: string; body: string } | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
   const requestId = useRef(0)
   useEffect(() => { requestId.current += 1; setError(null); setSaved(null) }, [root, path])
@@ -58,21 +58,21 @@ export function RightPane({ paper }: { paper: ReactNode }) {
       useProject.getState().openList('files')
       return
     }
-    setError(PREVIEW.readFailedBody)
+    setError({ title: PREVIEW.loadFailed, body: PREVIEW.readFailedBody })
   }
   const open = async () => {
     const id = ++requestId.current
     const result = await window.knuaf.openPath(path)
     if (requestId.current !== id || useProject.getState().docPath !== path || useProject.getState().root !== root) return
-    if ('error' in result) setError(result.error.message)
-    else if (result.result.reason === 'open_failed') setError(ARTIFACTS.openFallback)
+    if ('error' in result) setError({ title: ARTIFACTS.openFailedTitle, body: result.error.code === 'not_openable' ? ARTIFACTS.openNotSupported : result.error.message })
+    else if (result.result.reason === 'open_failed') setError({ title: ARTIFACTS.openFailedTitle, body: ARTIFACTS.openFallback })
   }
   const save = async () => {
     if (!item) return
     const id = ++requestId.current
     const result = await window.knuaf.fileSaveAs(root, item.path)
     if (requestId.current !== id || useProject.getState().docPath !== path || useProject.getState().root !== root) return
-    if (result.error) setError(describeError(result.error).title)
+    if (result.error) setError({ title: PREVIEW.loadFailed, body: describeError(result.error).title })
     else if (result.result) setSaved(String(result.result))
   }
   const selected = (on: boolean): React.CSSProperties => ({ border: 'var(--hairline) solid', borderColor: on ? 'var(--line)' : 'transparent', background: on ? 'var(--bg)' : 'transparent', fontWeight: on ? 600 : 400, borderRadius: '10px 10px 0 0', padding: '7px 12px', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
@@ -86,7 +86,7 @@ export function RightPane({ paper }: { paper: ReactNode }) {
       <header style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 20px', minHeight: 56, borderBottom: 'var(--hairline) solid var(--line)' }}><div><h2 title={name} style={{ fontSize: 15, margin: 0 }}>{name}</h2><span className="caption">{COPY.fileType(path)} · {COPY.readOnly}</span></div><span style={{ flex: 1 }} />{item && <button onClick={() => void save()}>{ARTIFACTS.save}</button>}<PreviewActions path={path} onOpen={() => void open()} /></header>
       <div style={{ flex: 1, overflow: 'auto', padding: '22px 26px', background: 'var(--desk)' }}>
         {/\.(xlsx|xlsm)$/i.test(path) && <p className="caption">{COPY.excelHint}</p>}
-        {saved && <p role="status">{saved}</p>}{error && <Feedback kind="warning" title={PREVIEW.loadFailed} body={error} />}
+        {saved && <p role="status">{saved}</p>}{error && <Feedback kind="warning" title={error.title} body={error.body} />}
         <Preview root={root} item={item} target={path} items={items ?? []} onRendered={() => void loadLists()} onReadError={readError} onUnsupported={(payload) => { close(); if (!payload.openable) void window.knuaf.openFileLink(path) }} />
       </div>
     </section>}
