@@ -154,6 +154,12 @@ Node 전용 목록에 추가하지 마세요. Node 검사는 정식 stage·설�
 IPC 성공 응답만으로 준비를 가장하지 않습니다. 의도적으로 준비를 붙잡는 시나리오는 네 번째 인자의
 `{ preparation: 'pending' }`으로 이 전제만 제외하고 실제 `deps.doctor`/`deps:ensure` 경로를 제어합니다.
 `doctor.all`은 종합 진단용이므로 준비 대기 fixture로 쓰지 않습니다.
+
+설치본 E2E의 동봉 실행기 선택 검사는 같은 `{ preparation: 'pending' }` 옵션으로 개발용 `.venv` seed와
+준비 완료 대기를 제외합니다. `bundledProject()`로 만든 폴더를 그대로 열고 실제 종이 본문과
+`sidecarInfo()`의 `running`·`bundled`·동봉 Python·스킬 경로를 확인합니다. 먼저 venv를 심으면 앱이
+정상 우선순위대로 프로젝트 venv를 골라, 동봉 실행기를 검증하는 시험 전제가 사라집니다.
+
 잠금 UI 검사는 펼침이 열렸다는 사실과 종합 진단 완료를 구분합니다. 첫 조회는 `fix:lock`의 관측 시각,
 소유 기록을 심은 뒤 **다시 진단**은 **마지막 점유 기록**이 표시될 때까지 기다린 다음 기존 disabled·probe·enabled
 검사를 수행합니다. `doctor.all`은 의존성 import·버전 조회도 끝나야 반환하므로 빈 로딩 화면을 잠금 응답 누락으로
