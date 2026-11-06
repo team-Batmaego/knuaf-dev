@@ -97,8 +97,9 @@ test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 �
     await link.click()
     const pop = page.locator('.paper-head .popover')
     await expect(pop).toBeVisible({ timeout: 30_000 })
-    await expect(pop.getByText('"검토전_본문.md"을 찾지 못했어요.', { exact: true })).toBeVisible()
-    await expect(pop.getByText('아래는 이 논문에서 만든 다른 파일이에요.', { exact: true })).toBeVisible()
+    const notice = pop.getByRole('status')
+    await expect(notice).toContainText('"검토전_본문.md"을 찾지 못했어요.')
+    await expect(notice).toContainText('아래는 이 논문에서 만든 다른 파일이에요.')
   } finally {
     await electronApp.close()
   }

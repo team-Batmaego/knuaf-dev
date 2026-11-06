@@ -39,11 +39,11 @@ test('준비 미완료와 실제 빈 결과를 구분하고 만들기 이유 및
     const makeRows = pop.locator('.pop-make-block')
     await expect(makeRows).toHaveCount(4)
     for (const row of await makeRows.all()) await expect(row.getByRole('button')).toBeDisabled()
-    const reveal = pop.getByRole('button', { name: '폴더에서 보기', exact: true })
-    await expect(reveal).toBeVisible()
-    await expect(reveal).toBeEnabled()
-    await reveal.click()
-    await expect.poll(() => shellCalls(log)).toEqual([`reveal\t${realpathSync(root)}`])
+    const openFolder = pop.getByRole('button', { name: '폴더에서 보기', exact: true })
+    await expect(openFolder).toBeVisible()
+    await expect(openFolder).toBeEnabled()
+    await openFolder.click()
+    await expect.poll(() => shellCalls(log)).toEqual([`open\t${realpathSync(root)}`])
     // Keep the distinction and explanation checks independent; the actionable folder behavior above
     // still runs when either piece of guidance is missing.
     await expect.soft(pop.getByText('아직 만든 파일이 없어요.', { exact: true })).toHaveCount(0)
