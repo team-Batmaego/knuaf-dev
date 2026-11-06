@@ -98,6 +98,7 @@ jobs:
         run: pnpm exec playwright test --config playwright.installed.config.ts --output test-results/installed-artifacts
         env:
           KNUAF_SHOT_DIR: test-results/installed-shots
+          KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
 
       - name: 설치본 e2e 흔적
         if: failure()
