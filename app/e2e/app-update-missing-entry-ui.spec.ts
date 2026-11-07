@@ -5,6 +5,7 @@ test('an unavailable newer app does not look installable and explains why', asyn
   const { electronApp, page } = await launch({ env: { KNUAF_AGENT_PATH_ONLY: '1', PATH: '/usr/bin:/bin' } })
   try {
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     const section = page.getByRole('region', { name: '업데이트' })
     await electronApp.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0].webContents.send('app-update:status', {

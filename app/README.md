@@ -1,4 +1,4 @@
-# KNUAF-Dev · 창업논문 작성 도우미 (Electron + Python 사이드카)
+# 창업논문 도우미 (Electron + Python 사이드카)
 
 에이전트(Codex / Claude Code)가 인터뷰·작문을 하는 동안, 학생이 **저장 상태·검사 결과·다음 할 일·산출물**을 보고
 잠금 잔류·정본 손상 같은 막힘을 스스로 풀 수 있게 하는 데스크톱 GUI입니다. AI 도우미를 연결하면 답변과 작업 폴더의
@@ -6,12 +6,27 @@
 
 ## 구조
 
-- `sidecar/knuaf_sidecar/` — stdlib만 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
-  JSON-lines(stdin/stdout)로 대화합니다. `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
+- `sidecar/knuaf_sidecar/` — 프로토콜은 stdlib, XLSX 미리보기는 openpyxl을 쓰는 Python 프로세스. Electron이 `python -m knuaf_sidecar --scripts-dir <S>`로 띄우고
+  JSON-lines(stdin/stdout)로 대화합니다. 요청·응답 모두 UTF-8이며, 사이드카가 stdin/stdout/stderr 인코딩을
+  직접 고정하므로 Python의 상속 코드페이지가 달라도 한글·공백 작업 경로를 그대로 처리합니다.
+  `gg_core`는 in-process로 호출하고(상태·검사·잠금·스냅샷·발행),
   CLI 전용 스크립트(build_docx, gg_excel_*, gg_office, gg_deps, gg_kordoc)는 서브프로세스로 실행해 출력을
-  `{ok, exit, status, data, path, block_reason, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
+  `{ok, exit, status, data, path, block_reason, commit_state, detail, stdout, stderr}` 봉투로 정규화합니다. 쓰기 메서드는 하나의 락으로 직렬화되며,
   `methods.list`가 각 메서드의 쓰기 여부를 보고합니다. 읽기 전용 조회로 `materials.list`(intake 사실 + sources/ 파일),
-  `artifact.list`(build/ 산출물 스캔), `artifact.preview`(xlsx 읽기 전용 표·md 텍스트·pdf 표지)가 있습니다.
+  `artifact.list`(build/ 출력 영역·정본 outputs 등록 경로·생성 receipt와 해시가 일치하는 루트 Word), `artifact.preview`(xlsx 읽기 전용 표·md 텍스트·pdf 표지)가 있습니다.
+  `project.major`는 원본의 공개 전공 계약으로 유효 바인딩만 읽습니다. renderer는 그 전공을 출력 요청의 `major_id`로
+  명시하고 원본이 정본 바인딩과 다시 대조합니다. 없거나 무효인 바인딩은 전공 확인 요청으로 돌아가며 기본 전공을 만들지 않습니다.
+  출력 취소는 전공 사전 조회부터 같은 clientId로 추적합니다. 조회 중 취소하면 main이 이미 읽기를 끝냈어도
+  후속 출력은 시작하지 않으며 UI 대기를 끝냅니다. 이미 시작한 출력은 기존 main/sidecar 취소 결과를 따릅니다.
+  진행 줄의 취소 단추는 오른쪽에 고정해 경과 시간의 숫자나 단계 문구가 바뀌어도 움직이지 않습니다.
+  만들기 성공은 상태 갱신이 끝난 뒤 `making=null`과 완료 피드백을 함께 게시합니다. 갱신 중에는
+  진행 상태와 재실행 잠금을 유지하며, 완료·진행·취소를 동시에 표시하지 않습니다.
+  `office.clean`은 요청한 job 목록 전체를 원본 cleanup_guard에 넘깁니다. 닫힌 job의 삭제와 미확인 세션의
+  보존·거절을 함께 보고하며, 일부 job이 거절되면 전체 성공으로 표시하지 않습니다.
+  출판 오류는 commit 상태와 exit 2(미반영)·3(반영 후 정리 남음)·4(반영 여부 불명)를 유지합니다.
+  잠금은 `gg_lock.inspect_lock`(구조 조회), `probe_lock`(일회성 점유 관측), `cleanup_owner`(소유 증거만 정리)를 사용합니다.
+  점유 관측은 다음 쓰기 허가가 아니며, 정리는 실제 OS guard를 재획득한 경우에만 실행합니다. PID나 기록의 나이로 해제하지 않습니다.
+  기존 정본의 v2 전환은 모든 writer 중단을 명시 확인하는 별도 오프라인 절차입니다. 자동 init·잠금 삭제·전환은 하지 않습니다.
 - `src/main/` — 인터프리터 선택(`KNUAF_PYTHON` > `<프로젝트>/.venv` > 번들 python > PATH), 사이드카 브리지, IPC, 설정.
   `file:read`는 작업 폴더 안 `.pdf`/`.md`/`.txt`만(50MB 이하) 바이트로 돌려주고, `file:save-as`는 폴더 안 파일을
   사용자가 고른 위치로 복사합니다 — 둘 다 경로가 폴더 밖으로 나가면 거절합니다.
@@ -48,17 +63,24 @@
   "매번 묻기"는 전역 확인을 켜고 기존 폴더별 예외도 지웁니다. 설정에서 전역 선택을 바꿀 수 있습니다. Windows는 첫 폴더를 열기 전에 임시 파일 쓰기 시험을 합니다.
   - 자료: intake 사실로 기록된 현재 작성물·재무 파일과 sources/ 파일 목록(현재 작성물·참고자료 구분)을 보여 줍니다.
     파일을 골라도 채팅 답변에 경로를 넣을 뿐 현재 작성물로 채택하지 않습니다(intake-selection.md).
-  - 결과물: build/ 아래 DOCX·XLSX·PDF·MD를 목록·미리보기·다른 이름 저장·외부 열기 합니다. 대화·자료·점검의
-    프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
+  - 결과물: build/ 아래의 DOCX·XLSX·PDF·MD와 `project.json.outputs` 등록 파일을 목록·미리보기·다른 이름 저장·외부 열기 합니다.
+    루트 Word는 `build_docx.py`가 발행한 동반 `.manifest.json`의 `kind: draft`·입력 해시·현재 파일 해시 일치가 있어야 포함합니다.
+    정본 등록은 `adopt_output`이 만든 `.gg-artifacts/` 관리 사본 경로를 사용합니다. 루트 원고·참고자료는 확장자만으로 포함하지 않습니다.
+    파일 목록을 열 때와 도우미 작업이 끝날 때 다시 읽으므로 정본 개정이 바뀌지 않아도 생성 파일이 반영됩니다.
+    대화·자료·점검의 프로젝트 파일 링크도 같은 미리보기 시트를 엽니다. PDF는 pdf.js (`pdfjs-dist`, Electron 37 Chromium과 맞지 않아
     `legacy` 빌드)로 그리고, DOCX는 `docx-preview`를 sandbox iframe 안에서 렌더링합니다. 그림·수식·복잡한 서식은
     일부 다를 수 있다는 안내를 표시합니다. XLSX는 사이드카가 openpyxl로 읽은 표를 그립니다(재계산 안 된 수식이 과반이면 경고).
-    **재무 엑셀 만들기**는 등록한 학생 재무 파일을 우선 복사하고, 없으면 동봉 기준 양식으로
-    새 파일을 만듭니다. 이름 충돌 때는 새 버전 이름을 쓰며 학생 원본·기존 입력값을 덮어쓰지 않습니다.
-    양식 정본은 `skills/knuaf-dev/assets/templates/finance-template.xlsx`이고,
-    `stage:skill`이 assets까지 패키징합니다. 연도별 교체도 같은 경로의 파일 하나를 교체합니다.
-    프로젝트 로컬 스킬 설치도 assets를 포함하고, 스킬 버전 해시에 XLSX 내용까지 반영합니다.
-    양식 파일만 교체해도 다음 스킬 갱신 때 구버전을 감지합니다.
-    새 사본은 입력값 채우기·실제 Excel 재계산·본문 대조가 끝난 재무 결과가 아닙니다.
+    openpyxl이 없는 실행기를 선택한 경우에는 빈 화면 대신 패키지 준비가 필요하다는 이유와
+    **원래 앱으로 열기** 안내를 표시합니다. 표 시트가 없는 파일도 빈 상태 안내를 표시합니다.
+    논문 준비가 끝나지 않아 만들 수 없으면 파일 목록에 이유와 도우미에게 준비를 요청하는 안내를 표시합니다.
+    **재무 엑셀 만들기**는 유효 전공 바인딩을 확인하고 등록한 학생 재무 파일을 우선 복사합니다. 선택한 파일의
+    읽기 실패를 동봉본으로 대체하지 않습니다. 등록 파일이 없으면 전공별 양식을 먼저 확인하도록 안내하며,
+    특용작물 전공에서 명시적으로 선택한 X01만 동봉 자산으로 만듭니다. H01·X02를 X01로 대체하지 않습니다.
+    다른 전공은 원본의 지원 출력·양식 조사 계약을 그대로 따릅니다. 새 사본은 실제 Excel 재계산·본문 대조·제출 승인이 아닙니다.
+    **재무 파일 검사**는 명시한 source → 등록된 학생 재무 파일 → source가 없을 때만 전공별 양식 순서입니다.
+    빈 입력칸도 source 생략으로 처리합니다. 학생 파일 검사는 전공 없이 가능하며, 손상·유실 오류를 동봉 양식으로 대체하지 않습니다.
+    설치는 assets와 `version.json`·`skill.json`·`install-manifest.json`을 보존하며, root metadata도 내용 fingerprint에 포함합니다.
+    프로젝트 두 공급자 설치 경로는 `.knuaf-gui/skill-install.json`에 기록해 원본 `gg_update.py auto`가 `managed`로 종료하게 합니다.
 
 스킬(`knuaf-dev`)은 전역이 아니라 프로젝트 로컬(`<프로젝트>/.claude/skills`, `<프로젝트>/.agents/skills`)에 설치됩니다.
 
@@ -95,6 +117,9 @@ Windows의 `codex.cmd`·`Path/PATH`와 설치 파일의 경로 별칭을 시험�
 대화 파일 형식과 폴더×AI 연결 열쇠는 바꾸지 않습니다.
 
 질문 카드 아래에도 같은 모델 칩이 있으며, 모델·생각 깊이를 바꿔도 질문과 직접 입력 초안은 남습니다.
+종이의 **고쳐 달라기**는 인용이 그려진 commit에서 입력칸에 초점을 옮깁니다. 여러 칸 질문은
+직접 입력칸이 실제로 마운트된 뒤 요청을 소비하며, 다음 애니메이션 프레임을 기다리지 않습니다.
+`e2e/qa2b.spec.ts`는 실제 드래그 뒤 초점과 추가 클릭 없는 키 입력을 함께 확인합니다.
 앱 화면에는 수정하지 않은 Pretendard Variable 글꼴을 오프라인으로 동봉합니다
 (SIL Open Font License 1.1, 원문 `src/renderer/src/fonts/LICENSE-Pretendard.txt`).
 질문 제목은 줄 길이를 고르고, 보기 설명은 보기 본문 아래에서 줄바꿈합니다.
@@ -115,10 +140,126 @@ INT1 회귀는 `e2e/int1.spec.ts`가 실제 prepare 실패·늦은 성공·새 �
 ```bash
 cd app
 pnpm install
-KNUAF_PYTHON=$(which python3.13) pnpm dev          # 개발 실행 (스크립트는 ../skills/knuaf-dev/scripts 를 사용)
+KNUAF_PYTHON=$(which python3.13) pnpm dev          # stage 호환 게이트 → compose 묶음으로 개발 실행
 pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
 ```
+
+`pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
+별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
+`test:e2e`·기본 Playwright 설정은 GUI용입니다. `model-chip.spec.ts`처럼 GUI와 store가 섞인 파일은
+Node 전용 목록에 추가하지 마세요. Node 검사는 정식 stage·설치본·실제 화면 검증의 대체가 아닙니다.
+
+일반 Electron E2E의 `openProject()`는 worker마다 `gg_deps.py ensure`로 준비한 실제 패키지 환경을
+각 시험 폴더의 독립 `.venv` 디렉터리로 복사한 뒤, 설정 > 문제 해결 > 준비 상태가 **준비됨**일 때 반환합니다.
+최초 seed 설치에는 pip 패키지 공급원이 필요하며 설치 실패는 그대로 시험 실패입니다. `.venv` symlink나
+IPC 성공 응답만으로 준비를 가장하지 않습니다. 의도적으로 준비를 붙잡는 시나리오는 네 번째 인자의
+`{ preparation: 'pending' }`으로 이 전제만 제외하고 실제 `deps.doctor`/`deps:ensure` 경로를 제어합니다.
+`doctor.all`은 종합 진단용이므로 준비 대기 fixture로 쓰지 않습니다.
+
+설치본 E2E의 동봉 실행기 선택 검사는 같은 `{ preparation: 'pending' }` 옵션으로 개발용 `.venv` seed와
+준비 완료 대기를 제외합니다. `bundledProject()`로 만든 폴더를 그대로 열고 실제 종이 본문과
+`sidecarInfo()`의 `running`·`bundled`·동봉 Python·스킬 경로를 확인합니다. 먼저 venv를 심으면 앱이
+정상 우선순위대로 프로젝트 venv를 골라, 동봉 실행기를 검증하는 시험 전제가 사라집니다.
+
+잠금 UI는 `lock.info`를 전체 점검(`doctor.all`)과 독립 조회합니다. 전체 점검의 의존성 import·버전 조회나
+폴더 순회가 늦어도 잠금 관찰·점유 확인·소유 기록 정리를 사용할 수 있습니다. 잠금 조회 중에는 확인 중 표시와
+비활성 재진단 단추를 보이고, 실패는 잠금 영역에 남깁니다. 잠금과 전체 점검은 요청 세대를 따로 소유하므로
+늦은 전체 점검 결과가 새 점유 관찰을 덮지 않습니다. 관측 시각·마지막 점유 기록 뒤 disabled·probe·enabled
+검사는 유지하며 고정 sleep·재시도·timeout 증가는 쓰지 않습니다. `e2e/diagnosis-feedback.spec.ts`는 이 UI
+동시성 경계에서만 `doctor.all`을 제어된 늦은 aggregate fixture로 격리합니다. 실제 `lock.info`로 정리 전
+owner를 먼저 확보해 늦은 aggregate에 넣으므로 스레드 스케줄링이나 의존성 진단 완료 속도에 기대지 않습니다.
+실제 잠금 관찰·probe·owner 정리와 정본·guard 보존을 확인한 뒤 응답을 풀고, aggregate가 화면에 반영돼도
+예전 owner가 되살아나지 않음을 확인합니다. 전체 점검 실제 경로는 `invariants.spec.ts`·`smoke.spec.ts`가
+계속 검증하며, 이 동시성 시험은 실제 점검 여러 건의 배수를 완료 조건으로 삼지 않습니다.
+DOCX는 실제 상태 갱신 응답을 보류해 진행·완료의 단일 전이를 검사합니다.
+
+Electron E2E는 각 실행의 시험 output에 `doctor-<시각>.jsonl`을 남깁니다. `KNUAF_E2E_DOCTOR_TRACE`를
+시험 helper만 지정하며, 지정하지 않은 제품 실행에는 profiling·기록이 없습니다. 전체 점검 시작·끝과 잠금·의존성·
+개별 현재/프로젝트 import·Kordoc·history·마지막 임시 파일 순회 구간의 소요를 request_id·pid로 구분합니다.
+학생 경로·본문·RPC payload·환경변수는 기록하지 않습니다. 끝이 없는 start가 있으면 그 단계가 미완료인 증거이며,
+이 기록만으로 특정 Windows 하위 원인을 미리 단정하지 않습니다. CI 실패 아티팩트에 JSONL이 함께 보존되며,
+Windows는 성공 여부와 관계없이 `doctor-timings-windows` 아티팩트로도 올립니다.
+
+`navTo(page, '자료' | '결과물')`는 종이 머리의 `head-materials` / `head-files` 단추와 그 단추의
+팝오버만 대상으로 삼습니다. 열린 자료 목록 안의 **파일 고르기…**도 `/파일/`에 걸리므로,
+머리 전체에서 부분 이름으로 첫 단추를 고르면 자료 → 결과물 전환이 파일 선택으로 잘못 갑니다.
+
+`e2e/review-baseline.spec.ts`는 열린 임시 파일의 부모를 밖으로 옮기는 경합을 검사합니다.
+Windows가 열린 자식 때문에 이동을 거절하면 그 오류의 전파와 원위치 임시 파일 정리를 검사하고,
+이동이 성공하면 외부 디렉터리의 임시·완성 파일 부재를 검사합니다. 빈 이동 디렉터리의 존재가
+보안 조건은 아니며, 어느 경로에서도 비교 기준이 발행되거나 외부 파일이 남아서는 안 됩니다.
+
+재무 파일을 등록하지 않은 생성/미리보기 시험은 양식 안내 뒤 **공용 X01 빈 양식 사용**을 명시 선택합니다.
+선택 전 출력이 없고 선택 뒤 실제 통합문서가 문서 탭에서 보이는지 확인하며, 자동 fallback을 요구하지 않습니다.
+서명된 규칙집 업데이트 UI 시험은 현재 동봉 `skill.json`의 다음 patch를 후보로 서명하고 동봉판으로 rollback합니다.
+같은 버전·다른 내용의 정상 거절을 업데이트 실패로 오인하지 않게 하는 fixture 규칙입니다.
+
+개인 `.harness.conf`나 공유 하네스를 수정할 필요가 없습니다. 종전 훅 명령인
+`.venv-dev/bin/python -m pytest`는 추적된 `tests/conftest.py`를 통해 수집 전에
+고정 pin을 오프라인으로 준비하고, 실패하면 수집 오류 대신 준비 원인과 비0 종료를 냅니다.
+CI의 `test-with-skill.mjs`도 같은 stage를 사용합니다. 직접 실행하려면 저장소 루트에서
+`node app/scripts/test-with-skill.mjs --offline --python .venv-dev/bin/python`을 사용합니다.
+캐시의 HEAD/tag·전체 상태뿐 아니라 실제 바이트를 고정 commit blob과 대조합니다.
+숨김 index 플래그로 가린 변조도 거절하며, 검증한 입력의 격리 사본으로 호환 시험을 합니다.
+준비 실패 시 예전 `resources/skill`로 통과시키지 않습니다. 상세 캐시/로컬 검증 절차는 루트 README를 따릅니다.
+
+원본은 `skill-source.json`의 고정 commit/tag, 앱 전용 차이는 `skill-overlay/`입니다.
+`stage:skill`은 W2 compose 결과를 최종 bytes 그대로 소비자·원본 내부 시험과
+`UPSTREAM_PROTECTION_TESTS`에 명시한 원본 루트 보호 시험에 넣습니다.
+이 목록은 앱에서 이관한 유효 보호에 대응하며 원본 루트 전체를 무조건 수집하지 않습니다.
+시험이 누락되거나 하나라도 실패하면 동봉을 거절합니다. 모두 성공한 경우에만
+`resources/skill/`로 동봉하며 dev/build/resource 준비·skill-release CI가 같은 게이트를 사용합니다.
+실패하면 이전 묶음을 보존하며 구판 사본으로 자동 대체하지 않습니다.
+호환 실패 메시지의 `consumer`·`upstream` 숫자는 시험 건수가 아니라 pytest 종료코드입니다(`0`은 성공).
+소비자 시험은 Kordoc 차단 예외의 `reason`·`details`(자식 종료코드·stderr 포함)와 live guard의 probe/cleanup
+응답을 실패 보고서에 남깁니다. 이 진단 출력은 stage 차단 조건을 바꾸지 않습니다.
+Windows 가짜 Kordoc은 원본 fixture처럼 shim 옆 `node_modules/kordoc/dist/cli.js`를 제공해 실제 패키지로
+넘어가지 않고 shell-free 경로를 시험합니다. 잠금 시험은 Windows의 `unavailable/busy_or_denied`와
+`lock_ambiguous` 거절을 정확히 확인하고 owner/guard 보존·해제 뒤 정리 검사를 동일하게 수행합니다.
+사이드카 시험 클라이언트는 단일 reader와 queue로 JSON-lines를 받아, 한 번에 도착한 이벤트·완료 응답을
+TextIOWrapper가 미리 읽어도 OS `select()` 대기로 잃지 않습니다. 취소 완료의 5초 제한은 유지합니다.
+
+현재 pin은 v0.4.2(`60311c11fbf12fdc04249be8c75eeaf027c06a66`)입니다.
+pin 변경 시 consumer·upstream 내부·보호별 upstream root 전체 게이트를 통과해야 하며, 시험 제외·로컬 원본 패치·낡은 stage로 성공시키지 않습니다.
+문서 소비자 보호는 최종 `SKILL.md`와 하위 `references/**/*.md`에서 퇴역 원장을
+새 기록·쓰기 대상으로 지시하는 문형과 저장 위치 표를 거절합니다. 읽기·보존·쓰기 금지
+언급은 허용합니다. 이후 원본 판이 다시 위반하면 제외 없이 거절합니다.
+
+로컬 검증용 compose는 `KNUAF_SCRIPTS_DIR=/절대/묶음/scripts`(앱)와
+`KNUAF_TEST_SCRIPTS_DIR=/절대/묶음/scripts`(pytest)로 지정합니다.
+stage를 통과하지 않은 로컬 입력은 **검증 전용**이며, `pnpm exec electron-vite build`로 띄운 화면을
+정식 stage/build·설치본 검증 통과로 집계하지 않습니다. packaged 앱은 개발 override를 무시합니다.
+
+S0는 동봉 묶음의 `skill.json` 판/API를 읽으며 암묵적 1.0.0 추정은 없습니다.
+에이전트 설치·사이드카·채팅은 같은 선택 묶음을 사용합니다. root metadata도 fingerprint에 들어가고
+재설치 시 학생 수정 사본을 skill 탐색 경로 밖으로 백업합니다.
+프로젝트 `.knuaf-gui/skill-install.json`은 양쪽 설치 경로를 표시하며, 설치본의 `gg_update.py auto`는
+`managed`로 종료하여 앱 업데이트 경로와 경쟁하지 않습니다.
+
+### 의존성 준비 계약
+
+- 합성 스킬 판은 채널의 `skill.version`과 `package.json.skillVersion`(이번 배정 1.0.1) 중 높은 값을 stage 입력으로 사용합니다.
+  앱 판·upstream 판·SKILL_API와 별개입니다. overlay.json에는 version을 추가하지 않습니다.
+  skill-release는 게시·초안 최대값의 다음 patch와 배정값을 비교해 기존 번호를 재사용하지 않습니다.
+- 폴더 열기가 성공하면 다음 비동기 조회보다 먼저 방문별 `checking`과 진행 카운터를 등록합니다.
+  `deps.doctor`는 종합 `doctor.all`과 분리하고, current Python이 아닌 프로젝트 `.venv`의 실제 import·버전 확인만 ready로 인정합니다.
+  빈/손상 진단은 blocked이며 설치를 시작하지 않습니다.
+  실패한 다른 폴더 열기는 현재 폴더 방문의 소유권을 취소하지 않습니다. 열기 요청 세대는 별도로 증가해 오래된 성공은 거절합니다.
+  main도 수동 재진단 시작 즉시 전송을 닫습니다. 현재 방문의 모든 진단이 끝나고 최신 진단이 ready일 때만 열며,
+  실패·취소·옛 방문의 응답은 최신 준비 상태를 ready로 덮지 않습니다. 설치 중 진단은 설치 전체 검증의 소유권을 빼앗지 않습니다.
+- 준비 결과는 `checking → installing → verifying → ready | blocked`입니다. 카운터 0은 성공이 아닙니다.
+  자동 준비와 수동 패키지 준비는 같은 action·root별 physical single-flight를 사용합니다. 다시 진단은 설치하지 않습니다.
+  설치 뒤 main 실행기 선택·재진단과 renderer 재조회까지 기다립니다. 오래된 방문은 현재 실행기·화면을 바꾸지 않습니다.
+- 실패·취소·agent_busy면 전송 대기를 끝내되 초안을 보존하고, 준비 오류·다시 준비 동선을 남깁니다.
+  재준비 성공이 거절된 메시지를 자동 전송하지 않습니다. 만들기도 ready 이전에는 실행하지 않습니다.
+  소유한 설치 취소/종료는 자식 pip까지 중단하며, Windows taskkill 경로는 실기기 검증이 별도로 필요합니다.
+  POSIX는 기존 TERM → wait → 그룹 KILL 순서를 유지합니다. 마지막 KILL의 PermissionError는
+  `/bin/ps`의 PGID·상태 조회로 해당 그룹에 좀비(Z) 아닌 구성원이 없음을 확인한 경우에만 허용합니다.
+  살아 있는 구성원이 있거나 조회가 실패하면 `process_stop_failed`이며, 리더 종료만으로 성공 처리하지 않습니다.
+  cancel/shutdown은 이 오류를 해당 제어 요청에 응답하고 서버를 유지합니다. 취소 실패 자체는 작업 스레드·
+  쓰기 락·pending의 수명을 바꾸지 않습니다. 이 국소 조회는 PGID 소유권/reap 경합이나 조회 뒤의 변화를
+  방지하지 않으며, 그룹을 벗어난 후손의 종료까지 증명하지는 않습니다.
 
 ## 서명된 앱 업데이트 채널 게시
 
@@ -147,6 +288,8 @@ node app/scripts/check-app-channel.mjs --channel updates/channel.json
 
 개발·테스트 전용 환경 변수:
 
+- `KNUAF_SCRIPTS_DIR=/절대/compose/묶음/scripts` — 개발 모드에서 **묶음 전체**의 원본을 선택합니다. 부모 묶음의 `skill.json`이 필요합니다. 사이드카·에이전트 설치·W1의 S0가 같은 묶음을 사용하며, 설치본에서는 무시합니다.
+- `KNUAF_TEST_SCRIPTS_DIR=/절대/compose/묶음/scripts` — pytest의 원본 선택. 예: 저장소 루트에서 `KNUAF_TEST_SCRIPTS_DIR=… .venv-dev/bin/python -m pytest tests/test_sidecar.py tests/test_sidecar_read_all.py tests/test_sidecar_publication.py`.
 - `KNUAF_CLAUDE_MODEL=sonnet` — Claude 채팅 SDK 세션에 `model`을 고정합니다(테스트 전용).
 - `KNUAF_DRY_LAUNCH=1` — 외부 터미널 실행 스크립트를 쓰기만 하고 열지 않습니다(테스트 전용).
 - `KNUAF_LIVE=1` — `e2e/live-*.spec.ts`를 포함해 실행합니다. 실제 Claude/Codex 로그인과 구독 사용량이 필요하므로 기본 실행에서는 제외됩니다.
@@ -163,14 +306,26 @@ pnpm dist:mac           # 또는 pnpm dist:win
 먼저 준비합니다. 개별로 돌리려면:
 
 ```bash
+pnpm stage:skill        # 고정 knuaf-doc + 앱 overlay → 호환 게이트 → resources/skill
 pnpm fetch:python       # python-build-standalone 3.12 → resources/python
-pnpm build:wheelhouse   # openpyxl·python-docx·lxml·pypdf 휠 → resources/wheelhouse
-pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png
-pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf
-pnpm stage:skill        # ../skills/knuaf-dev → resources/skill
+pnpm build:wheelhouse   # staged 요구·bundled ABI/대상별 휠 검증 + 동봉 Python에 미리보기용 openpyxl 설치
+pnpm build:icons        # build/clay-icons/*.png → iconset·icns·ico·png (Chromium 실행)
+pnpm build:guide        # docs/학생용-사용안내.md → .html·.pdf (Chromium 실행)
+pnpm build:guide --html-only  # 브라우저 금지 환경: HTML만 갱신, PDF는 그대로
 ```
 
-번들 python은 `gg_deps.py ensure`의 base 인터프리터로만 쓰이고, 패키지는 계약대로 `<프로젝트>/.venv`에 설치됩니다.
+번들 Python은 사이드카 실행과 `gg_deps.py ensure`의 base 인터프리터로 쓰입니다.
+XLSX 미리보기는 프로젝트 패키지 준비 전에도 동작해야 하므로 `build:wheelhouse`가 동봉 Python에
+openpyxl과 그 의존성(et-xmlfile)만 오프라인으로 설치하고 import를 확인합니다. 기존 휠하우스를
+재사용해도 이 설치·확인은 생략하지 않습니다. 논문 작성·문서 도구의 나머지 패키지는 기존대로
+`<프로젝트>/.venv`에 설치됩니다. 명시적 실행기·프로젝트 venv·관리 런타임의 선택 우선순위는 바꾸지 않습니다.
+wheelhouse는 `.Complete`의 요구 파일·manifest·명세·동봉 Python ABI/대상·wheel 해시가 모두 맞을 때만 재사용합니다.
+동봉 Python이 없거나 PYTHON override/교차 대상이면 빌드를 거절합니다. 오프라인 설치 실패 후 온라인 재시도는
+두 단계의 원인을 보존하며, 취소 뒤에는 다음 설치 단계를 시작하지 않습니다.
+
+XLSX 렌더러 회귀: `pnpm -C app exec playwright test xlsx-preview.spec.ts`.
+이 스펙은 Electron을 실행하지 않지만 headless Chromium을 실행하므로 브라우저 금지 환경에서는 실행하지 않습니다.
+Windows 분기는 브리지의 platform 값으로 확인하므로 Windows 설치본 실기기 검증을 대신하지 않습니다.
 
 ## 지키는 규칙 (스킬 문서에서 옴)
 
@@ -178,6 +333,6 @@ pnpm stage:skill        # ../skills/knuaf-dev → resources/skill
 - 학생에게 JSON·명령어·모델 선택을 요구하지 않음(`SKILL.md:15`).
 - 기계검사 / 내용검토 / 출력검토 / 교수 승인 4레인을 하나로 합치지 않음(`SKILL.md:34`). 진행률 % 없음.
 - 유효한 독립검토가 없으면 최상단에 `독립검토 미실행` 배너.
-- 잠금은 같은 기기에서 종료된 프로세스의 것만 해제(`section-ledger.md`). 산출물은 절대 덮어쓰지 않음.
+- 잠금 구조·점유 관측은 분리합니다. 실제 guard를 점유할 수 있을 때만 남은 소유 기록을 정리하며 살아 있는 작업을 끊거나 guard를 삭제하지 않습니다.
 - AI 도우미를 연결하면 답변과 작업 폴더의 내용이 선택한 제공업체(OpenAI 또는 Anthropic)로 전송됨.
   앱 자체는 그 외 어디에도 자료를 보내지 않음.

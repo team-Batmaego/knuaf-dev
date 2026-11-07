@@ -11,6 +11,7 @@ import zipfile
 import pytest
 
 import gg_excel_fill as fill
+from conftest import bound_test_context
 
 openpyxl = pytest.importorskip("openpyxl")
 
@@ -87,7 +88,7 @@ def files(tmp_path, template, entries, values):
 
 def run(tmp_path, template, entries, values, out_name="채운 사본.xlsx"):
     m, v = files(tmp_path, template, entries, values)
-    return fill.fill_copy(template, m, v, tmp_path / out_name)
+    return fill.fill_copy(template, m, v, tmp_path / out_name, context=bound_test_context(tmp_path))
 
 
 # --- the happy path, and what must survive it --------------------------------
@@ -187,7 +188,7 @@ def test_a_template_changed_since_review_is_refused(tmp_path, template):
     wb[SHEET]["C1"] = 999            # the reviewed file is not this file any more
     wb.save(template)
     with pytest.raises(RuntimeError, match="template version changed"):
-        fill.fill_copy(template, m, v, tmp_path / "out.xlsx")
+        fill.fill_copy(template, m, v, tmp_path / "out.xlsx", context=bound_test_context(tmp_path))
 
 
 def test_an_existing_output_is_never_overwritten(tmp_path, template):

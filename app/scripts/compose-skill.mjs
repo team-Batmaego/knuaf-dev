@@ -54,19 +54,40 @@ export function overlayHash(overlay) {
 export function checkSource(source, upstream) {
   if (source.repo !== 'starceas/knuaf-doc' || !/^v\d+\.\d+\.\d+$/.test(source.tag) ||
       !/^[a-f0-9]{40}$/.test(source.commit)) throw new Error('Invalid pinned source')
-  const git = (...args) => execFileSync('git', ['-C', upstream, ...args], { encoding: 'utf8' }).trim()
+  const git = (...args) => execFileSync('git', ['--no-replace-objects', '-C', upstream, ...args], { encoding: 'utf8' }).trim()
   if (git('rev-parse', 'HEAD') !== source.commit || git('rev-parse', `${source.tag}^{commit}`) !== source.commit) {
     throw new Error('Source HEAD/tag does not match pinned commit')
   }
-  // The composed bytes must come from the pinned tree, not local modifications.
-  if (git('status', '--porcelain', '--untracked-files=all', '--', 'skills/knuaf-doc')) {
-    throw new Error('Source skill tree is dirty')
+  // Compatibility also executes root tests/docs. Cached ignored files must not change either input.
+  if (git('status', '--porcelain', '--untracked-files=all', '--ignored=matching')) {
+    throw new Error('Source checkout is dirty (including ignored files)')
   }
+  // Read the pinned tree's blob identities, never the cache index/stat cache.
+  // Return the verified buffers so composition and compatibility can share a frozen input.
+  const files = new Map(), executable = []
+  for (const entry of git('ls-tree', '-r', '-z', '--full-tree', source.commit).split('\0')) {
+    if (!entry) continue
+    const tab = entry.indexOf('\t')
+    const [mode, type, expected] = entry.slice(0, tab).split(' ')
+    const path = safePath(entry.slice(tab + 1)), full = resolve(upstream, path)
+    if (type !== 'blob' || (mode !== '100644' && mode !== '100755') || !lstatSync(full).isFile()) {
+      throw new Error(`Unsupported pinned source file: ${path}`)
+    }
+    const bytes = readFileSync(full)
+    const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
+    if (actual !== expected) throw new Error(`Source file differs from pinned commit: ${path}`)
+    files.set(path, bytes)
+    if (mode === '100755') executable.push(path)
+  }
+  return { files, executable }
 }
 
 export function compose({ upstream, source, overlay, version, api = 1 }) {
-  checkSource(source, upstream)
-  return composeFiles(readTree(resolve(upstream, 'skills/knuaf-doc')), { source, overlay, version, api })
+  const { files } = checkSource(source, upstream), skill = new Map()
+  for (const [path, bytes] of files) {
+    if (path.startsWith('skills/knuaf-doc/')) skill.set(path.slice('skills/knuaf-doc/'.length), bytes)
+  }
+  return composeFiles(skill, { source, overlay, version, api })
 }
 
 export function composeFiles(input, { source, overlay, version, api = 1 }) {

@@ -27,7 +27,7 @@ import { fakeCodexEnv, scratch, writeFakeClaude } from './fixtures/fake-codex'
 
 const app = resolve(__dirname, '..')
 const repo = resolve(app, '..')
-const scripts = join(repo, 'skills', 'knuaf-dev', 'scripts')
+const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
 /** 앱을 숨김 실행으로 띄운다 — helpers.launch() 와 달리 창 크기를 손대지 않는다. */

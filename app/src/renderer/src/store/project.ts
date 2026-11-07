@@ -1,13 +1,18 @@
 import { create } from 'zustand'
-import { usePrep } from './prep'
+import { usePrep, type DependencyPreparation } from './prep'
 import type { ArtifactItem, MaterialsData, ProjectPeek, SectionRow, Settings, SidecarInfo, Status } from '../../../shared/types'
 import type { StageBuildTree } from '../../../shared/stage'
-import type { ProjectLoad } from '../rpc'
+import type { EventHandler, ProjectLoad } from '../rpc'
 import { CHAT, HELPER, describeError, type DescribedError } from '../copy'
-import { rpc } from '../rpc'
+import { rpc, RpcFailure } from '../rpc'
 import { chatProvider, resolveChatMode, useChat } from './chat'
 import { chosenProvider, useConnect } from './connect'
 import type { Provider } from '../../../shared/chat'
+import { useReview, type ReviewEdit } from './review'
+
+export type DocReturn = { view: 'chat' | 'paper'; key: string }
+export type ListIntent = { seq: number; kind: 'materials' | 'files' }
+export type PaperEvent = { id: string; sectionId: string; title: string; at: string; edit: ReviewEdit | null }
 
 /**
  * 지금 대화할 공급자 — **화면(`Chat`)이 계산하는 것과 같은 규칙**을 쓴다(store/connect 의
@@ -42,7 +47,6 @@ interface ProjectState {
   hasProject: boolean
   status: Status | null
   peek: ProjectPeek | null
-  depsReady: boolean | null
   loading: boolean
   error: DescribedError | null
   /**
@@ -69,10 +73,21 @@ interface ProjectState {
   /** First-folder permission consent is global; the main process gates every project:open caller. */
   firstProjectGate: { root: string; kind: 'permission' | 'write-error' } | null
   sheet: Screen | null
-  /** Absolute target for the single-file preview overlay; it can sit over Checkup without replacing it. */
-  previewPath: string | null
   previewNotice: { title: string; body: string } | null
   previewFocusReturn: PreviewFocusReturn | null
+  docPath: string | null
+  paneTab: 'paper' | 'file'
+  paneHold: boolean
+  docReturn: DocReturn | null
+  foldNotice: boolean
+  listIntent: ListIntent | null
+  quoteIntent: { seq: number } | null
+  setPaneTab: (tab: 'paper' | 'file') => void
+  openList: (kind: 'materials' | 'files') => void
+  consumeListIntent: (seq: number) => void
+  requestQuote: () => void
+  consumeQuoteIntent: (seq: number) => void
+  setFoldNotice: () => void
   settingsFocus: SettingsFocus
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
@@ -136,7 +151,7 @@ interface ProjectState {
    * 대화 기록 파일(`chat-<provider>.json`)에는 쓰지 않는다. 절 제목은 `section.read`가 아니라
    * `project.sections`에서 가져온다(도우미 글의 머리 배너를 되뇌지 않기 위함).
    */
-  events: { id: string; sectionId: string; title: string; at: string }[]
+  events: PaperEvent[]
   /** 종이에서 어느 장으로 갈지 — 대화 이벤트 줄의 "종이에서 보기"가 세운다. */
   focusedSection: string | null
   focusSection: (id: string | null) => void
@@ -154,8 +169,8 @@ interface ProjectState {
   /** 정본이 생겼는지, 그리고 읽어 둔 것보다 기록이 올랐는지 — project.json 만 읽는다. */
   watchCanon: () => Promise<void>
   refreshSidecar: () => Promise<void>
-  refreshDeps: () => Promise<void>
-  prepareDeps: (root: string) => Promise<void>
+  prepareDeps: (root: string, options?: { onEvent?: EventHandler; clientId?: string; install?: boolean }) => Promise<DependencyPreparation>
+  cancelDeps: (operationId: string) => Promise<boolean>
   clearError: () => void
   helper: { open: boolean; status: any | null; result: { title: string; body?: string; kind: 'claude' | 'codex' } | null; error: DescribedError | null }
   openHelper: () => Promise<void>
@@ -182,26 +197,28 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  * 앱을 켠 직후 첫 읽기에서는 아무 일도 알리지 않는다.
  */
 let sectionHashes: Record<string, string> | null = null
+let sectionRequest = 0
+let listRequest = 0
 /** 읽는 중에 또 읽지 않는다 — 감시 타이머가 사이드카를 겹쳐 띄우지 않게. */
 let statusInFlight = false
 /** 조용한 갱신이 잇따라 실패하면 그때는 말한다 — 한 번은 도우미가 쓰는 중일 수 있다. */
 let quietFailures = 0
 /**
- * 폴더 열기의 세대 = **방문**. `open()` 이 부를 때마다 하나 오른다. 늦게 깨어난 비동기 단계는 자기가 시작한
- * 방문이 아직 지금 방문인지 보고, 아니면 아무것도 쓰지 않고 다음 조회도 시작하지 않는다(검토 CI43-R1-01,
- * OPEN-STALE-R1-01·02).
- *
- * 폴더 이름(root)만 비교하면 A→B→A 에서 막지 못한다. 첫 A 방문의 응답은 B 를 거쳐 다시 연 A 에서도 root 가
- * 같아 통과해 지금 방문의 상태를 덮는다. 이전 방문과 지금 방문을 가르는 것은 폴더가 아니라 "몇 번째 열기인가"다.
+ * 열기 요청 세대와 실제 게시된 방문은 구별한다. 실패한 열기는 화면에 남은 폴더의 준비·조회 소유권을
+ * 빼앗지 않는다. 요청 세대는 단조 증가시켜 더 오래된 성공 응답을 계속 거절한다.
+ * 성공한 A→B→A 는 방문도 달라지므로 첫 A의 늦은 응답이 새 A를 덮을 수 없다.
  */
 let openSeq = 0
+let intentSeq = 0
+let currentVisit = 0
+const dependencyRuns = new Map<string, { visit: number; operationId: string; cancelled: boolean; installRequested: boolean; promise: Promise<DependencyPreparation> }>()
 /**
  * 지금 시작하는 비동기 단계의 소유자 확인. 시작 시점의 방문과 폴더를 잡아 두고, 응답 뒤에 둘 다 그대로인지
  * 돌려준다 — 열기·갱신·감시·목록 읽기·준비가 모두 **같은 기준**을 쓴다.
  */
 function visitOf(root: string): () => boolean {
-  const seq = openSeq
-  return () => openSeq === seq && useProject.getState().root === root
+  const visit = currentVisit
+  return () => currentVisit === visit && useProject.getState().root === root
 }
 
 export const useProject = create<ProjectState>((set, get) => ({
@@ -210,7 +227,6 @@ export const useProject = create<ProjectState>((set, get) => ({
   hasProject: false,
   status: null,
   peek: null,
-  depsReady: null,
   loading: false,
   error: null,
   openFailure: null,
@@ -219,9 +235,25 @@ export const useProject = create<ProjectState>((set, get) => ({
   sidecar: null,
   settings: null,
   sheet: null,
-  previewPath: null,
   previewNotice: null,
   previewFocusReturn: null,
+  docPath: null,
+  paneTab: 'paper',
+  paneHold: false,
+  docReturn: null,
+  foldNotice: false,
+  listIntent: null,
+  quoteIntent: null,
+  setPaneTab: (paneTab) => set({ paneTab: paneTab === 'file' && !get().docPath ? 'paper' : paneTab }),
+  openList: (kind) => {
+    if (get().sheet) get().closeSheet()
+    if (get().paperClosed) get().setPaperClosed(false)
+    set({ paneHold: true, paneTab: 'paper', paneView: 'paper', listIntent: { seq: ++intentSeq, kind } })
+  },
+  consumeListIntent: (seq) => set((s) => s.listIntent?.seq === seq ? { listIntent: null } : s),
+  requestQuote: () => set({ paneView: 'chat', quoteIntent: { seq: ++intentSeq } }),
+  consumeQuoteIntent: (seq) => set((s) => s.quoteIntent?.seq === seq ? { quoteIntent: null } : s),
+  setFoldNotice: () => { if (get().paperClosed) set({ foldNotice: true }) },
   settingsFocus: null,
   logs: [],
   sections: null,
@@ -236,16 +268,23 @@ export const useProject = create<ProjectState>((set, get) => ({
   paneView: 'chat',
   events: [],
   focusedSection: null,
-  openSheet: (sheet) => { set({ sheet, ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
+  openSheet: (sheet) => { set({ sheet, ...(sheet === 'checkup' ? { paneTab: 'paper' as const } : {}), ...(sheet === 'settings' ? {} : { settingsFocus: null }) }); location.hash = sheet },
   closeSheet: () => { set({ sheet: null, settingsFocus: null }); location.hash = '' },
   openPreview: (path, fallback = null) => {
     const active = typeof document === 'undefined' ? null : document.activeElement
-    const trigger = active instanceof HTMLElement && active !== document.body ? active : null
-    set({ previewPath: path, previewNotice: null, previewFocusReturn: { trigger, fallback } })
+    const trigger = typeof HTMLElement !== 'undefined' && active instanceof HTMLElement && active !== document.body ? active : null
+    const keyed = trigger?.closest<HTMLElement>('[data-focus-key]')
+    const returnTo: DocReturn = keyed?.dataset.focusKey
+      ? { view: keyed.closest('.paperpane') ? 'paper' : 'chat', key: keyed.dataset.focusKey }
+      : { view: get().sheet === 'checkup' || !!fallback ? 'paper' : 'chat', key: get().sheet === 'checkup' ? 'head-action' : fallback?.dataset.focusKey ?? '' }
+    if (get().paperClosed) get().setPaperClosed(false)
+    set({ docPath: path, paneTab: 'file', paneHold: true, paneView: 'paper', docReturn: returnTo, sheet: null, previewNotice: null, previewFocusReturn: { trigger, fallback } })
   },
   closePreview: () => {
     const focusReturn = get().previewFocusReturn
-    set({ previewPath: null, previewNotice: null, previewFocusReturn: null })
+    const hasSections = !!get().sections?.length
+    const view = hasSections ? get().docReturn?.view ?? 'paper' : 'chat'
+    set({ docPath: null, paneTab: 'paper', paneHold: hasSections && get().paneHold, paneView: view, docReturn: null, previewNotice: null, previewFocusReturn: null })
     return focusReturn
   },
   setPreviewNotice: (previewNotice) => set({ previewNotice }),
@@ -274,17 +313,36 @@ export const useProject = create<ProjectState>((set, get) => ({
     if (!root) { set({ sections: null }); return }
     // 이 읽기를 시작한 방문. A→B→A 에서 첫 A 방문의 늦은 응답은 root 가 같아도 지금 방문의 것이 아니다 —
     // 옛 목록으로 덮으면 지금 방문의 status 는 이미 최신 개정이라 주기 감시가 다시 읽지 않는다(검토 OPEN-STALE-R1-01).
-    const mine = visitOf(root)
+    const visit = visitOf(root)
+    const request = ++sectionRequest
+    const mine = () => visit() && request === sectionRequest
     try {
       const rows = await rpc.sections(root)
       if (!mine()) return
-      set({ sections: rows })
       const prev = sectionHashes
+      const changed = rows.filter((r) => !prev || prev[r.id] !== r.draft_hash)
+      const events: PaperEvent[] = []
+      if (changed.length) {
+        const bodies = await rpc.readAllSections(root).catch(() => [])
+        if (!mine()) return
+        for (const row of changed) {
+          const body = bodies.find((item) => item.id === row.id)
+          let edit: ReviewEdit | null = null
+          if (body) {
+            try {
+              await useReview.getState().noteSeen(root, row.id, { title: body.title, draft: body.draft, hash: row.draft_hash })
+              if (!mine()) return
+              edit = useReview.getState().editOf(root, row.id, row.draft_hash)
+            } catch { /* The save still happened even if the comparison baseline could not be read. */ }
+          }
+          if (prev && (prev[row.id] !== undefined || (row.draft_chars ?? body?.draft.length ?? 0) > 0)) {
+            events.push({ id: `${row.id}:${row.revision}`, sectionId: row.id, title: row.title, at: new Date().toISOString(), edit })
+          }
+        }
+      }
+      if (!mine()) return
       sectionHashes = Object.fromEntries(rows.map((r) => [r.id, r.draft_hash]))
-      // 폴더를 연 뒤 첫 판정에서는 알리지 않는다 — 그때는 모든 절이 "처음 보는" 것이다.
-      if (!prev) return
-      const wrote = rows.filter((r) => prev[r.id] !== undefined && prev[r.id] !== r.draft_hash)
-      if (wrote.length) set((s) => ({ events: [...s.events, ...wrote.map((r) => ({ id: `${r.id}:${r.draft_hash}`, sectionId: r.id, title: r.title, at: new Date().toISOString() }))].slice(-20) }))
+      set((s) => ({ sections: rows, events: [...s.events, ...events].slice(-20), foldNotice: s.foldNotice || (s.paperClosed && events.length > 0) }))
     } catch {
       // 읽지 못한 것을 "등록된 절이 없다"로 꾸미지 않는다 — null 은 모른다는 뜻이다.
       if (mine()) set({ sections: null })
@@ -294,6 +352,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   loadLists: async () => {
     const root = get().root
     if (!root) { set({ materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null }); return }
+    const request = ++listRequest
     const mine = visitOf(root)
     const [m, a, tree, load] = await Promise.all([
       rpc.materials(root).catch(() => null),
@@ -303,7 +362,7 @@ export const useProject = create<ProjectState>((set, get) => ({
       rpc.buildTree(root).catch(() => null),
       rpc.load(root).catch(() => null)
     ])
-    if (!mine()) return
+    if (!mine() || request !== listRequest) return
     set({
       materials: m,
       artifacts: 'v' in a ? a.v.items : null,
@@ -315,7 +374,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   focusSection: (focusedSection) => set({ focusedSection }),
   setPaperClosed: (closed) => {
     const root = get().root
-    set({ paperClosed: closed })
+    set({ paperClosed: closed, ...(!closed ? { foldNotice: false } : {}) })
     if (!root) return
     const prefs = { ...(get().settings?.ui_prefs ?? {}) }
     prefs[root] = { ...prefs[root], paperClosed: closed }
@@ -350,14 +409,18 @@ export const useProject = create<ProjectState>((set, get) => ({
       return d
     }
     const opened = r.result
-    const peek = await window.knuaf.peekProject(root)
-    if (superseded()) return null
+    // Publish this visit and register checking before the first follow-up await.
     const settings = get().settings
+    currentVisit = seq
     set({
-      root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek, depsReady: null, firstProjectGate: null,
+      root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek: null, firstProjectGate: null,
       // 폴더마다 다른 취향이므로 폴더가 바뀌면 여기서 다시 읽는다(전역 settings 는 그대로).
       paperClosed: settings?.ui_prefs?.[root]?.paperClosed === true
     })
+    void get().prepareDeps(root)
+    const peek = await window.knuaf.peekProject(root)
+    if (superseded()) return null
+    set({ peek })
     // 시트는 폴더가 바뀌면 닫는다 — 다른 논문의 점검·자료가 떠 있으면 안 된다.
     // 이동은 성공이 확정된 여기서 한다 — 아래 refresh() 는 파이썬 스폰이라 몇 초
     // 걸리는데, 그 사이 학생이 다른 것을 열면 늦게 온 이동이 되돌려 버렸다.
@@ -367,7 +430,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.
     sectionHashes = null
-    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat' })
+    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat', paneHold: false, docReturn: null, foldNotice: false, listIntent: null, quoteIntent: null, paneTab: 'paper', docPath: null })
     canonPoll = setInterval(() => { void get().watchCanon() }, 2000)
     // 도우미가 하위 폴더에 init한 경우 — 빈 화면으로 두지 않고 어디에 만들었는지 알린다.
     const nested = opened.nestedProject
@@ -379,35 +442,77 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 학생이 그 사이 다른 폴더를 눌렀다 — 준비·대화 읽기는 새 열기가 한다. 여기서 이전 폴더로 대화를 읽기
     // 시작하면 지금 폴더의 대화·오류 줄이 잠깐 비고, 그 틈에 누른 닫기가 사라진다(검토 CI43-R1-01).
     if (superseded()) return null
-    // 준비는 폴더를 여는 순간 백그라운드로 시작하고 실패만 표면화한다(03-화면/01 결정).
-    // 옮겨 온 폴더도 deps가 비어 있을 수 있으니 매번 확인한다 — 준비됐으면 아무 일도 없다.
-    void get().prepareDeps(root)
     // 화면이 쓸 공급자를 **같이 넘긴다** — 안 넘기면 화면이 곧바로 다른 공급자로 다시 읽어
     // 대화를 한 번 비운다(위 chatProviderNow 주석).
     void useChat.getState().load(root, chatProviderNow())
     return null
   },
-  /** Quiet deps.ensure after refreshDeps reports not-ready; only a failure is surfaced. */
-  prepareDeps: async (root) => {
-    // 이 준비를 시작한 방문. 떠난 방문의 조회 결과·실패는 지금 방문의 준비 상태와 오류 줄에 쓰지 않는다
-    // (검토 OPEN-STALE-R1-02). 지금 방문이 아니면 추가 조회(설치·재확인)도 시작하지 않는다.
+  prepareDeps: (root, options) => {
+    const visit = currentVisit
+    const previous = dependencyRuns.get(root)
+    if (previous?.visit === visit) {
+      if (options?.install !== false) previous.installRequested = true
+      return previous.promise
+    }
     const mine = visitOf(root)
-    await get().refreshDeps()
-    if (!mine() || get().depsReady !== false) return
-    type DepsReply = { result?: { ok?: boolean; block_reason?: string | null; stderr?: string }; error?: { code?: string; message?: string } }
-    // 준비하는 동안 대화 전송은 기다리고 화면은 진행 표시를 띄운다(store/prep.ts).
-    usePrep.getState().begin(root)
-    // 작업 수는 방문과 상관없이 실제로 끝났을 때 줄인다 — 떠났다고 건너뛰면 그 폴더의 전송 대기가 남는다.
-    const r: DepsReply = await window.knuaf.depsEnsure(root).catch((e: unknown) => ({ error: { message: String(e) } }))
-      .finally(() => usePrep.getState().end(root))
-    if (!mine()) return
-    if ('result' in r && r.result?.ok) { void get().refreshDeps(); return }
-    // 터미널 도우미가 작업 중이면 sidecar가 쓰기를 거절한다 — 실패가 아니라 바쁨이니 조용히 넘긴다.
-    if ('error' in r && r.error?.code === 'agent_busy') return
-    const detail = 'result' in r
-      ? (r.result?.block_reason ?? r.result?.stderr?.trim().split('\n').filter(Boolean).at(-1) ?? 'deps.ensure failed')
-      : String(r.error?.message ?? 'deps.ensure failed')
-    set({ error: { kind: 'warning', title: CHAT.prepFailedTitle, action: '"설정 > 문제 해결"의 "준비 상태"를 확인해 주세요.', code: 'deps_ensure', raw: detail } })
+    const operationId = options?.clientId ?? rpc.newClientId()
+    const prep = usePrep.getState()
+    prep.startDependency(root, visit, operationId)
+    prep.begin(root)
+    const promise = (async (): Promise<DependencyPreparation> => {
+      let phase: 'checking' | 'installing' | 'verifying' = 'checking'
+      let result: DependencyPreparation = { visit, operationId, phase: 'blocked' }
+      const live = (): void => {
+        const active = dependencyRuns.get(root)
+        if (active?.operationId === operationId && active.cancelled) throw new RpcFailure({ code: 'cancelled', message: '준비를 취소했어요.' })
+        if (!mine()) throw new RpcFailure({ code: 'cancelled', message: '다른 폴더 방문으로 준비를 중단했어요.' })
+      }
+      try {
+        // A→B→A joins the old physical operation, then diagnoses its own visit.
+        if (previous) await previous.promise
+        live()
+        let report = await rpc.depsDoctor(root, operationId, options?.onEvent)
+        live()
+        prep.updateDependency(root, operationId, { report })
+        if (!report.ready) {
+          if (options?.install === false && !dependencyRuns.get(root)?.installRequested) throw new RpcFailure({ code: 'deps_required', message: '프로젝트 .venv를 준비해야 해요.' })
+          phase = 'installing'
+          prep.updateDependency(root, operationId, { phase, report })
+          const reply = await window.knuaf.depsEnsure(root, options?.onEvent, operationId)
+          live()
+          if (reply.error) throw new RpcFailure(reply.error)
+          if (!reply.result?.ok) throw new RpcFailure({
+            code: 'deps_ensure', message: reply.result?.block_reason || reply.result?.stderr || '패키지 설치 실패', data: reply.result
+          })
+          phase = 'verifying'
+          prep.updateDependency(root, operationId, { phase })
+          await get().refreshSidecar()
+          live()
+          report = await rpc.depsDoctor(root, operationId, options?.onEvent)
+          live()
+          if (!report.ready) throw new RpcFailure({ code: 'deps_verify', message: '프로젝트 .venv의 import·버전 확인을 통과하지 못했어요.', data: report })
+        }
+        result = { visit, operationId, phase: 'ready', report }
+      } catch (error) {
+        const failure = error as { code?: string; message?: string; data?: unknown }
+        if (failure.code === 'deps_verify' || (failure.data && typeof failure.data === 'object' && 'phase' in failure.data && failure.data.phase === 'verifying')) phase = 'verifying'
+        result = { visit, operationId, phase: 'blocked', error: {
+          code: failure.code ?? 'deps_doctor', phase,
+          message: (failure.message ?? String(error)) + (failure.data ? '\n' + JSON.stringify(failure.data) : '')
+        } }
+      } finally {
+        if (mine()) prep.updateDependency(root, operationId, result)
+        prep.end(root)
+        if (dependencyRuns.get(root)?.visit === visit) dependencyRuns.delete(root)
+      }
+      return result
+    })()
+    dependencyRuns.set(root, { visit, operationId, cancelled: false, installRequested: options?.install !== false, promise })
+    return promise
+  },
+  cancelDeps: async (operationId) => {
+    for (const active of dependencyRuns.values()) if (active.operationId === operationId) active.cancelled = true
+    return rpc.cancel(operationId)
   },
   /**
    * hasProject 와 status 는 폴더를 열 때 한 번 정해진다. 도우미가 그 뒤에 정본을
@@ -471,13 +576,12 @@ export const useProject = create<ProjectState>((set, get) => ({
     set({ error: err, retryFailed: { root } })
     return false
   },
-  refreshSidecar: async () => set({ sidecar: await window.knuaf.sidecarInfo() }),
-  refreshDeps: async () => {
+  refreshSidecar: async () => {
     const root = get().root
     if (!root) return
     const mine = visitOf(root)
-    // 떠난 방문의 doctor 응답이 지금 방문의 준비 상태를 바꾸지 않게 한다(검토 OPEN-STALE-R1-02).
-    try { const d = await rpc.doctor(root); if (mine()) set({ depsReady: !!d.deps?.ready }) } catch { if (mine()) set({ depsReady: null }) }
+    const sidecar = await window.knuaf.sidecarInfo()
+    if (mine()) set({ sidecar })
   },
   // 오류 카드를 닫으면 그 요청의 실패 정보·복구 실패 표시도 같이 지운다 — 버튼이 사라진 뒤
   // 재시도 대상만 남지 않게.

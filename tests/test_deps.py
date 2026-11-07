@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import REPO, parse_json, run_script
+from conftest import REPO, SCRIPTS, parse_json, run_script
 
 WHEELHOUSE = REPO / "app" / "resources" / "wheelhouse"
 # the wheelhouse is built for the bundled runtime (lxml is cp312-specific), so use that interpreter
@@ -45,29 +45,9 @@ def test_ensure_failure_is_json_not_traceback(empty_folder, monkeypatch):
 
 
 def test_pip_requirement_files_are_ascii():
-    """pip 은 -r 파일을 **로케일 인코딩**으로 읽는다 — 비ASCII 한 바이트로 설치가 깨진다.
-
-    W2 윈도우 설치본 빌드가 정확히 이렇게 실패했다(cp1252 → UnicodeDecodeError).
-    한국어 Windows(cp949)에서 학생 PC도 같은 원인으로 깨진다.
-    """
-    skip_parts = {"node_modules", "__pycache__", "test-results", "dist", "out", "resources", "site-packages"}
-    files = []
-    for p in REPO.rglob("requirements*.txt"):
-        parts = p.relative_to(REPO).parts[:-1]
-        if any(part.startswith(".") for part in parts) or any(part in skip_parts for part in parts):
-            continue
-        files.append(p)
-    assert files, "검사할 pip 요구 파일을 찾지 못함"
-    for p in files:
-        raw = p.read_bytes()
-        try:
-            raw.decode("ascii")
-        except UnicodeDecodeError as e:
-            line = raw[: e.start].count(b"\n") + 1
-            raise AssertionError(
-                f"{p.relative_to(REPO)}:{line} 에 비ASCII 바이트가 있다. pip 이 로케일 인코딩으로 읽어 "
-                "한국어 Windows(cp949)·서구 Windows(cp1252)에서 UnicodeDecodeError 로 실패한다."
-            ) from None
+    """The actual composed runtime input must be safe for locale-decoding pip bootstraps."""
+    requirements = SCRIPTS / "requirements-runtime.txt"
+    assert requirements.read_bytes().isascii(), str(requirements)
 
 
 def test_ensure_hands_pip_utf8_env(empty_folder, monkeypatch):

@@ -1,0 +1,50 @@
+.splash {
+  position: fixed; inset: 0; z-index: 10000; overflow: hidden;
+  background: #101a13; color: #f4efe4; cursor: default;
+  font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  -webkit-app-region: no-drag;
+  transition: opacity .3s linear;
+}
+.splash--fading { opacity: 0; }
+.splash__stage {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(100vw, 160vh); aspect-ratio: 8 / 5; container-type: inline-size;
+  --sun-x: 66.875%; --sun-y: 22.833333333%;
+}
+.splash__art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.splash__rays {
+  position: absolute; inset: 0; pointer-events: none;
+  transform-origin: var(--sun-x) var(--sun-y);
+  background: radial-gradient(circle at var(--sun-x) var(--sun-y), rgba(255,224,158,.55) 0%, rgba(255,196,96,.22) 34%, transparent 62%);
+  animation: splash-glow 4.5s ease-in-out forwards;
+}
+.splash__rays i {
+  position: absolute; left: var(--sun-x); top: var(--sun-y); width: 146vmax; height: 146vmax;
+  margin: -73vmax 0 0 -73vmax; opacity: .5;
+  background: conic-gradient(transparent 0deg, rgba(255,222,150,.34) 5deg, transparent 11deg 46deg, rgba(255,222,150,.26) 52deg, transparent 58deg 96deg, rgba(255,222,150,.3) 102deg, transparent 108deg 150deg, rgba(255,222,150,.22) 157deg, transparent 164deg 206deg, rgba(255,222,150,.28) 213deg, transparent 220deg 262deg, rgba(255,222,150,.24) 269deg, transparent 276deg 318deg, rgba(255,222,150,.3) 325deg, transparent 332deg);
+  mask-image: radial-gradient(circle, #000 0%, #000 28%, transparent 62%);
+  animation: splash-turn 4.5s ease-in-out forwards;
+}
+.splash__particles { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.splash__particles i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: #f0d49a; box-shadow: 0 0 6px rgba(240,212,154,.55); animation: splash-pollen 6s linear infinite; }
+.splash__copy { position: absolute; left: 0; right: 0; bottom: 1%; height: 33.7%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.splash__name { color: #f4efe4; font-size: clamp(24px, 4.2cqw, 52px); font-weight: 700; letter-spacing: -.8px; line-height: 1.08; text-align: center; animation: splash-reveal .45s ease both; }
+.splash__credit { height: 48px; margin-top: 13px; text-align: center; animation: splash-reveal .45s 3.4s ease both; }
+.splash__made { color: #b9c0b1; font-size: 10px; letter-spacing: .16em; line-height: 1.3; margin-bottom: 2px; }
+.splash__columns { display: flex; align-items: center; gap: 20px; color: #b9c0b1; font-size: 12px; }
+.splash__columns div { width: 118px; display: flex; flex-direction: column; }
+.splash__columns div span { font-size: 11px; letter-spacing: .06em; }
+.splash__columns strong { color: #f4efe4; font-size: 15.5px; line-height: 1.3; margin-top: 2px; }
+.splash__track { width: 176px; height: 3px; margin-top: 19px; border-radius: 2px; background: rgba(244,239,228,.22); overflow: hidden; }
+.splash__track div { width: 100%; height: 100%; background: #f4efe4; transform: scaleX(0); transform-origin: left; }
+.splash__note { margin-top: 10px; color: #dfd6c2; font-size: 15px; line-height: 1.4; }
+@keyframes splash-glow { from { opacity: 0; transform: scale(.72); } to { opacity: .85; transform: scale(1.14); } }
+@keyframes splash-turn { from { transform: rotate(0); } to { transform: rotate(14deg); } }
+@keyframes splash-pollen { from { transform: translateY(20px); opacity: 0; } 20%, 80% { opacity: .65; } to { transform: translateY(-100px); opacity: 0; } }
+@keyframes splash-reveal { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .splash__rays { animation: none; opacity: .6; transform: none; }
+  .splash__rays i { animation: none; }
+  .splash__particles { display: none; }
+  .splash__name, .splash__credit { animation: none; }
+}

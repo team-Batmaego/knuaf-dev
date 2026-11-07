@@ -5,9 +5,10 @@
  * 그래서 조건은 zone.ts 한 곳, 초안은 `draftAfterSend` 하나로 모으고 여기서 고정한다.
  */
 import { expect, test } from '@playwright/test'
-import { parseQuestion, optionAnswer, splitOption } from '../src/shared/question'
+import { chapterOf, optionAnswer, parseQuestion, splitOption } from '../src/shared/question'
 import { questionCardOf, waitingQuestionCount, zoneOf } from '../src/shared/zone'
 import { draftAfterSend, useChat } from '../src/renderer/src/store/chat'
+import { usePrep } from '../src/renderer/src/store/prep'
 import type { ChatMessage, ChatSnapshot, ConnectionStatus } from '../src/shared/chat'
 import type { Status } from '../src/shared/types'
 
@@ -95,6 +96,44 @@ test('선택형 3~5개를 읽고 제목·질문·보기·장을 꺼낸다', () =
   expect(lines[parsed!.span.start].trim()).toContain('1) 농협 공판장')
   expect(lines[parsed!.span.end].trim().startsWith('→')).toBe(true)
 })
+
+test('명시적 장 표기와 한국어 조사를 장 번호로 읽고 하위 장은 상위 번호를 반환한다', () => {
+  expect(chapterOf('Ⅳ장 재무 계획')).toBe(4)
+  expect(chapterOf('IV장에 쓰여요')).toBe(4)
+  expect(chapterOf('Ⅳ장의 구성')).toBe(4)
+  expect(chapterOf('4장은 포함돼요')).toBe(4)
+  expect(chapterOf('IV-1장에 쓰여요')).toBe(4)
+  expect(chapterOf('재무 계획(IV장)에 쓰여요')).toBe(4)
+  expect(chapterOf('자산 조사(IV-1)에 쓰여요')).toBe(4)
+  expect(chapterOf('자산 조사(2-3)에 쓰여요')).toBe(2)
+  expect(chapterOf('Ⅲ장 판매 현황 · Ⅵ장 매출 계산에 쓰여요')).toBe(3)
+  expect(chapterOf('4장')).toBe(4)
+  expect(chapterOf('X장')).toBe(10)
+})
+
+test('장 근거가 아닌 번호와 문맥 없는 하위 번호는 장으로 읽지 않는다', () => {
+  expect(chapterOf('IV) 첫 번째 목록')).toBeNull()
+  expect(chapterOf('Ⅳ. 목록 번호')).toBeNull()
+  expect(chapterOf('XIV장')).toBeNull()
+  expect(chapterOf('12장')).toBeNull()
+  expect(chapterOf('4장면')).toBeNull()
+  expect(chapterOf('IV-1')).toBeNull()
+  expect(chapterOf('2-3')).toBeNull()
+  expect(chapterOf('IV-1a')).toBeNull()
+  expect(chapterOf('표 IV-1 · 비용')).toBeNull()
+  expect(chapterOf('항목 2-3 · 장비')).toBeNull()
+  expect(chapterOf('표 (IV-1)에 쓰여요')).toBeNull()
+  expect(chapterOf('항목 (2-3)에 쓰여요')).toBeNull()
+})
+
+test('영문 장 표기는 새 API로 읽고 기존 chapterHint는 유지한다', () => {
+  const text = Q().replace('Ⅲ장 판매 현황 · Ⅵ장 매출 계산에 쓰여요', '재무 계획(IV장)에 쓰여요')
+  const parsed = parseQuestion(text)!
+  expect(parsed.chapterHint).toBeNull()
+  expect(chapterOf(parsed.use)).toBe(4)
+})
+
+
 
 test('보기 2개와 5개는 읽고, 1개와 6개는 카드가 아니다', () => {
   expect(parseQuestion(Q('Q1-1', ['매입', '임차']))!.options).toHaveLength(2)
@@ -314,6 +353,8 @@ test('초안 판정은 편집 번호로 한다 — 같은 문장을 지웠다 �
 const ROOT = '/p/race'
 
 function harness(drafts: Record<string, string> = {}) {
+  usePrep.setState({ prep: {}, write: {}, dependencies: Object.fromEntries([ROOT, '/A', '/B'].map(root =>
+    [root, { visit: 0, operationId: 'verified-fixture', phase: 'ready' as const }])) })
   const persisted: string[] = []
   const writes: { root: string; text: string }[] = []
   const disk: Record<string, string> = { ...drafts }

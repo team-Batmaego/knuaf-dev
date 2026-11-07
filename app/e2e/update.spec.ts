@@ -72,6 +72,20 @@ function updater(store: SkillStore, f = fixture(), restartSidecar: () => Promise
   return { updates, requests }
 }
 
+test('missing or invalid S0 metadata never invents a bundled version or initializes an update store', () => {
+  const root = temporary(), bundled = join(root, 'bundle')
+  mkdirSync(bundled)
+  for (const text of [null, '{', '{"version":"invalid","api":1}', '{"version":"1.0.0","api":2}']) {
+    if (text !== null) writeFileSync(join(bundled, 'skill.json'), text)
+    expect(() => new SkillStore(root, bundled, '0.5.1', keys)).toThrow()
+    expect(existsSync(join(root, 'skill-store'))).toBe(false)
+  }
+  writeFileSync(join(bundled, 'skill.json'), '{"version":"1.0.2","api":1}')
+  const store = new SkillStore(root, bundled, '0.5.1', keys)
+  expect(() => store.publish(fixture('1.0.1').verified(), fixture('1.0.1').zip)).toThrow()
+  expect(store.state().active).toBeNull()
+  expect(store.resolveSkillSource()).toBe(bundled)
+})
 function channelUpdater(store: SkillStore, channel: () => unknown) {
   const requests: string[] = []
   const updates = new SkillUpdates(store, { config: config(), fetch: async url => {

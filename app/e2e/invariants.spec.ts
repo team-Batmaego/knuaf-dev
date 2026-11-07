@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Packager } from 'electron-builder'
 import { app, launch, navTo, openPreset, openProject, plantStaleLock, synthProject } from './helpers'
 import { APP_NAME, APP_NAME_ASCII } from '../src/shared/name'
 
@@ -9,28 +10,48 @@ const KORDOC = '문서를 읽는 데 필요한 도구를 준비할게요. 처음
 
 
 /**
- * 앱 이름은 src/shared/name.ts 한 군데에서 온다. electron-builder.yml 은 TS 를 읽지
- * 못해 같은 문자열을 손으로 적어 두므로, 어긋나면 여기서 잡는다 — 어긋나면 화면과
- * Finder 가 서로 다른 이름을 보여 준다.
+ * 표시 이름은 플랫폼별로 바꾸되 데이터·업데이트 식별자는 유지한다.
+ * Windows 실행 파일명은 NSIS의 실행 중 검사·기존 바로가기 보존에도 쓰인다.
  */
-test('the built app is named what the app calls itself', () => {
-  const yml = readFileSync(join(app, 'electron-builder.yml'), 'utf-8')
-  const value = (key: string): string | null => yml.match(new RegExp(`^\\s*${key}:\\s*(.+?)\\s*$`, 'm'))?.[1] ?? null
-  for (const key of ['executableName', 'CFBundleDisplayName', 'title']) {
-    expect(value(key), `electron-builder.yml 의 ${key} 가 APP_NAME 과 다르다`).toBe(APP_NAME)
-  }
-  // 헬퍼 번들 이름과 설치판 userData 폴더 이름이 여기서 온다 — 한글이 섞이면 앱이 죽는다.
-  expect(value('productName')).toBe(APP_NAME_ASCII)
-  expect(APP_NAME_ASCII, 'ASCII 가 아닌 글자가 섞였다').toMatch(/^[A-Za-z0-9._-]+$/)
-  expect(value('artifactName'), '내려받는 파일 이름에 공백·비ASCII 가 있으면 링크가 깨진다')
-    .toMatch(/^[A-Za-z0-9._${}-]+$/)
+test('display names preserve installed data and executable identities', async () => {
+  const packager = new Packager({ projectDir: app })
+  await packager.validateConfig()
+  const config = packager.config
+  expect(config.mac?.executableName).toBe(APP_NAME)
+  expect(config.mac?.extendInfo?.CFBundleDisplayName).toBe(APP_NAME)
+  expect(config.dmg?.title).toBe(APP_NAME)
+  expect(config.executableName).toBe('KNUAF-Dev · 창업논문 작성 도우미')
+  expect(config.win?.executableName).toBeUndefined()
+  expect(config.appId).toBe('kr.ac.knuaf.doc.companion')
+  expect(config.productName).toBe(APP_NAME_ASCII)
+  expect(APP_NAME_ASCII).toBe('knuaf-dev')
+  expect(packager.metadata.name).toBe('knuaf-thesis-helper')
+  expect(config.artifactName).toBe('knuaf-dev-${version}-${arch}.${ext}')
 })
 
-test('Windows installer is configured for a one-click per-user install', () => {
+test('Windows installer is configured for a one-click per-user install', async () => {
   const yml = readFileSync(join(app, 'electron-builder.yml'), 'utf-8')
-  const nsisConfig = /^nsis:\r?\n  oneClick: true\r?\n  perMachine: false\r?\n  runAfterFinish: true\r?\n  createDesktopShortcut: true\r?\n  createStartMenuShortcut: true\r?\n  include: build\/installer\.nsh$/m
-  for (const lineEnding of ['\n', '\r\n']) {
-    expect(yml.replace(/\r?\n/g, lineEnding)).toMatch(nsisConfig)
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-installer-config-'))
+  try {
+    for (const lineEnding of ['\n', '\r\n']) {
+      const config = join(root, 'electron-builder.yml')
+      writeFileSync(config, yml.replace(/\r?\n/g, lineEnding))
+      // Use the builder's YAML loader: field order and additional options do not
+      // change these installation requirements, and booleans stay typed.
+      const packager = new Packager({ projectDir: app, config })
+      await packager.validateConfig()
+      const nsis = packager.config.nsis
+      expect(nsis?.oneClick).toBe(true)
+      expect(nsis?.perMachine).toBe(false)
+      expect(nsis?.runAfterFinish).toBe(true)
+      expect(nsis?.createDesktopShortcut).toBe(true)
+      expect(nsis?.createStartMenuShortcut).toBe(true)
+      expect(nsis?.include).toBe('build/installer.nsh')
+      expect(nsis?.shortcutName).toBe(APP_NAME)
+      expect(nsis?.uninstallDisplayName).toBe(APP_NAME + ' ${version}')
+    }
+  } finally {
+    rmSync(root, { recursive: true })
   }
 })
 
@@ -46,6 +67,7 @@ test('제작자 정보는 첫 화면을 가리지 않고 설정에서 볼 수 �
   try {
     await expect(page.getByText('어떤 논문을 쓰고 있어요?')).toBeVisible()
     await page.getByRole('button', { name: '설정' }).first().click()
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await expect(page.getByText('GUI: made by 산업곤충전공 이준재')).toBeVisible()
     await expect(page.getByText('prod. 특용작물전공 24학번 김대욱 · 산업곤충전공 24학번 이준재')).toBeVisible()
   } finally { await electronApp.close() }
@@ -70,15 +92,14 @@ test('hard rules hold across screens', async () => {
   const chatCtrls = (await page.locator('.chat-pane label, .chat-pane .field > span, .chat-pane button').allInnerTexts()).join('\n')
   expect(chatCtrls).not.toMatch(/JSON|모델/)
 
-  // The independent-review notice must reach the publish/save points even when the student
-  // never opens 점검 — the notice lives at the moment of the attempt, not behind a screen.
+  // The independent-review notice appears at the publish/save action, even without opening 점검.
   await navTo(page, '결과물')
-  await expect(page.locator('text=다른 사람 검토 기록이 아직 없어요')).toBeVisible()
-  // 파일 만들기: 제출용 버튼은 관문이 막혀도 활성 — 경고가 관문이지 버튼 잠금이 아니다(#4).
-  const submitBtn = page.locator('.make-row:has-text("제출용 후보 만들기") button')
+  const files = page.locator('.paper-head .popover')
+  const submitRow = files.locator('[data-make="submission_candidate"]')
+  const submitBtn = submitRow.getByRole('button')
   await expect(submitBtn).toBeEnabled()
   await submitBtn.click()
-  await expect(page.locator('text=다른 사람 검토 기록이 아직 없어요').first()).toBeVisible()
+  await expect(submitRow).toContainText('다른 사람 검토 기록이 아직 없어요')
   // The same notice reaches the 고급 도구 발행 지점 (설정 > 고급 도구 > 검토본보내기).
   await navTo(page, '설정')
   await openPreset(page, 'tools:export')
@@ -118,15 +139,20 @@ test('hard rules hold across screens', async () => {
   await expect(page.locator('.paper-head .popover .pop-row').first()).toContainText('머리말')
   await page.keyboard.press('Escape')
 
-  // troubleshoot (설정 > 문제 해결): release only for a stale same-host lock; sanctioned Kordoc sentence only
+  // v2 cleanup requires a free OS-guard observation, never PID inference.
   await navTo(page, '설정')
   await openPreset(page, 'fix:lock')
   await openPreset(page, 'fix:kordoc')
   await expect(page.locator(`text=${KORDOC}`)).toHaveCount(1)
-  await expect(page.locator('button:has-text("잠금 해제")')).toBeDisabled()
+  const cleanup = page.getByRole('button', { name: '소유 기록 정리', exact: true })
+  // The disclosure mounts before doctor.all returns; wait for its lock observation, not a disabled button.
+  await page.locator('details[data-preset="fix:lock"] time').waitFor({ state: 'visible' })
+  await expect(cleanup).toBeDisabled()
   plantStaleLock(root)
   await page.click('text=다시 진단')
-  await expect(page.locator('text=남은 잠금')).toBeVisible({ timeout: 30_000 })
-  await expect(page.locator('button:has-text("잠금 해제")')).toBeEnabled()
+  await page.getByText('마지막 점유 기록', { exact: true }).waitFor({ state: 'visible' })
+  await expect(cleanup).toBeDisabled()
+  await page.getByRole('button', { name: '점유 상태 확인', exact: true }).click()
+  await expect(cleanup).toBeEnabled()
   await electronApp.close()
 })

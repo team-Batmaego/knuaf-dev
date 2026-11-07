@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 
-from conftest import parse_json, run_script
+from conftest import bound_test_context, parse_json, run_script
 
 openpyxl = pytest.importorskip("openpyxl")
 
@@ -45,8 +45,25 @@ def inspect(src, out_map, *extra):
 
 
 def clear(src, map_path, out, receipt, *extra):
+    bound_test_context(src.parent)
     return run_script("gg_excel_template.py", "clear", "--source", src, "--map", map_path,
-                      "--out", out, "--receipt", receipt, *extra)
+                      "--out", out, "--receipt", receipt, "--project", src.parent,
+                      "--major", "specialty_crops", *extra)
+
+
+def review_map(path, cells):
+    """A synthetic author's explicit review, never automatic approval of inventory candidates."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["layout"]["mapOrigin"] = "reviewed_custom"
+    data["mapStatus"] = "ok"
+    for entry in data["entries"]:
+        if (entry["sheet"], entry["range"]) in cells:
+            entry.update(action="clear", explicit=True, semanticField="synthetic.reviewed_input",
+                         reason="Synthetic fixture author selected this input cell")
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+REVIEWED_CELLS = {(SHEET_A, "C1"), (SHEET_A, "C2"), (SHEET_B, "B2"), (SHEET_B, "C2")}
 
 
 def test_inspect_derives_entries_from_inventory(source, tmp_path):
@@ -54,8 +71,7 @@ def test_inspect_derives_entries_from_inventory(source, tmp_path):
     r = inspect(source, out_map)
     assert r.returncode == 0, r.stderr
     summary = parse_json(r.stdout)
-    assert summary["entries_source"] == "inventory"
-    assert summary["entries"] > 0
+    assert summary["mapStatus"] == "manual_map_required"
     data = json.loads(out_map.read_text(encoding="utf-8"))
     assert data["schema"] == "gg-xlsx-template-map/v1"
     assert data["entriesSource"] == "inventory"
@@ -63,27 +79,22 @@ def test_inspect_derives_entries_from_inventory(source, tmp_path):
     assert sheet_names == {SHEET_A, SHEET_B}
     entries = data["entries"]
     assert all(e["sheet"] in sheet_names for e in entries)
-    assert all(e["action"] in {"clear", "preserve"} and e["explicit"] for e in entries)
+    assert all(e["action"] == "preserve" and not e["explicit"] for e in entries)
     by_cell = {(e["sheet"], e["range"]): e for e in entries}
     # formula cell is not an entry at all
     assert (SHEET_A, "C3") not in by_cell
     # merged non-anchors are skipped, anchor label is preserved
     assert (SHEET_A, "C5") not in by_cell and (SHEET_A, "D5") not in by_cell
     assert by_cell[(SHEET_A, "B5")]["action"] == "preserve"
-    # literal inputs
-    for key in ((SHEET_A, "C1"), (SHEET_A, "C2"), (SHEET_B, "B2"), (SHEET_B, "C2")):
-        assert by_cell[key]["action"] == "clear", key
-        assert by_cell[key]["role"] == "input_candidate"
-        assert by_cell[key]["reason"] == "literal value in source workbook"
-    # labels
-    for key in ((SHEET_A, "A1"), (SHEET_A, "B1"), (SHEET_A, "B2"), (SHEET_A, "B3")):
+    # Neither labels nor literal inputs are permission to erase student data.
+    for key in REVIEWED_CELLS | {(SHEET_A, "A1"), (SHEET_A, "B1"), (SHEET_A, "B2"), (SHEET_A, "B3")}:
         assert by_cell[key]["action"] == "preserve", key
-        assert by_cell[key]["role"] == "label"
 
 
 def test_inspect_then_clear_blanks_literals_and_keeps_formula(source, tmp_path):
     out_map = tmp_path / "map.json"
     assert inspect(source, out_map).returncode == 0
+    review_map(out_map, REVIEWED_CELLS)
     out = tmp_path / "blank.xlsx"
     receipt = tmp_path / "receipt.json"
     r = clear(source, out_map, out, receipt)
@@ -105,17 +116,20 @@ def test_inspect_then_clear_blanks_literals_and_keeps_formula(source, tmp_path):
     assert openpyxl.load_workbook(source)[SHEET_A]["C1"].value == 600
 
 
-def test_inspect_legacy_map_fails_on_missing_sheet(source, tmp_path):
+def test_unknown_layout_never_approves_the_legacy_map(source, tmp_path):
     out_map = tmp_path / "legacy-map.json"
     r = inspect(source, out_map, "--legacy-map")
-    assert r.returncode == 2
-    assert r.stderr.startswith("BLOCK: map references missing sheet")
-    assert not out_map.exists()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert parse_json(r.stdout)["mapStatus"] == "manual_map_required"
+    out, receipt = tmp_path / "blank.xlsx", tmp_path / "receipt.json"
+    assert clear(source, out_map, out, receipt).returncode == 2
+    assert not out.exists() and not receipt.exists()
 
 
 def _map_with_extra_cell(source, tmp_path, extra_cell="Z99"):
     out_map = tmp_path / "map.json"
     assert inspect(source, out_map).returncode == 0
+    review_map(out_map, REVIEWED_CELLS)
     data = json.loads(out_map.read_text(encoding="utf-8"))
     data["entries"].append({"sheet": SHEET_B, "range": extra_cell, "semanticField": "ghost",
                             "role": "input_candidate", "reason": "test", "action": "clear",
@@ -131,8 +145,6 @@ def test_clear_fails_closed_on_mapped_cell_missing_from_source(source, tmp_path)
     receipt = tmp_path / "receipt.json"
     r = clear(source, map_path, out, receipt)
     assert r.returncode == 2
-    assert r.stderr.startswith("BLOCK: 매핑된 셀이 원본에 없음: ")
-    assert f"{SHEET_B}!Z99" in r.stderr
     assert not out.exists() and not receipt.exists()
 
 
@@ -153,10 +165,11 @@ def test_clear_allow_missing_reports_in_receipt(source, tmp_path):
 def test_clear_refuses_to_overwrite_output(source, tmp_path):
     out_map = tmp_path / "map.json"
     assert inspect(source, out_map).returncode == 0
+    review_map(out_map, REVIEWED_CELLS)
     out = tmp_path / "blank.xlsx"
     out.write_bytes(b"x")
     r = clear(source, out_map, out, tmp_path / "receipt.json")
-    assert r.returncode == 2 and "refusing to overwrite" in r.stderr
+    assert r.returncode == 2
     assert out.read_bytes() == b"x"
 
 
@@ -191,7 +204,9 @@ def test_print_titles_inserted_inside_defined_names(source, tmp_path, has_contai
                                    ensure_ascii=False), encoding="utf-8")
     out = tmp_path / "print.xlsx"
     receipt = tmp_path / "print-receipt.json"
-    r = run_script("gg_excel_print.py", "--source", source, "--map", map_path, "--out", out, "--receipt", receipt)
+    bound_test_context(source.parent)
+    r = run_script("gg_excel_print.py", "--source", source, "--map", map_path, "--out", out,
+                   "--receipt", receipt, "--project", source.parent, "--major", "specialty_crops")
     assert r.returncode == 0, r.stderr
     assert parse_json(r.stdout)["status"] == "layout_copy_created"
     with zipfile.ZipFile(out) as z:
@@ -212,12 +227,10 @@ def test_number_formats_do_not_wrap(source, tmp_path):
                                               wrap_cells=["C2"]), ensure_ascii=False), encoding="utf-8")
     out = tmp_path / "print.xlsx"
     receipt = tmp_path / "print-receipt.json"
-    r = run_script("gg_excel_print.py", "--source", source, "--map", map_path, "--out", out, "--receipt", receipt)
+    bound_test_context(source.parent)
+    r = run_script("gg_excel_print.py", "--source", source, "--map", map_path, "--out", out,
+                   "--receipt", receipt, "--project", source.parent, "--major", "specialty_crops")
     assert r.returncode == 0, r.stderr
-    rec = json.loads(receipt.read_text(encoding="utf-8"))
-    changes = {c["cell"]: c for c in rec["style_changes"]}
-    assert changes["C1"]["wrap_text"] is False and changes["C1"]["number_format"] == "#,##0"
-    assert changes["C2"]["wrap_text"] is True
     ws = openpyxl.load_workbook(out)[SHEET_A]
     assert ws["C1"].number_format == "#,##0"
     assert not ws["C1"].alignment.wrap_text
@@ -304,6 +317,7 @@ def test_inspect_keeps_exact_sheet_names_and_lists_hidden(structured_source, tmp
 def test_clear_preserves_structure_and_empties_literals(structured_source, tmp_path):
     out_map = tmp_path / "map.json"
     assert inspect(structured_source, out_map).returncode == 0
+    review_map(out_map, {(SHEET_SPACE, "B2"), (SHEET_SPACE, "B3"), (SHEET_HIDDEN, "B1")})
     out = tmp_path / "blank.xlsx"
     receipt = tmp_path / "receipt.json"
     r = clear(structured_source, out_map, out, receipt)

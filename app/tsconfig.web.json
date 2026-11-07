@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022", "module": "ESNext", "moduleResolution": "bundler", "jsx": "react-jsx", "strict": true,
     "esModuleInterop": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"], "skipLibCheck": true, "composite": true, "noEmit": true,
+    "lib": ["ES2022", "ES2024.Promise", "DOM", "DOM.Iterable"], "skipLibCheck": true, "composite": true, "noEmit": true,
     "types": ["vite/client"]
   },
   "include": ["src/renderer/**/*", "src/preload/index.d.ts", "src/shared/**/*"]

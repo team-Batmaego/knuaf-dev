@@ -1,8 +1,9 @@
+import { useEffect, useState } from 'react'
 import { ConnectRow } from './ConnectRow'
 import { useProject } from '../store/project'
 import { chosenProvider, displayState, useConnect, type ConnState } from '../store/connect'
 import { chatProvider, resolveChatMode } from '../store/chat'
-import { PROVIDER_NAME, TITLEBAR } from '../copy'
+import { ONBOARD, PROVIDER_NAME, TITLEBAR } from '../copy'
 import type { Provider } from '../../../shared/chat'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -28,6 +29,17 @@ export function useAccountProvider(): { provider: Provider; stateOf: (p: Provide
  */
 export function AccountChooser({ onPicked }: { onPicked?: () => void }) {
   const { provider, stateOf } = useAccountProvider()
+  const [offline, setOffline] = useState(() => typeof navigator !== 'undefined' && !navigator.onLine)
+  useEffect(() => {
+    const sync = (): void => setOffline(!window.navigator.onLine)
+    window.addEventListener('offline', sync)
+    window.addEventListener('online', sync)
+    return () => {
+      window.removeEventListener('offline', sync)
+      window.removeEventListener('online', sync)
+    }
+  }, [])
+  const loginAvailable = stateOf('codex') === 'need-login' || stateOf('claude') === 'need-login'
   const select = useConnect((s) => s.select)
   const loadSettings = useProject((s) => s.loadSettings)
   const pickProvider = async (p: Provider): Promise<void> => {
@@ -39,6 +51,7 @@ export function AccountChooser({ onPicked }: { onPicked?: () => void }) {
   return (
     <div className="list">
       <p className="caption">AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.</p>
+      {offline && loginAvailable && <p className="caption" role="status">{ONBOARD.offlineHint}</p>}
       {(['codex', 'claude'] as Provider[]).map((p) => (
         <ConnectRow key={p} provider={p} current={p === provider}
           extra={stateOf(p) === 'connected' && p !== provider

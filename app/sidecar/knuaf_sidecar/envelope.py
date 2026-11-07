@@ -18,6 +18,8 @@ def normalize(argv, python, exit_code, stdout: str, stderr: str, duration_ms: in
         "data": None,
         "path": None,
         "block_reason": None,
+        "commit_state": None,
+        "detail": None,
         "stdout": stdout,
         "stderr": stderr,
         "argv": list(map(str, argv)),
@@ -32,6 +34,9 @@ def normalize(argv, python, exit_code, stdout: str, stderr: str, duration_ms: in
         env["data"] = data
         if isinstance(data, dict):
             env["status"] = data.get("status")
+            env["commit_state"] = data.get("commit_state")
+            env["detail"] = data.get("detail")
+            env["status"] = env["status"] or env["commit_state"]
             if isinstance(data.get("path"), str):
                 env["path"] = data["path"]
     elif text and exit_code == 0 and len(text.splitlines()) == 1:
@@ -43,9 +48,16 @@ def normalize(argv, python, exit_code, stdout: str, stderr: str, duration_ms: in
     if err.startswith("BLOCK:"):
         env["block_reason"] = err.splitlines()[0][len("BLOCK:"):].strip()
         env["status"] = env["status"] or "blocked"
-    elif isinstance(env["data"], dict) and env["data"].get("status") == "blocked":
+    elif isinstance(env["data"], dict) and (
+        env["status"] in {"held", "blocked", "fail", "failed", "error"}
+        or env["commit_state"] in {"not_committed", "committed_cleanup_pending", "indeterminate"}
+    ):
         env["block_reason"] = env["data"].get("reason")
-    env["ok"] = exit_code == 0 and env["status"] not in {"blocked", "fail", "failed"}
+    env["ok"] = (
+        exit_code == 0
+        and env["status"] not in {"held", "blocked", "fail", "failed", "error"}
+        and env["commit_state"] in {None, "committed"}
+    )
     return env
 
 

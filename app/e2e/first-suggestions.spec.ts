@@ -29,6 +29,7 @@ for (const [label, prompt] of suggestions) {
       await page.getByRole('button', { name: '보내기', exact: true }).click()
       await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
       await expect(page.locator('.folder-message')).toHaveText(edited)
+      await expect(page.getByRole('textbox', { name: '논문 이름' })).toHaveValue('새 논문')
       await page.getByRole('textbox', { name: '논문 이름' }).fill('딸기 논문')
       await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
       await expect(page.getByText('모든 논문 폴더에서 허락 방식을 골라 주세요.')).toBeVisible()
@@ -43,6 +44,32 @@ for (const [label, prompt] of suggestions) {
     } finally { await electronApp.close() }
   })
 }
+
+
+test('첫 폴더 생성 뒤 오프라인 안내가 채팅 본문에 보이고 연결 상태 변화에 따라 갱신된다', async () => {
+  const dir = scratch()
+  const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-out' })
+  const { electronApp, page } = await launch({ env, permissionPrompt: true })
+  try {
+    await page.context().setOffline(true)
+    await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(false)
+    const box = page.getByRole('textbox', { name: '답변을 입력하세요' })
+    await page.getByRole('button', { name: '새 창업 논문 시작', exact: true }).click()
+    await expect(box).toHaveValue(suggestions[0][1])
+    await page.getByRole('button', { name: '보내기', exact: true }).click()
+    await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
+    await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
+    await expect(page.getByText('모든 논문 폴더에서 허락 방식을 골라 주세요.')).toBeVisible()
+    await page.getByRole('button', { name: '매번 묻기' }).click()
+
+    const loginNotice = page.locator('.zline.info').filter({ hasText: 'ChatGPT 로그인이 필요해요' })
+    await expect(loginNotice).toContainText('인터넷에 연결한 뒤 로그인해 주세요.')
+
+    await page.context().setOffline(false)
+    await expect.poll(() => page.evaluate(() => navigator.onLine)).toBe(true)
+    await expect(loginNotice).not.toContainText('인터넷에 연결한 뒤 로그인해 주세요.')
+  } finally { await electronApp.close() }
+})
 
 test('기존에 입력한 글을 제안 단추가 지우지 않는다', async () => {
   const dir = scratch()

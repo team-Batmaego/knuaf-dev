@@ -1,7 +1,8 @@
-# Mirror of .codexignore: the skill package is skills/knuaf-dev only.
-# README says app/ and tests/ are development directories that do not ship;
-# without this, a Claude Code marketplace install pulls the whole repo.
-app/
+# Ship only the generated, compatibility-verified bundle from app/.
+app/*
+!app/resources/
+app/resources/*
+!app/resources/skill/
 tests/
 .venv-dev/
 .github/
