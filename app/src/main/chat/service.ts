@@ -184,7 +184,9 @@ export class ChatService {
   private publish(s: ChatSnapshot) {
     const file = this.file(s.root, s.provider)
     try { mkdirSync(dirname(file), { recursive: true }) } catch { /* 아래 쓰기가 같은 이유로 실패한다 */ }
-    writeFileAtomic(file, JSON.stringify(s, null, 2), { mode: 0o600, fs: this.writeFs, complete: (text) => { try { parseChat(text, s.provider); return true } catch { return false } } })
+    // 승인 대기는 프로세스가 종료되면 복구할 수 없다. 파일 내용(diff)은 화면으로만 보낸다.
+    const { permission: _permission, ...persisted } = s
+    writeFileAtomic(file, JSON.stringify(persisted, null, 2), { mode: 0o600, fs: this.writeFs, complete: (text) => { try { parseChat(text, s.provider); return true } catch { return false } } })
     this.opts.emit(structuredClone(s))
   }
   snapshot(root: string, provider: Provider): ChatSnapshot {
@@ -476,9 +478,16 @@ export class ChatService {
           this.publish(s)
         },
         permission: permission => {
-          const q = this.waiting.get(key) ?? []
-          q.push(permission); this.waiting.set(key, q)
-          this.showNextPermission(s, key)
+          // 같은 서버 요청의 늦은 파일 변경 정보는 새 승인으로 줄 세우지 않는다.
+          if (s.permission?.id === permission.id) s.permission = permission
+          else {
+            const q = this.waiting.get(key) ?? []
+            const existing = q.findIndex(p => p.id === permission.id)
+            if (existing >= 0) q[existing] = permission
+            else q.push(permission)
+            this.waiting.set(key, q)
+            this.showNextPermission(s, key)
+          }
           delivered(); this.publish(s)
         }
       }, replayHistory)

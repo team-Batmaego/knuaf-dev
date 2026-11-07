@@ -613,6 +613,15 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .askcard-raw { font-family: var(--mono); font-size: 12.5px; color: var(--muted); white-space: pre-wrap; word-break: break-all;
   max-height: 168px; overflow: auto; background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 8px; padding: 6px 9px; margin: 4px 0 8px; }
 .askcard .prose { font-size: 0.8125rem; color: var(--ink-2); }
+.file-changes { max-height: min(40vh, 260px); overflow-y: scroll; scrollbar-width: thin; margin: 4px 0 8px; }
+.file-change + .file-change { margin-top: var(--sp-3); }
+.file-change-heading { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 13px; color: var(--ink-2); }
+.file-change-heading strong, .file-change-move { min-width: 0; overflow-wrap: anywhere; }
+.file-change-heading strong { color: var(--ink); }
+.file-change-move { font-size: 12.5px; color: var(--ink-2); }
+.file-change-lines { margin: 4px 0 0; padding: 6px 9px; font: 12.5px/1.5 var(--mono); color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 8px; }
+.file-change .disclosure { margin-top: 0; }
+.file-change .disclosure-body { padding-top: 0; }
 
 /* ---- 아래 칸: 작업 중 한 줄 (DESIGN §3) — 입력칸은 쓸 수 있고 보내기만 멈추기 ---- */
 .zone-status { display: flex; align-items: center; gap: var(--sp-2); font-size: 13.5px; color: var(--ink-2); margin-top: var(--sp-4); padding: 0 var(--sp-2); }
