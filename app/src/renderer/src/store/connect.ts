@@ -39,11 +39,11 @@ export function connInfoOf(status: ConnectionStatus): ConnInfo {
 /**
  * 실제로 보여 줄 상태. 로그인 창을 띄워 둔 동안에는 확인이 "로그인 필요"를 돌려줘도
  * 그 표시를 유지한다 — 브라우저에서 로그인하는 학생에게 화면이 "로그인이 필요해요"로
- * 돌아가 있으면 무엇을 기다리는지 알 수 없다. 끝난 사실(연결됨·확인 실패·도구 없음)은
- * 기다림보다 세다.
+ * 돌아가 있으면 무엇을 기다리는지 알 수 없다. 확인 실패·도구 없음은 기다림보다 세고,
+ * 연결됨은 폴링이 확인한 다음 로그인 중 표시를 내릴 때 보인다.
  */
 export function displayState(info: ConnInfo, loggingIn: boolean): ConnState {
-  if (loggingIn && info.state !== 'connected' && info.state !== 'failed' && info.state !== 'no-tool') return 'logging-in'
+  if (loggingIn && info.state !== 'failed' && info.state !== 'no-tool') return 'logging-in'
   return info.state
 }
 
@@ -229,7 +229,7 @@ export const useConnect = create<ConnectState>((set, get) => ({
       if (!loginAttemptLive(provider, mine)) return true
       await get().refresh(provider)
       if (!loginAttemptLive(provider, mine)) return true
-      const done = displayState(get()[provider], get().loggingIn[provider]) === 'connected'
+      const done = get()[provider].state === 'connected'
       if (done) set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: false } }))
       return done
     })

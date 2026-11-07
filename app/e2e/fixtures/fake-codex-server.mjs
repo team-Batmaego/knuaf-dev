@@ -60,6 +60,8 @@ const INIT_DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_INIT_DELAY_MS ??
 /** 기본값 조회(ephemeral thread)만 실패시키는 횟수 — 실패 뒤 재조회 경로를 시험한다. */
 let ephemeralFailures = Math.max(0, Number(process.env.FAKE_CODEX_EPHEMERAL_FAIL_TIMES ?? 0) || 0)
 let modelListFailures = Math.max(0, Number(process.env.FAKE_CODEX_MODELS_FAIL_TIMES ?? 0) || 0)
+const TURN_FAILURE = process.env.FAKE_CODEX_TURN_FAILURE ?? ''
+const LOGIN_COMPLETE = process.env.FAKE_CODEX_LOGIN_COMPLETE ?? ''
 const MODELS = (() => {
   const raw = process.env.FAKE_CODEX_MODELS
   if (raw) { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : [] } catch { return [] } }
@@ -144,8 +146,20 @@ function handle(message) {
     case 'account/read':
       return out({ id, result: { account: loggedIn() ? { type: 'chatgpt' } : null } })
     case 'account/login/start':
-      if (STATE) writeFileSync(STATE, 'chatgpt\n')
-      return out({ id, result: { loginId: 'fake', authUrl: 'about:blank' } })
+      if (STATE && !LOGIN_COMPLETE) writeFileSync(STATE, 'chatgpt\n')
+      out({ id, result: { loginId: 'fake', authUrl: 'about:blank' } })
+      if (LOGIN_COMPLETE) {
+        const timer = setInterval(() => {
+          if (!existsSync(LOGIN_COMPLETE)) return
+          clearInterval(timer)
+          if (STATE) writeFileSync(STATE, 'chatgpt\n')
+          out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
+        }, 50)
+      } else if (process.env.FAKE_CODEX_LOGIN_EARLY === '1') {
+        out({ method: 'account/login/completed', params: { loginId: 'old-attempt', success: true } })
+        out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
+      } else out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
+      return
     case 'skills/list': {
       const cwd = (params.cwds ?? [])[0] ?? process.cwd()
       const skill = join(cwd, '.agents', 'skills', 'knuaf-dev', 'SKILL.md')
@@ -199,6 +213,14 @@ function handle(message) {
       const turnId = 'u-fake'
       out({ id, result: { turn: { id: turnId } } })
       out({ method: 'turn/started', params: { threadId, turn: { id: turnId } } })
+      if (TURN_FAILURE && (!LOGIN_COMPLETE || !existsSync(LOGIN_COMPLETE))) {
+        const message = TURN_FAILURE === 'refresh' ? 'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.'
+          : TURN_FAILURE === '401' ? 'HTTP 401 Unauthorized: authentication failed'
+            : TURN_FAILURE === 'external401' ? '401 from external research website'
+              : TURN_FAILURE === 'rate' ? 'HTTP 429 rate limit exceeded' : 'Network error: ECONNRESET'
+        out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message } } } })
+        return
+      }
       if (FILE_EVENTS !== undefined) {
         for (const event of JSON.parse(FILE_EVENTS)) out(event)
         out({ id: ++serverSeq, method: 'item/fileChange/requestApproval', params: {

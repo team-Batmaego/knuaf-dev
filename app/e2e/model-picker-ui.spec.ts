@@ -203,3 +203,30 @@ test('목록 오류는 재조회로 복구하고 실패 중에도 계정 기본 
     await expect(draft).toHaveValue('쓰던 문장은 남겨 주세요')
   } finally { await electronApp.close() }
 })
+
+test('긴 모델 목록은 제목줄 아래에서 시작하고 처음과 끝에 모두 닿는다', async ({}, info) => {
+  const models = Array.from({ length: 24 }, (_, i) => option(`gpt-example-${i}`, `모델 ${i + 1}`))
+  const { electronApp, page } = await scene(models)
+  const root = synthProject()
+  seedChat(root, [{ id: 'a0', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
+  try {
+    await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ width: 1024, height: 750 }))
+    await openProject(page, root)
+    await page.getByTitle('이 논문의 도우미').click()
+    const popup = page.locator('.composer-model-host .popover')
+    await expect(popup.locator('.model-option')).toHaveCount(25)
+    const captureDir = process.env.KNUAF_CHIP_CAPTURE_DIR
+    if (captureDir) mkdirSync(captureDir, { recursive: true })
+    await page.screenshot({ path: captureDir ? join(captureDir, 'long-models.png') : info.outputPath('long-models.png') })
+    const [header, panel, note] = await Promise.all([
+      page.locator('.titlebar').boundingBox(), popup.boundingBox(),
+      popup.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.').boundingBox()
+    ])
+    expect(header && panel && note).toBeTruthy()
+    expect(panel!.y).toBeGreaterThanOrEqual(header!.y + header!.height)
+    expect(note!.y).toBeGreaterThanOrEqual(panel!.y)
+    const footer = popup.getByText('앱은 AI를 팔지 않아요. 내 구독 계정을 써요.')
+    await footer.scrollIntoViewIfNeeded()
+    await expect(footer).toBeVisible()
+  } finally { await electronApp.close() }
+})
