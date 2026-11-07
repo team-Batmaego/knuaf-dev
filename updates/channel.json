@@ -1,7 +1,16 @@
 {
   "schema": 1,
   "app": {
-    "latest": "0.5.1",
-    "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.5.1"
+    "latest": "0.6.0",
+    "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.0",
+    "win32-x64": {
+      "manifest": "eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYtYXBwIiwidmVyc2lvbiI6IjAuNi4wIiwicGxhdGZvcm0iOiJ3aW4zMi14NjQiLCJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vdGVhbS1CYXRtYWVnby9rbnVhZi1kZXYvcmVsZWFzZXMvZG93bmxvYWQvdjAuNi4wL2tudWFmLWRldi0wLjYuMC14NjQuZXhlIiwic2l6ZSI6MzUyMjYwMzQyLCJzaGEyNTYiOiI3YWVmODE5MzVmYzdiMWZkYzNlZDI4NTIxMWMyODk0NTYwODJiMjY2MGYwYTJjYzI0ZjE3MTk3ZmZjMzU2YWUxIn0=",
+      "sig": "1LPLZ8RZOtfBv8H2pnIMWp1vE5/rSho/x9BXdvGbNBZAvVh1FnizQShNqWi8W7qEXa0N+6wTAk8BAlY24deUBg==",
+      "version": "0.6.0",
+      "platform": "win32-x64",
+      "url": "https://github.com/team-Batmaego/knuaf-dev/releases/download/v0.6.0/knuaf-dev-0.6.0-x64.exe",
+      "size": 352260342,
+      "sha256": "7aef81935fc7b1fdc3ed285211c289456082b2660f0a2cc24f17197ffc356ae1"
+    }
   }
 }
