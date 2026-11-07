@@ -166,10 +166,12 @@ IPC 성공 응답만으로 준비를 가장하지 않습니다. 의도적으로 
 폴더 순회가 늦어도 잠금 관찰·점유 확인·소유 기록 정리를 사용할 수 있습니다. 잠금 조회 중에는 확인 중 표시와
 비활성 재진단 단추를 보이고, 실패는 잠금 영역에 남깁니다. 잠금과 전체 점검은 요청 세대를 따로 소유하므로
 늦은 전체 점검 결과가 새 점유 관찰을 덮지 않습니다. 관측 시각·마지막 점유 기록 뒤 disabled·probe·enabled
-검사는 유지하며 고정 sleep·재시도·timeout 증가는 쓰지 않습니다. `e2e/diagnosis-feedback.spec.ts`는 전체 점검의
-실제 처리는 시작한 채 **요청 진입 시점**에 응답 전달 gate를 걸어, 처리 완료 속도와 무관하게 잠금의 독립성을
-검사합니다. 잠금 관찰·probe·owner 정리와 정본·guard 보존을 확인한 뒤에만 기존 시험 제한 안에서 실제 점검
-완료를 기다리고, 정리 전 owner가 담긴 늦은 aggregate도 도착한 뒤 owner가 되살아나지 않음을 확인합니다.
+검사는 유지하며 고정 sleep·재시도·timeout 증가는 쓰지 않습니다. `e2e/diagnosis-feedback.spec.ts`는 이 UI
+동시성 경계에서만 `doctor.all`을 제어된 늦은 aggregate fixture로 격리합니다. 실제 `lock.info`로 정리 전
+owner를 먼저 확보해 늦은 aggregate에 넣으므로 스레드 스케줄링이나 의존성 진단 완료 속도에 기대지 않습니다.
+실제 잠금 관찰·probe·owner 정리와 정본·guard 보존을 확인한 뒤 응답을 풀고, aggregate가 화면에 반영돼도
+예전 owner가 되살아나지 않음을 확인합니다. 전체 점검 실제 경로는 `invariants.spec.ts`·`smoke.spec.ts`가
+계속 검증하며, 이 동시성 시험은 실제 점검 여러 건의 배수를 완료 조건으로 삼지 않습니다.
 DOCX는 실제 상태 갱신 응답을 보류해 진행·완료의 단일 전이를 검사합니다.
 
 Electron E2E는 각 실행의 시험 output에 `doctor-<시각>.jsonl`을 남깁니다. `KNUAF_E2E_DOCTOR_TRACE`를
