@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
-import type { ChatModelInfo } from '../../shared/chat'
+import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
 
 /** 존재하면 realpath, 아니면 입력 그대로. 경로 비교는 반드시 이것을 거친다. */
@@ -26,6 +26,33 @@ export function serverArgsFor(env: NodeJS.ProcessEnv): string[] {
   if (env.KNUAF_CODEX_MODEL) args.push('-c', `model=${env.KNUAF_CODEX_MODEL}`)
   if (env.KNUAF_CODEX_EFFORT) args.push('-c', `model_reasoning_effort=${env.KNUAF_CODEX_EFFORT}`)
   return [...args, 'app-server']
+}
+const FILE_CHANGE_UNAVAILABLE = '변경 내용을 확인하지 못했어요. 거절한 뒤 도우미에게 어떤 파일을 어떻게 바꾸는지 물어봐 주세요.'
+
+/** 다른 턴의 같은 itemId와 섞이지 않도록 서버가 보내는 세 식별자를 함께 쓴다. */
+function fileChangeKey(thread: unknown, turn: unknown, item: unknown): string | undefined {
+  return typeof thread === 'string' && typeof turn === 'string' && typeof item === 'string'
+    ? JSON.stringify([thread, turn, item]) : undefined
+}
+
+function readFileChanges(value: unknown): PermissionFileChange[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const changes: PermissionFileChange[] = []
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || typeof raw.path !== 'string' || !raw.path) return undefined
+    const kind = typeof raw.kind === 'string' ? raw.kind : raw.kind?.type
+    const type = kind === 'add' || kind === 'delete' || kind === 'update' ? kind : 'unknown'
+    changes.push({ path: raw.path, kind: type === 'update'
+      ? { type, move_path: typeof raw.kind?.move_path === 'string' ? raw.kind.move_path : null }
+      : { type }, diff: typeof raw.diff === 'string' ? raw.diff : null })
+  }
+  return changes
+}
+
+function filePermission(id: string, reason: unknown, changes?: PermissionFileChange[]): PermissionRequest {
+  const detail = typeof reason === 'string' && reason.trim() ? reason : ''
+  return { id, title: '파일 변경 확인', detail: changes ? detail : [detail, FILE_CHANGE_UNAVAILABLE].filter(Boolean).join('\n\n'),
+    ...(changes ? { fileChanges: changes } : {}) }
 }
 
 export class CodexConnection implements AgentConnection {
@@ -52,6 +79,8 @@ export class CodexConnection implements AgentConnection {
   private waiter?: { resolve: () => void; reject: (error: Error) => void }
   private approvals = new Map<string, number | string>()
   private messages = new Map<string, string>()
+  private fileChanges = new Map<string, PermissionFileChange[]>()
+  private pendingFileApprovals = new Map<string, { key: string; reason: unknown }>()
   /**
    * 최신 CLI 는 평문 `app-server`; 실패하면 옛 `--listen stdio://` 로 한 번 재시도한다.
    * 앞의 `-c` 는 전역 knuaf-dev 스킬 사본을 끄는 config 오버라이드 — ~/.codex/skills 등에
@@ -88,6 +117,14 @@ export class CodexConnection implements AgentConnection {
     const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.serverArgs, this.options.root, this.options.env)
     rpc.onNotification = (method, p) => {
       if (p?.threadId && p.threadId !== this.thread) return
+      if (method === 'item/started' && p.item?.type === 'fileChange') {
+        this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
+      } else if (method === 'item/fileChange/patchUpdated') {
+        this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.itemId), p.changes)
+      } else if (method === 'item/completed' && p.item?.type === 'fileChange') {
+        const key = fileChangeKey(p.threadId, p.turnId, p.item.id)
+        this.rememberFileChanges(key, undefined)
+      }
       if (method === 'item/agentMessage/delta') {
         const text = (this.messages.get(p.itemId) ?? '') + p.delta
         this.messages.set(p.itemId, text); this.events?.message(p.itemId, text)
@@ -95,19 +132,24 @@ export class CodexConnection implements AgentConnection {
         this.events?.message(p.item.id, p.item.text)
       } else if (method === 'turn/started') this.turn = p.turn.id
       else if (method === 'turn/completed') {
+        this.fileChanges.clear(); this.pendingFileApprovals.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') w?.resolve()
         else w?.reject(new Error(p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
       }
     }
     rpc.onRequest = (id, method, p) => {
-      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+      if (method === 'item/commandExecution/requestApproval') {
         this.approvals.set(String(id), id)
-        // 이유(reason)와 명령(command)을 **둘 다** 남긴다 — 예전 `p.command ?? p.reason` 은 명령이
-        // 있으면 이유를 버려, 화면이 "무엇을 왜 허락하는지"를 말할 수 없었다(검토 QA N-I05).
-        // 권한 정책·승인 동작은 그대로고, 학생에게 보여 줄 문자열만 넓힌다.
+        // 명령과 이유를 모두 보존한다. 명령 카드의 기존 표시와 승인 동작은 그대로다.
         const detail = [p.command, p.reason].filter((v: unknown): v is string => typeof v === 'string' && v.trim() !== '').join('\n\n')
-        this.events?.permission({ id: String(id), title: method.includes('commandExecution') ? '명령 실행 확인' : '파일 변경 확인', detail: detail || JSON.stringify(p) })
+        this.events?.permission({ id: String(id), title: '명령 실행 확인', detail: detail || JSON.stringify(p) })
+      } else if (method === 'item/fileChange/requestApproval') {
+        const requestId = String(id)
+        this.approvals.set(requestId, id)
+        const key = fileChangeKey(p?.threadId, p?.turnId, p?.itemId)
+        if (key) this.pendingFileApprovals.set(requestId, { key, reason: p.reason })
+        this.events?.permission(filePermission(requestId, p?.reason, key ? this.fileChanges.get(key) : undefined))
       } else if (method === 'item/tool/requestUserInput') {
         // The unmodified interview contract requires chat text, not tool popups.
         rpc.send({ id, result: { answers: {} } })
@@ -136,6 +178,15 @@ export class CodexConnection implements AgentConnection {
     this.serverVersion = /^[^/\s]+\/([^\s]+)/.exec(ua)?.[1] ?? /(\d+\.\d+\.\d+)/.exec(ua)?.[1] ?? null
     rpc.send({ method: 'initialized', params: {} })
     return rpc
+  }
+  private rememberFileChanges(key: string | undefined, raw: unknown): void {
+    if (!key) return
+    const changes = readFileChanges(raw)
+    if (changes) this.fileChanges.set(key, changes)
+    else this.fileChanges.delete(key)
+    for (const [id, pending] of this.pendingFileApprovals) {
+      if (pending.key === key) this.events?.permission(filePermission(id, pending.reason, changes))
+    }
   }
   async status() {
     const rpc = await this.connect()
@@ -359,6 +410,9 @@ export class CodexConnection implements AgentConnection {
     const request = this.approvals.get(id)
     if (request === undefined) throw new Error('이미 종료된 권한 요청이에요.')
     this.rpc?.send({ id: request, result: { decision: allow ? 'accept' : 'decline' } }); this.approvals.delete(id)
+    const pending = this.pendingFileApprovals.get(id)
+    if (pending) this.fileChanges.delete(pending.key)
+    this.pendingFileApprovals.delete(id)
   }
   async stop() {
     this.stopped = true
@@ -366,5 +420,6 @@ export class CodexConnection implements AgentConnection {
       try { await this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }) } catch { /* process termination below */ }
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
+    this.fileChanges.clear(); this.pendingFileApprovals.clear()
   }
 }

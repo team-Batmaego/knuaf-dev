@@ -313,6 +313,37 @@ test('동시에 온 권한 요청은 덮이지 않고 차례로 뜬다 (발견 8
   await svc.close()
 })
 
+test('파일 변경 정보가 늦게 와도 표시 중인 카드와 대기 줄을 갱신하고 중복 승인하지 않는다', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const answered: { id: string; allow: boolean }[] = []
+  const { promise: turn, resolve: done } = Promise.withResolvers<void>()
+  const first = { path: 'a.md', kind: { type: 'add' as const }, diff: '첫 파일' }
+  const second = { path: 'b.md', kind: { type: 'delete' as const }, diff: '둘째 파일' }
+  const svc = service(fake({
+    run: async (_t, _sid, events) => {
+      events.permission({ id: 'p1', title: '파일 변경 확인', detail: '확인할 수 없음' })
+      events.permission({ id: 'p2', title: '파일 변경 확인', detail: '확인할 수 없음' })
+      events.permission({ id: 'p1', title: '파일 변경 확인', detail: '', fileChanges: [first] })
+      events.permission({ id: 'p2', title: '파일 변경 확인', detail: '', fileChanges: [second] })
+      await turn
+    },
+    respond: (id, allow) => { answered.push({ id, allow }) }
+  }))
+  void svc.send(root, 'codex', '파일을 정리해 주세요', 'req-file-update')
+  await expect.poll(() => svc.snapshot(root, 'codex').permission?.fileChanges).toEqual([first])
+  const saved = JSON.parse(readFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), 'utf8'))
+  expect(saved.permission).toBeUndefined()
+  expect(JSON.stringify(saved)).not.toContain('첫 파일')
+  svc.respond(root, 'codex', 'p1', true)
+  expect(svc.snapshot(root, 'codex').permission?.fileChanges).toEqual([second])
+  svc.respond(root, 'codex', 'p2', false)
+  expect(svc.snapshot(root, 'codex').permission).toBeUndefined()
+  expect(answered).toEqual([{ id: 'p1', allow: true }, { id: 'p2', allow: false }])
+  done()
+  await settled(svc, root)
+  await svc.close()
+})
+
 // "이 폴더에서는 계속 허용"은 이 폴더에서 다시 묻지 않겠다는 약속이다. 줄에 남아 있던
 // 요청을 그 뒤에 카드로 올리면 방금 받은 답을 무르는 셈이 된다.
 test('계속 허용을 고르면 줄에 남은 요청도 묻지 않는다', async () => {
