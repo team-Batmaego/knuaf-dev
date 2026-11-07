@@ -62,6 +62,7 @@ let ephemeralFailures = Math.max(0, Number(process.env.FAKE_CODEX_EPHEMERAL_FAIL
 let modelListFailures = Math.max(0, Number(process.env.FAKE_CODEX_MODELS_FAIL_TIMES ?? 0) || 0)
 const TURN_FAILURE = process.env.FAKE_CODEX_TURN_FAILURE ?? ''
 const LOGIN_COMPLETE = process.env.FAKE_CODEX_LOGIN_COMPLETE ?? ''
+const TURN_RELEASE = process.env.FAKE_CODEX_TURN_RELEASE ?? ''
 const MODELS = (() => {
   const raw = process.env.FAKE_CODEX_MODELS
   if (raw) { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : [] } catch { return [] } }
@@ -216,9 +217,18 @@ function handle(message) {
       if (TURN_FAILURE && (!LOGIN_COMPLETE || !existsSync(LOGIN_COMPLETE))) {
         const message = TURN_FAILURE === 'refresh' ? 'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.'
           : TURN_FAILURE === '401' ? 'HTTP 401 Unauthorized: authentication failed'
-            : TURN_FAILURE === 'external401' ? '401 from external research website'
-              : TURN_FAILURE === 'rate' ? 'HTTP 429 rate limit exceeded' : 'Network error: ECONNRESET'
-        out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message } } } })
+            : TURN_FAILURE === '401-with-secret-marker' ? 'SYNTHETIC-SENSITIVE-MARKER'
+            : TURN_FAILURE === 'external-unauthorized' ? 'External research website returned HTTP 401 Unauthorized'
+              : TURN_FAILURE === 'refresh-network' ? 'Your access token could not be refreshed: network timeout'
+                : TURN_FAILURE === 'bare401' ? 'HTTP 401 Unauthorized: authentication failed'
+                  : TURN_FAILURE === 'external401' ? '401 from external research website'
+                    : TURN_FAILURE === 'rate' ? 'HTTP 429 rate limit exceeded' : 'Network error: ECONNRESET'
+        const fail = () => out({ method: 'turn/completed', params: { threadId, turn: {
+          id: turnId, status: 'failed', error: { message, ...(TURN_FAILURE.startsWith('401') ? { codexErrorInfo: 'unauthorized' } : {}) }
+        } } })
+        if (TURN_RELEASE) {
+          const timer = setInterval(() => { if (existsSync(TURN_RELEASE)) { clearInterval(timer); fail() } }, 50)
+        } else fail()
         return
       }
       if (FILE_EVENTS !== undefined) {

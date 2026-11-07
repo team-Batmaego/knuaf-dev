@@ -341,14 +341,14 @@ export function describeChatError(raw: string): DescribedError {
 function providerCopy(text: string): ErrorCopy | null {
   if (/requires a newer version|update (the )?codex|unsupported model|unknown model|not supported/i.test(text))
     return { title: '도우미 프로그램을 업데이트해야 해요.', action: 'Codex를 최신 버전으로 올린 뒤 다시 보내 주세요.', kind: 'error' }
+  if (/timed?\s*out|ETIMEDOUT|ECONN|network|fetch failed|socket hang/i.test(text))
+    return { title: '네트워크 연결을 확인해 주세요.', action: '인터넷 연결을 확인한 뒤 다시 보내 주세요.', kind: 'warning' }
   if (/\b(401|403)\b|unauthori|forbidden|authenticat|not logged in|\blogin\b/i.test(text))
-    return { title: 'AI 계정 연결을 확인해 주세요.', action: '내 논문 화면에서 ChatGPT 로그인을 다시 한 뒤 보내 주세요.', kind: 'warning' }
+    return { title: '요청 인증을 확인하지 못했어요.', action: '오류 내용을 확인해 주세요.', kind: 'warning' }
   if (/\b429\b|rate.?limit|quota|usage limit|insufficient/i.test(text))
     return { title: '도우미 요청 한도에 걸렸어요.', action: '잠시 기다렸다가 다시 보내 주세요.', kind: 'warning' }
   if (/\b5\d\d\b|overloaded|internal server|temporarily unavailable/i.test(text))
     return { title: '도우미 서비스가 잠시 불안정해요.', action: '잠시 후 다시 보내 주세요.', kind: 'warning' }
-  if (/timed?\s*out|ETIMEDOUT|ECONN|network|fetch failed|socket hang/i.test(text))
-    return { title: '네트워크 연결을 확인해 주세요.', action: '인터넷 연결을 확인한 뒤 다시 보내 주세요.', kind: 'warning' }
   return null
 }
 

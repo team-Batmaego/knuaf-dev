@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
-import { CodexConnection } from './codex'
+import { CodexAuthenticationError, CodexConnection } from './codex'
 import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
@@ -20,12 +20,9 @@ function parseChat(text: string, provider: Provider): ChatSnapshot {
 }
 
 const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
-// 실패한 Codex 실행의 오류만 판정한다. 일반 답변이나 도구 출력의 401은 보지 않는다.
-const codexAuthFailure = (error: unknown): boolean => error instanceof Error && (
-  /(?:access token|refresh token).*(?:could not be refreshed|expired|invalid|revoked)/i.test(error.message) ||
-  /\b401\b[^\n]*(?:unauthorized|authentication|access token)/i.test(error.message) ||
-  /(?:authentication|access token)[^\n]*\b401\b/i.test(error.message)
-)
+// 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
+const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
+  (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
 
 export class ChatService {
   private snapshots = new Map<string, ChatSnapshot>()
@@ -34,6 +31,7 @@ export class ChatService {
   private runs = new Map<string, Promise<void>>()
   private shuttingDown = false
   private authRequired = new Set<Provider>()
+  private authGeneration: Record<Provider, number> = { codex: 0, claude: 0 }
   private reauthenticating = new Map<Provider, AgentConnection>()
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
@@ -46,6 +44,7 @@ export class ChatService {
       const status = await login.status()
       if (status.connected && this.reauthenticating.get(provider) === login &&
           (!(login instanceof ClaudeConnection) || login.loginConfirmed)) {
+        this.authGeneration[provider]++
         this.pendingLogins.delete(provider)
         this.authRequired.delete(provider)
         this.reauthenticating.delete(provider)
@@ -463,6 +462,7 @@ export class ChatService {
     // 서버 재생(과거 턴)은 스냅샷에 assistant 기록이 하나도 없을 때만 — 이미 있으면
     // item-N/msg_* id가 달라 중복으로 들어온다.
     const replayHistory = !s.messages.some(m => m.role === 'assistant')
+    const authGeneration = this.authGeneration[s.provider]
     /**
      * 답장이 오기 시작했으면 전달된 것이다. 예전에는 run() 이 끝나야 'sent' 로 바꿨는데,
      * 에이전트 턴은 몇 분씩 가므로 도우미가 눈앞에서 말하는 내내 학생 메시지에
@@ -510,12 +510,14 @@ export class ChatService {
       // (중단하면 연결이 끊겨 run 이 예외로 끝나므로 여기로 온다.)
       if (s.state !== 'stopped') {
         if ((s.provider === 'claude' && e instanceof ClaudeAuthenticationError) || (s.provider === 'codex' && codexAuthFailure(e))) {
-          this.authRequired.add(s.provider)
-          this.reauthenticating.delete(s.provider)
-          s.authRequired = true
+          if (authGeneration === this.authGeneration[s.provider]) {
+            this.authRequired.add(s.provider)
+            s.authRequired = true
+          }
+          s.error = authGeneration === this.authGeneration[s.provider] ? authCopy(s.provider) : '이전 답변의 인증이 만료됐어요. 보냈는지 확인한 뒤 이어서 보내 주세요.'
         }
         if (s.state !== 'interrupted') s.state = 'error'
-        s.error = s.authRequired ? authCopy(s.provider) : e instanceof Error ? e.message : '작업이 완료되지 않았어요.'
+        s.error ??= e instanceof Error ? e.message : '작업이 완료되지 않았어요.'
       }
     } finally { s.permission = undefined; this.waiting.delete(key); this.publish(s) }
   }
