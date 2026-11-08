@@ -14,6 +14,7 @@
  *   FAKE_CODEX_ASK_REASON   권한 요청의 reason (기본 쉬운 이유 한 줄, 빈 값이면 필드 생략)
  *   FAKE_CODEX_FILE_EVENTS  JSON 알림 배열 뒤 파일 변경 승인을 요청한다(스키마 기반 시험)
  *   FAKE_CODEX_FILE_AFTER   승인 요청 뒤 보낼 JSON 알림 배열
+ *   FAKE_CODEX_COMMAND_EVENTS  턴을 끝내기 전에 보낼 JSON 알림 배열 — `commandExecution` 결과 시험용
  *   FAKE_CODEX_DELAY_MS     모든 요청 응답을 이만큼 늦춘다(기본 0) — 느린 기계 조건 재현용
  *   FAKE_CODEX_MODELS       `model/list` 가 돌려줄 모델 배열(JSON). 없으면 Sol·Terra·Astra·Luna 기본값
  *   FAKE_CODEX_TURN_LOG     `turn/start` 로 온 model·effort 를 한 줄씩 덧붙일 파일 — 시험이 읽는다
@@ -42,6 +43,8 @@ const ASK_COMMAND = process.env.FAKE_CODEX_ASK_COMMAND ?? 'cat /etc/hosts'
 const ASK_REASON = process.env.FAKE_CODEX_ASK_REASON ?? '논문 폴더 밖 파일을 읽으려고 해요'
 const FILE_EVENTS = process.env.FAKE_CODEX_FILE_EVENTS
 const FILE_AFTER = process.env.FAKE_CODEX_FILE_AFTER
+/** 턴이 끝나기 전에 보낼 알림 — 셸 명령 결과(`commandExecution`)의 출력을 시험한다. */
+const COMMAND_EVENTS = process.env.FAKE_CODEX_COMMAND_EVENTS
 /** 응답 지연(ms) — 느린 기계(CI) 조건을 만들기 위한 시험 전용 스위치. 기본 0(동작 불변). */
 const DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_DELAY_MS ?? 0) || 0)
 /** 턴을 끝내지 않는다 — "작업 중" 화면을 안정적으로 본다. `after-delta` 면 답 첫 조각(전달 확인)을 보낸 뒤 붙잡는다. */
@@ -248,6 +251,9 @@ function handle(message) {
           ...(ASK_REASON ? { reason: ASK_REASON } : {})
         } })
         return
+      }
+      if (COMMAND_EVENTS !== undefined) {
+        for (const event of JSON.parse(COMMAND_EVENTS)) out(event)
       }
       if (HOLD) return
       if (HOLD_AFTER_DELTA) {

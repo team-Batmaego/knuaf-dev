@@ -1,4 +1,10 @@
 import { defineConfig } from '@playwright/test'
+import { cleanupTmpdir, isolateTmpdir } from './e2e/tmp-run'
+
+// 이 실행이 만든 임시 폴더는 실행 전용 뿌리 아래로 모이고 종료에 지운다(`e2e/tmp-run.ts`).
+// 설치본 시험도 `mkdtempSync(join(tmpdir(), 'kd-installed-…'))` 로 폴더를 만든다.
+isolateTmpdir()
+process.once('exit', cleanupTmpdir)
 
 /**
  * 설치본(dmg → /Applications) 전용 실행. 개발 빌드 e2e(`e2e/`, `playwright.config.ts`)와
@@ -19,5 +25,6 @@ export default defineConfig({
   retries: 0,
   workers: 1,
   reporter: 'list',
-  use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', video: 'retain-on-failure' }
+  use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', video: 'retain-on-failure' },
+  globalTeardown: './e2e/tmp-run.ts'
 })
