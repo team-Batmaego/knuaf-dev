@@ -289,8 +289,9 @@ export class ChatService {
     return effectiveModelChoice(stored, this.modelLists.get(provider) ?? null)
   }
   /**
-   * 이 계정이 쓸 수 있는 모델 목록. 통로가 없는 공급자(이번 판의 Claude)는 `supported:false` 로
-   * 답한다 — 화면은 추천도 칩도 띄우지 않고 지금처럼 기본값으로 둔다.
+   * 이 계정이 쓸 수 있는 모델 목록. 통로가 없는 공급자는 `supported:false` 로 답한다 —
+   * 화면은 추천도 칩도 띄우지 않고 지금처럼 기본값으로 둔다. 지금은 두 회사 모두 통로가
+   * 있다(ChatGPT `model/list`, Claude 초기화 응답의 `models`).
    */
   async models(root: string | null, provider: Provider): Promise<ChatModels> {
     return agentActivity.run(async () => {

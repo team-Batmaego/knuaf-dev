@@ -1119,9 +1119,6 @@ export const CHAT = {
   // --- 입력칸 모델 칩 ------------------------------------------------------
   modelChipTitle: '이 논문의 도우미',
   depthTitle: '생각 깊이',
-  depthDefault: '기본값',
-  /** 값은 지어내지 않는다 — 지금은 그 사용자의 CLI 기본값이 쓰인다는 사실만 말한다. */
-  depthFollows: (name: string) => `내 ${name} 설정을 따라요`,
   // --- 아래 칸: 작업 중 한 줄(설계 §3) --------------------------------------
   runningLine: '도우미가 작업 중이에요',
   /** 폴더 준비(.venv) 중 — 입력칸 위 진행 표시(store/prep.ts). 처음 한 번, 윈도우에서는 몇 분 걸린다. */
@@ -1135,13 +1132,19 @@ export const CHAT = {
 /** 모델 칩: 계정 목록·추천·선택은 학생이 팝오버를 열었을 때만 조회한다. */
 export const MODEL_PICKER = {
   companyTitle: '어느 AI와 대화할까요',
-  modelsTitle: 'ChatGPT 모델',
+  /** 회사마다 목록을 그 회사 이름으로 부른다 — 예전에는 "ChatGPT 모델"로 고정돼 있었다. */
+  modelsTitleFor: (company: string) => `${company} 모델`,
   accountDefault: '안 고름(계정 기본)',
-  accountDefaultHint: '내 ChatGPT 설정을 그대로 써요',
+  accountDefaultHintFor: (company: string) => `내 ${company} 설정을 그대로 써요`,
   ...MODEL_SELECTION_COPY,
   defaultDepth: '기본값',
   depthChip: (depth: string) => `생각 깊이 ${depth === '기본값' ? '기본' : depth}`,
-  efforts: { none: '없음', minimal: '최소', low: '낮게', medium: '보통', high: '높게', xhigh: '아주 높게', max: '최대로' } as Record<string, string>,
+  // 단계 이름은 모델이 주는 그대로 둔다(설계 §1: 줄이지 않는다). 'ultra' 는 Codex 가
+  // 주는 이름이고, 그 단계가 "자동 분담"을 뜻하므로 이름표에 그 사실을 같이 적는다.
+  efforts: {
+    none: '없음', minimal: '최소', low: '낮게', medium: '보통', high: '높게', xhigh: '아주 높게', max: '최대로',
+    ultra: '울트라(자동 분담)'
+  } as Record<string, string>,
   purpose: (lanes: string) => `${lanes}에 추천`,
   recommended: '추천',
   otherModel: '그 밖의 작업은 모델 설명을 참고해 주세요',
@@ -1150,9 +1153,11 @@ export const MODEL_PICKER = {
   saving: '모델 선택을 저장하고 있어요…',
   listFailed: '모델 목록을 불러오지 못했어요.',
   empty: '이 계정에서 고를 수 있는 모델이 없어요. 계정 기본값으로 대화할 수 있어요.',
-  connectFirst: 'ChatGPT에 연결하면 이 계정에서 쓸 수 있는 모델이 보여요.',
+  connectFirst: 'AI에 연결하면 이 계정에서 쓸 수 있는 모델이 보여요.',
   chooseForDepth: '모델을 고르면 생각 깊이도 바꿀 수 있어요.',
-  sameConversation: '같은 ChatGPT 대화에서 다음 메시지부터 적용돼요.',
+  sameConversationFor: (company: string) => `같은 ${company} 대화에서 다음 메시지부터 적용돼요.`,
+  /** ultra 는 깊이만 올리는 단계가 아니다 — 동봉 설명이 "Maximum reasoning with automatic task delegation"이다. */
+  ultraNotice: '울트라는 Codex가 스스로 담당을 여러 개 띄워요 — 한도가 빨리 줄고, 작업 분담표와 따로 돌아요.',
   reviewNotice: '검토는 새 대화로 하세요. 검토용 새 대화 열기는 아직 지원하지 않아요.',
   limitNotice: 'Sol 같은 무거운 모델은 구독 한도를 더 빨리 쓸 수 있어요.',
   subscription: '앱은 AI를 팔지 않아요. 내 구독 계정을 써요.'
