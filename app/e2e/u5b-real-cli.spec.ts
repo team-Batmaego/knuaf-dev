@@ -13,6 +13,7 @@ import { expect, test } from '@playwright/test'
 import http from 'node:http'
 import { appendFileSync, existsSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import { studentTurnText } from '../src/main/chat/claude'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -49,7 +50,11 @@ async function waitForMarker(logFile: string, timeoutMs: number): Promise<void> 
 }
 const MAIN_MARKER = 'MAIN-MARKER'
 
-type Reply = { tool?: [string, Record<string, unknown>] }
+type Reply = {
+  tool?: [string, Record<string, unknown>]
+  /** 학생 폴더에 `context: fork` 스킬 `forky` 를 둔다 — 학생 글의 슬래시로 펼쳐지는지 본다. */
+  forkSkill?: boolean
+}
 
 /**
  * 가짜 Messages API. 메인 차례에는 시나리오의 `tool_use` 를, 하위 담당 차례에는 표지가 실려
@@ -132,13 +137,18 @@ async function fakeApi(reply: Reply, logFile: string): Promise<{ url: string; cl
  * 실제 CLI 한 판. `disallowed` 를 주면 앱이 실제로 넘기는 옵션과 같은 모양이 된다.
  * 돌려주는 `ran` 은 하위 담당 대화가 엔진에서 시작됐는지다.
  */
-async function runCli(cli: string, reply: Reply, opts: { disallowed?: string[] } = {}) {
+async function runCli(cli: string, reply: Reply, opts: { disallowed?: string[]; studentText?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'kd-u5b-cli-'))
   const ws = join(root, 'ws'); const home = join(root, 'home'); const cfg = join(root, 'cfg')
   for (const dir of [ws, home, cfg]) mkdirSync(dir, { recursive: true })
   const logFile = join(root, 'log.jsonl')
   writeFileSync(logFile, '')
   writeFileSync(join(cfg, '.claude.json'), JSON.stringify({ projects: { [ws]: { hasTrustDialogAccepted: true } } }))
+  if (reply.forkSkill) {
+    mkdirSync(join(ws, '.claude', 'skills', 'forky'), { recursive: true })
+    writeFileSync(join(ws, '.claude', 'skills', 'forky', 'SKILL.md'),
+      `---\nname: forky\ndescription: forked test skill\ncontext: fork\n---\n${SUBAGENT_MARKER} fork skill body: reply ok.\n`)
+  }
   const api = await fakeApi(reply, logFile)
   let ran = false
   try {
@@ -147,8 +157,10 @@ async function runCli(cli: string, reply: Reply, opts: { disallowed?: string[] }
       ANTHROPIC_BASE_URL: api.url, ANTHROPIC_API_KEY: 'sk-ant-api03-FAKE-for-local-mock-only',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_AUTOUPDATER: '1'
     }
+    // `studentText` 가 있으면 **앱이 만드는 그 글 그대로** 보낸다(첫 턴: `/knuaf-dev <학생글>`,
+    // resume 턴: `studentTurnText(학생글)`). 없으면 대조용 표지 글.
     const q = query({
-      prompt: `${MAIN_MARKER} do the task`,
+      prompt: opts.studentText ?? `${MAIN_MARKER} do the task`,
       options: {
         cwd: ws, pathToClaudeCodeExecutable: cli, env, settingSources: ['project', 'local'],
         permissionMode: 'default', model: 'claude-sonnet-4-5',
@@ -194,4 +206,25 @@ test('U5b(실CLI): disallowedTools 로 Workflow·fork Skill 을 닫으면 하위
     expect(r.tools).not.toContain('Workflow')
     expect(r.tools).not.toContain('Skill')
   }
+})
+
+/**
+ * U5c — **학생이 슬래시로 시작하는 글**을 쳤을 때. `disallowedTools` 는 `Skill` 도구를 꺼도
+ * CLI 가 학생 글의 슬래시 명령을 **직접** 펼치는 길을 막지 못한다(실측). 그래서 앱은 그 글을
+ * 일반 글로 바꿔 보낸다 — 여기서는 그 처방이 실CLI 에서 실제로 하위 담당을 막는지 본다.
+ */
+const STUDENT_SLASH = '/forky 이 논문 봐 줘'
+
+test('U5c(실CLI): 학생 글을 그대로 보내면 슬래시 fork 스킬이 하위 담당을 띄운다 — 양성 대조', async () => {
+  // 대조: 앱의 처방 없이 학생 글을 그대로 보내면 CLI 가 `/forky` 를 명령으로 읽는다.
+  const r = await runCli(cli!, { forkSkill: true }, { disallowed: ['Agent', 'Task', 'Workflow', 'Skill'], studentText: STUDENT_SLASH })
+  expect(r.ran, '학생 글의 슬래시가 fork 스킬을 펼쳐야 대조가 성립한다').toBe(true)
+})
+
+test('U5c(실CLI): studentTurnText 를 거친 글은 명령으로 읽히지 않는다', async () => {
+  const r = await runCli(cli!, { forkSkill: true }, {
+    disallowed: ['Agent', 'Task', 'Workflow', 'Skill'],
+    studentText: studentTurnText(STUDENT_SLASH)
+  })
+  expect(r.ran, '앞 칸을 붙였는데도 하위 담당이 떴어요').toBe(false)
 })

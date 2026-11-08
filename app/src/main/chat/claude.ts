@@ -423,6 +423,31 @@ export const subagentGuardHook = async (input: unknown): Promise<SyncHookJSONOut
   }
 }
 
+/**
+ * 학생이 친 글을 **CLI 가 명령으로 읽지 않게** 만든 뒤 그대로 넘긴다(U5c).
+ *
+ * 왜 필요한가: `disallowedTools` 로 `Skill` 도구를 꺼도, 학생 글이 `/` 로 시작하면 CLI 는 그것을
+ * **슬래시 명령**으로 보고 스킬을 직접 펼친다 — `Skill` 도구를 거치지 않는 길이라 그 옵션이
+ * 막지 못한다. 앱 스킬 사본 폴더의 `context: fork` 스킬도, CLI 동봉 `code-review` 도 그렇게
+ * 하위 담당을 띄운다(두 판 실측). 앱 안에서 숨은 하위 담당이 도는 것은 §3.2 [r11] 과
+ * 형님 UI 원칙(학생이 명령을 외울 필요 없음)에 어긋난다.
+ *
+ * 처방: 첫 줄이 `/` 로 시작하면 **앞에 한 칸**을 붙인다. 학생이 쓴 낱말은 한 글자도 바꾸지
+ * 않고, CLI 는 그 줄을 평범한 글 한 줄로 읽는다(실측: 앞 공백 한 칸이면 일반 턴).
+ *
+ * 손대지 않는 경우:
+ *  · 이미 앞에 공백·줄바꿈·탭이 있다 — CLI 가 이미 일반 턴으로 읽는다(실측).
+ *  · 전각 슬래시(`／`)·`//` — 명령 자리가 아니다(실측).
+ *  · 줄 **안**의 슬래시, 코드 블록 안 예시 — 명령 자리는 첫 줄 첫 글자뿐이다(실측).
+ *
+ * 첫 턴(새 대화)은 여기 오지 않는다 — 앱이 `/knuaf-dev ${글}` 로 보내므로 슬래시 명령 자리는
+ * `/knuaf-dev` 하나이고, 그 뒤의 슬래시는 명령이 아니다(실측). 그 앞붙임은 앱의 길이라 그대로 둔다.
+ */
+export function studentTurnText(text: string): string {
+  if (typeof text !== 'string' || text === '') return text
+  return text.startsWith('/') ? ` ${text}` : text
+}
+
 /** 모든 턴에 붙는 앱 지침 — 세션 경계·스킬 규칙·셸 표기·하위 담당 금지. */
 const CLAUDE_SYSTEM_APPEND = '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 하위 담당(Agent·Task) 도구는 앱이 거절하니 부르지 마세요 — 넘길 일은 `gg.py delegate` 주문서로 넘기고, 그 명령이 아직 없으면 그 일은 직접 하거나 학생에게 한 줄로 알리세요. 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.'
 
@@ -753,8 +778,10 @@ export class ClaudeConnection implements AgentConnection {
     if (markOverride) this.overriddenFor = sessionId
     this.controller = new AbortController()
     // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
+    // 이어지는 턴은 학생 글을 그대로 보내되, 슬래시로 시작하면 CLI 가 명령으로 읽지 않게
+    // 맨 앞에 한 칸을 붙인다(U5c — `studentTurnText`).
     const q = this.active = query({
-      prompt: sessionId ? text : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`,
+      prompt: sessionId ? studentTurnText(text) : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`,
       options: {
         ...this.queryOptions(sessionId, plan),
         // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
