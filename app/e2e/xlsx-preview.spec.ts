@@ -163,6 +163,30 @@ wb.save(sys.argv[1])
   await expect(page.getByRole('cell', { name: '사과', exact: true })).toBeVisible()
   await expect(page.getByRole('cell', { name: '매출', exact: true })).toHaveCount(0)
 
+  // 검토 권고 1 — 끝 탭까지 실제로 스크롤한 뒤에도 강조(thumb)와 선택 탭이 같은 자리를 가리키는가.
+  // 탭과 thumb가 같은 positioned `.segmented` 안에 있어 스크롤량이 둘 다에서 빠진다.
+  await tabs.last().click()
+  await expect(tabs.last()).toHaveAttribute('aria-selected', 'true')
+  // thumb는 transition으로 따라 움직이고, 클릭이 끝 탭을 보이도록 탭 줄을 민다 —
+  // 스크롤과 강조가 둘 다 끝난 뒤의 좌표를 한 번에 본다(순차 단정은 경합에 흔들린다).
+  type Align = { scrollLeft: number; dx: number; dw: number; settled: boolean }
+  const alignment = () => strip.evaluate((el): Align => {
+    const seg = el.querySelector('.segmented') as HTMLElement
+    const thumb = seg.querySelector('.thumb') as HTMLElement
+    const tab = seg.querySelector('button[aria-selected="true"]') as HTMLElement
+    const a = thumb.getBoundingClientRect()
+    const b = tab.getBoundingClientRect()
+    const dx = Math.abs(a.left - b.left)
+    const dw = Math.abs(a.width - b.width)
+    return { scrollLeft: el.scrollLeft, dx, dw, settled: el.scrollLeft > 0 && dx < 1 && dw < 1 }
+  })
+  await expect.poll(async () => (await alignment()).settled, { timeout: 5_000 }).toBe(true)
+  const aligned = await alignment()
+  expect(aligned.scrollLeft, '끝 탭까지 실제로 스크롤되지 않았다').toBeGreaterThan(0)
+  expect(aligned.dx).toBeLessThan(1)
+  expect(aligned.dw).toBeLessThan(1)
+  await expect(page.getByRole('cell', { name: '1회', exact: true })).toBeVisible()
+
   // 캡처는 저장소 밖(작업 폴더)에 남긴다 — 제품 저장소에는 넣지 않는다(책임자 지시).
   const out = process.env.KNUAF_W10_W12_SHOTS
   if (out) {

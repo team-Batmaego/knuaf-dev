@@ -65,13 +65,6 @@ function countEditedAreas(before: string, after: string): number {
   return count
 }
 
-/** Count changed places between two bodies; first writing counts as `wrote`, not a place count. */
-function editBetween(before: string, after: string): ReviewEdit {
-  return before.length === 0 && after.length > 0
-    ? { kind: 'wrote' }
-    : { kind: 'edited', count: countEditedAreas(before, after) }
-}
-
 function editKey(root: string, sectionId: string, hash: string): string {
   return JSON.stringify([root, sectionId, hash])
 }
@@ -97,29 +90,30 @@ export const useReview = create<ReviewState>((set, get) => ({
           throw new Error(reply.error?.message ?? '비교 기준을 불러오거나 저장하지 못했어요.')
         }
         set((state) => {
-          const previous = state.lastSeen[key]
           const saved = state.baseline[key]
-          const known = state.editCounts[editKey(root, sectionId, doc.hash)]
+          const hashKey = editKey(root, sectionId, doc.hash)
+          const known = state.editCounts[hashKey]
+          const earlier = state.lastSeen[key]
           /**
-           * Count **bodies**, not hashes. PaperPane's fire-and-forget read and the section list
-           * are two independent readers: the pane can report the saved body first (recorded
-           * under the old hash), then the list reports the same body under the new hash. A hash
-           * check alone then compares the body with itself and tells the student "0곳" while the
-           * diff shows real changes. So:
-           *   - a genuinely newer body (this save) counts against the body seen just before it;
-           *   - the same body under a new hash (the race) counts against the persisted baseline —
-           *     the same `before` that "고친 부분 보기" draws;
-           *   - an already-counted hash keeps its first count (events are fixed when created).
+           * 숫자의 뜻은 하나다 — **화면 "고친 부분 보기"의 `before`(persisted baseline) 대비 바뀐 곳 수**.
+           * 그리고 해시마다 **한 번만** 확정한다. 이 두 규칙이 검토(REVIEW-W10-W12) 중요 1·2를 닫는다:
+           *   ① 팬의 fire-and-forget 읽기와 목록 읽기가 어떤 순서로 들어와도 `before`가 baseline으로
+           *      고정이므로 같은 해시는 같은 값을 낸다(직전 관측 본문에 기대지 않는다).
+           *   ② 같은 해시에 다른 본문이 뒤따라 와도(옛 해시·새 본문 경합) 이미 정한 값을 덮지 않는다.
+           * 기준본이 비어 있던 절이 **처음** 본문을 얻는 순간만 `wrote`다. 그 뒤 저장은 기준본이
+           * 비어 있어도 곳 수로 센다 — 빈 기준본 탓에 두 번째 저장이 `wrote`로 되돌아가지 않는다.
            */
-          let edit: ReviewEdit | null = null
-          if (previous && previous.draft !== doc.draft) edit = editBetween(previous.draft, doc.draft)
-          // A zero count must not stand next to a non-empty "고친 부분 보기" diff: the counter
-          // and the rendered diff share the persisted baseline as their `before`. A hash that
-          // already has a fixed count is never recomputed (a second read of the same save must
-          // not overwrite it with a different basis).
-          const weak = !edit || (edit.kind === 'edited' && edit.count === 0)
-          if (weak && !known && previous && saved && saved.draft !== doc.draft) {
-            edit = editBetween(saved.draft, doc.draft)
+          const base = saved?.draft ?? persistedDraft
+          let edit: ReviewEdit | null = known ?? null
+          if (!known) {
+            if (base !== doc.draft) {
+              const firstBody = base === '' && doc.draft !== '' && (earlier === undefined || earlier.draft === '')
+              edit = firstBody ? { kind: 'wrote' } : { kind: 'edited', count: countEditedAreas(base, doc.draft) }
+            } else if (earlier && earlier.draft !== doc.draft) {
+              // 기준본으로 되돌아온 저장 — 새로 쓴 것이 아니므로 `wrote`가 아니라 0곳이다
+              // (diff도 비어 있어 문구와 화면이 일치한다).
+              edit = { kind: 'edited', count: 0 }
+            }
           }
           return {
             baseline: {
@@ -127,7 +121,7 @@ export const useReview = create<ReviewState>((set, get) => ({
               [key]: { title: saved?.title ?? doc.title, draft: persistedDraft, hash: saved?.hash ?? '' }
             },
             lastSeen: { ...state.lastSeen, [key]: doc },
-            ...(edit ? { editCounts: { ...state.editCounts, [editKey(root, sectionId, doc.hash)]: edit } } : {})
+            ...(known || !edit ? {} : { editCounts: { ...state.editCounts, [hashKey]: edit } })
           }
         })
       })
