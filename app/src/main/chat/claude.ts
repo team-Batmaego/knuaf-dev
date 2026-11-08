@@ -426,15 +426,11 @@ function exeName(word: string): string {
  * 따옴표 안의 `;`·`|`·`&` 는 글자다(`rg "claude|codex" notes.md` 는 한 조각).
  */
 function parseShell(raw: string): string[][] | null {
+  // 따옴표 안의 윈도우 경로 구분자(\)만 슬래시로 바꿔 읽는다.
+  // 따옴표 안의 이스케이프(\\"·\\$·\\`)와 따옴표 밖의 `\`는 셸이 다르게 읽으므로 판정 불가다.
   const cmd = raw.replace(BENIGN_REDIR, ' ')
   if (SHELL_UNJUDGEABLE.test(cmd) || /\n/.test(cmd)) return null
-  // 윈도우 경로 구분자(\)만 슬래시로 바꿔 읽는다. 이스케이프(따옴표 밖 \)·따옴표 안 \\" 등)는 판정 불가다.
-  //따옴표 밖에서 글자·숫자 바로 앞의 \는 이름 쪼개기라 판정 불가다.
-  const unquoted = cmd.replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/'(?:[^'\\]|\\.)*'/g, '')
-  if (/\\[A-Za-z0-9]/u.test(unquoted)) return null
-  if (/\\[;"&|(){}[\]$`]/u.test(unquoted)) return null
-  if (/\\(?![A-Za-z0-9\p{Script=Hangul}._\-/:\\])/u.test(unquoted)) return null
-  const norm = cmd.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul} ._\-\\/:\]])/gu, '/')
+  const norm = cmd.replace(/"[^"]*"/g, (g) => g.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul}._\-/:\\])/gu, '/'))
   const segs: string[][] = []
   let seg: string[] = []
   let word: string | null = null
@@ -453,7 +449,7 @@ function parseShell(raw: string): string[][] | null {
       const close = norm.indexOf(c, i + 1)
       if (close < 0) return null
       const body = norm.slice(i + 1, close)
-      if (c === '"' && /"/.test(body)) return null
+      if (c === '"' && /\\["\\$`]/.test(body)) return null
       word = (word ?? '') + body; parts++; quoted = true; i = close
     } else if (c === '\\') return null
     else if (/\s/.test(c)) endWord()

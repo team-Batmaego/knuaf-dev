@@ -4,7 +4,7 @@ import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join, resolve } from 'node:path'
+import { delimiter, join, resolve, win32 } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
 import { skillSource, VERSION_FILE } from '../src/main/agent'
 import { autoAllow, describeTool, inspectAgentSettings, looksLikePath, lostToolCalls } from '../src/main/chat/claude'
@@ -1127,24 +1127,24 @@ test('AI·감싸기 판정이 스킬과 점검 명령을 새로 막지 않는다
   ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(true)
 })
 
-// 윈도우 표기(\)도 슬래시와 같은 보호 판정을 받는다. 맥에서는
-// path.win32 로 뿌려서 경로 해석이 윈도우 규칙을 따르도록 한다(S1 WIN).
+// 윈도우 경로 해석은 본체에서 호스트 OS 기준 node:path를 써서 맥에서도
+// 보호 판정이 윈도우 구분자·드라이브를 같은 규칙으로 본다(S1 WIN).
 test('윈도우 경로 표기에서도 보호 경로는 계속 막힌다 (S1 WIN)', () => {
   const root = process.platform === 'win32' ? 'C:\\Users\\학생\\무제 폴더' : '/Users/s/무제 폴더'
-  const W = (p: string) => process.platform === 'win32' ? p.replaceAll('/', '\\') : p
+  const W = (p: string) => process.platform === 'win32' ? win32.resolve(root, p) : `${root}/${p}`
   for (const file of [
-    `${root}/sub/.claude/skills/x/SKILL.md`,
-    `${root}/sub/CLAUDE.md`,
-    `${root}/.claude/settings.local.json`,
-    `${root}/.mcp.json`,
-    `${root}/.claude.json`
+    'sub/.claude/skills/x/SKILL.md',
+    'sub/CLAUDE.md',
+    '.claude/settings.local.json',
+    '.mcp.json',
+    '.claude.json'
   ]) expect(autoAllow(root, 'Write', { file_path: W(file) }), file).toBe(false)
   for (const cmd of [
-    `mv stage ${W(`${root}/sub/.claude`)}`,
-    `cp x ${W(`${root}/sub/CLAUDE.md`)}`,
-    `python3 ${W(`${root}/sub/.claude/skills/x/evil.py`)}`,
-    `tee ${W(`${root}/.claude/settings.local.json`)}`,
-    `mkdir -p ${W(`${root}/.claude/hooks`)}`
+    `mv stage ${W('sub/.claude')}`,
+    `cp x ${W('sub/CLAUDE.md')}`,
+    `python3 ${W('sub/.claude/skills/x/evil.py')}`,
+    `tee ${W('.claude/settings.local.json')}`,
+    `mkdir -p ${W('.claude/hooks')}`
   ]) expect(autoAllow(root, 'Bash', { command: cmd }), cmd).toBe(false)
   for (const cmd of [
     'mv stage sub/.claude',
@@ -1159,8 +1159,13 @@ test('윈도우 경로 표기에서도 보호 경로는 계속 막힌다 (S1 WIN
 })
 
 test('이스케이프로 보호 경로를 숨기는 형태는 계속 묻는다 (S1 WIN)', () => {
-  // 이스케이프(\.claude·claude)나 셸 메타는 정규화하지 않고 판정 불가로 둔다.
+  // 따옴표 밖 이스케이프(\\.·\\-)는 셸이 다르게 읽으므로 판정 불가로 둔다(검토 차단).
   for (const cmd of [
+    'cp x CLAUDE\\.md',
+    'cp x sub/CLAUDE\\.md',
+    'cp x .mcp\\.json',
+    'cp x CLAUDE.local\\.md',
+    'cp x CLAUDE.local\\md',
     'tee .clau\\de/settings.local.json',
     'cp x .claude/settings.local.json\\',
     'rm -r .\\.claude',
