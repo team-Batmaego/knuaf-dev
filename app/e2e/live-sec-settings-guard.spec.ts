@@ -1,4 +1,5 @@
 // 회귀 시험 — 논문 폴더 안 Claude 설정 파일로 권한을 넓히는 길을 막았는지.
+// 실제 Claude 모델을 부르므로 `live-` 이름으로 둔다 — KNUAF_LIVE=1 일 때만 돈다(playwright.config.ts testIgnore).
 //
 // 실제 앱(빌드 산출물)을 띄우고 **동봉 CLI**(2.1.275)로 확인한다. 학생이 받는 CLI 가
 // PATH 의 다른 버전이 아니라 동봉본이기 때문이다(검토 SEC 중요-1).
