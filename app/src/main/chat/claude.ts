@@ -516,40 +516,50 @@ export class ClaudeConnection implements AgentConnection {
   }
 
   /**
-   * 이 턴에 실을 모델·깊이. 세 경우다.
-   * 1. 고른 모델이 있으면 그 모델 + (고른 깊이). 깊이를 안 골랐으면 생략 = 모델 기본값.
-   * 2. 고른 모델이 없고 이 대화에서 덮어쓴 적도 없으면 아무것도 넣지 않는다(지금까지와 같다).
-   * 3. 이 앱이 덮어쓴 뒤 해제했다 → 확인된 계정 기본 모델을 **명시해서** 되돌린다.
+   * 한 턴의 모델·깊이 계획. **한 번만 읽고 그 값으로 끝까지 간다** — 옵션 조립·초기화 대조·
+   * 기본값 저장이 모두 이 한 값을 쓴다(웹 검토 U1b 중요 1·5). 예전에는 `prepare()`·`run()`·
+   * 초기화 처리에서 각각 다시 읽어서, 그 사이에 칩을 만지면 "보낸 값"과 "판정한 값"이 갈렸다.
+   *
+   * 순서:
+   * 1. 학생이 고른 모델 → 그 모델 + 고른 깊이. **깊이를 안 골랐으면 깊이를 보내지 않는다** —
+   *    환경 변수 깊이를 여기 끼워 넣으면 화면("기본값")과 실제 요청이 갈린다(중요 4).
+   * 2. 고른 모델이 없고 개발용 핀(`KNUAF_CLAUDE_MODEL`)이 있으면 그 핀. 핀은 학생 선택이
+   *    아니라 시험·검증용 기본값 자리다(live 스펙이 이 통로로 비용을 낮춘다).
+   * 3. 되돌려야 하는데 계정 기본값을 모르면 `blocked` — 모델 없이 재개하면 CLI 가 마지막
+   *    모델을 복원하므로(D1-03) 조용히 이전 모델로 가게 된다. 부르는 쪽이 전송을 막는다.
+   * 4. 그 밖에는 아무 키도 넣지 않는다(지금까지와 같은 요청 모양).
+   *
+   * `sentModel` 은 실제로 CLI 에 넘긴 모델이다. 초기화 응답과 견주고 기본값 저장 여부를
+   * 정하는 기준도 이 값이다 — 다시 읽은 선택값이 아니다(중요 5).
+   * `marksOverride` 는 "이 대화를 앱이 덮어썼다"를 기록할지다. 계획을 세우는 시점에 기록하지
+   * 않고 **전송이 실제로 시작될 때** 기록한다 — 막힌 턴이 흔적을 남기면 안 된다.
    */
-  private turnModelParams(choice: { model: string; effort: string | null } | null, sessionId: string | undefined): { model?: string; effort?: string } {
-    // 개발용 핀(환경 변수)은 학생 선택이 없을 때의 기본값 자리다 — live 스펙이 이 통로로
-    // 비용을 낮춘다. 학생이 칩에서 고른 값이 있으면 언제나 그쪽이 이긴다.
+  private turnPlan(sessionId: string | undefined): { model?: string; effort?: string; sentModel: string | null; blocked: boolean; marksOverride: boolean } {
+    const choice = this.options.modelChoice?.() ?? null
     const envModel = this.options.env.KNUAF_CLAUDE_MODEL || undefined
     const envEffort = CLAUDE_EFFORTS.has(this.options.env.KNUAF_CLAUDE_EFFORT ?? '')
       ? this.options.env.KNUAF_CLAUDE_EFFORT as string
       : undefined
-    // 고른 모델이 있으면 그 모델. 깊이를 안 골랐으면 생략해 모델 기본값을 쓴다.
+
     if (choice?.model) {
-      this.overriddenFor = sessionId ?? ''
-      const effort = choice.effort ?? envEffort
-      return { model: choice.model, ...(effort ? { effort } : {}) }
+      // 학생이 깊이를 "기본값"으로 두었으면 깊이는 비운다(모델 기본값을 쓴다).
+      return { model: choice.model, ...(choice.effort ? { effort: choice.effort } : {}), sentModel: choice.model, blocked: false, marksOverride: true }
     }
-    if (envModel) return { model: envModel, ...(envEffort ? { effort: envEffort } : {}) }
+    if (envModel) return { model: envModel, ...(envEffort ? { effort: envEffort } : {}), sentModel: envModel, blocked: false, marksOverride: false }
+
     /**
-     * 여기부터는 "고른 모델 없음"이다. 언제 되돌려야 하는가:
-     * ① 이 연결에서 덮어쓴 적이 있다(같은 앱 실행), 또는
+     * 여기부터는 "고른 모델 없음". 언제 되돌려야 하는가:
+     * ① 이 연결에서 이 대화를 덮어쓴 적이 있다(같은 앱 실행), 또는
      * ② 앱을 다시 켜서 재개했는데 이 학생은 전에 모델을 고른 적이 있다(설정의 흔적).
      * ②가 없으면 재시작 뒤 "안 고름"이 CLI 의 마지막 모델 복원에 조용히 먹힌다(D1-03).
-     * 새 대화는 아직 덮어쓴 적이 없으므로 ①·② 어느 쪽도 아니다 — 모델 키 없이 열어 기본값을 확인한다.
+     * 새 대화는 아직 덮어쓴 적이 없으므로 ①·② 어느 쪽도 아니다 — 모델 키 없이 열어 기본값을
+     * 확인하고, 그 확인으로 ②가 풀린다(중요 2).
      */
-    const resumed = sessionId !== undefined
-    const mustRestore = this.overriddenFor === (sessionId ?? '') || (resumed && (this.options.modelChosen?.() ?? false))
-    if (!mustRestore) return envEffort ? { effort: envEffort } : {}
-    return this.accountDefault
-      ? { model: this.accountDefault, ...(envEffort ? { effort: envEffort } : {}) }
-      : envEffort ? { effort: envEffort } : {}
+    const mustRestore = this.overriddenFor === (sessionId ?? '') || (sessionId !== undefined && (this.options.modelChosen?.() ?? false))
+    if (!mustRestore) return { ...(envEffort ? { effort: envEffort } : {}), sentModel: null, blocked: false, marksOverride: false }
+    if (!this.accountDefault) return { ...(envEffort ? { effort: envEffort } : {}), sentModel: null, blocked: true, marksOverride: false }
+    return { model: this.accountDefault, ...(envEffort ? { effort: envEffort } : {}), sentModel: this.accountDefault, blocked: false, marksOverride: false }
   }
-
 
   /**
    * 요청한 값(별칭 `opus`·`sonnet`)과 초기화가 알려 준 실제 id(`claude-opus-5`)가 같은
@@ -572,17 +582,11 @@ export class ClaudeConnection implements AgentConnection {
   /**
    * 전송 전 확인. 되돌릴 기본값이 필요한데 확인하지 못했으면 **여기서 던진다** — 보낸 글이
    * 대화에 남거나 초안이 사라지기 전에 막는다(Codex `prepare()` 와 같은 원칙, MC1-01).
-   * 새 대화(`sessionId` 없음)는 덮어쓴 적이 없으므로 묻지 않는다.
+   * `run()` 도 같은 계획으로 한 번 더 막으므로, 준비와 전송 사이에 칩이 바뀌어도
+   * 모델 없이 재개되지 않는다(중요 1).
    */
   async prepare(sessionId: string | undefined): Promise<void> {
-    if (!sessionId) return
-    if (this.options.modelChoice?.()?.model) return
-    // 개발용 핀이 있으면 되돌릴 모델이 이미 정해져 있다 — 기본값을 몰라도 막지 않는다.
-    if (this.options.env.KNUAF_CLAUDE_MODEL) return
-    if (this.accountDefault) return
-    // 이 연결에서 덮어쓴 적도 없고, 전에 고른 흔적도 없으면 되돌릴 것이 없다.
-    if (this.overriddenFor !== sessionId && !(this.options.modelChosen?.() ?? false)) return
-    throw new Error(CLAUDE_MODEL_COPY.unsetNeedsChoice)
+    if (this.turnPlan(sessionId).blocked) throw new Error(CLAUDE_MODEL_COPY.unsetNeedsChoice)
   }
 
   /**
@@ -656,12 +660,17 @@ export class ClaudeConnection implements AgentConnection {
   }
   async run(text: string, sessionId: string | undefined, events: AgentEvents) {
     if (!(await this.status()).connected) throw new Error('Claude 구독 계정 로그인을 완료해 주세요.')
+    // 이 턴에 쓸 값을 **여기서 한 번만** 읽는다. 아래의 옵션 조립·초기화 대조·기본값 저장이
+    // 모두 이 계획을 쓴다 — 전송 중에 칩이 바뀌어도 이미 정한 값으로 나간다(중요 1·5).
+    const plan = this.turnPlan(sessionId)
+    if (plan.blocked) throw new Error(CLAUDE_MODEL_COPY.unsetNeedsChoice)
+    if (plan.marksOverride) this.overriddenFor = sessionId ?? ''
     this.controller = new AbortController()
     // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
     const q = this.active = query({
       prompt: sessionId ? text : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`,
       options: {
-        ...this.queryOptions(sessionId, this.turnModelParams(this.options.modelChoice?.() ?? null, sessionId)),
+        ...this.queryOptions(sessionId, plan),
         // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
         // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
         // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
@@ -707,9 +716,8 @@ export class ClaudeConnection implements AgentConnection {
       const account = await q.accountInfo()
       if (account.apiKeySource && account.apiKeySource !== 'none') throw new Error('API 인증이 감지되어 중단했어요. 구독 인증을 확인해 주세요.')
       let lost = 0
-      // 이 턴에 앱이 요청한 모델. 초기화 메시지의 실제 model 과 대조해 어긋나면 알린다 —
-      // 요금제·조직 설정이 조용히 다른 모델로 돌려도 학생이 알 수 있게(D1-03 ③).
-      const requested = this.options.modelChoice?.()?.model ?? null
+      // 이 턴이 **실제로 보낸** 모델(plan.sentModel). 다시 읽은 선택값이 아니다 — 그 사이
+      // 칩이 바뀌면 보내지 않은 값으로 경고하거나 저장하게 된다(중요 5).
       let verified = false
       for await (const message of q) {
         if (claudeAuthenticationFailed(message)) throw new ClaudeAuthenticationError()
@@ -719,12 +727,15 @@ export class ClaudeConnection implements AgentConnection {
         if (!verified && message.type === 'system' && message.subtype === 'init') {
           verified = true
           const actual = typeof message.model === 'string' && message.model ? message.model : null
-          if (!sessionId && !requested && this.overriddenFor === null && !this.accountDefault && actual) {
-            this.accountDefault = actual
-          }
+          // 계정 기본값은 **모델을 보내지 않은 새 대화**의 init 만 인정한다(설계 §1).
+          // 환경 변수 핀으로 모델을 보냈거나(중요 3), 첫 턴부터 모델을 골랐거나, 앞 대화에서
+          // 모델을 보낸 연결이면(중요 2: "새 대화"는 세션 단위이지 연결 단위가 아니다) 아니다.
+          if (!sessionId && !plan.sentModel && !this.accountDefault && actual) this.accountDefault = actual
           // 새 대화의 표시를 이제 알게 된 세션 id 로 옮긴다 — 다음 턴부터 같은 대화다.
           if (this.overriddenFor === '' && message.session_id) this.overriddenFor = message.session_id
-          if (requested && actual && !this.sameModel(requested, actual)) events.note(CLAUDE_MODEL_COPY.defaultMismatch(requested, actual))
+          if (plan.sentModel && actual && !this.sameModel(plan.sentModel, actual)) {
+            events.note(CLAUDE_MODEL_COPY.defaultMismatch(plan.sentModel, actual))
+          }
         }
         lost += lostToolCalls(message)
         if (message.type === 'assistant') {
