@@ -111,8 +111,15 @@ function realOrSelfDeep(p: string): string {
 }
 
 /**
- * 이 조각이 보호 경로를 가리키는 인자들. 플래그에 붙은 경로(`-o.claude/x`, `--out=.claude/x`)도
- * 본다 — `sort -oFILE` 처럼 값이 붙는 문법이 있어서 `-` 로 시작한다고 건너뛰면 빠져나간다.
+ * 이 조각이 보호 경로를 가리키는 인자들.
+ *
+ * **모든 인자**를 본다 — 경로 모양(`looksLikePath`)으로 먼저 거르면 슬래시 없는 맨이름이
+ * 빠져나간다. `mv stage .claude`·`cp evil.md CLAUDE.md` 는 인자에 `/` 가 없어 경로로
+ * 읽히지 않았고, 그래서 자동 허용됐다(검토 SEC-FIX B1 실측). 맨이름은 작업폴더 기준
+ * 상대경로로 해석되므로 `resolve` 후 판정하면 그대로 잡힌다.
+ *
+ * 플래그에 붙은 경로(`-o.claude/x`, `--out=.claude/x`)와 플래그 뒤 값도 본다 —
+ * `sort -oFILE`·`cp -t DIR` 처럼 값이 붙거나 따로 오는 문법이 있다.
  */
 export function protectedHits(root: string, t: string[]): string[] {
   const out: string[] = []
@@ -120,7 +127,7 @@ export function protectedHits(root: string, t: string[]): string[] {
     const pieces = [a]
     if (a.startsWith('-')) pieces.push(a.replace(/^-+[A-Za-z0-9_-]*=?/, ''))
     for (const piece of pieces) {
-      if (!piece || !looksLikePath(piece)) continue
+      if (!piece) continue
       const rel = protectedRel(root, piece)
       if (rel && !out.includes(piece)) out.push(piece)
     }
@@ -311,6 +318,17 @@ const INFO_FLAG = /^(-v|-V|--version|-h|--help)$/
 const SHELL_STATE = new Set([
   'export', 'declare', 'typeset', 'local', 'readonly', 'set', 'alias', 'unalias', 'function', 'hash', 'trap'
 ])
+/**
+ * 압축을 풀거나 내용을 펼치는 명령. **인자에 보호 경로가 없어도** 압축 안에 들어 있으면
+ * 그 자리에 그대로 만들어진다 — `tar xf a.tar` 하나로 `.claude/settings.local.json` 이
+ * 생긴다(검토 SEC-FIX I1). 압축 안을 미리 읽어 판정하지 않고 묻는다.
+ *
+ * 동봉 스킬은 이 명령들을 쓰지 않는다(grep: 문서·스크립트 모두 없음, `zip(` 은 파이썬 내장).
+ * 그래서 평소 카드가 늘지 않는다.
+ */
+const UNPACK = new Set([
+  'tar', 'bsdtar', 'gtar', 'unzip', 'ditto', 'cpio', 'gunzip', 'unpigz', '7z', '7za', 'xar'
+])
 /** 이 옵션이 붙으면 프로그램을 실행하는 평범한 도구들. */
 const LAUNCH_FLAGS: Record<string, string[]> = {
   find: ['-exec', '-execdir', '-ok', '-okdir'],
@@ -379,7 +397,7 @@ function parseShell(raw: string): string[][] | null {
   return segs
 }
 
-type Reason = { kind: 'reach' | 'ai' | 'launch' | 'state' | 'interp'; name: string }
+type Reason = { kind: 'reach' | 'ai' | 'launch' | 'state' | 'interp' | 'unpack'; name: string }
 /**
  * 경로와 별개로, 이 조각을 묻는 이유. 없으면 null.
  *
@@ -393,6 +411,7 @@ function segmentReason(t: string[]): Reason | null {
   if (['which', 'type', 'whereis'].includes(base) || (base === 'command' && /^-[vV]$/.test(args[0] ?? ''))) return null
   if (AI_CLI.has(base)) return { kind: 'ai', name: base }
   if (OUTSIDE_REACH.has(base)) return { kind: 'reach', name: base }
+  if (UNPACK.has(base)) return { kind: 'unpack', name: base }
   let runs: Reason | null = null
   if (ASSIGNMENT.test(exe)) runs = { kind: args.length ? 'launch' : 'state', name: exe.split('=')[0] + '=' }
   else if (SHELL_STATE.has(base)) runs = { kind: 'state', name: base }
@@ -545,6 +564,8 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
     if (ai) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${cmd}\n\n"${ai.name}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
     const launch = first('launch')
     if (launch) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${cmd}\n\n"${launch.name}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+    const unpack = first('unpack')
+    if (unpack) return { title: '압축을 풀어 파일을 만드는 명령이에요', detail: `${cmd}\n\n"${unpack.name}" 는 압축 안에 든 파일을 그대로 꺼내 놓아요. 앱이 그 안을 미리 확인하지 못해요. 의도한 일이 아니면 거절해 주세요.` }
     const state = first('state')
     if (state) return { title: '셸 설정을 바꾸는 명령이에요', detail: `${cmd}\n\n"${state.name}" 는 뒤에 오는 명령이 실행되는 방식을 바꿀 수 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
     if (first('interp')) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${cmd}\n\n프로그램 안에 무엇이 있는지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }

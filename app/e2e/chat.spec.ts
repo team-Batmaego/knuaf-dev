@@ -647,6 +647,44 @@ test('셸로 권한 파일을 쓰는 길도 묻는다', () => {
   expect(autoAllow(ROOT, 'Bash', { command: 'python3 .claude/skills/knuaf-dev/scripts/gg_deps.py python .' })).toBe(true)
 })
 
+test('슬래시 없는 맨이름도 보호 경로로 잡는다', () => {
+  // 검토 SEC-FIX B1: `looksLikePath` 로 먼저 거르면 `/` 가 없는 맨이름이 빠져나갔다.
+  // `mv stage .claude` 는 stage/ 안의 settings.local.json 을 그대로 .claude 로 옮긴다 —
+  // Write 로 stage/ 에 쓰는 것은 보호 경로가 아니라 자동 허용이므로, 이 두 단계면 우회가 된다.
+  for (const cmd of [
+    'mv stage .claude',
+    'cp -R stage/. .claude',
+    'cp evil.md CLAUDE.md',
+    'cp m.json .mcp.json',
+    'cp m.json .claude.json',
+    'mkdir .claude',
+    'rm -r .claude',
+    'ln -s /tmp .claude'
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(false)
+  // 폴더 안 평범한 이름은 그대로 통과한다 — 맨이름 검사가 지나치게 넓지 않은지.
+  for (const cmd of [
+    'mv stage sections',
+    'cp a.md CLAUDE.md.bak',
+    'mkdir -p build/native'
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(true)
+})
+
+test('압축 풀기 명령은 묻는다', () => {
+  // 압축 안에 `.claude/settings.local.json` 이 들어 있으면 인자만 봐서는 알 수 없다.
+  for (const cmd of [
+    'tar xf a.tar',
+    'tar -xzf a.tgz',
+    'tar --extract --file a.tar',
+    'bsdtar xf a.tar',
+    'unzip a.zip',
+    'ditto -x -k a.zip .',
+    'cpio -id < a.cpio',
+    'gunzip a.gz'
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(false)
+  // 카드 문구도 이유를 말한다.
+  expect(describeTool('Bash', { command: 'tar xf a.tar' }, ROOT).title).toBe('압축을 풀어 파일을 만드는 명령이에요')
+})
+
 test('권한 파일 카드는 무엇을 바꾸는지 말한다', () => {
   const d = describeTool('Write', { file_path: `${ROOT}/.claude/settings.local.json` }, ROOT)
   expect(d.title).toBe('도우미의 권한을 바꾸는 파일이에요')

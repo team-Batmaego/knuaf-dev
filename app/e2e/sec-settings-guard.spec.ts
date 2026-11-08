@@ -150,21 +150,23 @@ test('이미 있던 local 허락 규칙은 더 이상 카드를 끄지 못한다
   // 수정 전: CLI 가 이 규칙을 canUseTool 앞에서 적용해 **카드 0건 + 실행됨**(P2 실측).
   // 수정 뒤: settingSources 에서 local 을 뺐으므로 앱 판정만 남고, 앱이 막는 명령은 카드로 간다.
   //
-  // 명령은 **폴더 안**의 파이썬 파일을 고른다. 폴더 안·경로 인자만 보면 앱의 autoAllow 가
-  // 통과시키는 모양이지만 인터프리터 실행이라 앱은 막는다 — 그래서 "허락 규칙이 카드를
-  // 껐는가"만 차이로 남는다. 폴더 밖 경로를 쓰면 폴더 경계 판정이 먼저 걸려 시험이 흐려진다.
+  // 명령은 `git init <폴더 안 경로>`. 앱은 이걸 폴더 밖에 닿는 명령으로 보아 카드로 보낸다.
+  // 수정 전에는 CLI 가 local 의 `Bash(*)` 를 먼저 적용해 **카드가 아예 뜨지 않았다**(P2 실측).
+  // 즉 이 시험이 보는 것은 "앱이 이 명령을 막는가"가 아니라 **"허락 규칙이 앱의 카드를
+  // 끌 수 있는가"** 다. 도우미가 이 명령을 실제로 실행하는 것은 앞선 P1~P19 에서 반복 확인됐다
+  // (스스로 만든 파일을 실행하라는 요청은 모델이 되묻는 경우가 있어 시험 신호로 쓰지 않는다).
   const root = freshRoot('existing')
   mkdirSync(join(root, '.claude'), { recursive: true })
   writeFileSync(join(root, '.claude', 'settings.local.json'),
     JSON.stringify({ permissions: { allow: ['Bash(*)'] } }, null, 2), 'utf-8')
-  writeFileSync(join(root, 'probe.py'), 'open("probe-ran.txt", "w").write("ran")\n', 'utf-8')
+  const probe = join(root, 'probe-guard')
   const { electronApp, page } = await launchAsk('existing')
   try {
     await openReady(page, root)
-    const r = await turn(page, root, `knuaf-dev 스킬 작업은 잠시 멈춰 주세요. 지시한 셸 명령 하나만 Bash 도구로 그대로 실행하고, 결과를 한 줄로 알려 주세요: python3 probe.py`)
+    const r = await turn(page, root, `knuaf-dev 스킬 작업은 잠시 멈춰 주세요. 지시한 셸 명령 하나만 Bash 도구로 그대로 실행하고, 결과를 한 줄로 알려 주세요: git init ${probe}`)
     console.log('GUARD existing:', JSON.stringify(r))
     expect(r.cards.length, '허락 규칙이 있어도 카드가 떠야 한다').toBeGreaterThan(0)
-    expect(existsSync(join(root, 'probe-ran.txt')), '거절했으므로 실행되지 않아야 한다').toBe(false)
+    expect(existsSync(join(probe, '.git')), '거절했으므로 실행되지 않아야 한다').toBe(false)
     // 그리고 그 사실을 학생에게 알린다(앱이 만든 것이 아닌 설정).
     expect(r.notes.join('\n')).toContain('권한을 바꾸는 설정')
   } finally { await electronApp.close() }
