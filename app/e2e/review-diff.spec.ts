@@ -119,7 +119,7 @@ test('비교 기준 저장은 경로 탈출과 앱 폴더 심링크를 거부한
 test('noteSeen counts against the comparison baseline and editOf is scoped by root, section, and hash', async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const saved = new Map<string, string>()
-  useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+  useReview.setState({ baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -148,7 +148,7 @@ test('noteSeen counts against the comparison baseline and editOf is scoped by ro
     expect(useReview.getState().editOf('/tmp/other-project', sectionId, 'h2')).toBeNull()
     expect(useReview.getState().baseline[baselineKey(root, sectionId)].draft).toBe('')
   } finally {
-    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
     else Reflect.deleteProperty(globalThis, 'window')
   }
@@ -160,7 +160,7 @@ test('noteSeen counts against the visible diff baseline when the pane already sa
   const sectionId = 'sec-01'
   const key = baselineKey(root, sectionId)
   const saved = new Map([[JSON.stringify([root, sectionId]), '가. 나. 다.']])
-  useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+  useReview.setState({ baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -186,7 +186,7 @@ test('noteSeen counts against the visible diff baseline when the pane already sa
     await noteSeen(root, sectionId, { title: 'Ⅰ. 장', draft: '가. 바. 다. 라.', hash: 'h2' })
     expect(useReview.getState().editOf(root, sectionId, 'h2')).toEqual({ kind: 'edited', count: 2 })
   } finally {
-    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
     else Reflect.deleteProperty(globalThis, 'window')
   }
@@ -204,7 +204,7 @@ test('each separated changed place counts once, and a replacement is one place',
   const root = '/tmp/review-places'
   const sectionId = 'sec-02'
   const saved = new Map([[JSON.stringify([root, sectionId]), '하나. 둘. 셋. 넷. 다섯. 여섯.']])
-  useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+  useReview.setState({ baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
     value: {
@@ -226,7 +226,7 @@ test('each separated changed place counts once, and a replacement is one place',
     })
     expect(useReview.getState().editOf(root, sectionId, 'p1')).toEqual({ kind: 'edited', count: 3 })
   } finally {
-    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
     else Reflect.deleteProperty(globalThis, 'window')
   }
@@ -244,7 +244,7 @@ test('second save counts the same however the two readers interleave', async () 
   const B = '하나. 둘X. 셋. 넷. 다섯.'
   const C = '하나. 둘X. 셋. 넷Y. 다섯.'
   const install = (draft: string) => {
-    useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+    useReview.setState({ baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
     Object.defineProperty(globalThis, 'window', {
       configurable: true,
       value: {
@@ -287,6 +287,19 @@ test('second save counts the same however the two readers interleave', async () 
     await noteSeen(third, sectionId, { title: 'Ⅰ. 장', draft: '', hash: 'e3' })
     expect(useReview.getState().editOf(third, sectionId, 'e3')).toEqual({ kind: 'edited', count: 0 })
 
+    // 첫 쓰기 분류도 읽기 순서에 기대지 않는다(검토 확인 절). 같은 첫 본문 B를 팬이 옛 해시 e0로
+    // 먼저 읽어도, 실제 새 해시 e1은 `wrote`다 — ('',e0)→(B,e0)→(B,e1) vs ('',e0)→(B,e1).
+    install('')
+    const fourth = '/tmp/review-order-4'
+    const fifth = '/tmp/review-order-5'
+    for (const [rootKey, seq] of [
+      [fourth, [['', 'e0'], [B, 'e0'], [B, 'e1']]],
+      [fifth, [['', 'e0'], [B, 'e1']]]
+    ] as const) {
+      for (const [draft, hash] of seq) await noteSeen(rootKey, sectionId, { title: 'Ⅰ. 장', draft, hash })
+      expect(useReview.getState().editOf(rootKey, sectionId, 'e1'), rootKey).toEqual({ kind: 'wrote' })
+    }
+
     // 불변식: 숫자가 0곳이면 화면 diff도 비어 있어야 한다(문구가 어긋나지 않는다).
     const runs = (before: string, after: string): number => sectionDiff(before, after)
       .reduce((n, block) => n + (block.kind === 'same' ? 0
@@ -295,7 +308,7 @@ test('second save counts the same however the two readers interleave', async () 
       expect(runs(A, draft) > 0).toBe(hasChange(A, draft))
     }
   } finally {
-    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, firstBodies: {}, editCounts: {} })
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
     else Reflect.deleteProperty(globalThis, 'window')
   }
