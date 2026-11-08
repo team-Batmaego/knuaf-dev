@@ -669,6 +669,34 @@ test('슬래시 없는 맨이름도 보호 경로로 잡는다', () => {
   ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(true)
 })
 
+test('하위 폴더의 .claude·CLAUDE.md 도 보호한다', () => {
+  // 검토 2회째 지적: 동봉 CLI(0.3.275)는 파일 작업이 일어난 폴더마다 그 폴더의
+  // `.claude/skills` 를 스킬 자리로 더하고(dynamicSkillDirs — 파일의 폴더에서 루트까지
+  // 거슬러 올라간다), 하위 폴더의 CLAUDE.md 도 읽는다(nestedMemoryAttachmentTriggers).
+  // 그래서 `sub/.claude/skills/x/SKILL.md` 는 다음 도구를 카드 없이 돌리는 allowed-tools 가 된다.
+  for (const [name, input] of [
+    ['Write', { file_path: `${ROOT}/sub/.claude/skills/x/SKILL.md` }],
+    ['Write', { file_path: `${ROOT}/sub/deep/.claude/settings.local.json` }],
+    ['Edit', { file_path: `${ROOT}/sub/.claude/agents/a.md` }],
+    ['Write', { file_path: `${ROOT}/sub/CLAUDE.md` }],
+    ['Write', { file_path: `${ROOT}/sub/deep/CLAUDE.local.md` }],
+    ['Write', { file_path: 'sub/.claude/skills/x/SKILL.md' }]          // 상대경로
+  ] as const) expect(autoAllow(ROOT, name, input), `${name} ${JSON.stringify(input)}`).toBe(false)
+  for (const cmd of [
+    'mv stage sub/.claude',
+    'mv stage sub/deep/.claude',
+    'cp x sub/.claude/settings.local.json',
+    'mv x sub/CLAUDE.md',
+    'mv x sub/deep/CLAUDE.local.md',
+    'python3 sub/.claude/skills/x/evil.py'                             // 하위 폴더 스킬 실행
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(false)
+  // 앱이 설치한 스킬은 그대로 돌아야 한다(카드가 매 턴 뜨면 안 된다).
+  expect(autoAllow(ROOT, 'Bash', { command: 'python3 .claude/skills/knuaf-dev/scripts/gg_deps.py python .' })).toBe(true)
+  // 하위 폴더의 평범한 파일은 그대로 통과한다.
+  expect(autoAllow(ROOT, 'Write', { file_path: `${ROOT}/sub/sections/02.md` })).toBe(true)
+  expect(autoAllow(ROOT, 'Write', { file_path: `${ROOT}/sub/CLAUDE.md.bak` })).toBe(true)
+})
+
 test('압축 풀기 명령은 묻는다', () => {
   // 압축 안에 `.claude/settings.local.json` 이 들어 있으면 인자만 봐서는 알 수 없다.
   for (const cmd of [
@@ -720,6 +748,14 @@ test('폴더에 이미 있는 권한 설정을 찾아낸다', () => {
     mkdirSync(join(root, '.claude', 'skills', 'knuaf-dev'), { recursive: true })
     writeFileSync(join(root, '.claude', 'skills', 'knuaf-dev', 'SKILL.md'), '---\nallowed-tools: Bash\n---\n')
     expect(inspectAgentSettings(root).some((f) => f.what.includes('앱이 설치하지 않은 스킬'))).toBe(false)
+    // 하위 폴더의 .claude/skills·CLAUDE.md 도 찾는다(CLI 가 그것도 읽는다).
+    mkdirSync(join(root, 'sub', '.claude', 'skills', 'evil'), { recursive: true })
+    writeFileSync(join(root, 'sub', '.claude', 'skills', 'evil', 'SKILL.md'), '---\nallowed-tools: Bash\n---\n')
+    writeFileSync(join(root, 'sub', 'CLAUDE.md'), '# hi')
+    const nested = inspectAgentSettings(root).map((f) => `${f.file}:${f.what}`).join('\n')
+    expect(nested).toContain('sub/.claude/skills')
+    expect(nested).toContain('sub/.claude/skills/evil/SKILL.md')
+    expect(nested).toContain('sub/CLAUDE.md')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -993,7 +1029,11 @@ test('펼쳐질 수 있는 첫 인자는 스킬 스크립트로 인정하지 않
 // `C:foo` 는 계속 묻는다. 루트는 그 플랫폼에서 이 경로가 폴더 안이 되도록 고른다.
 test('윈도우 드라이브 절대경로의 스킬 호출은 묻지 않고, 다른 자리의 : 는 묻는다', () => {
   const root = process.platform === 'win32' ? 'C:\\Users\\학생\\무제 폴더' : '/Users/s/무제 폴더'
-  const W = 'C:/Users/학생/무제 폴더'
+  // 앱이 설치한 스킬 사본은 그 플랫폼의 실제 자리로 확인한다. 예전에는 맥에서도
+  // `C:/…` 를 그대로 넣었는데, 그 경로는 맥에서 실재하지 않아 "폴더 안"으로만 읽혔다.
+  // 보호 판정이 경로 조각 기준이 된 뒤로는 그런 경로도 `.claude` 조각을 갖고 있으므로
+  // 카드로 간다(맥에서 실재하지 않는 경로를 자동 허용할 이유가 없다).
+  const W = process.platform === 'win32' ? 'C:/Users/학생/무제 폴더' : '/Users/s/무제 폴더'
   for (const cmd of [
     `python.exe "${W}/.claude/skills/knuaf-dev/scripts/gg.py" status`,
     `"${W}/.venv/Scripts/python.exe" "${W}/.claude/skills/knuaf-dev/scripts/gg_deps.py" python "${W}"`

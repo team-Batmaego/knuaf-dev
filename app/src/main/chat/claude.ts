@@ -2,6 +2,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { query, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
@@ -56,19 +57,33 @@ const PATH_TOOLS: Record<string, string[]> = {
  * CLI 버전의 신뢰·git 게이트에 기대지 않는 방어여야 한다(그 게이트는 버전마다 바뀐다).
  */
 const PROTECTED_DIRS = ['.claude']
-/** 비교는 소문자로 한다(맥 기본 파일시스템이 대소문자를 구분하지 않는다) — 목록도 소문자. */
-const PROTECTED_FILES = ['.mcp.json', '.claude.json', 'claude.md', 'claude.local.md']
-/** 앱이 매 전송마다 다시 설치하는 스킬 사본 자리. 읽기는 막지 않는다(스킬이 자기 파일을 읽는다). */
+/**
+ * **마지막 조각**만 보는 이름들 — 어느 깊이에 있어도 보호한다. 하위 폴더의 CLAUDE.md 도
+ * CLI 가 읽기 때문이다(`nestedMemoryAttachmentTriggers`, 동봉 0.3.275 바이너리 확인).
+ * 비교는 소문자로 한다(맥 기본 파일시스템이 대소문자를 구분하지 않는다).
+ */
+const PROTECTED_NAMES = ['claude.md', 'claude.local.md']
+/** **루트 바로 아래만** 보호하는 파일들 — CLI 가 작업 폴더 기준으로만 읽는다. */
+const PROTECTED_ROOT_FILES = ['.mcp.json', '.claude.json']
+/** 앱이 매 전송마다 다시 설치하는 스킬 사본 자리. 실행은 예외, 쓰기는 아니다(자기 규칙을 못 고친다). */
 const APP_SKILL_PREFIX = '.claude/skills/'
 /** 쓰기가 아니라 읽기만 하는 도구. 권한을 바꾸지 않으므로 보호 경로도 그대로 통과한다. */
 const READ_ONLY_TOOLS: Record<string, true> = { Read: true, Glob: true, Grep: true, LS: true }
 
 /**
- * 이 경로가 위 보호 목록 안인가. 있으면 폴더 기준 상대경로(소문자·NFC)를 돌려준다.
+ * 이 경로가 보호 대상인가. 있으면 폴더 기준 상대경로를 돌려준다(카드에 그대로 보여 준다).
+ *
+ * **루트 바로 아래만 보면 안 된다.** 동봉 CLI(0.3.275)는 파일 작업이 일어난 폴더마다
+ * 그 폴더의 `.claude/skills` 를 스킬 자리로 더하고(`dynamicSkillDirs`, 파일의 폴더에서
+ * 루트까지 거슬러 올라간다), 하위 폴더의 CLAUDE.md 도 읽는다
+ * (`nestedMemoryAttachmentTriggers`). 그래서 `sub/.claude/skills/x/SKILL.md` 는 실제로
+ * 다음 도구를 카드 없이 돌리는 `allowed-tools` 가 될 수 있다 — 검토 2회째 지적.
+ *
+ * 그래서 **경로 조각**으로 판정한다: 어느 깊이든 `.claude` 조각이 있거나, 마지막 조각이
+ * `CLAUDE.md`·`CLAUDE.local.md` 면 보호. `.mcp.json`·`.claude.json` 은 루트 바로 아래만.
  *
  * 문자열만 보면 심볼릭 링크로 빠져나간다(`.claude/p → /tmp`, `p/settings.json`).
- * 그래서 **문자 그대로의 경로**와 **링크를 따라간 실제 경로** 둘 다 본다. 맥 기본
- * 파일시스템은 대소문자를 구분하지 않으므로 비교는 소문자로 한다.
+ * 그래서 **문자 그대로의 경로**와 **링크를 따라간 실제 경로** 둘 다 본다.
  */
 export function protectedRel(root: string, value: unknown): string | null {
   if (typeof value !== 'string' || !value) return null
@@ -82,11 +97,12 @@ export function protectedRel(root: string, value: unknown): string | null {
     for (const raw of bases) {
       const b = n(raw)
       if (a === b || !a.startsWith(b + sep)) continue
-      // 돌려주는 값은 **적힌 그대로의** 상대경로다(카드에 보여 준다). 판정만 소문자로 한다.
       const rel = abs.slice(raw.length + 1)
-      const key = n(rel)
-      if (PROTECTED_DIRS.some((d) => key === d || key.startsWith(`${d}/`))) return rel
-      if (PROTECTED_FILES.includes(key)) return rel
+      const segments = n(rel).split(sep)
+      if (segments.some((seg) => PROTECTED_DIRS.includes(seg))) return rel
+      const last = segments[segments.length - 1]
+      if (PROTECTED_NAMES.includes(last)) return rel
+      if (segments.length === 1 && PROTECTED_ROOT_FILES.includes(last)) return rel
     }
   }
   return null
@@ -203,18 +219,67 @@ export function inspectAgentSettings(root: string): AgentSettingsFinding[] {
     if (s.enableAllProjectMcpServers === true) out.push({ file: rel, what: '폴더의 MCP 서버 전부 켜기' })
   }
   if (existsSync(join(root, '.mcp.json'))) out.push({ file: '.mcp.json', what: '외부 프로그램(MCP 서버) 목록' })
-  const agents = listMarkdown(join(root, '.claude', 'agents'))
-  if (agents.length) out.push({ file: '.claude/agents', what: `도우미 대신 일하는 에이전트 ${agents.length}개` })
-  const commands = listMarkdown(join(root, '.claude', 'commands'))
-  if (commands.length) out.push({ file: '.claude/commands', what: `명령 ${commands.length}개` })
-  const skills = listMarkdown(join(root, '.claude', 'skills'), true)
-  // 앱이 설치한 knuaf-dev 사본은 뺀다 — 매 전송마다 앱이 다시 쓰는 자리다.
-  const foreign = skills.filter((p) => !p.includes(`skills${sep}${'knuaf-dev'}${sep}`))
-  if (foreign.length) out.push({ file: '.claude/skills', what: `앱이 설치하지 않은 스킬 ${foreign.length}개` })
-  for (const p of [...agents, ...commands, ...foreign]) {
-    if (/^\s*allowed-tools\s*:/m.test(head(p))) out.push({ file: p.slice(root.length + 1), what: '스킬·에이전트가 스스로 도구를 허용하는 목록(allowed-tools)' })
+  // 하위 폴더까지 본다 — CLI 는 파일 작업이 일어난 폴더의 `.claude/skills` 도 스킬 자리로
+  // 더하므로(dynamicSkillDirs), 루트만 훑으면 고지가 빠진다(검토 2회째 지적).
+  const found = walkProtected(root)
+  for (const dir of found.claudeDirs) {
+    const relDir = relOf(root, dir)
+    const agents = listMarkdown(join(dir, 'agents'))
+    if (agents.length) out.push({ file: `${relDir}/agents`, what: `도우미 대신 일하는 에이전트 ${agents.length}개` })
+    const commands = listMarkdown(join(dir, 'commands'))
+    if (commands.length) out.push({ file: `${relDir}/commands`, what: `명령 ${commands.length}개` })
+    const skills = listMarkdown(join(dir, 'skills'), true)
+    // 앱이 설치한 knuaf-dev 사본은 뺀다 — 매 전송마다 앱이 다시 쓰는 자리다.
+    const foreign = skills.filter((p) => !p.includes(`skills${sep}knuaf-dev${sep}`))
+    if (foreign.length) out.push({ file: `${relDir}/skills`, what: `앱이 설치하지 않은 스킬 ${foreign.length}개` })
+    for (const p of [...agents, ...commands, ...foreign]) {
+      if (/^\s*allowed-tools\s*:/m.test(head(p))) out.push({ file: relOf(root, p), what: '스킬·에이전트가 스스로 도구를 허용하는 목록(allowed-tools)' })
+    }
   }
+  for (const p of found.memoryFiles) out.push({ file: relOf(root, p), what: '폴더 지시문 파일' })
   return out
+}
+
+/** 폴더 기준 상대경로. 카드·고지에 그대로 쓴다. */
+function relOf(root: string, p: string): string {
+  return p.slice(root.length + 1)
+}
+
+/** 고지용 탐색 깊이. 논문 폴더 구조는 얕고, 더 깊이 내려가면 오히려 놓친다. */
+const INSPECT_MAX_DEPTH = 4
+/** 훑지 않는 폴더 — 파일이 많고 CLI 가 그 안의 설정을 읽지 않는다. */
+const INSPECT_SKIP: Record<string, true> = {
+  '.git': true, '.venv': true, node_modules: true, __pycache__: true,
+  '.knuaf-gui': true, dist: true, build: true, out: true, '.cache': true
+}
+
+/**
+ * 폴더 아래에서 보호 대상을 찾는다 — `.claude` 디렉터리(어느 깊이든)와
+ * `CLAUDE.md`·`CLAUDE.local.md`(어느 깊이든).
+ *
+ * `.claude` 안으로는 더 내려가지 않는다(그 안의 스킬·에이전트는 부른 쪽이 따로 본다).
+ * 무거운 폴더는 건너뛴다 — 고지 한 줄 때문에 `.venv` 를 훑을 이유가 없다.
+ */
+function walkProtected(root: string): { claudeDirs: string[]; memoryFiles: string[] } {
+  const claudeDirs: string[] = []
+  const memoryFiles: string[] = []
+  const visit = (dir: string, depth: number) => {
+    if (depth > INSPECT_MAX_DEPTH) return
+    let entries: Dirent[] = []
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const p = join(dir, e.name)
+      if (e.isFile()) {
+        if (PROTECTED_NAMES.includes(e.name.normalize('NFC').toLowerCase())) memoryFiles.push(p)
+        continue
+      }
+      if (!e.isDirectory() || INSPECT_SKIP[e.name]) continue
+      if (e.name.normalize('NFC').toLowerCase() === '.claude') { claudeDirs.push(p); continue }
+      visit(p, depth + 1)
+    }
+  }
+  visit(root, 0)
+  return { claudeDirs, memoryFiles }
 }
 
 /** 디렉터리의 `*.md` 파일 절대경로. `deep` 이면 한 단계 아래(`skills/<name>/SKILL.md`)까지. */
