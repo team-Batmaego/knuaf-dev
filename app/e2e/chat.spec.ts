@@ -1126,3 +1126,50 @@ test('AI·감싸기 판정이 스킬과 점검 명령을 새로 막지 않는다
     `cat "${ROOT}/sources/claude-대화.md"`  // 파일 이름에 섞인 낱말은 실행 파일이 아니다
   ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(true)
 })
+
+// 윈도우 표기(\)도 슬래시와 같은 보호 판정을 받는다. 맥에서는
+// path.win32 로 뿌려서 경로 해석이 윈도우 규칙을 따르도록 한다(S1 WIN).
+test('윈도우 경로 표기에서도 보호 경로는 계속 막힌다 (S1 WIN)', () => {
+  const root = process.platform === 'win32' ? 'C:\\Users\\학생\\무제 폴더' : '/Users/s/무제 폴더'
+  const W = (p: string) => process.platform === 'win32' ? p.replaceAll('/', '\\') : p
+  for (const file of [
+    `${root}/sub/.claude/skills/x/SKILL.md`,
+    `${root}/sub/CLAUDE.md`,
+    `${root}/.claude/settings.local.json`,
+    `${root}/.mcp.json`,
+    `${root}/.claude.json`
+  ]) expect(autoAllow(root, 'Write', { file_path: W(file) }), file).toBe(false)
+  for (const cmd of [
+    `mv stage ${W(`${root}/sub/.claude`)}`,
+    `cp x ${W(`${root}/sub/CLAUDE.md`)}`,
+    `python3 ${W(`${root}/sub/.claude/skills/x/evil.py`)}`,
+    `tee ${W(`${root}/.claude/settings.local.json`)}`,
+    `mkdir -p ${W(`${root}/.claude/hooks`)}`
+  ]) expect(autoAllow(root, 'Bash', { command: cmd }), cmd).toBe(false)
+  for (const cmd of [
+    'mv stage sub/.claude',
+    'mv stage sub/deep/.claude',
+    'cp x sub/.claude/settings.local.json',
+    'mv x sub/CLAUDE.md',
+    'mv x sub/deep/CLAUDE.local.md',
+    'python3 sub/.claude/skills/x/evil.py',
+    'tee .claude/settings.local.json',
+    'mkdir -p .claude/hooks'
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(false)
+})
+
+test('이스케이프로 보호 경로를 숨기는 형태는 계속 묻는다 (S1 WIN)', () => {
+  // 이스케이프(\.claude·claude)나 셸 메타는 정규화하지 않고 판정 불가로 둔다.
+  for (const cmd of [
+    'tee .clau\\de/settings.local.json',
+    'cp x .claude/settings.local.json\\',
+    'rm -r .\\.claude',
+    'echo \\.claude/settings.local.json',
+    'echo ok\\ fine',
+    'cl\\aude -p x',
+    `python3 "${ROOT}/.claude/skills/gg.py" status\\`,
+    'grep a\\;b.md notes.md || true'
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(false)
+  // 셸 메타·인용 형태도 계속 묻는다 — 정규화가 우회로 읽히지 않게.
+  expect(autoAllow(ROOT, 'Bash', { command: 'python3 "scripts\\;gg.py" -m x' })).toBe(false)
+})

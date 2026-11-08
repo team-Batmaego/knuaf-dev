@@ -99,10 +99,11 @@ export function protectedRel(root: string, value: unknown): string | null {
       if (a === b || !a.startsWith(b + sep)) continue
       const rel = abs.slice(raw.length + 1)
       const segments = n(rel).split(sep)
-      if (segments.some((seg) => PROTECTED_DIRS.includes(seg))) return rel
+      const display = rel.replace(/\\/g, '/')
+      if (segments.some((seg) => PROTECTED_DIRS.includes(seg))) return display
       const last = segments[segments.length - 1]
-      if (PROTECTED_NAMES.includes(last)) return rel
-      if (segments.length === 1 && PROTECTED_ROOT_FILES.includes(last)) return rel
+      if (PROTECTED_NAMES.includes(last)) return display
+      if (segments.length === 1 && PROTECTED_ROOT_FILES.includes(last)) return display
     }
   }
   return null
@@ -242,7 +243,7 @@ export function inspectAgentSettings(root: string): AgentSettingsFinding[] {
 
 /** 폴더 기준 상대경로. 카드·고지에 그대로 쓴다. */
 function relOf(root: string, p: string): string {
-  return p.slice(root.length + 1)
+  return p.slice(root.length + 1).replace(/\\/g, '/')
 }
 
 /** 고지용 탐색 깊이. 논문 폴더 구조는 얕고, 더 깊이 내려가면 오히려 놓친다. */
@@ -339,7 +340,7 @@ const OUTSIDE_REACH = new Set([
  */
 const INTERPRETERS = /^(python3?(\.\d+)?|sh|bash|zsh|node|perl|ruby)$/
 /** 스킬이 실제로 돌리는 스크립트들. */
-const SKILL_SCRIPT = /(^|\/)(gg|gg_[a-z_]+|build_docx|show_research|merge_sections|build_status|lint_[a-z_]+)\.py$/
+const SKILL_SCRIPT = /(^|[\\/])(gg|gg_[a-z_]+|build_docx|show_research|merge_sections|build_status|lint_[a-z_]+)\.py$/
 /**
  * 스킬 스크립트로 인정하는 경로의 문자 집합: 영문자·숫자·한글(완성형과 macOS 의 풀어쓴 자모)·
  * 공백·`.`·`_`·`-`·`/`. 셸이 이 문자들은 펼치지 않으므로 앱이 본 문자열이 그대로 파일 이름이
@@ -427,6 +428,13 @@ function exeName(word: string): string {
 function parseShell(raw: string): string[][] | null {
   const cmd = raw.replace(BENIGN_REDIR, ' ')
   if (SHELL_UNJUDGEABLE.test(cmd) || /\n/.test(cmd)) return null
+  // 윈도우 경로 구분자(\)만 슬래시로 바꿔 읽는다. 이스케이프(따옴표 밖 \)·따옴표 안 \\" 등)는 판정 불가다.
+  //따옴표 밖에서 글자·숫자 바로 앞의 \는 이름 쪼개기라 판정 불가다.
+  const unquoted = cmd.replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/'(?:[^'\\]|\\.)*'/g, '')
+  if (/\\[A-Za-z0-9]/u.test(unquoted)) return null
+  if (/\\[;"&|(){}[\]$`]/u.test(unquoted)) return null
+  if (/\\(?![A-Za-z0-9\p{Script=Hangul}._\-/:\\])/u.test(unquoted)) return null
+  const norm = cmd.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul} ._\-\\/:\]])/gu, '/')
   const segs: string[][] = []
   let seg: string[] = []
   let word: string | null = null
@@ -439,21 +447,21 @@ function parseShell(raw: string): string[][] | null {
     seg.push(word); word = null; parts = 0; quoted = false
   }
   const endSeg = () => { endWord(); if (seg.length) segs.push(seg); seg = [] }
-  for (let i = 0; i < cmd.length; i++) {
-    const c = cmd[i]
+  for (let i = 0; i < norm.length; i++) {
+    const c = norm[i]
     if (c === '"' || c === "'") {
-      const close = cmd.indexOf(c, i + 1)
+      const close = norm.indexOf(c, i + 1)
       if (close < 0) return null
-      const body = cmd.slice(i + 1, close)
-      if (c === '"' && /\\["\\$`]/.test(body)) return null
+      const body = norm.slice(i + 1, close)
+      if (c === '"' && /"/.test(body)) return null
       word = (word ?? '') + body; parts++; quoted = true; i = close
     } else if (c === '\\') return null
     else if (/\s/.test(c)) endWord()
     else if (c === ';') endSeg()
-    else if (c === '|') { endSeg(); if (cmd[i + 1] === '|') i++ }
-    else if (c === '&') { if (cmd[i + 1] !== '&') return null; endSeg(); i++ }
+    else if (c === '|') { endSeg(); if (norm[i + 1] === '|') i++ }
+    else if (c === '&') { if (norm[i + 1] !== '&') return null; endSeg(); i++ }
     else {
-      if (word === null || /["']/.test(cmd[i - 1] ?? '')) parts++
+      if (word === null || /["']/.test(norm[i - 1] ?? '')) parts++
       word = (word ?? '') + c
     }
   }
