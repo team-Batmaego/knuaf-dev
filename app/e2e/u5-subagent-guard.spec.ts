@@ -111,8 +111,10 @@ function codexRig(events: unknown[]) {
   const skill = join(root, '.agents', 'skills', 'knuaf-dev')
   mkdirSync(skill, { recursive: true })
   writeFileSync(join(skill, 'SKILL.md'), '# test skill\n')
+  const threadLog = join(root, 'thread-start.jsonl')
+  writeFileSync(threadLog, '')
   const env = { ...process.env, ...fakeCodexEnv(join(root, 'bin'), {
-    FAKE_CODEX_SUBAGENT_EVENTS: JSON.stringify(events)
+    FAKE_CODEX_SUBAGENT_EVENTS: JSON.stringify(events), FAKE_CODEX_THREAD_START_LOG: threadLog
   }) }
   const binary = findExecutable('codex', env)
   if (!binary) throw new Error('가짜 Codex를 찾지 못했어요.')
@@ -127,7 +129,9 @@ function codexRig(events: unknown[]) {
   const audit = (): Record<string, unknown>[] => existsSync(auditDir)
     ? readdirSync(auditDir).map((f) => JSON.parse(readFileSync(join(auditDir, f), 'utf8')) as Record<string, unknown>)
     : []
-  return { root, conn, notes, messages, audit, agentEvents }
+  const threadStarts = (): { method: string; params: Record<string, unknown> }[] =>
+    readFileSync(threadLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  return { root, conn, notes, messages, audit, agentEvents, threadStarts }
 }
 
 const spawnCall = (threadId: string, childId: string) => ({
@@ -187,5 +191,26 @@ test('U5: 다른 collab 도구(sendInput 등)는 담당 생성이 아니다 — 
     await r.conn.run('계속해 줘', undefined, r.agentEvents)
     expect(r.notes.filter((n) => n === SUBAGENT_SPAWNED_NOTE)).toHaveLength(0)
     expect(r.audit()).toEqual([])
+  } finally { await r.conn.stop() }
+})
+
+test('U5: 메인 Codex 의 thread/start 에 역할 config·sub 요청이 없다 — 엔진 하위 담당을 열지 않는다', async () => {
+  const r = codexRig([])
+  try {
+    await r.conn.run('평범한 요청', undefined, r.agentEvents)
+    const main = r.threadStarts().filter((t) => t.params.ephemeral !== true)
+    expect(main.length).toBeGreaterThan(0)
+    for (const { method, params } of main) {
+      expect(method === 'thread/start' || method === 'thread/resume').toBe(true)
+      // §3.2 Codex 열의 담당 정의 자리(config 의 agents.<역할>)를 싣지 않는다.
+      expect(params.config).toBeUndefined()
+      // 하위 담당을 미리 띄우는 요청도 없다.
+      expect(params.spawnAgent).toBeUndefined()
+      expect(params.agents).toBeUndefined()
+      expect(params.subAgent).toBeUndefined()
+      // 대화는 여전히 논문 폴더에서, 쓰기는 그 폴더로 가둔다.
+      expect(params.cwd).toBe(r.root)
+      expect(params.sandbox).toBe('workspace-write')
+    }
   } finally { await r.conn.stop() }
 })

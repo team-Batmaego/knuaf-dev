@@ -27,6 +27,8 @@
  *   FAKE_CODEX_EPHEMERAL_FAIL_TIMES
  *                           기본값 조회용 `thread/start(ephemeral:true)` 를 그 횟수만큼 오류로 거절한다
  *   FAKE_CODEX_MODELS_FAIL_TIMES  모델 목록 조회를 처음 N회 오류로 거절한다(복구 UI 시험).
+ *   FAKE_CODEX_THREAD_START_LOG  `thread/start`·`thread/resume` 로 온 params 를 한 줄씩 남긴다 —
+ *                           메인 대화 요청에 역할 config·sub 요청이 **없는지** 시험이 본다.
  */
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -176,6 +178,9 @@ function handle(message) {
     }
     case 'thread/start':
     case 'thread/resume': {
+      if (process.env.FAKE_CODEX_THREAD_START_LOG) {
+        appendFileSync(process.env.FAKE_CODEX_THREAD_START_LOG, `${JSON.stringify({ method: message.method, params })}\n`)
+      }
       // `ephemeral` 은 앱이 '서버 기본값'을 물을 때 쓴다 — 디스크에 남지 않는 대화 하나.
       if (params.ephemeral === true) {
         if (ephemeralFailures > 0) {
