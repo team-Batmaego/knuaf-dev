@@ -53,6 +53,18 @@ jobs:
         working-directory: app
       - run: pnpm build
         working-directory: app
+      # xlsx-preview.spec.ts 는 Playwright 의 headless Chromium 셸로 실제 화면을 띄운다.
+      # 러너 이미지에는 브라우저가 없어서, 이 단계가 없으면 태그 실행이 여기서 죽는다
+      # (v0.6.0 release 42464591854 — "Executable doesn't exist at …/chrome-headless-shell").
+      # ci.yml 과 같은 캐시 키를 써서 브랜치 CI 가 받아 둔 브라우저를 그대로 재사용한다.
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
+      - name: Install Playwright Chromium headless shell
+        working-directory: app
+        run: pnpm exec playwright install chromium --only-shell
       - run: pnpm exec playwright test --grep-invert "screenshots|real window capture"
         working-directory: app
         env:
