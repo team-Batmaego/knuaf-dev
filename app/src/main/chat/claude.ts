@@ -3,7 +3,7 @@ import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { query, type ModelInfo, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
@@ -351,8 +351,53 @@ export function toChatModelInfo(info: ModelInfo): ChatModelInfo | null {
   }
 }
 
-/** 모든 턴에 붙는 앱 지침 — 세션 경계·스킬 규칙·셸 표기·백그라운드 담당 금지. */
-const CLAUDE_SYSTEM_APPEND = '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 서브에이전트를 백그라운드로 띄우지 마세요(run_in_background 금지). 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.'
+/**
+ * 메인 대화가 엔진 기능으로 스스로 하위 담당을 띄우는 길을 막는다(설계 §3.2 [r11]).
+ *
+ * 왜 막는가: v0.7은 다른 모델에게 넘기는 일을 **앱이 연 담당(relay)** 으로만 보낸다. 검토는
+ * 언제나 새 대화여야 하고(§3.4, 형님 확정), 분담 사용량은 학생 동의와 확인을 거쳐야 한다
+ * (§3.5). 엔진의 하위 담당은 그 두 길을 그대로 건너뛴다.
+ *
+ * 이름: 동봉 CLI(2.1.319) 안의 별칭 표가 `{Task:"Agent", …}` 이고 훅 input 은 그 별칭을
+ * 접은 정본 이름(`Agent`)으로 온다 — 그래도 둘 다 적어 두어 판이 바뀌어 옛 이름으로 와도
+ * 같은 판정을 받는다. 대소문자를 접는 것은 오판이 늘어나는 쪽이 아니라 막는 쪽이기 때문이다
+ * (이 이름들과 다른 도구 `TaskCreate`·`TaskList` 등은 목록에 없다).
+ */
+const SUBAGENT_TOOLS: Record<string, true> = { agent: true, task: true }
+
+/** 하위 담당 호출을 거절할 때 모델이 읽는 문장 — 다음에 할 일을 그대로 적는다. */
+const SUBAGENT_DENY_REASON = '하위 담당(Agent·Task 도구)은 이 앱에서 열 수 없어요. 앱이 승인한 배치의 일은 앱이 직접 새 대화로 넘기고, 검토는 언제나 새 대화로만 열려요. 넘길 일은 `gg.py delegate` 주문서로 넘기세요. 그 명령이 아직 없으면 그 일은 직접 하거나, 학생에게 "이 일은 다른 모델에게 넘겨 주세요"라고 한 줄로 알리세요.'
+
+/** 이 도구 호출이 하위 담당을 띄우는 것인가. 훅과 canUseTool 이 같은 판정을 쓴다. */
+export function isSubagentTool(name: unknown): boolean {
+  return typeof name === 'string' && SUBAGENT_TOOLS[name.toLowerCase()] === true
+}
+
+/**
+ * PreToolUse 훅 — 하위 담당 호출을 **언제나** 거절한다(승인 배치·동의·신뢰 폴더와 무관).
+ *
+ * 매처 없이 모든 도구에 걸고 여기서 거른다. 매처는 CLI 판마다 정규식 의미가 달라질 수 있고
+ * (`Agent|Task` 는 `TaskCreate` 에도 걸린다), 이 판정은 권한 경계라 등록 즉시 확실해야 한다.
+ * 매처 없는 훅은 도구 호출마다 한 번 도는데, 그 왕복은 앱 안 IPC 다(네트워크 아님).
+ *
+ * 하위 담당 안에서 불릴 때(`agent_id` 있음)도 같은 거절이다 — `agent_id` 를 보지 않으므로
+ * 담당이 다시 담당을 띄우는 우회로도 열리지 않는다(v0.7은 엔진 하위 담당을 어디에서도 쓰지
+ * 않는다 — 두 회사 모두 relay).
+ */
+export const subagentGuardHook = async (input: unknown): Promise<SyncHookJSONOutput> => {
+  const hook = input as { hook_event_name?: unknown; tool_name?: unknown }
+  if (hook?.hook_event_name !== 'PreToolUse' || !isSubagentTool(hook.tool_name)) return { continue: true }
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: SUBAGENT_DENY_REASON
+    }
+  }
+}
+
+/** 모든 턴에 붙는 앱 지침 — 세션 경계·스킬 규칙·셸 표기·하위 담당 금지. */
+const CLAUDE_SYSTEM_APPEND = '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 하위 담당(Agent·Task) 도구는 앱이 거절하니 부르지 마세요 — 넘길 일은 `gg.py delegate` 주문서로 넘기고, 그 명령이 아직 없으면 그 일은 직접 하거나 학생에게 한 줄로 알리세요. 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.'
 
 export function lostToolCalls(message: unknown): number {
   const content = (message as { message?: { content?: unknown } })?.message?.content
@@ -511,7 +556,12 @@ export class ClaudeConnection implements AgentConnection {
       ...(params.model ? { model: params.model } : {}),
       ...(params.effort ? { effort: params.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
       // 매 턴 같은 문구 — 세션 경계·스킬 규칙 안내.
-      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: CLAUDE_SYSTEM_APPEND }
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: CLAUDE_SYSTEM_APPEND },
+      // 하위 담당 금지의 **강제** 자리(§3.2 [r11]). 지시문은 말이고 이 훅은 관문이다 —
+      // 허용 규칙·신뢰 폴더·승인 배치와 무관하게 언제나 거절한다. 매처 없이 걸어 이름 해석
+      // 차이(정본 `Agent` vs 옛 별칭 `Task`)를 여기서 흡수한다. `probe()` 도 같은 옵션을
+      // 쓰지만 목록 조회는 턴을 보내지 않으므로 훅은 불리지 않는다.
+      hooks: { PreToolUse: [{ hooks: [subagentGuardHook] }] }
     }
   }
 
@@ -687,6 +737,12 @@ export class ClaudeConnection implements AgentConnection {
         // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
         canUseTool: async (name, input, options): Promise<PermissionResult> => {
           if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
+          // 2차 그물(§3.2 [r11]). 실제 관문은 위의 PreToolUse 훅이다 — 훅 거절은 허용 규칙보다
+          // 먼저 듣는다(knuaf-dev 폴더의 project/local 설정이 도구를 통째로 허용해도 그렇다).
+          // 그런데 그 설정이 훅 자체를 끄는 판(`disableAllHooks` 등)이 있으면 훅은 불리지 않고
+          // 도구가 허용 규칙으로 바로 통과할 수 있다. 그때 남는 자리가 여기다 — 같은 판정을
+          // 한 번 더 적어, 어느 한쪽이 뚫려도 하위 담당은 열리지 않게 한다.
+          if (isSubagentTool(name)) return { behavior: 'deny', message: SUBAGENT_DENY_REASON }
           // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
           // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
           // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재

@@ -31,13 +31,28 @@ if (args[0] === 'auth' && args[1] === 'status') {
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n')
   appendFileSync(process.env.W1_QUERY_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\n')
   const lines = createInterface({ input: process.stdin })
+  /** 실제 CLI 처럼 앱의 답을 기다리는 요청들 — 응답 줄이 오면 이 자리에서 풀린다. */
+  const waiting = new Map()
+  /** 초기화가 등록한 PreToolUse 훅. 실제 CLI 는 이 id 로 앱에 물어보고 답을 기다린다. */
+  let hookIds = []
+  const ask = (request) => new Promise((resolve) => {
+    const requestId = `r-${waiting.size + 1}`
+    waiting.set(requestId, resolve)
+    send({ type: 'control_request', request_id: requestId, request })
+  })
   lines.on('line', (line) => {
     const msg = JSON.parse(line)
     appendFileSync(process.env.W1_QUERY_LOG, JSON.stringify(msg) + '\n')
+    if (msg.type === 'control_response') {
+      const done = waiting.get(msg.response?.request_id)
+      if (done) { waiting.delete(msg.response.request_id); done(msg.response.response ?? msg.response) }
+      return
+    }
     if (msg.type === 'control_request' && msg.request.subtype === 'initialize') {
       // 소비하지 않는 stderr 파이프가 대화를 멈추는 회귀도 잡는다.
       // `models` 는 SDK 초기화 응답의 실제 자리다 — 앱의 모델 칩이 여기서 목록을 받는다.
       const models = process.env.W1_MODELS ? JSON.parse(process.env.W1_MODELS) : []
+      hookIds = (msg.request.hooks?.PreToolUse ?? []).flatMap((m) => m.hookCallbackIds ?? [])
       process.stderr.write('x'.repeat(256 * 1024), () => send({ type: 'control_response', response: {
         subtype: 'success', request_id: msg.request_id,
         response: { commands: [{ name: 'knuaf-dev' }], account: { apiKeySource: 'none' }, models }
@@ -52,26 +67,71 @@ if (args[0] === 'auth' && args[1] === 'status') {
       const announce = () => send({ type: 'system', subtype: 'init', session_id: sessionId,
         model: initModel, tools: [], mcp_servers: [] })
       announce()
-      const failure = process.env.W1_QUERY_ERROR || (process.env.W1_AUTH_STATE && !existsSync(process.env.W1_AUTH_STATE) ? 'authentication_failed' : '')
-      if (failure) {
-        const text = failure === 'authentication_failed'
-          ? 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.'
-          : failure === 'rate_limit' ? 'API Error: 429 rate limit exceeded' : 'Network error: ECONNRESET'
-        const fail = () => {
-          send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: sessionId, message: {
-            content: [{ type: 'text', text }]
-          } })
-          send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [text], session_id: sessionId })
+      void (async () => {
+        /**
+         * 하위 담당 호출을 **실제 CLI 처럼** 흉내 낸다(설계 §3.2 [r11] · §8). 두 갈래가 있다.
+         *  · `W1_HOOK_TOOL`: 훅이 켜진 일반 도구 경로 — CLI 가 앱의 PreToolUse 훅에 묻고,
+         *    거절이면 도구를 **실행하지 않고** 그 사유를 tool_result 로 돌려준다.
+         *  · `W1_PERMISSION_TOOL`: 훅을 못 듣는 판 — CLI 가 can_use_tool 로 묻는다(2차 그물).
+         * 어느 쪽이든 "거절이면 Agent 결과가 없다"가 시험의 핵심이다.
+         */
+        const decide = async (tool) => {
+          if (process.env.W1_HOOK_TOOL && hookIds.length > 0) {
+            const decision = await ask({
+              subtype: 'hook_callback', callback_id: hookIds[0], tool_use_id: 'tu-hook',
+              input: { hook_event_name: 'PreToolUse', tool_name: tool, tool_use_id: 'tu-hook',
+                tool_input: { subagent_type: 'general-purpose', prompt: '혼자 조사해 줘', description: '조사' } }
+            })
+            const verdict = decision?.hookSpecificOutput ?? {}
+            if (process.env.W1_HOOK_LOG) appendFileSync(process.env.W1_HOOK_LOG, JSON.stringify(verdict) + '\n')
+            return { denied: verdict.permissionDecision === 'deny', reason: verdict.permissionDecisionReason ?? '' }
+          }
+          if (process.env.W1_PERMISSION_TOOL) {
+            const decision = await ask({
+              subtype: 'can_use_tool', tool_name: tool, tool_use_id: 'tu-perm', permission_suggestions: [],
+              input: { subagent_type: 'general-purpose', prompt: '혼자 조사해 줘', description: '조사' }
+            })
+            if (process.env.W1_HOOK_LOG) appendFileSync(process.env.W1_HOOK_LOG, JSON.stringify(decision ?? {}) + '\n')
+            return { denied: decision?.behavior === 'deny', reason: decision?.message ?? '' }
+          }
+          return { denied: false, reason: '' }
         }
-        if (process.env.W1_QUERY_RELEASE) {
-          const timer = setInterval(() => { if (existsSync(process.env.W1_QUERY_RELEASE)) { clearInterval(timer); fail() } }, 20)
-        } else fail()
-        return
-      }
-      send({ type: 'assistant', uuid: 'answer', session_id: sessionId, message: {
-        content: [{ type: 'text', text: '가짜 CLI 응답' }]
-      } })
-      send({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId })
+        const tool = process.env.W1_HOOK_TOOL || process.env.W1_PERMISSION_TOOL
+        if (tool) {
+          const outcome = await decide(tool)
+          // 도구가 **실제로 돌았는가**를 따로 남긴다 — 거절이면 돌지 않았다는 사실이 시험의 핵심이다.
+          if (process.env.W1_HOOK_LOG) appendFileSync(process.env.W1_HOOK_LOG, JSON.stringify({ executed: !outcome.denied }) + '\n')
+          // 거절이면 도구 결과는 오류 한 줄뿐이다 — 하위 담당이 돌았다는 흔적을 만들지 않는다.
+          send({ type: 'assistant', uuid: 'tool-call', session_id: sessionId, message: { content: [{
+            type: 'tool_use', id: 'tu-call', name: tool,
+            input: { subagent_type: 'general-purpose', prompt: '혼자 조사해 줘', description: '조사' }
+          }] } })
+          send({ type: 'user', uuid: 'tool-result', session_id: sessionId, message: { content: [{
+            type: 'tool_result', tool_use_id: 'tu-call', is_error: outcome.denied,
+            content: outcome.denied ? outcome.reason : 'Agent 결과: 혼자 조사했습니다.'
+          }] } })
+        }
+        const failure = process.env.W1_QUERY_ERROR || (process.env.W1_AUTH_STATE && !existsSync(process.env.W1_AUTH_STATE) ? 'authentication_failed' : '')
+        if (failure) {
+          const text = failure === 'authentication_failed'
+            ? 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.'
+            : failure === 'rate_limit' ? 'API Error: 429 rate limit exceeded' : 'Network error: ECONNRESET'
+          const fail = () => {
+            send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: sessionId, message: {
+              content: [{ type: 'text', text }]
+            } })
+            send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [text], session_id: sessionId })
+          }
+          if (process.env.W1_QUERY_RELEASE) {
+            const timer = setInterval(() => { if (existsSync(process.env.W1_QUERY_RELEASE)) { clearInterval(timer); fail() } }, 20)
+          } else fail()
+          return
+        }
+        send({ type: 'assistant', uuid: 'answer', session_id: sessionId, message: {
+          content: [{ type: 'text', text: '가짜 CLI 응답' }]
+        } })
+        send({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId })
+      })()
     }
   })
 }

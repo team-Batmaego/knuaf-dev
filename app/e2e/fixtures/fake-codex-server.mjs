@@ -42,6 +42,12 @@ const ASK_COMMAND = process.env.FAKE_CODEX_ASK_COMMAND ?? 'cat /etc/hosts'
 const ASK_REASON = process.env.FAKE_CODEX_ASK_REASON ?? '논문 폴더 밖 파일을 읽으려고 해요'
 const FILE_EVENTS = process.env.FAKE_CODEX_FILE_EVENTS
 const FILE_AFTER = process.env.FAKE_CODEX_FILE_AFTER
+/**
+ * 메인이 스스로 띄운 하위 담당 장면(설계 §3.2 Codex·§5-7). JSON 알림 배열을 그대로 내보낸 뒤
+ * 턴을 정상으로 끝낸다 — 앱이 그 알림을 기록·알림으로만 쓰고 대화(agentMessage)에는 넣지
+ * 않는지 본다. 승인 카드를 만들지 않는 것이 `FAKE_CODEX_FILE_EVENTS` 와 다르다.
+ */
+const SUBAGENT_EVENTS = process.env.FAKE_CODEX_SUBAGENT_EVENTS
 /** 응답 지연(ms) — 느린 기계(CI) 조건을 만들기 위한 시험 전용 스위치. 기본 0(동작 불변). */
 const DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_DELAY_MS ?? 0) || 0)
 /** 턴을 끝내지 않는다 — "작업 중" 화면을 안정적으로 본다. `after-delta` 면 답 첫 조각(전달 확인)을 보낸 뒤 붙잡는다. */
@@ -237,6 +243,11 @@ function handle(message) {
           threadId, turnId, itemId: 'file-1', startedAtMs: 1, reason: null, grantRoot: null
         } })
         if (FILE_AFTER) setTimeout(() => { for (const event of JSON.parse(FILE_AFTER)) out(event) }, 50)
+        return
+      }
+      if (SUBAGENT_EVENTS !== undefined) {
+        for (const event of JSON.parse(SUBAGENT_EVENTS)) out(event)
+        out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } })
         return
       }
       if (ASK) {
