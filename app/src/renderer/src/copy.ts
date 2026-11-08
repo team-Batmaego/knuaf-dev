@@ -1480,7 +1480,9 @@ export const CHAT_EVENT = {
   goPaper: '종이에서 보기',
   edited: (title: string, count: number | null) => count === null
     ? `${title}${objectParticle(title)} 고쳤어요`
-    : `${title}에서 ${count}곳을 고쳤어요`,
+    : count === 0
+      ? `${title}에서 고친 곳을 찾지 못했어요`
+      : `${title}에서 ${count}곳을 고쳤어요`,
   showDiff: '고친 부분 보기'
 } as const
 

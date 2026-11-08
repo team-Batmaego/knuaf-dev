@@ -464,6 +464,11 @@ dialog.sheet .sheet-foot { display: flex; justify-content: flex-end; gap: var(--
 .docx-preview-frame { display: block; width: 100%; height: calc(100vh - 220px); min-height: 320px; border: var(--hairline) solid var(--line); border-radius: var(--r-md); }
 .preview-image { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; }
 .preview-truncation-badge .badge { border-radius: 5px; }
+/* 시트 이름은 한 줄로 읽힌다. 이름이 많거나 길면 탭 줄만 가로로 스크롤한다 — 한 글자씩
+   세로로 꺾이던 자리(실기기 W-12). 폭이 모자라면 버튼을 줄이지 않고 탭 줄을 민다. */
+.sheet-tabs { min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+.sheet-tabs .segmented { width: max-content; vertical-align: top; }
+.sheet-tabs .segmented button { flex: 0 0 auto; white-space: nowrap; }
 .artifact-list { max-height: 60vh; overflow: auto; }
 .artifact-list .item { cursor: pointer; }
 .artifact-list .item.active { border-color: var(--accent); background: var(--accent-soft); }
