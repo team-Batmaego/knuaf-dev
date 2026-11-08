@@ -664,7 +664,14 @@ export class ClaudeConnection implements AgentConnection {
     // 모두 이 계획을 쓴다 — 전송 중에 칩이 바뀌어도 이미 정한 값으로 나간다(중요 1·5).
     const plan = this.turnPlan(sessionId)
     if (plan.blocked) throw new Error(CLAUDE_MODEL_COPY.unsetNeedsChoice)
-    if (plan.marksOverride) this.overriddenFor = sessionId ?? ''
+    /**
+     * "이 대화를 앱이 덮어썼다" 표식은 **초기화가 실제로 온 뒤**에 붙인다(R1).
+     * 예전에는 전송 직전에 붙여서, 초기화 전에 죽은 턴도 새 대화를 "덮어쓴 대화"로 만들어
+     * 버렸다. 그러면 그 뒤 "안 고름"으로 새 대화를 여는 복구 경로가 막힌다 — 실패한 턴은
+     * 아무것도 덮어쓰지 않았으므로 표식도 남기지 않는다.
+     */
+    const markOverride = plan.marksOverride && sessionId !== undefined
+    if (markOverride) this.overriddenFor = sessionId
     this.controller = new AbortController()
     // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
     const q = this.active = query({
@@ -727,12 +734,15 @@ export class ClaudeConnection implements AgentConnection {
         if (!verified && message.type === 'system' && message.subtype === 'init') {
           verified = true
           const actual = typeof message.model === 'string' && message.model ? message.model : null
-          // 계정 기본값은 **모델을 보내지 않은 새 대화**의 init 만 인정한다(설계 §1).
-          // 환경 변수 핀으로 모델을 보냈거나(중요 3), 첫 턴부터 모델을 골랐거나, 앞 대화에서
-          // 모델을 보낸 연결이면(중요 2: "새 대화"는 세션 단위이지 연결 단위가 아니다) 아니다.
-          if (!sessionId && !plan.sentModel && !this.accountDefault && actual) this.accountDefault = actual
-          // 새 대화의 표시를 이제 알게 된 세션 id 로 옮긴다 — 다음 턴부터 같은 대화다.
-          if (this.overriddenFor === '' && message.session_id) this.overriddenFor = message.session_id
+          /**
+           * 계정 기본값은 **모델을 보내지 않은 새 대화**의 init 이다(설계 §1). 조건에
+           * `!this.accountDefault` 를 두지 않는다(R2) — 계정/프로젝트 기본값은 바뀔 수 있고,
+           * 새 대화의 init 이 곧 그때의 답이다. 처음 본 값만 붙들면 기본값이 바뀐 뒤에도
+           * 옛 모델을 계속 명시해 보낸다. 모델을 보낸 턴(핀 포함)은 여전히 제외한다.
+           */
+          if (!sessionId && !plan.sentModel && actual) this.accountDefault = actual
+          // 새 대화의 표식은 초기화가 왔으므로 이제 붙인다(위 주석) — 다음 턴부터 같은 대화다.
+          if (plan.marksOverride && message.session_id) this.overriddenFor = message.session_id
           if (plan.sentModel && actual && !this.sameModel(plan.sentModel, actual)) {
             events.note(CLAUDE_MODEL_COPY.defaultMismatch(plan.sentModel, actual))
           }
