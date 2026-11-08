@@ -365,6 +365,27 @@ export function toChatModelInfo(info: ModelInfo): ChatModelInfo | null {
  */
 const SUBAGENT_TOOLS: Record<string, true> = { agent: true, task: true }
 
+/**
+ * 엔진에게 **도구 자체를 주지 않는다**(§3.2 [r11] 강제의 본체). 훅은 이름으로 거르는 2차
+ * 그물이고, 이것은 그 앞단이다 — 실CLI 두 판(2.1.275·2.1.319) 실측:
+ *  - `Agent`·`Task` 를 넣으면 도구 목록에서 빠지고 호출도 거절된다.
+ *  - `Workflow` 를 넣어야 한다. **이것을 빼면 훅도 `canUseTool` 도 보지 않는 경로**로
+ *    하위 담당을 백그라운드로 띄운다(훅엔 `tool:"Workflow"` 가 찍히지만 판정 밖이고,
+ *    `canUseTool` 은 통과시킨다 — 결과는 "Workflow launched in background").
+ *  - `Skill` 을 넣어야 한다. 빼면 `context: fork` 스킬이 하위 담당을 띄운다. 동봉 스킬
+ *    `code-review` 가 fork 라 학생 PC 어디서나 `Skill` 한 번이면 열린다. 훅은 `tool:"Skill"`
+ *    을 보지만 스킬 본문의 frontmatter(`context: fork`)는 앱이 모르고, 이름 하나만 막는
+ *    `Skill(code-review)` 로는 프로젝트·사용자 폴더의 fork 스킬을 못 막는다.
+ *
+ * `Skill` 을 끄고도 앱은 그대로 돈다 — 앱은 첫 턴을 `/knuaf-dev <요청>` 슬래시 명령으로
+ * 보내고(inline), 슬래시 확장은 `Skill` 도구 없이 CLI 가 직접 한다(두 판 실측: 도구 목록에
+ * `Skill` 이 없어도 스킬 본문이 실려 왔다). 그래서 모델이 스스로 부르는 스킬만 닫힌다.
+ *
+ * ToolSearch 로 되살아나지도 않는다(두 판 실측: "No matching deferred tools found" /
+ * 검색 결과에 `Skill` 이 없음).
+ */
+const DISALLOWED_SUBAGENT_TOOLS = ['Agent', 'Task', 'Workflow', 'Skill']
+
 /** 하위 담당 호출을 거절할 때 모델이 읽는 문장 — 다음에 할 일을 그대로 적는다. */
 const SUBAGENT_DENY_REASON = '하위 담당(Agent·Task 도구)은 이 앱에서 열 수 없어요. 앱이 승인한 배치의 일은 앱이 직접 새 대화로 넘기고, 검토는 언제나 새 대화로만 열려요. 넘길 일은 `gg.py delegate` 주문서로 넘기세요. 그 명령이 아직 없으면 그 일은 직접 하거나, 학생에게 "이 일은 다른 모델에게 넘겨 주세요"라고 한 줄로 알리세요.'
 
@@ -376,8 +397,14 @@ export function isSubagentTool(name: unknown): boolean {
 /**
  * PreToolUse 훅 — 하위 담당 호출을 **언제나** 거절한다(승인 배치·동의·신뢰 폴더와 무관).
  *
+ * 이것은 **2차 겹**이다. 본체는 `disallowedTools`(엔진이 그 도구를 모델에게 주지 않는다)이고,
+ * 이 훅은 엔진 옵션이 판마다 달라지거나 앱이 옵션을 잘못 조립했을 때 남는 겹이다.
+ * 훅 하나에 기대면 안 되는 이유는 실측에 있다 — 훅 콜백이 예외를 던지면 CLI 는 **열린 채
+ * 통과**시킨다(fail-open). 그래서 도구 이름 판정은 엔진에 맡기고, 훅은 정상 경로에서 같은
+ * 뜻을 한 번 더 말하는 자리로 둔다.
+ *
  * 매처 없이 모든 도구에 걸고 여기서 거른다. 매처는 CLI 판마다 정규식 의미가 달라질 수 있고
- * (`Agent|Task` 는 `TaskCreate` 에도 걸린다), 이 판정은 권한 경계라 등록 즉시 확실해야 한다.
+ * (`Agent|Task` 는 `TaskCreate` 에도 걸린다), 이 판정은 권한 경계라 확실해야 한다.
  * 매처 없는 훅은 도구 호출마다 한 번 도는데, 그 왕복은 앱 안 IPC 다(네트워크 아님).
  *
  * 하위 담당 안에서 불릴 때(`agent_id` 있음)도 같은 거절이다 — `agent_id` 를 보지 않으므로
@@ -557,10 +584,12 @@ export class ClaudeConnection implements AgentConnection {
       ...(params.effort ? { effort: params.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
       // 매 턴 같은 문구 — 세션 경계·스킬 규칙 안내.
       systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: CLAUDE_SYSTEM_APPEND },
-      // 하위 담당 금지의 **강제** 자리(§3.2 [r11]). 지시문은 말이고 이 훅은 관문이다 —
-      // 허용 규칙·신뢰 폴더·승인 배치와 무관하게 언제나 거절한다. 매처 없이 걸어 이름 해석
-      // 차이(정본 `Agent` vs 옛 별칭 `Task`)를 여기서 흡수한다. `probe()` 도 같은 옵션을
-      // 쓰지만 목록 조회는 턴을 보내지 않으므로 훅은 불리지 않는다.
+      // 하위 담당 금지의 **본체**(§3.2 [r11]) — 엔진이 도구를 주지 않는다. 훅·canUseTool 보다
+      // 먼저 듣고, 훅이 못 듣는 판(콜백 예외·`disableAllHooks`)에서도 같은 효과다.
+      disallowedTools: DISALLOWED_SUBAGENT_TOOLS,
+      // 2차 그물 — 이름으로 거르는 훅. 엔진 옵션이 판마다 달라지는 경우를 대비한 겹이다.
+      // 매처 없이 걸어 별칭 해석 차이(정본 `Agent` vs 옛 별칭 `Task`)를 여기서 흡수한다.
+      // `probe()` 도 같은 옵션을 쓰지만 목록 조회는 턴을 보내지 않으므로 훅은 불리지 않는다.
       hooks: { PreToolUse: [{ hooks: [subagentGuardHook] }] }
     }
   }
@@ -737,12 +766,14 @@ export class ClaudeConnection implements AgentConnection {
         // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
         canUseTool: async (name, input, options): Promise<PermissionResult> => {
           if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
-          // 2차 그물(§3.2 [r11]). 실제 관문은 위의 PreToolUse 훅이다 — 훅 거절은 허용 규칙보다
-          // 먼저 듣는다(knuaf-dev 폴더의 project/local 설정이 도구를 통째로 허용해도 그렇다).
-          // 그런데 그 설정이 훅 자체를 끄는 판(`disableAllHooks` 등)이 있으면 훅은 불리지 않고
-          // 도구가 허용 규칙으로 바로 통과할 수 있다. 그때 남는 자리가 여기다 — 같은 판정을
-          // 한 번 더 적어, 어느 한쪽이 뚫려도 하위 담당은 열리지 않게 한다.
-          if (isSubagentTool(name)) return { behavior: 'deny', message: SUBAGENT_DENY_REASON }
+          /**
+           * **하위 담당은 여기서 막지 않는다 — 막을 수 없기 때문이다.** 실CLI 두 판 실측:
+           * `Agent` 에는 이 콜백이 **한 번도 불리지 않는다**(허용 규칙을 지워도, 훅을 떼도).
+           * 엔진이 승인 질문 없이 도는 도구라 이 자리에 오지 않는다. 반면 훅 콜백이 예외를
+           * 던지면 엔진은 **열린 채 통과**시킨다(fail-open) — 실측에서 그대로 하위 담당이 떴다.
+           * 그래서 실제 관문은 `disallowedTools`(엔진이 도구를 주지 않음)이고, 훅은 이름으로
+           * 거르는 2차 겹이다. 여기에 같은 판정을 또 적으면 "막았다"는 착각만 남는다.
+           */
           // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
           // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
           // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재

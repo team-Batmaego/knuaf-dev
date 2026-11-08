@@ -112,8 +112,19 @@ export class CodexConnection implements AgentConnection {
    * 실제 model·effort 는 `subAgentActivity` 가 알려 준다(F6).
    */
   private subagents = new Map<string, { model: string | null; effort: string | null }>()
-  /** 학생에게 이미 말한 것 — `item/started`·`item/completed` 가 같은 호출로 두 번 와도 한 번만. */
+  /**
+   * 아직 자식 thread id 를 못 받은 spawn 호출 — 키는 `<부모 thread>:<호출 item id>`.
+   *
+   * 왜 미뤄 두는가: 엔진은 `item/started` 에서 **새 thread id 를 아직 모른다**(`CollabAgentSpawnBeginEvent`
+   * 에는 그 필드가 없고 `CollabAgentSpawnEndEvent` 에만 `new_thread_id` 가 있다). 그래서
+   * 시작 알림의 `receiverThreadIds` 는 비어 있고 완료 알림에서야 채워진다 — 시작에서 곧바로
+   * "처리됨"으로 닫으면 그 id 를 버려 요청값↔실제값 대조가 깨진다(검토 U5b 중요 2).
+   */
+  private pendingSpawns = new Map<string, { model: string | null; effort: string | null }>()
+  /** 학생에게 알린 spawn 호출 — 시작·완료 두 알림에 같은 호출이 와도 한 번만. */
   private announcedSubagents = new Set<string>()
+  /** 실제값을 이미 기록한 담당 thread — `subAgentActivity` 가 started 로 두 번 와도 한 번만. */
+  private recordedActivities = new Set<string>()
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
   }
@@ -135,23 +146,52 @@ export class CodexConnection implements AgentConnection {
     const type = 'type' in item ? item.type : undefined
     const id = 'id' in item && typeof item.id === 'string' ? item.id : ''
     if (type === 'collabAgentToolCall' && 'tool' in item && item.tool === 'spawnAgent') {
-      const key = `${threadId}:${id}`
-      if (this.announcedSubagents.has(key)) return
-      this.announcedSubagents.add(key)
-      const model = 'model' in item && typeof item.model === 'string' && item.model ? item.model : null
-      const effort = 'reasoningEffort' in item && typeof item.reasoningEffort === 'string' && item.reasoningEffort ? item.reasoningEffort : null
-      const raw = 'receiverThreadIds' in item && Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []
-      const receivers = raw.filter((v: unknown): v is string => typeof v === 'string' && v !== '')
-      for (const thread of receivers) this.subagents.set(thread, { model, effort })
-      this.recordSubagent({ event: 'spawned', threadIds: receivers, requestedModel: model, requestedEffort: effort })
-      this.events?.note(SUBAGENT_SPAWNED_NOTE)
+      this.observeSpawn(threadId, id, item)
     } else if (type === 'subAgentActivity' && 'kind' in item && item.kind === 'started') {
-      const thread = 'agentThreadId' in item && typeof item.agentThreadId === 'string' ? item.agentThreadId : ''
-      const requested = this.subagents.get(thread) ?? { model: null, effort: null }
-      const model = 'model' in item && typeof item.model === 'string' && item.model ? item.model : null
-      const effort = 'reasoningEffort' in item && typeof item.reasoningEffort === 'string' && item.reasoningEffort ? item.reasoningEffort : null
-      this.recordSubagent({ event: 'resolved', threadIds: [thread], requestedModel: requested.model, requestedEffort: requested.effort, actualModel: model ?? 'unverified', actualEffort: effort })
+      this.observeActivity(item)
     }
+  }
+  /**
+   * spawn 호출 하나. 자식 thread id 가 아직 없으면 **보류**하고, 완료 알림에서 채워진다.
+   * 알림은 spawn 이 처음 확인될 때 한 번, 기록은 id 가 확정될 때 한 번 남긴다.
+   */
+  private observeSpawn(threadId: string, itemId: string, item: object): void {
+    const key = `${threadId}:${itemId}`
+    const model = 'model' in item && typeof item.model === 'string' && item.model ? item.model : null
+    const effort = 'reasoningEffort' in item && typeof item.reasoningEffort === 'string' && item.reasoningEffort ? item.reasoningEffort : null
+    const raw = 'receiverThreadIds' in item && Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []
+    const receivers = raw.filter((v: unknown): v is string => typeof v === 'string' && v !== '')
+    const pending = this.pendingSpawns.get(key)
+    // 알림은 띄웠다는 사실만 말한다 — id 가 늦게 와도 학생에게 두 번 말하지 않는다.
+    if (!this.announcedSubagents.has(key)) {
+      this.announcedSubagents.add(key)
+      this.events?.note(SUBAGENT_SPAWNED_NOTE)
+    }
+    if (receivers.length === 0) {
+      // 시작 알림: 아직 id 가 없다. 요청값만 붙들어 둔다.
+      this.pendingSpawns.set(key, { model, effort })
+      return
+    }
+    // 완료 알림 — 붙들어 두었던 요청값을 지우고 id 를 확정한다(없으면 넘어온 값을 쓴다).
+    if (pending) this.pendingSpawns.delete(key)
+    const requested = {
+      model: model ?? pending?.model ?? null,
+      effort: effort ?? pending?.effort ?? null
+    }
+    for (const thread of receivers) this.subagents.set(thread, requested)
+    this.recordSubagent({ event: 'spawned', threadIds: receivers, requestedModel: requested.model, requestedEffort: requested.effort })
+  }
+  /** 담당의 실제 model·effort 확인(`subAgentActivity`). 같은 담당은 한 번만 기록한다. */
+  private observeActivity(item: object): void {
+    const thread = 'agentThreadId' in item && typeof item.agentThreadId === 'string' ? item.agentThreadId : ''
+    const activityId = 'id' in item && typeof item.id === 'string' ? item.id : ''
+    const key = activityId || thread
+    if (!key || this.recordedActivities.has(key)) return
+    this.recordedActivities.add(key)
+    const requested = this.subagents.get(thread) ?? { model: null, effort: null }
+    const model = 'model' in item && typeof item.model === 'string' && item.model ? item.model : null
+    const effort = 'reasoningEffort' in item && typeof item.reasoningEffort === 'string' && item.reasoningEffort ? item.reasoningEffort : null
+    this.recordSubagent({ event: 'resolved', threadIds: [thread], requestedModel: requested.model, requestedEffort: requested.effort, actualModel: model ?? 'unverified', actualEffort: effort })
   }
   /**
    * `audit/model-routing/` 에 한 줄 남긴다 — 스킬의 담당 기록 계약(model-routing.md)과 같은

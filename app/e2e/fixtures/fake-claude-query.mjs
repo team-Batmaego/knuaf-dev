@@ -16,6 +16,13 @@ else if (seqFile) {
 }
 // 이 턴에 앱이 실제로 넘긴 모델 — 초기화가 무엇을 답할지 시험이 정한다(`W1_INIT_MODEL_BY_MODEL`).
 const modelArg = args.includes('--model') ? args[args.indexOf('--model') + 1] : undefined
+/**
+ * `--disallowedTools` = 엔진이 모델에게 **도구를 주지 않는** 자리다. 실제 CLI 는 그 이름을
+ * 도구 목록에서 빼고, 모델이 그래도 부르면 "No such tool available" 로 끝낸다(훅도
+ * can_use_tool 도 보지 않는다 — 검토 U5b 실측). 가짜 CLI 도 그 계약을 그대로 흉내 낸다.
+ */
+const disallowedArg = args.includes('--disallowedTools') ? args[args.indexOf('--disallowedTools') + 1] : ''
+const DISALLOWED = new Set(disallowedArg.split(',').map((s) => s.trim()).filter(Boolean))
 if (args[0] === 'auth' && args[1] === 'status') {
   console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }))
 } else if (args[0] === 'auth' && args[1] === 'login') {
@@ -97,7 +104,14 @@ if (args[0] === 'auth' && args[1] === 'status') {
           return { denied: false, reason: '' }
         }
         const tool = process.env.W1_HOOK_TOOL || process.env.W1_PERMISSION_TOOL
-        if (tool) {
+        if (tool && DISALLOWED.has(tool)) {
+          // 엔진 단계 차단 — 훅·can_use_tool 을 부르지도 않는다(실측). 도구는 돌지 않는다.
+          if (process.env.W1_HOOK_LOG) appendFileSync(process.env.W1_HOOK_LOG, JSON.stringify({ engineBlocked: tool }) + '\n')
+          send({ type: 'user', uuid: 'tool-result', session_id: sessionId, message: { content: [{
+            type: 'tool_result', tool_use_id: 'tu-call', is_error: true,
+            content: `Error: No such tool available: ${tool}. ${tool} is disabled for this session.`
+          }] } })
+        } else if (tool) {
           const outcome = await decide(tool)
           // 도구가 **실제로 돌았는가**를 따로 남긴다 — 거절이면 돌지 않았다는 사실이 시험의 핵심이다.
           if (process.env.W1_HOOK_LOG) appendFileSync(process.env.W1_HOOK_LOG, JSON.stringify({ executed: !outcome.denied }) + '\n')

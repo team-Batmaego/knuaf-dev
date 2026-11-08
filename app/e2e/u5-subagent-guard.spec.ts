@@ -39,7 +39,17 @@ function claudeRig(extra: Record<string, string> = {}) {
   const rows = (): Record<string, unknown>[] => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
   const inits = () => rows().filter((r) => r.type === 'control_request' && (r.request as { subtype?: string } | undefined)?.subtype === 'initialize')
   const hooks = (): Record<string, unknown>[] => readFileSync(hookLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
-  return { root, conn, env, rows, inits, hooks }
+  /**
+   * 앱이 CLI 에 넘긴 `--disallowedTools`. 엔진이 모델에게 주지 않는 도구 목록이고, 실CLI 두 판
+   * 에서 이 목록만이 Workflow·fork Skill 을 실제로 닫았다(훅·canUseTool 은 그 경로를 못 본다).
+   */
+  const disallowed = (): string[] => {
+    const args = rows().find((x) => Array.isArray(x.args))?.args
+    const list = Array.isArray(args) ? args : []
+    const at = list.indexOf('--disallowedTools')
+    return at >= 0 && typeof list[at + 1] === 'string' ? String(list[at + 1]).split(',').filter(Boolean) : []
+  }
+  return { root, conn, env, rows, inits, hooks, disallowed }
 }
 
 test('U5: 하위 담당 도구 이름은 언제나 거절한다 — 정본 Agent·옛 별칭 Task·대소문자', async () => {
@@ -56,6 +66,7 @@ test('U5: 하위 담당 도구 이름은 언제나 거절한다 — 정본 Agent
     expect(out).toEqual({ continue: true })
   }
   // 그리고 하위 담당이면 결정은 늘 deny — 승인 배치·신뢰 폴더 같은 입력 자체를 받지 않는다.
+  // (`Workflow`·`Skill` 은 여기 없다 — 그 둘은 이름 판정으로 닫히지 않아 엔진 옵션이 맡는다.)
   for (const name of ['Agent', 'Task']) {
     const out = await subagentGuardHook({ hook_event_name: 'PreToolUse', tool_name: name, tool_input: {}, tool_use_id: 't' })
     expect(out.hookSpecificOutput).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' })
@@ -81,27 +92,69 @@ test('U5: 메인 대화 옵션에 agents 가 없고, PreToolUse 훅이 초기화
   } finally { await r.conn.stop() }
 })
 
-test('U5: 훅이 켜진 일반 도구 경로 — Agent 호출이 거절되고 도구가 실행되지 않는다', async () => {
+test('U5b: Agent 는 엔진이 도구를 주지 않아 실행되지 않는다 — 훅까지 오지도 않는다', async () => {
+  // 404fda3 까지는 훅이 Agent 를 거절했다. 그 훅은 **콜백이 예외를 던지면 fail-open** 이라
+  // (실측) 단독 관문이 될 수 없다. 지금은 엔진 옵션이 먼저 막고, 훅은 2차 겹이다 —
+  // 그래서 이 시험은 "훅이 불리지 않고 도구가 돌지 않았다"를 잠근다(그게 더 강한 사실이다).
   const r = claudeRig({ W1_HOOK_TOOL: 'Agent' })
   try {
     await r.conn.run('혼자 조사해 줘', undefined, noopEvents)
-    const [verdict, executed] = r.hooks()
-    expect(verdict).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' })
-    expect(String(verdict.permissionDecisionReason)).toContain('gg.py delegate')
-    // 거절이 곧 "Agent 가 돌지 않았다"는 아니다 — CLI 가 그 판단을 실제로 따랐는지까지 본다.
-    expect(executed).toEqual({ executed: false })
+    expect(r.disallowed()).toEqual(expect.arrayContaining(['Agent', 'Task', 'Workflow', 'Skill']))
+    expect(r.hooks()).toEqual([{ engineBlocked: 'Agent' }])
+    // 훅 함수 자체는 2차 겹으로 남아 있다 — 이름이 목록에 없는 판을 위한 것이고, 그 판정은
+    // 첫 시험(훅 단위)이 고정한다.
     expect(r.hooks().some((h) => h.executed === true)).toBe(false)
   } finally { await r.conn.stop() }
 })
 
-test('U5: 훅이 못 듣는 판에서도 can_use_tool 이 같은 거절을 낸다 (2차 그물)', async () => {
+test('U5b(차단 1): Workflow 도 하위 담당 입구다 — 엔진 단계에서 도구를 주지 않는다', async () => {
+  // 실CLI 두 판 실측: Workflow 는 훅(`tool:"Workflow"`)도 canUseTool 도 판정 밖이라 통과하고
+  // "Workflow launched in background" 로 하위 담당이 뜬다. 유일하게 듣는 것은 disallowedTools 다.
+  const r = claudeRig({ W1_HOOK_TOOL: 'Workflow' })
+  try {
+    await r.conn.run('이 일을 워크플로로 돌려 줘', undefined, noopEvents)
+    // 엔진 옵션으로 내려갔는가 — 이 이름이 빠지면 그 경로가 그대로 열린다.
+    expect(r.disallowed()).toContain('Workflow')
+    expect(r.disallowed()).toEqual(expect.arrayContaining(['Agent', 'Task', 'Skill']))
+    // 그리고 도구는 돌지 않았다(훅도 canUseTool 도 불리지 않는 엔진 차단).
+    const log = r.hooks()
+    expect(log).toEqual([{ engineBlocked: 'Workflow' }])
+  } finally { await r.conn.stop() }
+})
+
+test('U5b(차단 2): fork 스킬도 입구다 — Skill 도구째로 주지 않는다', async () => {
+  // 동봉 스킬 code-review 가 context: fork 라 학생 PC 어디서나 Skill 한 번이면 하위 담당이 뜬다.
+  // 이름 하나만 막는 Skill(code-review) 로는 폴더의 fork 스킬을 못 막으므로 도구를 통째로 뺀다.
+  const r = claudeRig({ W1_HOOK_TOOL: 'Skill' })
+  try {
+    await r.conn.run('code-review 스킬로 검토해 줘', undefined, noopEvents)
+    expect(r.disallowed()).toContain('Skill')
+    expect(r.hooks()).toEqual([{ engineBlocked: 'Skill' }])
+  } finally { await r.conn.stop() }
+})
+
+test('U5b: 앱은 /knuaf-dev 슬래시로 스킬을 싣는다 — Skill 도구를 빼도 앱 스킬 본문은 간다', async () => {
+  // Skill 도구를 끄면 모델이 스스로 부르는 스킬은 닫힌다. 앱이 쓰는 길은 슬래시 명령이고,
+  // 그것은 CLI 가 직접 확장하므로 Skill 도구와 무관하다(두 판 실측).
+  const r = claudeRig()
+  try {
+    await r.conn.run('첫 요청', undefined, noopEvents)
+    const prompts = r.rows().filter((x) => x.type === 'user').map((x) => JSON.stringify(x.message))
+    expect(prompts.join('\n')).toContain('/knuaf-dev')
+  } finally { await r.conn.stop() }
+})
+
+test('U5b(중요 1): canUseTool 로는 막지 못한다 — Agent 는 그 콜백을 거치지 않는다', async () => {
+  // 실CLI 두 판 실측: Agent 는 승인 질문 없이 도는 도구라 can_use_tool 이 **한 번도** 불리지
+  // 않는다. 그래서 "2차 그물"을 canUseTool 에 두면 막았다는 착각만 남는다. 이 시험은 그 사실을
+  // 잠근다 — 가짜 CLI 가 그 콜백을 강제로 보내면 거절되지만, 강제로 보내지 않는 경로(실제
+  // 엔진 동작)에서는 불리지 않으므로 **엔진 옵션(disallowedTools)** 이 유일한 관문이다.
   const r = claudeRig({ W1_PERMISSION_TOOL: 'Task' })
   try {
     await r.conn.run('혼자 조사해 줘', undefined, noopEvents)
-    const [verdict, executed] = r.hooks()
-    expect(verdict).toMatchObject({ behavior: 'deny' })
-    expect(String(verdict.message)).toContain('gg.py delegate')
-    expect(executed).toEqual({ executed: false })
+    // 실제 앱 canUseTool 은 하위 담당 이름을 더 이상 특별히 거절하지 않는다(막을 수 없으므로).
+    const [verdict] = r.hooks()
+    expect(verdict).not.toMatchObject({ message: expect.stringContaining('gg.py delegate') })
   } finally { await r.conn.stop() }
 })
 
@@ -169,14 +222,42 @@ test('U5: Codex 메인이 띄운 하위 담당은 기록·알림만 — 담당�
   } finally { await r.conn.stop() }
 })
 
-test('U5: 하위 담당 알림이 여러 번 와도 알림은 한 번, 기록은 실제값이 확인될 때만 늘어난다', async () => {
-  // 같은 호출을 item/started·item/completed 로 두 번 보내는 것은 실제 서버에서도 흔하다.
-  const completed = { ...spawnCall('t-fake', 't-child'), method: 'item/completed' }
-  const r = codexRig([spawnCall('t-fake', 't-child'), completed, activityStarted('t-child', 't-child')])
+test('U5b(중요 2): 자식 thread id 는 완료 알림에만 온다 — 시작에서 닫지 않고 기다린다', async () => {
+  // 엔진 실측(CollabAgentSpawnBeginEvent 엔 새 thread 필드가 없고 EndEvent 에만 new_thread_id):
+  // 시작 알림의 receiverThreadIds 는 비어 있고 완료 알림에서야 채워진다. 시작에서 "처리됨"으로
+  // 닫으면 요청값↔실제값 대조가 통째로 비어버린다(검토 U5b 중요 2 재현 그대로).
+  const begin = { method: 'item/started', params: { threadId: 't-fake', turnId: 'u-fake', startedAtMs: 1, item: {
+    type: 'collabAgentToolCall', id: 'collab-1', tool: 'spawnAgent', status: 'inProgress',
+    senderThreadId: 't-fake', receiverThreadIds: [], prompt: '조사해 줘',
+    model: 'gpt-child', reasoningEffort: 'high', agentsStates: {}
+  } } }
+  const end = { method: 'item/completed', params: { threadId: 't-fake', turnId: 'u-fake', completedAtMs: 2, item: {
+    type: 'collabAgentToolCall', id: 'collab-1', tool: 'spawnAgent', status: 'completed',
+    senderThreadId: 't-fake', receiverThreadIds: ['t-child'], prompt: '조사해 줘',
+    model: 'gpt-child', reasoningEffort: 'high', agentsStates: { 't-child': { status: 'pendingInit', message: null } }
+  } } }
+  const r = codexRig([begin, end, activityStarted('t-child', 't-child')])
   try {
     await r.conn.run('자료 조사해 줘', undefined, r.agentEvents)
+    // 알림은 한 번(시작에서 이미 띄웠다).
     expect(r.notes.filter((n) => n === SUBAGENT_SPAWNED_NOTE)).toHaveLength(1)
-    expect(r.audit().filter((x) => x.event === 'spawned')).toHaveLength(1)
+    // 기록은 id 가 확정된 뒤 한 번, 그 id 와 요청값을 들고.
+    const spawned = r.audit().filter((x) => x.event === 'spawned')
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]).toMatchObject({ threadIds: ['t-child'], requestedModel: 'gpt-child', requestedEffort: 'high' })
+    // 실제값도 그 id 에 붙어 요청값과 나란히 남는다.
+    expect(r.audit().find((x) => x.event === 'resolved')).toMatchObject({
+      threadIds: ['t-child'], requestedModel: 'gpt-child', requestedEffort: 'high',
+      actualModel: 'gpt-resolved', actualEffort: 'medium'
+    })
+  } finally { await r.conn.stop() }
+})
+
+test('U5b(권고 1): 같은 활동 알림이 started·completed 로 두 번 와도 실제값 기록은 하나다', async () => {
+  const activity = activityStarted('t-child', 't-child')
+  const r = codexRig([spawnCall('t-fake', 't-child'), activity, { ...activity, method: 'item/completed' }])
+  try {
+    await r.conn.run('자료 조사해 줘', undefined, r.agentEvents)
     expect(r.audit().filter((x) => x.event === 'resolved')).toHaveLength(1)
   } finally { await r.conn.stop() }
 })
