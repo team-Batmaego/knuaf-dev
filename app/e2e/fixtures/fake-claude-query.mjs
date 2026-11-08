@@ -3,6 +3,9 @@ import { createInterface } from 'node:readline'
 import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
 
 const args = process.argv.slice(2)
+// 실제 CLI 는 재개하면 그 세션 id 로 답한다 — 앱이 저장한 대화 id 가 그대로 이어진다.
+const resumeArg = args.find((a) => a.startsWith('--resume='))
+const sessionId = resumeArg ? resumeArg.slice('--resume='.length) : 'fake-session'
 if (args[0] === 'auth' && args[1] === 'status') {
   console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }))
 } else if (args[0] === 'auth' && args[1] === 'login') {
@@ -23,31 +26,37 @@ if (args[0] === 'auth' && args[1] === 'status') {
     appendFileSync(process.env.W1_QUERY_LOG, JSON.stringify(msg) + '\n')
     if (msg.type === 'control_request' && msg.request.subtype === 'initialize') {
       // 소비하지 않는 stderr 파이프가 대화를 멈추는 회귀도 잡는다.
+      // `models` 는 SDK 초기화 응답의 실제 자리다 — 앱의 모델 칩이 여기서 목록을 받는다.
+      const models = process.env.W1_MODELS ? JSON.parse(process.env.W1_MODELS) : []
       process.stderr.write('x'.repeat(256 * 1024), () => send({ type: 'control_response', response: {
         subtype: 'success', request_id: msg.request_id,
-        response: { commands: [{ name: 'knuaf-dev' }], account: { apiKeySource: 'none' } }
+        response: { commands: [{ name: 'knuaf-dev' }], account: { apiKeySource: 'none' }, models }
       } }))
     } else if (msg.type === 'user') {
+      // 실제 CLI 는 첫 user 메시지 앞에 초기화 메시지를 보낸다 — 앱은 그 model 로 계정
+      // 기본값을 확인하고, 요청한 모델과 어긋나는지 본다.
+      send({ type: 'system', subtype: 'init', session_id: sessionId,
+        model: process.env.W1_INIT_MODEL || 'claude-opus-5', tools: [], mcp_servers: [] })
       const failure = process.env.W1_QUERY_ERROR || (process.env.W1_AUTH_STATE && !existsSync(process.env.W1_AUTH_STATE) ? 'authentication_failed' : '')
       if (failure) {
         const text = failure === 'authentication_failed'
           ? 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.'
           : failure === 'rate_limit' ? 'API Error: 429 rate limit exceeded' : 'Network error: ECONNRESET'
         const fail = () => {
-          send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: 'fake-session', message: {
+          send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: sessionId, message: {
             content: [{ type: 'text', text }]
           } })
-          send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [text], session_id: 'fake-session' })
+          send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [text], session_id: sessionId })
         }
         if (process.env.W1_QUERY_RELEASE) {
           const timer = setInterval(() => { if (existsSync(process.env.W1_QUERY_RELEASE)) { clearInterval(timer); fail() } }, 20)
         } else fail()
         return
       }
-      send({ type: 'assistant', uuid: 'answer', session_id: 'fake-session', message: {
+      send({ type: 'assistant', uuid: 'answer', session_id: sessionId, message: {
         content: [{ type: 'text', text: '가짜 CLI 응답' }]
       } })
-      send({ type: 'result', subtype: 'success', is_error: false, session_id: 'fake-session' })
+      send({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId })
     }
   })
 }

@@ -3,12 +3,12 @@ import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
-import { query, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import { query, type ModelInfo, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
-import type { ConnectionStatus } from '../../shared/chat'
+import type { ChatModelInfo, ConnectionStatus } from '../../shared/chat'
 import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 
 export class ClaudeAuthenticationError extends Error {
@@ -322,6 +322,38 @@ const PERMISSION_LOST = /Tool permission request failed/i
 /** SDK 가 받는 추론 강도. 알 수 없는 값은 조용히 무시한다 — 오타로 세션이 죽지 않게. */
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
+/** 모델 고르기가 저장된 선택을 되돌릴 수 없을 때의 문구(main·renderer 공통). */
+export const CLAUDE_MODEL_COPY = {
+  unsetNeedsChoice: '이 대화에서 모델을 골랐던 적이 있어서, "안 고름"으로 되돌리려면 계정 기본 모델을 알아야 해요. 지금은 그 값을 확인하지 못했어요. 모델 칩에서 모델을 하나 골라 주세요. (새 대화를 열면 계정 기본값을 다시 확인해요.)',
+  defaultMismatch: (requested: string, actual: string) => `고른 모델(${requested})로 대화가 열리지 않았어요. 이 대화는 ${actual}로 진행되고 있어요. 모델 칩에서 다시 확인해 주세요.`
+}
+
+/**
+ * SDK 의 모델 목록 한 줄 → 앱의 모델 목록 한 줄.
+ *
+ * 깊이 목록은 **모델이 주는 그대로** 쓴다(형님 Q1 "low~max 있듯이"). 줄이거나 더하지 않는다 —
+ * 모델마다 다른 목록을 앱이 추측하면 엔진이 조용히 낮춰 도는 일을 학생이 알 수 없다.
+ * `defaultEffort` 는 SDK 가 알려 주지 않으므로 `null` 이다(Codex 의 `model/list` 와 다르다).
+ */
+export function toChatModelInfo(info: ModelInfo): ChatModelInfo | null {
+  const model = typeof info?.value === 'string' ? info.value.trim() : ''
+  if (!model) return null
+  const efforts: string[] = Array.isArray(info.supportedEffortLevels)
+    ? info.supportedEffortLevels.filter((e) => CLAUDE_EFFORTS.has(e))
+    : []
+  return {
+    model,
+    name: typeof info.displayName === 'string' && info.displayName ? info.displayName : model,
+    description: typeof info.description === 'string' ? info.description : '',
+    efforts,
+    defaultEffort: null,
+    isDefault: false
+  }
+}
+
+/** 모든 턴에 붙는 앱 지침 — 세션 경계·스킬 규칙·셸 표기·백그라운드 담당 금지. */
+const CLAUDE_SYSTEM_APPEND = '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 서브에이전트를 백그라운드로 띄우지 마세요(run_in_background 금지). 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.'
+
 export function lostToolCalls(message: unknown): number {
   const content = (message as { message?: { content?: unknown } })?.message?.content
   if (!Array.isArray(content)) return 0
@@ -398,6 +430,17 @@ export { describeTool }
 export class ClaudeConnection implements AgentConnection {
   private active?: Query
   private loginProcess?: ChildProcess
+  /**
+   * 이 대화에서 앱이 모델을 **명시해서** 보낸 적이 있는가. 한 번이라도 보냈으면 CLI 는
+   * `resume` 때 그 모델을 복원하므로(D1-03, 실측), "안 고름"은 생략이 아니라 기본 모델을
+   * 명시해서 되돌려야 한다. 대화(세션)마다 다르므로 세션 id 와 함께 든다 —
+   * 새 대화는 아직 id 가 없으므로 `''` 로 표시하고, 첫 `system/init` 이 준 id 로 옮긴다.
+   */
+  private overriddenFor: string | null = null
+  /** 이 앱이 밝혀 낸 계정 기본 모델. 모델 옵션 없이 연 대화의 첫 `system/init.model` 만 인정한다. */
+  private accountDefault: string | null = null
+  /** 목록의 `value`(별칭) → `resolvedModel`(실제 id). 요청과 init 을 견주는 데만 쓴다. */
+  private resolvedModels = new Map<string, string>()
   private loginUnconfirmed = false
   /** 계정 복구 판정은 실제 로그인 시도의 성공 종료와 status 응답을 함께 본다. */
   get loginConfirmed(): boolean { return !this.loginUnconfirmed }
@@ -407,6 +450,141 @@ export class ClaudeConnection implements AgentConnection {
   private autoAllowed(name: string, input: unknown): boolean {
     return autoAllow(this.options.root, name, input, registeredSources(this.options.root))
   }
+  /**
+   * 이 계정이 쓸 수 있는 모델 목록. 초기화 응답(`initialize`)이 이미 들고 오므로 턴을
+   * 보내지 않고 묻는다 — 빈 입력 스트림으로 연 query 는 대화 기록을 만들지 않는다.
+   * 모델 목록 화면을 열 때마다 새 프로세스가 뜨지만, 한 번의 초기화 왕복이면 끝난다
+   * (실측 약 0.7초, 로컬 가짜 CLI).
+   */
+  async models(): Promise<ChatModelInfo[]> {
+    const q = this.probe()
+    try {
+      const list = await q.supportedModels()
+      const parsed = (Array.isArray(list) ? list : [])
+        .map(toChatModelInfo)
+        .filter((m): m is ChatModelInfo => m !== null)
+      for (const info of Array.isArray(list) ? list : []) {
+        if (typeof info?.value === 'string' && typeof info.resolvedModel === 'string' && info.resolvedModel) {
+          this.resolvedModels.set(info.value, info.resolvedModel)
+        }
+      }
+      return parsed
+    } finally {
+      q.close()
+    }
+  }
+
+  /**
+   * 목록·기본값 조회용 query. **턴을 보내지 않는다** — 빈 입력 스트림을 주면 CLI 는
+   * 초기화 응답까지만 주고 대화 기록을 남기지 않는다(실측: `projects/` 가 생기지 않음).
+   * `run()` 과 같은 옵션을 쓴다 — 목록은 실제 대화와 같은 환경에서 나와야 한다.
+   */
+  private probe(): Query {
+    // 대화 중인 턴의 컨트롤러를 갈아 끼우지 않는다 — 목록 조회는 그 턴과 무관하고,
+    // 갈아 끼우면 stop() 이 이미 버려진 컨트롤러를 abort 해 진행 중인 턴이 멈추지 않는다.
+    const controller = new AbortController()
+    return query({ prompt: (async function* () {})(), options: this.queryOptions(undefined, {}, controller) })
+  }
+
+  /**
+   * `run()` 과 `probe()` 가 함께 쓰는 query 옵션. 모델·깊이는 여기서만 정한다.
+   *
+   * 모델 (D1-03): 이 대화에서 앱이 모델을 보낸 적이 있으면 CLI 는 `resume` 때 그 모델을
+   * 복원한다(실측). 그래서 "안 고름"은 **생략이 아니라 기본 모델을 명시**해서 되돌린다.
+   * 계정 기본값은 모델 옵션 **없이** 연 대화의 첫 `system/init.model` 만 인정하고, 첫
+   * 턴부터 모델을 골랐던 대화의 init 은 선택값이므로 저장하지 않는다. 기본값을 모르면
+   * "안 고름"을 그 대화에서는 막는다(`prepare()` 가 전송 전에 던진다).
+   *
+   * 깊이: 실측 결과 CLI 는 `resume` 때 **직전 깊이를 복원하지 않는다**(이력의 마지막
+   * `perTurnEffort` 가 `max` 여도, 플래그 없이 재개한 요청은 모델 기본값 `high` 로 나갔다).
+   * 그래서 깊이는 매 턴 고른 값만 보내고, "안 고름"은 지금까지처럼 생략한다 — 되돌릴 것이 없다.
+   */
+  private queryOptions(sessionId: string | undefined, params: { model?: string; effort?: string }, controller = this.controller) {
+    return {
+      cwd: this.options.root, pathToClaudeCodeExecutable: this.options.binary,
+      ...claudeSpawnOptions(this.options.binary),
+      // The project's own skill copy stays authoritative — a stale ~/.claude/skills
+      // cannot shadow or mix with it. The external .command launcher pins the same
+      // scope (buildLaunchScript in ../agent.ts).
+      env: this.options.env, settingSources: ['project', 'local'] as ('project' | 'local')[],
+      resume: sessionId, abortController: controller, permissionMode: 'default' as const,
+      ...(params.model ? { model: params.model } : {}),
+      ...(params.effort ? { effort: params.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
+      // 매 턴 같은 문구 — 세션 경계·스킬 규칙 안내.
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: CLAUDE_SYSTEM_APPEND }
+    }
+  }
+
+  /**
+   * 이 턴에 실을 모델·깊이. 세 경우다.
+   * 1. 고른 모델이 있으면 그 모델 + (고른 깊이). 깊이를 안 골랐으면 생략 = 모델 기본값.
+   * 2. 고른 모델이 없고 이 대화에서 덮어쓴 적도 없으면 아무것도 넣지 않는다(지금까지와 같다).
+   * 3. 이 앱이 덮어쓴 뒤 해제했다 → 확인된 계정 기본 모델을 **명시해서** 되돌린다.
+   */
+  private turnModelParams(choice: { model: string; effort: string | null } | null, sessionId: string | undefined): { model?: string; effort?: string } {
+    // 개발용 핀(환경 변수)은 학생 선택이 없을 때의 기본값 자리다 — live 스펙이 이 통로로
+    // 비용을 낮춘다. 학생이 칩에서 고른 값이 있으면 언제나 그쪽이 이긴다.
+    const envModel = this.options.env.KNUAF_CLAUDE_MODEL || undefined
+    const envEffort = CLAUDE_EFFORTS.has(this.options.env.KNUAF_CLAUDE_EFFORT ?? '')
+      ? this.options.env.KNUAF_CLAUDE_EFFORT as string
+      : undefined
+    // 고른 모델이 있으면 그 모델. 깊이를 안 골랐으면 생략해 모델 기본값을 쓴다.
+    if (choice?.model) {
+      this.overriddenFor = sessionId ?? ''
+      const effort = choice.effort ?? envEffort
+      return { model: choice.model, ...(effort ? { effort } : {}) }
+    }
+    if (envModel) return { model: envModel, ...(envEffort ? { effort: envEffort } : {}) }
+    /**
+     * 여기부터는 "고른 모델 없음"이다. 언제 되돌려야 하는가:
+     * ① 이 연결에서 덮어쓴 적이 있다(같은 앱 실행), 또는
+     * ② 앱을 다시 켜서 재개했는데 이 학생은 전에 모델을 고른 적이 있다(설정의 흔적).
+     * ②가 없으면 재시작 뒤 "안 고름"이 CLI 의 마지막 모델 복원에 조용히 먹힌다(D1-03).
+     * 새 대화는 아직 덮어쓴 적이 없으므로 ①·② 어느 쪽도 아니다 — 모델 키 없이 열어 기본값을 확인한다.
+     */
+    const resumed = sessionId !== undefined
+    const mustRestore = this.overriddenFor === (sessionId ?? '') || (resumed && (this.options.modelChosen?.() ?? false))
+    if (!mustRestore) return envEffort ? { effort: envEffort } : {}
+    return this.accountDefault
+      ? { model: this.accountDefault, ...(envEffort ? { effort: envEffort } : {}) }
+      : envEffort ? { effort: envEffort } : {}
+  }
+
+
+  /**
+   * 요청한 값(별칭 `opus`·`sonnet`)과 초기화가 알려 준 실제 id(`claude-opus-5`)가 같은
+   * 모델인가. 어긋남을 **증명할 수 있을 때만** false 다 — 별칭이 id 로 풀리는 것은 정상이고,
+   * 그것을 경고로 띄우면 매 턴 거짓 경고가 난다.
+   * 1. `default` 는 "계정 기본값"이라는 뜻이므로 초기화가 준 값이 곧 답이다.
+   * 2. 목록을 받아 두었으면 그 줄의 `resolvedModel` 과 견준다(가장 정확하다).
+   * 3. 아니면 낱말 포함으로 본다 — `opus` ⊂ `claude-opus-5`, `haiku-9` ⊄ `claude-opus-5`.
+   */
+  private sameModel(requested: string, actual: string): boolean {
+    if (requested === 'default' || requested === actual) return true
+    const bare = (v: string) => v.replace(/\[[^\]]*\]$/, '').toLowerCase()
+    const resolved = this.resolvedModels.get(requested)
+    if (resolved) return bare(resolved) === bare(actual)
+    const words = new Set(bare(actual).split(/[^a-z0-9]+/).filter(Boolean))
+    return bare(requested).split(/[^a-z0-9]+/).filter(Boolean).every((w) => words.has(w))
+  }
+
+
+  /**
+   * 전송 전 확인. 되돌릴 기본값이 필요한데 확인하지 못했으면 **여기서 던진다** — 보낸 글이
+   * 대화에 남거나 초안이 사라지기 전에 막는다(Codex `prepare()` 와 같은 원칙, MC1-01).
+   * 새 대화(`sessionId` 없음)는 덮어쓴 적이 없으므로 묻지 않는다.
+   */
+  async prepare(sessionId: string | undefined): Promise<void> {
+    if (!sessionId) return
+    if (this.options.modelChoice?.()?.model) return
+    // 개발용 핀이 있으면 되돌릴 모델이 이미 정해져 있다 — 기본값을 몰라도 막지 않는다.
+    if (this.options.env.KNUAF_CLAUDE_MODEL) return
+    if (this.accountDefault) return
+    // 이 연결에서 덮어쓴 적도 없고, 전에 고른 흔적도 없으면 되돌릴 것이 없다.
+    if (this.overriddenFor !== sessionId && !(this.options.modelChosen?.() ?? false)) return
+    throw new Error(CLAUDE_MODEL_COPY.unsetNeedsChoice)
+  }
+
   /**
    * `auth status` 의 JSON 만이 로그인 여부의 근거다. 실행 실패·시간 초과·깨진 JSON 은
    * "로그인 필요"가 아니라 "확인하지 못했어요"다 — 예전에는 셋 다 조용히 `connected:false`
@@ -480,57 +658,48 @@ export class ClaudeConnection implements AgentConnection {
     if (!(await this.status()).connected) throw new Error('Claude 구독 계정 로그인을 완료해 주세요.')
     this.controller = new AbortController()
     // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
-    const q = this.active = query({ prompt: sessionId ? text : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`, options: {
-      cwd: this.options.root, pathToClaudeCodeExecutable: this.options.binary,
-      ...claudeSpawnOptions(this.options.binary),
-      // The project's own skill copy stays authoritative — a stale ~/.claude/skills
-      // cannot shadow or mix with it. The external .command launcher pins the same
-      // scope (buildLaunchScript in ../agent.ts).
-      env: this.options.env, settingSources: ['project', 'local'],
-      resume: sessionId, abortController: this.controller, permissionMode: 'default',
-      // 모델·추론 강도 핀. 미설정이면 CLI 기본값을 그대로 쓴다 — 학생 설정을 덮지 않는다.
-      // (live 스펙이 sonnet 으로 비용을 낮추는 데도 같은 통로를 쓴다.)
-      ...(this.options.env.KNUAF_CLAUDE_MODEL ? { model: this.options.env.KNUAF_CLAUDE_MODEL } : {}),
-      ...(CLAUDE_EFFORTS.has(this.options.env.KNUAF_CLAUDE_EFFORT ?? '')
-        ? { effort: this.options.env.KNUAF_CLAUDE_EFFORT as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 서브에이전트를 백그라운드로 띄우지 마세요(run_in_background 금지). 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.' },
-      // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
-      // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
-      // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
-      // "AbortError: Stream closed" 로 죽고, canUseTool 은 호출조차 되지 않는다 —
-      // 앱은 승인 창을 띄울 기회조차 없고 도우미는 그것을 "쓰기 권한 차단"으로 읽는다
-      // (시험주행 발견 11, 재현으로 확인). 제대로 된 해법은 세션 동안 stdin 을 열어 두는
-      // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
-      canUseTool: async (name, input, options): Promise<PermissionResult> => {
-        if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
-        // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
-        // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
-        // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재
-        // 논문 폴더/insideRoot 를 확인하며, 사이드카도 _confine() 으로 같은 선을 긋는다.
-        //
-        // 매번 묻는 것은 동의를 구하는 게 아니라 읽지도 못할 것을 클릭하게 만드는 일이고,
-        // 그러면 정작 폴더 밖을 건드리는 순간에도 습관적으로 허용을 누르게 된다.
-        if (this.autoAllowed(name, input)) return { behavior: 'allow', updatedInput: input }
-        // 여기서 통과하는 두 경우가 있다. (1) 설정의 "도우미가 도구를 쓸 때 물어볼까요?"
-        // 가 기본값 '묻지 않기'다 — 그러면 폴더를 가리지 않고 통과한다. (2) 학생이 권한
-        // 카드에서 "이 폴더에서는 계속 허용"을 직접 눌렀다.
-        //
-        // 기본을 묻지 않기로 둔 것은 편의를 위한 결정이고, 무엇을 포기하는지는 설정
-        // 화면에 그대로 적혀 있다(도우미는 폴더 밖 PDF·웹 문서도 읽고, 그 안에 섞인
-        // 지시를 앱이 걸러 주지 않는다). 물어보기로 되돌리면 위의 autoAllow 가 폴더 안
-        // 일을 걸러 주므로, 그때 남는 질문은 폴더 밖·읽을 수 없는 명령뿐이다.
-        if (this.options.trusted?.()) return { behavior: 'allow', updatedInput: input }
-        const id = randomUUID()
-        const allowed = await new Promise<boolean>(resolve => {
-          const done = (v: boolean) => { options.signal.removeEventListener('abort', aborted); this.approvals.delete(id); resolve(v) }
-          const aborted = () => done(false)
-          this.approvals.set(id, done)
-          options.signal.addEventListener('abort', aborted, { once: true })
-          events.permission({ id, ...describeTool(name, input, this.options.root) })
-        })
-        return allowed ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
+    const q = this.active = query({
+      prompt: sessionId ? text : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`,
+      options: {
+        ...this.queryOptions(sessionId, this.turnModelParams(this.options.modelChoice?.() ?? null, sessionId)),
+        // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
+        // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
+        // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
+        // "AbortError: Stream closed" 로 죽고, canUseTool 은 호출조차 되지 않는다 —
+        // 앱은 승인 창을 띄울 기회조차 없고 도우미는 그것을 "쓰기 권한 차단"으로 읽는다
+        // (시험주행 발견 11, 재현으로 확인). 제대로 된 해법은 세션 동안 stdin 을 열어 두는
+        // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
+        canUseTool: async (name, input, options): Promise<PermissionResult> => {
+          if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
+          // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
+          // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
+          // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재
+          // 논문 폴더/insideRoot 를 확인하며, 사이드카도 _confine() 으로 같은 선을 긋는다.
+          //
+          // 매번 묻는 것은 동의를 구하는 게 아니라 읽지도 못할 것을 클릭하게 만드는 일이고,
+          // 그러면 정작 폴더 밖을 건드리는 순간에도 습관적으로 허용을 누르게 된다.
+          if (this.autoAllowed(name, input)) return { behavior: 'allow', updatedInput: input }
+          // 여기서 통과하는 두 경우가 있다. (1) 설정의 "도우미가 도구를 쓸 때 물어볼까요?"
+          // 가 기본값 '묻지 않기'다 — 그러면 폴더를 가리지 않고 통과한다. (2) 학생이 권한
+          // 카드에서 "이 폴더에서는 계속 허용"을 직접 눌렀다.
+          //
+          // 기본을 묻지 않기로 둔 것은 편의를 위한 결정이고, 무엇을 포기하는지는 설정
+          // 화면에 그대로 적혀 있다(도우미는 폴더 밖 PDF·웹 문서도 읽고, 그 안에 섞인
+          // 지시를 앱이 걸러 주지 않는다). 물어보기로 되돌리면 위의 autoAllow 가 폴더 안
+          // 일을 걸러 주므로, 그때 남는 질문은 폴더 밖·읽을 수 없는 명령뿐이다.
+          if (this.options.trusted?.()) return { behavior: 'allow', updatedInput: input }
+          const id = randomUUID()
+          const allowed = await new Promise<boolean>(resolve => {
+            const done = (v: boolean) => { options.signal.removeEventListener('abort', aborted); this.approvals.delete(id); resolve(v) }
+            const aborted = () => done(false)
+            this.approvals.set(id, done)
+            options.signal.addEventListener('abort', aborted, { once: true })
+            events.permission({ id, ...describeTool(name, input, this.options.root) })
+          })
+          return allowed ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
+        }
       }
-    } })
+    })
     try {
       const commands = await q.supportedCommands()
       if (!commands.some(c => c.name === 'knuaf-dev' || c.name.endsWith(':knuaf-dev'))) throw new Error('Claude가 knuaf-dev 스킬을 찾지 못했어요.')
@@ -538,9 +707,25 @@ export class ClaudeConnection implements AgentConnection {
       const account = await q.accountInfo()
       if (account.apiKeySource && account.apiKeySource !== 'none') throw new Error('API 인증이 감지되어 중단했어요. 구독 인증을 확인해 주세요.')
       let lost = 0
+      // 이 턴에 앱이 요청한 모델. 초기화 메시지의 실제 model 과 대조해 어긋나면 알린다 —
+      // 요금제·조직 설정이 조용히 다른 모델로 돌려도 학생이 알 수 있게(D1-03 ③).
+      const requested = this.options.modelChoice?.()?.model ?? null
+      let verified = false
       for await (const message of q) {
         if (claudeAuthenticationFailed(message)) throw new ClaudeAuthenticationError()
         if ('session_id' in message && message.session_id) events.session(message.session_id)
+        // 계정 기본값은 **모델을 보내지 않은** 대화의 첫 init 에서만 인정한다. 첫 턴부터
+        // 모델을 골랐다면 그 init 은 선택값이지 기본값이 아니다(§1 [r3 D1-03]).
+        if (!verified && message.type === 'system' && message.subtype === 'init') {
+          verified = true
+          const actual = typeof message.model === 'string' && message.model ? message.model : null
+          if (!sessionId && !requested && this.overriddenFor === null && !this.accountDefault && actual) {
+            this.accountDefault = actual
+          }
+          // 새 대화의 표시를 이제 알게 된 세션 id 로 옮긴다 — 다음 턴부터 같은 대화다.
+          if (this.overriddenFor === '' && message.session_id) this.overriddenFor = message.session_id
+          if (requested && actual && !this.sameModel(requested, actual)) events.note(CLAUDE_MODEL_COPY.defaultMismatch(requested, actual))
+        }
         lost += lostToolCalls(message)
         if (message.type === 'assistant') {
           const text = message.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')

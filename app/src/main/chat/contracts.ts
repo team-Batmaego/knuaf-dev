@@ -22,11 +22,11 @@ export interface AgentConnection {
   run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory?: boolean): Promise<void>
   /**
    * 이 계정이 쓸 수 있는 모델 목록. 그 통로가 아직 없는 공급자는 구현하지 않는다 —
-   * ChatService 가 `supported:false` 로 답하고 화면은 추천을 띄우지 않는다(이번 판의 Claude).
+   * ChatService 가 `supported:false` 로 답하고 화면은 추천을 띄우지 않는다.
    */
   models?(): Promise<ChatModelInfo[]>
   /**
-   * 전송을 받아들이기 **전에** 필요한 확인(이번 판: 재개한 대화의 기본값 복귀 판정).
+   * 전송을 받아들이기 **전에** 필요한 확인 — 재개한 대화의 기본값 복귀 판정(두 회사 모두).
    * 여기서 던지면 보낸 글은 대화에 남지 않고 초안도 그대로다 — 조용히 예전 모델로 보내는
    * 대신 학생이 알 수 있는 오류로 막는다(검토 MC1-01).
    */

@@ -167,7 +167,7 @@ test('실측 순서의 같은 별칭 여러 세대 중 최신 모델에만 추�
 })
 
 
-test('빈 목록도 기본값으로 둘 수 있고 Claude는 모델 추천 없이 기본값을 유지한다', async () => {
+test('빈 목록도 기본값으로 둘 수 있고 Claude도 자기 모델 목록을 따로 받는다 (U1)', async () => {
   const { electronApp, page } = await scene([])
   try {
     const chip = page.getByTitle('이 논문의 도우미')
@@ -179,9 +179,11 @@ test('빈 목록도 기본값으로 둘 수 있고 Claude는 모델 추천 없�
     await popup.getByRole('button', { name: 'Claude로 바꾸기' }).click()
     await expect(chip).toContainText('Claude')
     await chip.click()
-    await expect(popup.locator('.model-option')).toHaveCount(0)
+    // [U1] Claude 도 모델 칩을 갖는다 — ChatGPT 추천표(별칭 표)는 Claude 목록에 붙지 않고,
+    // 계정이 알려 준 모델만 그대로 보인다. writeFakeClaude 는 대화 통로가 없어 목록은 비어 있다.
+    await expect(popup).toContainText('Claude 모델')
     await expect(popup.locator('.model-recommend')).toHaveCount(0)
-    await expect(popup).toContainText('내 Claude 설정을 따라요')
+    await expect(popup.getByRole('button', { name: /안 고름/ })).toContainText('내 Claude 설정을 그대로 써요')
   } finally { await electronApp.close() }
 })
 

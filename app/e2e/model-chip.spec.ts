@@ -540,7 +540,7 @@ test('보내기가 오류로 막히면 초안은 그대로 남는다 (MC1-01)', 
   expect(useChat.getState().error).toContain('기본 모델을 확인하지 못해')
 })
 
-test('모델 목록 통로가 없는 공급자(이번 판의 Claude)는 supported:false 로 답한다', async () => {
+test('모델 목록 통로가 없는 연결은 supported:false 로 답한다 — 화면은 기본값을 유지한다', async () => {
   const conn: AgentConnection = {
     status: async () => ({ installed: true, connected: true, version: '0.0.0-test', detail: '' }),
     login: async () => {},
