@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { diffSentences, hasChange, sectionDiff, splitSentences } from '../src/shared/diff'
 import { baselineKey, buildQuotedMessage, quoteOf, useReview } from '../src/renderer/src/store/review'
+import { CHAT_EVENT } from '../src/renderer/src/copy'
 import { ensureSectionBaseline } from '../src/main/review-baseline'
 
 // ---------------------------------------------------------------- 문장 자르기
@@ -144,6 +145,84 @@ test('noteSeen compares successive saved bodies and editOf is scoped by root, se
     expect(useReview.getState().editOf(root, sectionId, 'h2')).toEqual({ kind: 'edited', count: 2 })
     expect(useReview.getState().editOf('/tmp/other-project', sectionId, 'h2')).toBeNull()
     expect(useReview.getState().baseline[baselineKey(root, sectionId)].draft).toBe('')
+  } finally {
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
+test('noteSeen counts against the visible diff baseline when the pane already saw the saved body', async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const root = '/tmp/review-race'
+  const sectionId = 'sec-01'
+  const key = baselineKey(root, sectionId)
+  const saved = new Map([[JSON.stringify([root, sectionId]), '가. 나. 다.']])
+  useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      knuaf: {
+        review: {
+          ensureBaseline: async (root: string, sectionId: string) => ({
+            result: { draft: saved.get(JSON.stringify([root, sectionId])) ?? '' }
+          })
+        }
+      }
+    }
+  })
+  try {
+    const noteSeen = useReview.getState().noteSeen
+    // PaperPane's fire-and-forget read raced ahead: new body under the section list's old hash.
+    useReview.setState({
+      baseline: { [key]: { title: 'Ⅰ. 장', draft: '가. 나. 다.', hash: '' } },
+      lastSeen: { [key]: { title: 'Ⅰ. 장', draft: '가. 바. 다. 라.', hash: 'h1' } }
+    })
+    await noteSeen(root, sectionId, { title: 'Ⅰ. 장', draft: '가. 바. 다. 라.', hash: 'h2' })
+    expect(useReview.getState().editOf(root, sectionId, 'h2')).toEqual({ kind: 'edited', count: 2 })
+    // A later no-op read must not replace the fixed event count with 0.
+    await noteSeen(root, sectionId, { title: 'Ⅰ. 장', draft: '가. 바. 다. 라.', hash: 'h2' })
+    expect(useReview.getState().editOf(root, sectionId, 'h2')).toEqual({ kind: 'edited', count: 2 })
+  } finally {
+    useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
+test('event line wording: N places, a replacement counts once, and zero has its own sentence', () => {
+  expect(CHAT_EVENT.edited('Ⅰ. 장', 2)).toBe('Ⅰ. 장에서 2곳을 고쳤어요')
+  expect(CHAT_EVENT.edited('Ⅰ. 장', 1)).toBe('Ⅰ. 장에서 1곳을 고쳤어요')
+  expect(CHAT_EVENT.edited('Ⅰ. 장', 0)).toBe('Ⅰ. 장에서 고친 곳을 찾지 못했어요')
+  expect(CHAT_EVENT.edited('Ⅰ. 서론', null)).toBe('Ⅰ. 서론을 고쳤어요')
+})
+
+test('each separated changed place counts once, and a replacement is one place', async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const root = '/tmp/review-places'
+  const sectionId = 'sec-02'
+  const saved = new Map([[JSON.stringify([root, sectionId]), '하나. 둘. 셋. 넷. 다섯. 여섯.']])
+  useReview.setState({ baseline: {}, lastSeen: {}, editCounts: {} })
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      knuaf: {
+        review: {
+          ensureBaseline: async (root: string, sectionId: string) => ({
+            result: { draft: saved.get(JSON.stringify([root, sectionId])) ?? '' }
+          })
+        }
+      }
+    }
+  })
+  try {
+    await useReview.getState().noteSeen(root, sectionId, {
+      title: 'Ⅱ. 장', draft: '하나. 둘. 셋. 넷. 다섯. 여섯.', hash: 'p0'
+    })
+    await useReview.getState().noteSeen(root, sectionId, {
+      title: 'Ⅱ. 장', draft: '하나. 둘X. 셋. 넷Y. 다섯. 여섯Z.', hash: 'p1'
+    })
+    expect(useReview.getState().editOf(root, sectionId, 'p1')).toEqual({ kind: 'edited', count: 3 })
   } finally {
     useReview.setState({ quote: null, showDiff: false, baseline: {}, lastSeen: {}, editCounts: {} })
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)

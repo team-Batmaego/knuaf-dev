@@ -65,6 +65,13 @@ function countEditedAreas(before: string, after: string): number {
   return count
 }
 
+/** Count changed places between two bodies; first writing counts as `wrote`, not a place count. */
+function editBetween(before: string, after: string): ReviewEdit {
+  return before.length === 0 && after.length > 0
+    ? { kind: 'wrote' }
+    : { kind: 'edited', count: countEditedAreas(before, after) }
+}
+
 function editKey(root: string, sectionId: string, hash: string): string {
   return JSON.stringify([root, sectionId, hash])
 }
@@ -91,12 +98,29 @@ export const useReview = create<ReviewState>((set, get) => ({
         }
         set((state) => {
           const previous = state.lastSeen[key]
-          const edit = previous && previous.hash !== doc.hash
-            ? previous.draft.length === 0 && doc.draft.length > 0
-              ? { kind: 'wrote' } as const
-              : { kind: 'edited', count: countEditedAreas(previous.draft, doc.draft) } as const
-            : null
           const saved = state.baseline[key]
+          const known = state.editCounts[editKey(root, sectionId, doc.hash)]
+          /**
+           * Count **bodies**, not hashes. PaperPane's fire-and-forget read and the section list
+           * are two independent readers: the pane can report the saved body first (recorded
+           * under the old hash), then the list reports the same body under the new hash. A hash
+           * check alone then compares the body with itself and tells the student "0곳" while the
+           * diff shows real changes. So:
+           *   - a genuinely newer body (this save) counts against the body seen just before it;
+           *   - the same body under a new hash (the race) counts against the persisted baseline —
+           *     the same `before` that "고친 부분 보기" draws;
+           *   - an already-counted hash keeps its first count (events are fixed when created).
+           */
+          let edit: ReviewEdit | null = null
+          if (previous && previous.draft !== doc.draft) edit = editBetween(previous.draft, doc.draft)
+          // A zero count must not stand next to a non-empty "고친 부분 보기" diff: the counter
+          // and the rendered diff share the persisted baseline as their `before`. A hash that
+          // already has a fixed count is never recomputed (a second read of the same save must
+          // not overwrite it with a different basis).
+          const weak = !edit || (edit.kind === 'edited' && edit.count === 0)
+          if (weak && !known && previous && saved && saved.draft !== doc.draft) {
+            edit = editBetween(saved.draft, doc.draft)
+          }
           return {
             baseline: {
               ...state.baseline,

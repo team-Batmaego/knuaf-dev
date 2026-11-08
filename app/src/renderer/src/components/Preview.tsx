@@ -106,7 +106,7 @@ function XlsxView({ data }: { data: Extract<PreviewPayload, { kind: 'xlsx' }> })
   return <div>
     {data.formulas_uncalculated && <div style={{ marginBottom: 'var(--sp-3)' }}><Feedback kind="warning" title={PREVIEW.uncalculatedTitle} body={PREVIEW.uncalculatedBody} /></div>}
     <div className="row" style={{ marginBottom: 'var(--sp-2)' }}>
-      {data.sheets.length > 1 && <SegmentedControl value={String(sheet)} options={data.sheets.map((sh, i) => ({ id: String(i), label: sh.name }))} onChange={(v) => setSheet(Number(v))} label="시트" />}
+      {data.sheets.length > 1 && <div className="sheet-tabs"><SegmentedControl value={String(sheet)} options={data.sheets.map((sh, i) => ({ id: String(i), label: sh.name }))} onChange={(v) => setSheet(Number(v))} label="시트" /></div>}
       {s?.truncated && <Badge label={PREVIEW.truncated} />}
     </div>
     {s && <div className="preview-table-wrap"><table className="preview-table"><tbody>
