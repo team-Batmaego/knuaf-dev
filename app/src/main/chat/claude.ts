@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
-import { readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { query, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
@@ -43,6 +43,185 @@ const PATH_TOOLS: Record<string, string[]> = {
   Write: ['file_path'], Edit: ['file_path'], MultiEdit: ['file_path'],
   Read: ['file_path'], NotebookEdit: ['notebook_path'],
   Glob: ['path'], Grep: ['path'], LS: ['path']
+}
+
+/**
+ * 다음 세션의 CLI 권한·동작을 바꾸는 **폴더 안** 파일들. 여기에 쓰는 일은 학생이
+ * '매번 묻기'를 골랐으면 반드시 카드로 물어야 한다.
+ *
+ * 왜: CLI 는 `.claude/settings*.json` 의 `permissions.allow`·`hooks`, 스킬·에이전트의
+ * `allowed-tools` 를 앱의 canUseTool **앞에서** 적용한다. 그래서 도우미가 이 파일을 한 번
+ * 쓰면 그 다음부터 카드 없이 도구가 돌고 폴더 밖 읽기까지 통과한다 — 실측은
+ * `work/knuaf-dev/2026-11-08-v061-settings-security/REPRO-SEC.md`(P2·P5·P9·P15·P19).
+ * CLI 버전의 신뢰·git 게이트에 기대지 않는 방어여야 한다(그 게이트는 버전마다 바뀐다).
+ */
+const PROTECTED_DIRS = ['.claude']
+/** 비교는 소문자로 한다(맥 기본 파일시스템이 대소문자를 구분하지 않는다) — 목록도 소문자. */
+const PROTECTED_FILES = ['.mcp.json', '.claude.json', 'claude.md', 'claude.local.md']
+/** 앱이 매 전송마다 다시 설치하는 스킬 사본 자리. 읽기는 막지 않는다(스킬이 자기 파일을 읽는다). */
+const APP_SKILL_PREFIX = '.claude/skills/'
+/** 쓰기가 아니라 읽기만 하는 도구. 권한을 바꾸지 않으므로 보호 경로도 그대로 통과한다. */
+const READ_ONLY_TOOLS: Record<string, true> = { Read: true, Glob: true, Grep: true, LS: true }
+
+/**
+ * 이 경로가 위 보호 목록 안인가. 있으면 폴더 기준 상대경로(소문자·NFC)를 돌려준다.
+ *
+ * 문자열만 보면 심볼릭 링크로 빠져나간다(`.claude/p → /tmp`, `p/settings.json`).
+ * 그래서 **문자 그대로의 경로**와 **링크를 따라간 실제 경로** 둘 다 본다. 맥 기본
+ * 파일시스템은 대소문자를 구분하지 않으므로 비교는 소문자로 한다.
+ */
+export function protectedRel(root: string, value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null
+  const base = resolve(root)
+  const n = (x: string) => x.normalize('NFC').toLowerCase()
+  const candidates = [resolve(base, value), realOrSelfDeep(resolve(base, value))]
+  // root 자체도 링크일 수 있다(macOS 의 `/var` → `/private/var`). 그래서 기준도 두 형태로 본다.
+  const bases = [...new Set([base, realOrSelfDeep(base)])]
+  for (const abs of candidates) {
+    const a = n(abs)
+    for (const raw of bases) {
+      const b = n(raw)
+      if (a === b || !a.startsWith(b + sep)) continue
+      // 돌려주는 값은 **적힌 그대로의** 상대경로다(카드에 보여 준다). 판정만 소문자로 한다.
+      const rel = abs.slice(raw.length + 1)
+      const key = n(rel)
+      if (PROTECTED_DIRS.some((d) => key === d || key.startsWith(`${d}/`))) return rel
+      if (PROTECTED_FILES.includes(key)) return rel
+    }
+  }
+  return null
+}
+
+/**
+ * 아직 없는 파일도 **있는 조상까지** 링크를 풀어 실제 자리를 구한다.
+ *
+ * `realpathSync` 는 대상이 없으면 던지므로, 그대로 쓰면 `.claude` 를 가리키는 링크
+ * (`settings-dir/settings.json`)가 링크를 안 따라간 문자열로 남아 보호 목록을 빠져나간다.
+ */
+function realOrSelfDeep(p: string): string {
+  const seen: string[] = []
+  let cur = p
+  for (;;) {
+    try { return join(realpathSync(cur), ...seen.reverse()) } catch { /* 없는 조각은 쌓아 둔다 */ }
+    const parent = resolve(cur, '..')
+    if (parent === cur) return p
+    seen.push(cur.slice(parent.length).replace(/^[\\/]/, ''))
+    cur = parent
+  }
+}
+
+/**
+ * 이 조각이 보호 경로를 가리키는 인자들. 플래그에 붙은 경로(`-o.claude/x`, `--out=.claude/x`)도
+ * 본다 — `sort -oFILE` 처럼 값이 붙는 문법이 있어서 `-` 로 시작한다고 건너뛰면 빠져나간다.
+ */
+export function protectedHits(root: string, t: string[]): string[] {
+  const out: string[] = []
+  for (const a of t.slice(1)) {
+    const pieces = [a]
+    if (a.startsWith('-')) pieces.push(a.replace(/^-+[A-Za-z0-9_-]*=?/, ''))
+    for (const piece of pieces) {
+      if (!piece || !looksLikePath(piece)) continue
+      const rel = protectedRel(root, piece)
+      if (rel && !out.includes(piece)) out.push(piece)
+    }
+  }
+  return out
+}
+
+/**
+ * 이 조각(실행 파일 + 인자)이 보호 경로를 건드리는가.
+ *
+ * 예외는 하나뿐이다 — 앱이 설치한 스킬 스크립트를 인터프리터로 여는 모양. 스킬은 매 턴
+ * `.claude/skills/…/gg_*.py` 로 도구를 돌리므로 그것까지 물으면 카드가 매번 뜬다.
+ * 그 밖에 `tee`·`touch`·`sed -i` 처럼 보호 경로에 닿는 조각은 전부 묻는다.
+ */
+export function touchesProtected(root: string, t: string[]): boolean {
+  const hits = protectedHits(root, t)
+  if (!hits.length) return false
+  const [exe, ...args] = t
+  const [script] = args
+  const ownSkill = !!script && !script.startsWith('-') && !script.includes('..')
+    && SKILL_PATH.test(script) && SKILL_SCRIPT.test(script)
+    && INTERPRETERS.test(exeName(exe))
+    && (protectedRel(root, script) ?? '').startsWith(APP_SKILL_PREFIX)
+  return !(ownSkill && hits.length === 1 && hits[0] === script)
+}
+
+/** JSON·객체를 타입 없이 다루기 위한 좁은 판독기. 값은 모델·외부 파일에서 온다. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+/** 문자열 배열 길이. 배열이 아니면 0. */
+function countOf(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0
+}
+
+/** 파일 앞부분만 읽는다 — 프런트매터 확인용. 큰 파일을 통째로 읽지 않는다. */
+function head(file: string, bytes = 4096): string {
+  try { return readFileSync(file, 'utf-8').slice(0, bytes) } catch { return '' }
+}
+
+export type AgentSettingsFinding = { file: string; what: string }
+
+/**
+ * 폴더에 **이미 있는** '다음 세션의 권한·동작을 바꾸는' 설정을 찾는다.
+ *
+ * 쓰기는 autoAllow 가 막지만, 학생이 받은 폴더에 이미 들어 있을 수 있다(내려받은 압축,
+ * 다른 사람이 만든 논문 폴더). CLI 는 이런 파일을 앱의 canUseTool **앞에서** 읽으므로
+ * 앱이 그 사실을 알아야 학생에게 말할 수 있다. 판정하지 않고 **사실만 모은다** —
+ * 무엇을 지울지는 학생이 정한다(앱이 남의 파일을 지우지 않는다).
+ */
+export function inspectAgentSettings(root: string): AgentSettingsFinding[] {
+  const out: AgentSettingsFinding[] = []
+  const settings = ['.claude/settings.json', '.claude/settings.local.json']
+  for (const rel of settings) {
+    let parsed: unknown = null
+    try { parsed = JSON.parse(readFileSync(join(root, rel), 'utf-8')) } catch { continue }
+    const s = asRecord(parsed)
+    if (!s) continue
+    const perm = asRecord(s.permissions)
+    const allows = countOf(perm?.allow)
+    if (allows > 0) out.push({ file: rel, what: `도구를 묻지 않고 허용하는 규칙 ${allows}개` })
+    const dirs = countOf(perm?.additionalDirectories)
+    if (dirs > 0) out.push({ file: rel, what: `논문 폴더 밖을 여는 폴더 ${dirs}개` })
+    const deny = countOf(perm?.deny)
+    if (deny > 0) out.push({ file: rel, what: `도구를 막는 규칙 ${deny}개` })
+    const hooks = asRecord(s.hooks)
+    if (hooks && Object.keys(hooks).length > 0) out.push({ file: rel, what: `도구가 돌 때 함께 실행되는 명령 ${Object.keys(hooks).length}종` })
+    if (s.statusLine !== undefined) out.push({ file: rel, what: '상태줄 실행 명령' })
+    if (s.apiKeyHelper !== undefined) out.push({ file: rel, what: '계정 키를 꺼내는 명령' })
+    const env = asRecord(s.env)
+    if (env && Object.keys(env).length > 0) out.push({ file: rel, what: `도우미 환경변수 ${Object.keys(env).length}개` })
+    if (s.enableAllProjectMcpServers === true) out.push({ file: rel, what: '폴더의 MCP 서버 전부 켜기' })
+  }
+  if (existsSync(join(root, '.mcp.json'))) out.push({ file: '.mcp.json', what: '외부 프로그램(MCP 서버) 목록' })
+  const agents = listMarkdown(join(root, '.claude', 'agents'))
+  if (agents.length) out.push({ file: '.claude/agents', what: `도우미 대신 일하는 에이전트 ${agents.length}개` })
+  const commands = listMarkdown(join(root, '.claude', 'commands'))
+  if (commands.length) out.push({ file: '.claude/commands', what: `명령 ${commands.length}개` })
+  const skills = listMarkdown(join(root, '.claude', 'skills'), true)
+  // 앱이 설치한 knuaf-dev 사본은 뺀다 — 매 전송마다 앱이 다시 쓰는 자리다.
+  const foreign = skills.filter((p) => !p.includes(`skills${sep}${'knuaf-dev'}${sep}`))
+  if (foreign.length) out.push({ file: '.claude/skills', what: `앱이 설치하지 않은 스킬 ${foreign.length}개` })
+  for (const p of [...agents, ...commands, ...foreign]) {
+    if (/^\s*allowed-tools\s*:/m.test(head(p))) out.push({ file: p.slice(root.length + 1), what: '스킬·에이전트가 스스로 도구를 허용하는 목록(allowed-tools)' })
+  }
+  return out
+}
+
+/** 디렉터리의 `*.md` 파일 절대경로. `deep` 이면 한 단계 아래(`skills/<name>/SKILL.md`)까지. */
+function listMarkdown(dir: string, deep = false): string[] {
+  let names: string[] = []
+  try { names = readdirSync(dir) } catch { return [] }
+  const out: string[] = []
+  for (const name of names) {
+    const p = join(dir, name)
+    if (name.endsWith('.md')) { out.push(p); continue }
+    if (!deep) continue
+    try { if (readdirSync(p).includes('SKILL.md')) out.push(join(p, 'SKILL.md')) } catch { /* 파일이면 무시 */ }
+  }
+  return out
 }
 
 /**
@@ -338,14 +517,22 @@ export function lostToolCalls(message: unknown): number {
 /** 원시 JSON 대신 학생이 읽을 수 있는 한 문장. 자세한 값은 그대로 덧붙인다. */
 function describeTool(name: string, input: unknown, root: string): { title: string; detail: string } {
   const keys = PATH_TOOLS[name] ?? []
-  const outside = keys.map((k) => outsideRoot(root, (input as Record<string, unknown>)[k])).find(Boolean)
+  const hit = keys.map((k) => argOf(input, k)).map((v) => protectedRel(root, v)).find(Boolean)
+  if (hit && !READ_ONLY_TOOLS[name]) {
+    return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `대상: ${hit}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요. 거절해도 논문 쓰는 일은 그대로 됩니다.` }
+  }
+  const outside = keys.map((k) => outsideRoot(root, argOf(input, k))).find(Boolean)
   if (outside) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `대상: ${outside}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
-  const cmd = (input as { command?: unknown })?.command
+  const cmd = argOf(input, 'command')
   if (name === 'Bash' && typeof cmd === 'string') {
     const segs = parseShell(cmd)
     if (segs === null) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${cmd}\n\n변수나 기호가 섞여 있어 무엇을 건드릴지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
     const out = bashOutside(root, segs)
     if (out.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${cmd}\n\n폴더 밖: ${out.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
+    // 폴더 밖이 아니면 권한 파일을 건드리는지 본다. 둘 다 걸리면 폴더 밖을 먼저 말한다 —
+    // 밖으로 나가는 쪽이 학생에게 더 큰 사실이고, 권한 파일은 그 다음 문제다.
+    const guarded = segs.flatMap((t) => (touchesProtected(root, t) ? protectedHits(root, t) : []))
+    if (guarded.length) return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `${cmd}\n\n대상: ${guarded.join(', ')}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요.` }
     // 여기까지 왔다는 것은 autoAllow 가 통과시키지 않았다는 뜻이다. 이유를 사실대로
     // 나눠 말한다 — 예전에는 무엇에 걸렸든 "경로는 모두 논문 폴더 안이에요"라고 단정해서,
     // 경로 인자가 하나도 없는 명령(`command -v …`)에도 그렇게 적혔다(시험주행 발견 6).
@@ -366,12 +553,30 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
   return { title: `도우미가 "${name}" 도구를 쓰려고 해요`, detail: JSON.stringify(input, null, 2) }
 }
 
+/** 도구 입력에서 경로 인자 하나를 꺼낸다. 입력은 모델이 보낸 것이라 타입을 믿지 않는다. */
+function argOf(input: unknown, key: string): unknown {
+  if (input === null || typeof input !== 'object' || !(key in input)) return undefined
+  return (input as Record<string, unknown>)[key]
+}
+
 /** 자동 허용 판정 — 클래스 밖 순수 함수로 두어 테스트가 직접 고정한다(권한 경계). */
 export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = []): boolean {
   const ok = (v: unknown) => outsideRoot(root, v) === null || (typeof v === 'string' && allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')))
   const keys = PATH_TOOLS[name]
-  if (keys) return keys.every((k) => ok((input as Record<string, unknown>)[k]))
-  if (name === 'Bash') return isSkillCommand(root, input)
+  if (keys) {
+    const values = keys.map((k) => argOf(input, k))
+    if (!values.every(ok)) return false
+    // 폴더 안이어도 권한 파일은 묻는다 — 도우미가 자기 권한을 스스로 넓히는 통로를 막는다.
+    if (!READ_ONLY_TOOLS[name] && values.some((v) => protectedRel(root, v) !== null)) return false
+    return true
+  }
+  if (name === 'Bash') {
+    const raw = argOf(input, 'command')
+    const segs = typeof raw === 'string' ? parseShell(raw) : null
+    // 셸로 보호 경로를 쓰는 길(`tee .claude/settings.local.json`)도 카드로 돌린다.
+    if (segs?.some((t) => touchesProtected(root, t))) return false
+    return isSkillCommand(root, input)
+  }
   return false
 }
 
@@ -406,6 +611,20 @@ export class ClaudeConnection implements AgentConnection {
   constructor(private options: AgentOptions) {}
   private autoAllowed(name: string, input: unknown): boolean {
     return autoAllow(this.options.root, name, input, registeredSources(this.options.root))
+  }
+  /**
+   * 폴더에 이미 있는 '권한을 바꾸는 설정'을 학생에게 한 번 알린다.
+   *
+   * 판정하지 않고 사실만 적는다 — 앱은 남의 파일을 지우지 않는다. 문구는 "무엇이 있는지"와
+   * "무엇을 하면 되는지" 두 가지만 담는다. 도구 이름·키 이름은 학생에게 의미가 없으므로
+   * 쓰지 않는다(실제 키는 `what` 문장 안에서 이미 풀어 썼다).
+   */
+  private noteExistingSettings(events: AgentEvents): void {
+    const findings = inspectAgentSettings(this.options.root)
+    if (!findings.length) return
+    const shown = findings.slice(0, 4).map((f) => `· ${f.file} — ${f.what}`)
+    if (findings.length > shown.length) shown.push(`· 그 밖에 ${findings.length - shown.length}건`)
+    events.note(`이 폴더에 도우미의 권한을 바꾸는 설정이 이미 들어 있어요. 앱이 만든 것이 아닙니다.\n${shown.join('\n')}\n\n모르는 것이면 지우거나, 다른 폴더에서 작업해 주세요.`)
   }
   /**
    * `auth status` 의 JSON 만이 로그인 여부의 근거다. 실행 실패·시간 초과·깨진 JSON 은
@@ -479,6 +698,10 @@ export class ClaudeConnection implements AgentConnection {
   async run(text: string, sessionId: string | undefined, events: AgentEvents) {
     if (!(await this.status()).connected) throw new Error('Claude 구독 계정 로그인을 완료해 주세요.')
     this.controller = new AbortController()
+    // '매번 묻기'인데 폴더에 권한을 바꾸는 설정이 이미 있으면 첫 턴에 한 번 말한다.
+    // 앱이 그 파일을 읽지 않게 했어도(위 settingSources) CLI 는 읽으므로, 학생이 그 사실을
+    // 모른 채 대화를 시작하면 안 된다. 매 턴 반복하지 않는다 — 알림이 소음이 되면 안 읽는다.
+    if (!sessionId && !this.options.trusted?.()) this.noteExistingSettings(events)
     // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
     const q = this.active = query({ prompt: sessionId ? text : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`, options: {
       cwd: this.options.root, pathToClaudeCodeExecutable: this.options.binary,
@@ -486,7 +709,11 @@ export class ClaudeConnection implements AgentConnection {
       // The project's own skill copy stays authoritative — a stale ~/.claude/skills
       // cannot shadow or mix with it. The external .command launcher pins the same
       // scope (buildLaunchScript in ../agent.ts).
-      env: this.options.env, settingSources: ['project', 'local'],
+      // `local` 은 뺀다. `.claude/settings.local.json` 의 permissions.allow 가 CLI 에서
+      // canUseTool **앞에** 적용돼 카드·폴더 경계를 통째로 끄는 통로였다(REPRO-SEC P2·P6·P15).
+      // `project` 는 남긴다 — 스킬·CLAUDE.md 발견이 이 소스에 걸려 있다. 그 대신 쓰기는
+      // autoAllow 가 막고, 이미 있는 project 설정은 inspectAgentSettings 가 학생에게 알린다.
+      env: this.options.env, settingSources: ['project'],
       resume: sessionId, abortController: this.controller, permissionMode: 'default',
       // 모델·추론 강도 핀. 미설정이면 CLI 기본값을 그대로 쓴다 — 학생 설정을 덮지 않는다.
       // (live 스펙이 sonnet 으로 비용을 낮추는 데도 같은 통로를 쓴다.)

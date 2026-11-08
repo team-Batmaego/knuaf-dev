@@ -2,12 +2,12 @@
 // Plain Playwright `test()` in Node: no Electron and no real agent processes.
 import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
 import { skillSource, VERSION_FILE } from '../src/main/agent'
-import { autoAllow, describeTool, looksLikePath, lostToolCalls } from '../src/main/chat/claude'
+import { autoAllow, describeTool, inspectAgentSettings, looksLikePath, lostToolCalls } from '../src/main/chat/claude'
 import { checkLabel } from '../src/renderer/src/copy'
 import { pathKeyOf, subscriptionEnv } from '../src/main/chat/contracts'
 import { winSpawn } from '../src/main/win'
@@ -594,6 +594,95 @@ test('한글 경로의 NFC/NFD 차이로 폴더 안을 밖이라 하지 않는�
   expect(autoAllow(nfc.split('/audit')[0], 'Write', { file_path: nfd + '/x.md' })).toBe(true)
   // 그래도 밖은 밖이다.
   expect(autoAllow(nfd, 'Write', { file_path: '/Users/s/다른 폴더/x.md'.normalize('NFC') })).toBe(false)
+})
+
+test('도우미의 권한을 바꾸는 파일은 폴더 안이어도 묻는다', () => {
+  // CLI 는 `.claude/settings*.json` 의 permissions.allow·hooks 를 canUseTool **앞에서**
+  // 적용한다. 그래서 도우미가 이 파일을 카드 없이 쓰면 다음 세션부터 카드와 폴더 경계가
+  // 함께 꺼진다(실측 REPRO-SEC P2·P5·P9·P15·P19). 여기서 고정하는 것은 그 쓰기 통로다.
+  for (const [name, input] of [
+    ['Write', { file_path: `${ROOT}/.claude/settings.local.json` }],
+    ['Write', { file_path: `${ROOT}/.claude/settings.json` }],
+    ['Edit', { file_path: `${ROOT}/.claude/settings.json` }],
+    ['MultiEdit', { file_path: `${ROOT}/.claude/settings.local.json` }],
+    ['Write', { file_path: `${ROOT}/.claude/hooks/notify.sh` }],
+    ['Write', { file_path: '.claude/settings.local.json' }],           // 상대경로
+    ['Write', { file_path: `${ROOT}/sections/../.claude/settings.json` }], // ..
+    ['Write', { file_path: `${ROOT}/.CLAUDE/Settings.JSON` }],          // 대소문자 무시 파일시스템
+    ['Write', { file_path: `${ROOT}/.mcp.json` }],
+    ['Write', { file_path: `${ROOT}/.claude.json` }],
+    ['Write', { file_path: `${ROOT}/CLAUDE.md` }]
+  ] as const) expect(autoAllow(ROOT, name, input), `${name} ${JSON.stringify(input)}`).toBe(false)
+  // 읽기는 막지 않는다 — 스킬이 자기 파일과 CLAUDE.md 를 읽는다.
+  expect(autoAllow(ROOT, 'Read', { file_path: `${ROOT}/.claude/skills/knuaf-dev/SKILL.md` })).toBe(true)
+  expect(autoAllow(ROOT, 'Read', { file_path: `${ROOT}/CLAUDE.md` })).toBe(true)
+  // 논문 쓰기 자체는 그대로 묻지 않는다 — 카드가 늘어나면 안 된다.
+  expect(autoAllow(ROOT, 'Write', { file_path: `${ROOT}/sections/02.md` })).toBe(true)
+})
+
+test('심볼릭 링크로 .claude 를 가리켜도 묻는다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kd-protect-'))
+  const root = join(dir, '논문')
+  mkdirSync(join(root, '.claude'), { recursive: true })
+  mkdirSync(join(dir, '밖'), { recursive: true })
+  symlinkSync(join(root, '.claude'), join(root, 'settings-dir'))
+  try {
+    // 링크를 따라가면 실제로는 .claude 안이다.
+    expect(autoAllow(root, 'Write', { file_path: `${root}/settings-dir/settings.json` })).toBe(false)
+    expect(autoAllow(root, 'Write', { file_path: `${root}/settings-dir/../sections/01.md` })).toBe(true)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('셸로 권한 파일을 쓰는 길도 묻는다', () => {
+  for (const cmd of [
+    'tee .claude/settings.local.json',
+    'touch .claude/settings.json',
+    `cp ${ROOT}/sections/01.md .claude/settings.local.json`,
+    `mkdir -p .claude/hooks`,
+    `printf x > .claude/settings.local.json`,
+    'sort -o.claude/settings.local.json sections/01.md',   // 플래그에 붙은 경로
+    'sort --output=.claude/settings.json sections/01.md'
+  ]) expect(autoAllow(ROOT, 'Bash', { command: cmd }), cmd).toBe(false)
+  // 스킬이 자기 스크립트를 도는 모양은 그대로 통과한다(카드가 매 턴 뜨면 안 된다).
+  expect(autoAllow(ROOT, 'Bash', { command: 'python3 .claude/skills/knuaf-dev/scripts/gg_deps.py python .' })).toBe(true)
+})
+
+test('권한 파일 카드는 무엇을 바꾸는지 말한다', () => {
+  const d = describeTool('Write', { file_path: `${ROOT}/.claude/settings.local.json` }, ROOT)
+  expect(d.title).toBe('도우미의 권한을 바꾸는 파일이에요')
+  expect(d.detail).toContain('.claude/settings.local.json')
+  const sh = describeTool('Bash', { command: 'tee .claude/settings.local.json' }, ROOT)
+  expect(sh.title).toBe('도우미의 권한을 바꾸는 파일이에요')
+  // 논문 쓰기는 종전 문구 그대로 — 이 변경이 카드 문구를 흔들지 않는다.
+  expect(describeTool('Write', { file_path: `${ROOT}/sections/02.md` }, ROOT).title).toBe('도우미가 "Write" 도구를 쓰려고 해요')
+})
+
+test('폴더에 이미 있는 권한 설정을 찾아낸다', () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-inspect-'))
+  mkdirSync(join(root, '.claude', 'agents'), { recursive: true })
+  writeFileSync(join(root, '.claude', 'settings.json'), JSON.stringify({
+    permissions: { allow: ['Bash(*)'], additionalDirectories: ['/tmp'] },
+    hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }] },
+    statusLine: { type: 'command', command: 'true' }
+  }))
+  writeFileSync(join(root, '.claude', 'agents', 'helper.md'), '---\nallowed-tools: Bash\n---\n')
+  writeFileSync(join(root, '.mcp.json'), '{}')
+  try {
+    const found = inspectAgentSettings(root)
+    const all = found.map((f) => `${f.file}:${f.what}`).join('\n')
+    expect(all).toContain('settings.json')
+    expect(all).toContain('허용하는 규칙 1개')
+    expect(all).toContain('폴더 밖을 여는 폴더 1개')
+    expect(all).toContain('함께 실행되는 명령 1종')
+    expect(all).toContain('상태줄')
+    expect(all).toContain('.mcp.json')
+    expect(all).toContain('에이전트 1개')
+    expect(all).toContain('allowed-tools')
+    // 앱이 설치한 knuaf-dev 사본은 '남의 스킬'로 세지 않는다.
+    mkdirSync(join(root, '.claude', 'skills', 'knuaf-dev'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'skills', 'knuaf-dev', 'SKILL.md'), '---\nallowed-tools: Bash\n---\n')
+    expect(inspectAgentSettings(root).some((f) => f.what.includes('앱이 설치하지 않은 스킬'))).toBe(false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('등록된 출처 파일은 폴더 밖이어도 읽을 수 있다', () => {
