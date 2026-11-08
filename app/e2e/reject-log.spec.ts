@@ -28,7 +28,7 @@ import { fakeCodexEnv } from './fixtures/fake-codex'
 const REJECT = {
   operation: 'apply', target: 'canonical', commit_state: 'not_committed', reason: 'invalid_change',
   detail: { code: 'fact_metadata_invalid', field: 'measure', index: 2 },
-  request_id: 'chat:run-1', cleanup_errors: []
+  request_id: '0f0e6a4b-1c2d-4e3f-8a9b-0c1d2e3f4a5b', cleanup_errors: []
 }
 const REJECT_OUTPUT = `warning: skill cache stale\n${JSON.stringify(REJECT, null, 2)}\n`
 const GG_APPLY = 'python .agents/skills/knuaf-dev/scripts/gg.py apply . --change c.json --expected-revision 3'
@@ -50,7 +50,7 @@ test('거절 결과에서 사유·코드만 뽑아 기록을 만든다', () => {
   expect(record).toMatchObject({
     at: '2026-11-08T00:00:00.000Z', provider: 'codex', exitCode: 2,
     operation: 'apply', target: 'canonical', commit_state: 'not_committed',
-    reason: 'invalid_change', request_id: 'chat:run-1',
+    reason: 'invalid_change', request_id: '0f0e6a4b-1c2d-4e3f-8a9b-0c1d2e3f4a5b',
     detail: { code: 'fact_metadata_invalid', field: 'measure', index: 2 }
   })
   // 원고 본문·명령 출력 전문은 남기지 않는다.
@@ -89,7 +89,8 @@ test('진단 값도 형식이 틀리면 원문 대신 고정 표시로 바꾼다
     })
   })!
   expect(record.reason).toBe('<redacted>')
-  expect(record.request_id).toBe('<redacted>')
+  // 형식이 틀린 요청 ID 는 원문을 남기지 않고 **필드 자체를 뺀다** — 가짜 ID 는 쓸모가 없다.
+  expect('request_id' in record).toBe(false)
   expect(record.detail).toEqual({
     code: 'duplicate_path', field: 'measure',
     missing: ['measure', '<redacted>'],
@@ -104,13 +105,13 @@ test('진단 값도 형식이 틀리면 원문 대신 고정 표시로 바꾼다
       reason: 'invalid_change', detail: { path: '../../etc/passwd' } })
   })!
   expect(escape.detail).toEqual({ path: '<redacted>' })
-  // 폴더 안 상대경로는 논문 파일 이름이 한글이어도 그대로 남는다(진단 가치 보존).
+  // 폴더 안 상대경로도 파일 이름은 버리고 **폴더 종류·확장자만** 남긴다(검토 R3 2회째 차단 2).
   const local = applyRejection({
     provider: 'codex', command: GG_APPLY, exitCode: 2,
     output: JSON.stringify({ operation: 'apply', target: 'canonical', commit_state: 'not_committed',
       reason: 'invalid_change', detail: { path: 'sections/Ⅲ장/01_현황.md' } })
   })!
-  expect(local.detail).toEqual({ path: 'sections/Ⅲ장/01_현황.md' })
+  expect(local.detail).toEqual({ path: 'sections/….md' })
   // 지나치게 긴 경로도 원문을 쓰지 않는다 — 로그 한 줄을 원고 본문만 한 길이로 키우지 않게.
   const long = applyRejection({
     provider: 'codex', command: GG_APPLY, exitCode: 2,
@@ -129,13 +130,47 @@ test('진단 값도 형식이 틀리면 원문 대신 고정 표시로 바꾼다
   }
 })
 
+test('형식에 맞는 개인정보도 경로·요청 ID 로 새지 않는다', () => {
+  // 검토 R3 2회째 차단 2 반례 A·B — 정규식은 통과하지만 값 자체가 개인정보다.
+  const record = applyRejection({
+    provider: 'codex', command: GG_APPLY, exitCode: 2,
+    output: JSON.stringify({
+      operation: 'apply', target: 'canonical', commit_state: 'not_committed',
+      reason: 'invalid_change', request_id: '900101-1234567',
+      detail: { code: 'duplicate_path', path: 'sections/홍길동_900101-1234567.md' }
+    })
+  })!
+  expect(record.detail).toEqual({ code: 'duplicate_path', path: 'sections/….md' })
+  expect('request_id' in record).toBe(false)
+  const line = JSON.stringify(record)
+  for (const secret of ['홍길동', '900101-1234567']) {
+    expect(line, `로그에 개인정보가 남았다: ${secret}`).not.toContain(secret)
+  }
+  // 모르는 폴더·확장자도 원문 없이 종류만 남는다 — 중간 폴더 이름은 학생이 지은 것일 수 있다.
+  const unknown = applyRejection({
+    provider: 'codex', command: GG_APPLY, exitCode: 2,
+    output: JSON.stringify({ operation: 'apply', target: 'canonical', commit_state: 'not_committed',
+      reason: 'invalid_change', detail: { path: '내논문/홍길동/1장.hwp' } })
+  })!
+  expect(unknown.detail).toEqual({ path: 'other/….other' })
+  // 진짜 앱 UUID 는 그대로 남는다 — 진단 가치가 있고 개인정보가 아니다.
+  const uuid = '3f2a1c9e-8b7d-4e6a-9c1f-2d3e4f5a6b7c'
+  const kept = applyRejection({
+    provider: 'codex', command: GG_APPLY, exitCode: 2,
+    output: JSON.stringify({ operation: 'apply', target: 'canonical', commit_state: 'not_committed',
+      reason: 'revision_conflict', request_id: uuid })
+  })!
+  expect(kept.request_id).toBe(uuid)
+})
+
 test('정상 종료이거나 거절 결과가 없으면 기록을 만들지 않는다', () => {
   expect(applyRejection({ provider: 'codex', command: GG_APPLY, output: '{"revision": 4}', exitCode: 2 })).toBeNull()
   expect(applyRejection({ provider: 'codex', command: 'ls', output: 'ls: cannot access c.json', exitCode: 1 })).toBeNull()
   // 커밋은 됐고 잠금 청소만 남은 exit 3 — 거절이 아니므로 사유 로그를 만들지 않는다.
   expect(applyRejection({ provider: 'codex', command: 'gg.py apply x', exitCode: 3,
     output: '{"operation": "apply", "target": "canonical", "commit_state": "committed_cleanup_pending", "reason": "release_cleanup_failed", "cleanup_errors": [{"release": "busy"}]}' })).toBeNull()
-  // `blocked` 봉투는 자유 문자열 사유라 남기지 않는다 — 형식 검증을 통과할 수 없다.
+  // `blocked` 봉투라도 gg.py 의 고정 사유 목록에 없는 자유 문자열은 남기지 않는다. 실측 고정
+  // 사유(`--change와 --expected-revision 필요`)는 아래 전용 시험이 기록을 확인한다.
   expect(applyRejection({ provider: 'codex', command: 'python gg.py apply x', output: '{"status": "blocked", "reason": "--change 필요"}', exitCode: 2 })).toBeNull()
 })
 
@@ -149,6 +184,65 @@ test('확정 거절이 아닌 상태(indeterminate)와 무관한 명령의 출�
   expect(applyRejection({ provider: 'codex', command: `echo "${GG_APPLY}"`, exitCode: 1, output: REJECT_OUTPUT })).toBeNull()
   expect(applyRejection({ provider: 'codex', command: 'grep -r "gg.py apply" logs', exitCode: 1, output: REJECT_OUTPUT })).toBeNull()
   expect(applyRejection({ provider: 'codex', command: 'git show HEAD:run.log | grep gg.py apply', exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+  // 검토 R3 2회째 중요 1 반례 — 앞머리 실행기 뒤의 프로그램이 grep 이면 실행이 아니다.
+  expect(applyRejection({ provider: 'codex', command: `env LANG=C grep 'gg.py apply' past.log`, exitCode: 1, output: REJECT_OUTPUT })).toBeNull()
+  expect(applyRejection({ provider: 'codex', command: `sudo -u root cat past.log | grep 'gg.py apply'`, exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+  expect(applyRejection({ provider: 'codex', command: `printf '%s\\n' "gg.py apply --change c.json"`, exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+  // 주석·코드 문자열 안의 언급도 실행이 아니다.
+  expect(applyRejection({ provider: 'codex', command: '# gg.py apply . --change c.json\nls', exitCode: 2, output: REJECT_OUTPUT })).toBeNull()
+  expect(applyRejection({ provider: 'codex', command: `python -c "print('gg.py apply')"`, exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+  expect(applyRejection({ provider: 'codex', command: `node -e "console.log('gg.py apply')"`, exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+  // `--help`·`--version` 같은 조회는 apply 실행이 아니다.
+  expect(applyRejection({ provider: 'codex', command: 'gg.py --help apply', exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+  expect(applyRejection({ provider: 'codex', command: 'gg.py apply --help', exitCode: 0, output: REJECT_OUTPUT })).toBeNull()
+})
+
+test('앞머리 실행기를 벗기면 진짜 gg.py apply 실행을 놓치지 않는다', () => {
+  // 검토 R3 2회째 중요 1 — 출처 판정을 낱말 해석으로 바꾸면서 실행을 놓치면 로그가 통째로 빈다.
+  const commands = [
+    `env LANG=C python3 .agents/skills/knuaf-dev/scripts/gg.py apply . --change c.json`,
+    `env -u LANG PYTHONPATH=/x python gg.py apply . --change c.json`,
+    'sudo -u root python gg.py apply . --change c.json',
+    'command python gg.py apply . --change c.json',
+    'nohup python gg.py apply . --change c.json > out.log 2>&1',
+    `sh -c 'python gg.py apply . --change c.json'`,
+    `bash -lc "python gg.py apply . --change c.json"`,
+    '/usr/bin/python3 gg.py apply .',
+    'timeout 60 python gg.py apply .',
+    'python3 -B gg.py apply .',
+    './gg.py apply .'
+  ]
+  for (const command of commands) {
+    const record = applyRejection({ provider: 'codex', command, output: REJECT_OUTPUT, exitCode: 2 })
+    expect(record, `실행을 놓쳤다: ${command}`).not.toBeNull()
+    expect(record!.reason).toBe('invalid_change')
+  }
+  // 페이로드를 벗긴 뒤에도 로그에는 프로그램·옵션 이름만 남는다.
+  const nested = applyRejection({ provider: 'codex', command: `sudo sh -c 'python gg.py apply . --request-id 1 --change c.json'`, output: REJECT_OUTPUT, exitCode: 2 })!
+  expect(nested.command).toBe('gg.py apply --request-id --change')
+})
+
+test('blocked 봉투는 gg.py 의 고정 사유일 때만 거절로 기록한다', () => {
+  // 회귀 — `gg.py apply .`(인자 누락)는 blocked 봉투(exit 2)로 끝난다. 핀 스크립트 실측값 그대로.
+  const record = applyRejection({
+    provider: 'codex', command: 'python gg.py apply .', exitCode: 2,
+    output: '{"status": "blocked", "reason": "--change와 --expected-revision 필요"}'
+  })
+  expect(record).toMatchObject({ reason: '--change와 --expected-revision 필요', exitCode: 2 })
+  // blocked 봉투에는 apply 서명 필드가 없다 — 없는 값을 지어내지 않는다.
+  expect(record!.operation).toBeUndefined()
+  expect(record!.target).toBeUndefined()
+  expect(record!.commit_state).toBeUndefined()
+  // 목록 밖 자유 문자열·경로가 섞인 사유는 원문을 남기지 않는다.
+  for (const reason of ['missing.json 파일이 없음', "[Errno 2] No such file or directory: 'missing.json'", '/Users/홍길동/논문']) {
+    expect(applyRejection({
+      provider: 'codex', command: 'python gg.py apply . --change missing.json', exitCode: 2,
+      output: JSON.stringify({ status: 'blocked', reason })
+    }), `자유 문자열 사유가 기록됐다: ${reason}`).toBeNull()
+  }
+  // 출처가 확인되지 않은 blocked 봉투도 기록하지 않는다.
+  expect(applyRejection({ provider: 'codex', command: `env LANG=C grep 'gg.py apply' past.log`, exitCode: 1,
+    output: '{"status": "blocked", "reason": "--change와 --expected-revision 필요"}' })).toBeNull()
 })
 
 test('짝 잃은 따옴표 뒤에 오는 진짜 거절 JSON 을 놓치지 않는다', () => {
@@ -168,10 +262,10 @@ test('셸 종료코드가 0 이어도 출처가 확인된 gg.py 거절은 기록
 test('실기에서 나온 두 거절 모양을 그대로 잡는다', () => {
   // 핀 스크립트로 직접 재현한 출력 — `invalid_change`(exit 2)와 `revision_conflict`(exit 2).
   const invalid = applyRejection({ provider: 'codex', command: GG_APPLY,
-    exitCode: 2, output: '{\n "operation": "apply",\n "target": "canonical",\n "commit_state": "not_committed",\n "reason": "invalid_change",\n "cleanup_errors": [],\n "request_id": "r3:test2"\n}' })
-  expect(invalid).toMatchObject({ reason: 'invalid_change', commit_state: 'not_committed', request_id: 'r3:test2' })
+    exitCode: 2, output: '{\n "operation": "apply",\n "target": "canonical",\n "commit_state": "not_committed",\n "reason": "invalid_change",\n "cleanup_errors": [],\n "request_id": "7c9d1e2f-3a4b-4c5d-9e6f-7a8b9c0d1e2f"\n}' })
+  expect(invalid).toMatchObject({ reason: 'invalid_change', commit_state: 'not_committed', request_id: '7c9d1e2f-3a4b-4c5d-9e6f-7a8b9c0d1e2f' })
   const conflict = applyRejection({ provider: 'codex', command: GG_APPLY,
-    exitCode: 2, output: '{\n "operation": "apply",\n "target": "canonical",\n "commit_state": "not_committed",\n "reason": "revision_conflict",\n "cleanup_errors": [],\n "revision": 0,\n "request_id": "r3:test"\n}' })
+    exitCode: 2, output: '{\n "operation": "apply",\n "target": "canonical",\n "commit_state": "not_committed",\n "reason": "revision_conflict",\n "cleanup_errors": [],\n "revision": 0,\n "request_id": "8d0e2f3a-4b5c-4d6e-8f7a-8b9c0d1e2f3a"\n}' })
   expect(conflict).toMatchObject({ reason: 'revision_conflict', revision: 0 })
 })
 
@@ -179,9 +273,9 @@ test('진단의 원문 문자열은 버리고 허용 키·허용 모양만 남�
   const record = applyRejection({
     provider: 'codex', command: 'gg.py apply x', exitCode: 2,
     output: JSON.stringify({ operation: 'apply', target: 'canonical', commit_state: 'not_committed', reason: 'invalid_change',
-      detail: { code: 'duplicate_path', path: 'sections/01.md', raw: '학생이 쓴 본문 전체', index: -1 } })
+      detail: { code: 'duplicate_path', path: 'sections/홍길동/01.md', raw: '학생이 쓴 본문 전체', index: -1 } })
   })
-  expect(record?.detail).toEqual({ code: 'duplicate_path', path: 'sections/01.md' })
+  expect(record?.detail).toEqual({ code: 'duplicate_path', path: 'sections/….md' })
 })
 
 test('기록은 한 줄씩 덧붙고, 쓸 수 없으면 던지지 않는다', () => {

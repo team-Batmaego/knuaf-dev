@@ -9,6 +9,11 @@ import { dirname } from 'node:path'
  * 남기는 것은 **기계가 만든 고정 낱말**뿐이다. 명령줄 원문·인자 값·절대경로·원고 본문은
  * 형식 검증을 통과하지 못하면 고정 표시(`<redacted>`)로 바뀌거나 아예 빠진다.
  * 길이 제한은 개인정보 제거가 아니므로, 값마다 허용 모양을 따로 본다(검토 R3 1회째 차단 1·2).
+ *
+ * 2회째 검토(차단 2·중요 1) 뒤로는 **모양이 맞는 개인정보**도 통과하지 못한다 — 경로는 파일명
+ * 원문 대신 폴더 종류·확장자만 남기고, 요청 ID 는 앱이 만드는 UUID 만 인정한다. 출처 확인은
+ * 문자열 포함이 아니라 셸 낱말 해석으로 한다(`env`·`sudo`·`sh -c` 앞머리를 벗긴 **프로그램**
+ * 이 `gg.py` 이고 다음 낱말이 `apply` 일 때만 실행으로 센다).
  */
 
 /** `gg.py` 가 받는 옵션 이름 — 값은 절대 남기지 않고 **이름만** 요약에 쓴다. */
@@ -30,22 +35,74 @@ const REJECT_TARGET = 'canonical'
 const REJECT_STATE = 'not_committed'
 /** 셸 한 토막 안의 `gg.py apply` 호출. 출처가 없으면 출력 모양만으로 기록하지 않는다. */
 const GG_APPLY = /\bgg\.py["']?\s+apply\b/
-/** 실행이 아니라 **글자로만** gg.py 를 언급하는 토막(에코·검색·조회)의 첫 낱말. */
-const ECHOING = /^\s*(?:echo|printf|cat|grep|egrep|rg|sed|awk|head|tail|jq|git|ls|strings|wc|file|diff)\b/
 /** 옵션 이름만 뽑는다 — 값(`=` 뒤·공백 뒤)은 낱말 경계에서 잘린다. */
 const OPTION_NAME = /(?:^|\s)(--[a-z][a-z0-9-]{0,39})(?=\s|=|$)/g
 /** 기계 코드·사유 — 소문자·숫자·밑줄만. 그 밖의 글자(한글·공백·경로)는 원문일 수 있다. */
 const MACHINE_CODE = /^[a-z][a-z0-9_]{0,63}$/
 /** 필드 이름 — 같은 모양. `_diag_safe` 가 내보내는 `_DIAG_FIELDS` 가 전부 여기 들어간다. */
 const FIELD_NAME = /^[a-z][a-z0-9_]{0,39}$/
-/** 요청 ID — 앱이 만드는 값은 `chat:...` 모양이다. 그 밖의 자유 문자열은 가린다. */
-const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,99}$/
+/** 요청 ID — 앱이 만드는 값은 `crypto.randomUUID()` 의 RFC 4122 UUID 뿐이다(차단 2). */
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 /** 시각 — ISO 8601(ms·Z). 그 밖의 값은 지금 시각으로 채운다. */
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-/** 논문 폴더 안의 상대경로 — 절대경로·드라이브·UNC·백슬래시·`..` 는 통과하지 못하고 400자까지. */
+/**
+ * 논문 폴더 안의 상대경로 — 절대경로·드라이브·UNC·백슬래시·`..` 는 통과하지 못하고 400자까지.
+ * 통과한 경로에서도 **폴더 종류와 확장자만** 남긴다(아래 `pathType`).
+ */
 const RELATIVE_PATH = /^(?!\/)(?!.*\\)(?!.*(?:^|\/)\.\.(?:\/|$))(?!^[A-Za-z]:)[^\u0000-\u001f]{1,400}$/
+/**
+ * 진단 경로의 첫 폴더로 인정하는 **프로젝트 폴더 종류** — `gg_core.COLLECTIONS` 와 스킬이 쓰는
+ * 작업 폴더 이름만. 목록 밖 첫 낱말은 학생이 지은 폴더 이름일 수 있으므로 쓰지 않는다.
+ */
+const PATH_FOLDERS: Record<string, true> = {
+  sections: true, sources: true, outputs: true, receipts: true, facts: true,
+  migration: true, references: true, build: true, staging: true, inputs: true, companions: true
+}
+/** 경로 끝에 남기는 확장자 — 목록 밖 확장자는 `.other`. */
+const PATH_EXTENSIONS: Record<string, true> = {
+  '.md': true, '.json': true, '.xlsx': true, '.pdf': true, '.csv': true
+}
 /** 형식이 안 맞는 값을 원문 대신 남기는 고정 표시. */
 const REDACTED = '<redacted>'
+/**
+ * `gg.py` 가 `blocked` 봉투로 내보내는 **고정 사유** — `gg.py` 의 정적 `ValueError` 문자열 전부
+ * (AST 추출, 2026-11-09). 자유 문자열 사유는 형식 검증을 통과할 수 없으므로 여기 없으면 버린다.
+ * 보간된 사유(`'%s 경로 필요' % label`)는 경로가 섞일 수 있어 넣지 않는다.
+ */
+const BLOCKED_REASONS: Record<string, true> = {
+  '--change와 --expected-revision 필요': true,
+  '--crop과 --region 필요': true,
+  '--expected-revision 필요': true,
+  '--external-root 필요 (byte_source.kind=scanned_external)': true,
+  '--field 필요': true,
+  '--input 관측 JSON과 --observer 필요': true,
+  '--input 논문 입력 JSON 필요': true,
+  '--input 제안 JSON과 --expected-revision 필요': true,
+  '--input 제안 입력 JSON 필요': true,
+  '--input 채택 JSON과 --expected-revision 필요': true,
+  '--key-catalog 경로 필요': true,
+  '--kind는 draft·review·submission_candidate 중 하나': true,
+  '--major와 정본의 전공 바인딩이 다름': true,
+  '--out 새 폴더 필요': true,
+  '--packs-dir is not a source-scan operand': true,
+  '--pdf R0와 --xlsx R1 원본 경로 필요': true,
+  '--policy 경로 필요': true,
+  '--registry 경로 필요': true,
+  '--request-id 필요': true,
+  '--requested-use JSON 필요': true,
+  '--root 외부 루트 필요': true,
+  '--scope 절 ID 필요': true,
+  '--selection JSON 필요': true,
+  '--source 출처 ID 필요': true,
+  '--source-hash 필요': true,
+  '--xlsx 재계산 완료 통합문서 경로 필요': true,
+  'companion_files는 목록이어야 함': true,
+  insect_input_invalid_or_unreadable: true,
+  insect_internal_error: true,
+  insect_project_unreadable: true,
+  '관측 기록은 객체여야 함': true,
+  '채택 JSON은 {output, companion_files?} 형식이어야 함': true
+}
 /** 로그 한 파일의 상한. 넘으면 `.1` 로 한 번만 물러난다(무한 증가 금지). */
 const MAX_LOG_BYTES = 1024 * 1024
 /** 한 번에 훑는 출력 폭. 앞·뒤 두 창만 본다 — 명령 하나가 수십 MB 를 뱉어도 CPU 를 잡지 않게. */
@@ -153,15 +210,175 @@ function rejectionOf(output: string): Record<string, unknown> | undefined {
 }
 
 /**
- * 이 명령이 `gg.py apply` 를 실제로 실행했는가. 셸 구분자로 토막을 낸 뒤, 글자로만 언급하는
- * 토막(`echo`·`grep`·`cat` …)은 실행으로 세지 않는다. 명령 하나를 완전히 해석하지는 않는다 —
- * 인용 안의 우연한 문자열까지 가려내는 것은 이 로그의 몫이 아니고, 그 한계는 RESULT 에 적었다.
+ * `gg.py` 의 **호출 거절** 봉투인가 — `{"status":"blocked","reason":<고정 사유>}` (exit 2).
+ * 예: `gg.py apply .` 에 `--change` 가 없을 때. 사유가 `gg.py` 의 정적 `ValueError` 문자열
+ * 목록에 **정확히** 있을 때만 인정한다 — 자유 문자열·보간 사유는 경로나 원고를 실을 수 있다.
  */
-function ggApplySegment(command: string): string | undefined {
-  for (const segment of command.split(/[;&|\n]+/)) {
-    if (GG_APPLY.test(segment) && !ECHOING.test(segment)) return segment
+function blockedOf(output: string): Record<string, unknown> | undefined {
+  const results = jsonObjects(output).filter((value) =>
+    value.status === 'blocked' &&
+    typeof value.reason === 'string' &&
+    BLOCKED_REASONS[value.reason])
+  return results[results.length - 1]
+}
+
+/** 셸 낱말 하나에서 경로를 떼고 프로그램 이름만 — `/`·`\` 둘 다 본다. */
+function baseName(token: string): string {
+  const cut = Math.max(token.lastIndexOf('/'), token.lastIndexOf('\\'))
+  return cut >= 0 ? token.slice(cut + 1) : token
+}
+
+/** `sh -c '…'` 의 셸 이름 — 페이로드를 벗겨 그 안의 프로그램을 본다. */
+const SHELLS: Record<string, true> = { sh: true, bash: true, zsh: true, dash: true, ksh: true }
+
+/**
+ * 셸 앞머리에 붙는 실행기 — 뒤에 오는 **프로그램**이 무엇인지 정한다. `flags` 는 값을 하나 더
+ * 먹는 옵션, `operands` 는 프로그램 앞에 오는 위치 인자 수(예: `timeout 30`), `assignments` 는
+ * `env LANG=C` 처럼 변수 대입을 먼저 먹는지다.
+ */
+const WRAPPERS: Record<string, { flags?: Record<string, true>; operands?: number; assignments?: boolean }> = {
+  env: { flags: { '-u': true, '-C': true, '--unset': true, '--chdir': true, '-S': true }, assignments: true },
+  sudo: { flags: { '-u': true, '-g': true, '-p': true, '-C': true, '-D': true, '-R': true, '-T': true } },
+  command: {},
+  nohup: {},
+  time: { flags: { '-o': true, '-f': true } },
+  exec: { flags: { '-a': true } },
+  xargs: { flags: { '-I': true, '-n': true, '-P': true, '-L': true, '-s': true, '-d': true, '-E': true, '-a': true } },
+  timeout: { flags: { '-s': true, '-k': true, '--signal': true, '--kill-after': true }, operands: 1 },
+  stdbuf: { flags: { '-i': true, '-o': true, '-e': true } },
+  nice: { flags: { '-n': true, '--adjustment': true } }
+}
+
+/**
+ * 셸 명령을 **인용을 지킨 토막**으로 나눈다. 토막 경계는 인용 밖의 `;`·`&`·`|`·줄바꿈·괄호이고,
+ * 인용 안의 같은 글자는 값의 일부다(`sh -c 'a; b'` 는 한 토막). `#` 뒤는 주석으로 버린다 —
+ * 주석에 적힌 `gg.py apply` 를 실행으로 세지 않게.
+ */
+function splitSegments(command: string): { raw: string; tokens: string[] }[] {
+  const out: { raw: string; tokens: string[] }[] = []
+  let tokens: string[] = []
+  let token = ''
+  let started = false
+  let begin = 0
+  let quote: '"' | "'" | undefined
+  const flushToken = (): void => {
+    if (started) { tokens.push(token); token = ''; started = false }
+  }
+  const flushSegment = (end: number): void => {
+    flushToken()
+    if (tokens.length) out.push({ raw: command.slice(begin, end), tokens })
+    tokens = []
+    begin = end + 1
+  }
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]
+    if (quote) {
+      if (c === quote) quote = undefined
+      else if (c === '\\' && quote === '"' && i + 1 < command.length) token += command[++i]
+      else token += c
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; started = true; continue }
+    if (c === '\\') {
+      if (i + 1 < command.length) {
+        const next = command[i + 1]
+        if (next === '\n') { i++; continue } // 줄 이음
+        token += next; started = true; i++; continue
+      }
+      token += c; started = true; continue
+    }
+    if (c === '#' && !started) {
+      const lineEnd = command.indexOf('\n', i)
+      if (lineEnd < 0) break
+      i = lineEnd - 1
+      continue
+    }
+    if (c === ';' || c === '&' || c === '|' || c === '\n' || c === '(' || c === ')') {
+      flushSegment(i)
+      continue
+    }
+    if (c === ' ' || c === '\t' || c === '\r') { flushToken(); continue }
+    token += c; started = true
+  }
+  flushToken()
+  if (tokens.length) out.push({ raw: command.slice(begin), tokens })
+  return out
+}
+
+/**
+ * 토막에서 **실제로 실행되는 프로그램**의 낱말 위치를 찾는다. 앞머리 실행기(`env`·`sudo`·`time`…)와
+ * 변수 대입, `sh -c '…'` 페이로드를 벗긴 뒤 첫 낱말이 프로그램이다. 해석할 수 없으면 `undefined`
+ * — 모르는 모양은 실행으로 세지 않는다(놓치는 쪽이 새는 쪽보다 낫다).
+ */
+function resolveProgram(tokens: string[], depth = 0): string[] | undefined {
+  let i = 0
+  while (i < tokens.length) {
+    const token = tokens[i]
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) { i++; continue }
+    if (token === '!') { i++; continue }
+    const name = baseName(token)
+    if (SHELLS[name]) {
+      // `-c`(또는 `-lc` 처럼 c 가 든 묶음)만 페이로드를 준다 — 스크립트 파일·대화형 셸은 알 수 없다.
+      const at = tokens.findIndex((x, j) => j > i && /^-[A-Za-z]*c[A-Za-z]*$/.test(x))
+      if (at < 0) return undefined
+      const payload = tokens[at + 1]
+      if (payload === undefined || depth >= 3) return undefined
+      const inner = splitSegments(payload)[0]
+      return inner ? resolveProgram(inner.tokens, depth + 1) : undefined
+    }
+    if (name === 'python' || /^python[0-9.]+$/.test(name) || name === 'py') {
+      // `-c`(코드 문자열)·`-m`(모듈)은 실행 파일이 보이지 않는다.
+      if (tokens.slice(i + 1).some((x) => /^-[A-Za-z]*[cm][A-Za-z]*$/.test(x))) return undefined
+      let j = i + 1
+      while (j < tokens.length && tokens[j].startsWith('-')) {
+        j += /^-([XWQ])$/.test(tokens[j]) ? 2 : 1
+      }
+      if (j >= tokens.length || baseName(tokens[j]) !== 'gg.py') return undefined
+      return tokens.slice(j)
+    }
+    if (name === 'node' || name === 'bun' || name === 'deno') return undefined // `-e` 코드 문자열
+    const wrapper = WRAPPERS[name]
+    if (wrapper) {
+      // `command -v` 는 실행이 아니라 위치 조회다.
+      if (name === 'command' && tokens.slice(i + 1).some((x) => x === '-v' || x === '-V')) return undefined
+      i++
+      while (i < tokens.length) {
+        const next = tokens[i]
+        if (wrapper.assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(next)) { i++; continue }
+        if (next === '--') { i++; break }
+        if (next.startsWith('-') && next !== '-') {
+          i += wrapper.flags?.[next] ? 2 : 1
+          continue
+        }
+        break
+      }
+      if (wrapper.operands) i += wrapper.operands
+      continue
+    }
+    return tokens.slice(i)
   }
   return undefined
+}
+
+/**
+ * 이 명령이 `gg.py apply` 를 실제로 실행했는가. 인용을 지켜 토막을 낸 뒤, **프로그램 낱말**이
+ * `gg.py` 이고 바로 다음이 `apply` 인 토막만 실행으로 센다. `env LANG=C grep 'gg.py apply' past.log`
+ * 처럼 글자로만 언급하는 명령은 프로그램이 `grep` 이므로 걸리지 않는다(검토 R3 2회째 중요 1).
+ */
+function ggApplySegment(command: string): string | undefined {
+  for (const segment of splitSegments(command)) {
+    const program = resolveProgram(segment.tokens)
+    if (!program || baseName(program[0]) !== 'gg.py' || program[1] !== 'apply') continue
+    // `--help`/`-h` 는 실행이 아니라 사용법 출력이다.
+    if (program.slice(2).some((token) => token === '--help' || token === '-h')) continue
+    return segment.raw
+  }
+  return undefined
+}
+
+/** 요청 ID — 앱이 만든 RFC 4122 UUID 만 통과한다. 그 밖의 값은 필드 자체를 뺀다(차단 2). */
+function requestIdOf(value: unknown): string | undefined {
+  return typeof value === 'string' && REQUEST_ID.test(value) ? value : undefined
 }
 
 /** 형식이 맞는 문자열만 남기고, 있지만 형식이 틀린 값은 고정 표시로 바꾼다. */
@@ -171,9 +388,27 @@ function checked(value: unknown, pattern: RegExp): string | undefined {
 }
 
 /**
+ * 진단 경로를 **비식별 요약**으로 바꾼다. 상대경로 모양을 통과한 값에서도 파일 이름·중간 폴더는
+ * 학생 개인정보일 수 있으므로(검토 R3 2회째 차단 2), 아는 폴더 종류이면 그 이름과 확장자만 남기고
+ * 나머지는 `…` 로 지운다 — `sections/홍길동_900101-1234567.md` → `sections/….md`.
+ * 모양이 틀린 값은 `<redacted>`, 모르는 확장자는 `.other`.
+ */
+function pathType(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value === '') return undefined
+  if (!RELATIVE_PATH.test(value)) return REDACTED
+  const parts = value.split('/')
+  const name = parts[parts.length - 1]
+  const dot = name.lastIndexOf('.')
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : ''
+  const folder = parts.length > 1 ? parts[0].toLowerCase() : ''
+  return `${PATH_FOLDERS[folder] ? folder : 'other'}/…${PATH_EXTENSIONS[ext] ? ext : '.other'}`
+}
+
+/**
  * 진단 객체에서 허용 키만, **값도 형식 검증을 통과한 것만** 남긴다. 키 화이트리스트는 값의
  * 안전을 보장하지 않으므로(검토 R3 차단 2) `code`·`field`·`missing` 은 기계 코드 모양,
- * `path` 는 폴더 안 상대경로 모양일 때만 원문을 쓴다. 문자열 `detail`(원문일 수 있음)은 버린다.
+ * `path` 는 상대경로 모양을 통과한 뒤 폴더 종류·확장자만 남긴다. 문자열 `detail`(원문일 수
+ * 있음)은 버린다.
  */
 function diagOf(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -196,8 +431,7 @@ function diagOf(value: unknown): Record<string, unknown> | undefined {
     if (typeof index === 'number' && Number.isInteger(index) && index >= 0) safe.index = index
   }
   if ('path' in source) {
-    // 값은 폴더 안 상대경로만 — 절대경로·드라이브 문자·`..`·백슬래시는 원문을 쓰지 않는다.
-    const path = checked(source.path, RELATIVE_PATH)
+    const path = pathType(source.path)
     if (path) safe.path = path
   }
   return Object.keys(safe).length ? safe : undefined
@@ -223,10 +457,11 @@ function commandSummary(command: string): string {
 /**
  * 명령 결과에서 거절 기록을 만든다. 거절이 아니면 `null`.
  *
- * 판정은 둘을 함께 본다: ①명령이 `gg.py apply` 를 실제로 불렀다(출처) ②출력에 apply·canonical·
- * not_committed 서명의 결과가 있다. 셸의 최종 종료코드는 증거로 쓰지 않는다 — `gg.py apply ... || true`
- * 는 거절 뒤에도 0 으로 끝나고, 반대로 등록에 성공한 뒤 다른 명령이 실패해 0 이 아닌 코드를
- * 남길 수 있다(중요 3).
+ * 판정은 둘을 함께 본다: ①명령이 `gg.py apply` 를 **실제로** 불렀다(출처) ②출력에 거절 결과가
+ * 있다. 거절 결과는 둘 중 하나다 — apply·canonical·not_committed 서명의 결과, 또는 `gg.py` 의
+ * 고정 사유를 가진 `blocked` 봉투(호출 인자 누락 등). 셸의 최종 종료코드는 증거로 쓰지 않는다 —
+ * `gg.py apply ... || true` 는 거절 뒤에도 0 으로 끝나고, 반대로 등록에 성공한 뒤 다른 명령이
+ * 실패해 0 이 아닌 코드를 남길 수 있다(중요 3).
  */
 export function applyRejection(input: RejectionInput): RejectionRecord | null {
   const command = typeof input.command === 'string' ? input.command : ''
@@ -234,25 +469,29 @@ export function applyRejection(input: RejectionInput): RejectionRecord | null {
   const exitCode = typeof input.exitCode === 'number' && Number.isFinite(input.exitCode) ? input.exitCode : null
   if (!ggApplySegment(command)) return null
   const found = rejectionOf(output)
-  if (!found) return null
+  const blocked = found ? undefined : blockedOf(output)
+  if (!found && !blocked) return null
   const at = checked(input.at, ISO_TIME)
   const record: RejectionRecord = {
     at: at && at !== REDACTED ? at : new Date().toISOString(),
     provider: checked(input.provider, FIELD_NAME) ?? REDACTED,
     command: commandSummary(command),
     exitCode,
-    operation: REJECT_OPERATION,
-    target: REJECT_TARGET,
-    commit_state: REJECT_STATE,
-    reason: checked(found.reason, MACHINE_CODE) ?? REDACTED
+    reason: found ? checked(found.reason, MACHINE_CODE) ?? REDACTED : String(blocked?.reason)
   }
-  const requestId = checked(found.request_id, REQUEST_ID)
-  const revision = typeof found.revision === 'number' && Number.isInteger(found.revision) && found.revision >= 0
-    ? found.revision : undefined
-  const detail = diagOf(found.detail)
-  if (requestId) record.request_id = requestId
-  if (revision !== undefined) record.revision = revision
-  if (detail) record.detail = detail
+  if (found) {
+    // `blocked` 봉투에는 이 셋이 없다 — 없는 값을 지어내지 않는다.
+    record.operation = REJECT_OPERATION
+    record.target = REJECT_TARGET
+    record.commit_state = REJECT_STATE
+    const requestId = requestIdOf(found.request_id)
+    const revision = typeof found.revision === 'number' && Number.isInteger(found.revision) && found.revision >= 0
+      ? found.revision : undefined
+    const detail = diagOf(found.detail)
+    if (requestId) record.request_id = requestId
+    if (revision !== undefined) record.revision = revision
+    if (detail) record.detail = detail
+  }
   return record
 }
 
