@@ -46,6 +46,7 @@ export function ConnectRow({ provider, extra, current }: {
             <button onClick={() => void reopen(provider)}>{ONBOARD.reopenBrowser}</button>
             <button className="quiet" onClick={() => void cancel(provider)}>{ONBOARD.cancel}</button>
           </>}
+          {state === 'connected' && <button className="quiet" type="button" onClick={() => void login(provider)} aria-label={`${PROVIDER_NAME[provider]} 다시 로그인`}>다시 로그인</button>}
           {state === 'connected' && extra && <button className="primary" onClick={extra.run}>{extra.label}</button>}
           {/* 다시 확인은 실제로 다시 볼 것이 있을 때만 — 확인 중·로그인 중·연결됨에는
               아무 일도 하지 않는 회색 단추만 남는다(시안 A 에도 없다). */}

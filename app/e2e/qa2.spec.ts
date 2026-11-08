@@ -189,7 +189,7 @@ test('칩 팝오버는 위로 열려 Claude 행·깊이 줄이 화면 안에 있
         expect(b!.y + b!.height, `${w}×${h}: ${sel} 이 화면 아래로 잘렸다`).toBeLessThanOrEqual(h + 0.5)
       }
       // Claude 변경 버튼도 화면 안.
-      const btn = page.locator('[data-provider="claude"]').getByRole('button')
+      const btn = page.locator('[data-provider="claude"]').getByRole('button', { name: 'Claude로 바꾸기' })
       await btn.scrollIntoViewIfNeeded()
       await expect(btn).toBeVisible()
       const bb = await btn.boundingBox()

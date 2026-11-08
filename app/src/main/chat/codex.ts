@@ -7,6 +7,9 @@ import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
 
+/** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
+export class CodexAuthenticationError extends Error {}
+
 /** 존재하면 realpath, 아니면 입력 그대로. 경로 비교는 반드시 이것을 거친다. */
 export function realOrSelf(p: string): string {
   try { return realpathSync(p) } catch { return p }
@@ -60,6 +63,9 @@ export class CodexConnection implements AgentConnection {
   private events?: AgentEvents
   private serverVersion: string | null = null
   private thread?: string
+  private loginPending = false
+  private loginConfirmed = false
+  private earlyLogin?: { id: string; success: boolean }
   private turn?: string
   /**
    * 이 연결이 **이 대화에** model/effort 덮어쓰기를 보낸 적이 있는가.
@@ -116,6 +122,13 @@ export class CodexConnection implements AgentConnection {
     // 구버전에는 필요했으므로 평문을 먼저 쓰고 실패하면 옛 인자로 한 번 더 시도한다.
     const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.serverArgs, this.options.root, this.options.env)
     rpc.onNotification = (method, p) => {
+      if (method === 'account/login/completed' && this.loginPending && typeof p?.loginId === 'string') {
+        if (!this.loginInfo) this.earlyLogin = { id: p.loginId, success: p.success === true }
+        else if (p.loginId === this.loginInfo.id) {
+          this.loginPending = false
+          this.loginConfirmed = p.success === true
+        }
+      }
       if (p?.threadId && p.threadId !== this.thread) return
       if (method === 'item/started' && p.item?.type === 'fileChange') {
         this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
@@ -135,6 +148,7 @@ export class CodexConnection implements AgentConnection {
         this.fileChanges.clear(); this.pendingFileApprovals.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') w?.resolve()
+        else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
         else w?.reject(new Error(p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
       }
     }
@@ -191,8 +205,7 @@ export class CodexConnection implements AgentConnection {
   async status() {
     const rpc = await this.connect()
     const r = await rpc.request('account/read', { refreshToken: false })
-    const connected = r.account?.type === 'chatgpt'
-    // 정상(연결됨)일 때는 조용해야 한다 — detail은 미연결 설명에만 쓴다.
+    const connected = !this.loginPending && r.account?.type === 'chatgpt' && (!this.loginInfo || this.loginConfirmed)
     return { installed: true, connected, version: this.serverVersion, probe: 'ok' as const, detail: connected ? '' : 'ChatGPT 로그인이 필요해요. API 계정으로 자동 전환하지 않아요.' }
   }
   /**
@@ -244,8 +257,20 @@ export class CodexConnection implements AgentConnection {
     return out
   }
   async login() {
-    const r = await (await this.connect()).request('account/login/start', { type: 'chatgpt' })
+    this.loginPending = true
+    this.loginConfirmed = false
+    this.loginInfo = undefined
+    this.earlyLogin = undefined
+    let r: { loginId?: unknown; authUrl?: unknown }
+    try { r = await (await this.connect()).request('account/login/start', { type: 'chatgpt' }) }
+    catch (error) { this.loginPending = false; throw error }
     this.loginInfo = { id: typeof r.loginId === 'string' ? r.loginId : '', url: typeof r.authUrl === 'string' ? r.authUrl : '' }
+    const early = this.earlyLogin as { id: string; success: boolean } | undefined
+    if (early?.id === this.loginInfo.id) {
+      this.loginPending = false
+      this.loginConfirmed = early.success
+    }
+    this.earlyLogin = undefined
     // 브라우저를 못 열었다고 로그인 자체를 실패로 만들지 않는다. 서버 쪽 로그인은 이미
     // 시작됐고, 학생에게는 "브라우저 다시 열기"가 있다. 여기서 던지면 화면이 '확인 실패'가
     // 되어 방금 시작한 로그인을 취소한 것처럼 보인다(실제로 그 문구가 떴다 —
@@ -268,6 +293,8 @@ export class CodexConnection implements AgentConnection {
     const rpc = this.rpc
     const loginId = this.loginInfo?.id
     this.loginInfo = undefined
+    this.loginPending = false
+    this.loginConfirmed = false
     if (rpc && !rpc.closed && loginId) {
       try { await rpc.request('account/login/cancel', { loginId }) } catch { /* 옛 CLI: 메서드가 없으면 프로세스를 닫아 취소한다 */ }
     }

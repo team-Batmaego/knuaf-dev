@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { CLAUDE_AUTH_COPY } from '../../../shared/copy'
+import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY } from '../../../shared/copy'
 import { isPreparing, preparationFailureTitle, usePrep, waitPrepared } from './prep'
 import { beginLoginAttempt, connInfoOf, loginAttemptLive, startPoll, stopPoll, useConnect, type ConnState } from './connect'
 import type { ChatModelInfo, ChatModels, ChatSnapshot, ConnectionStatus, ModelChoice, Provider } from '../../../shared/chat'
@@ -363,9 +363,10 @@ export const useChat = create<ChatState>((set, get) => ({
     set({ error: messageOf(r) })
   },
   onSnapshot: (snapshot) => {
-    if (snapshot.authRequired) useConnect.getState().observeChat(snapshot.provider, { state: 'need-login', detail: CLAUDE_AUTH_COPY.required, version: null })
+    const detail = snapshot.provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
+    if (snapshot.authRequired) useConnect.getState().observeChat(snapshot.provider, { state: 'need-login', detail, version: null })
     if (snapshot.root === get().root && snapshot.provider === get().provider) set({ snapshot,
-      ...(snapshot.authRequired ? { status: { installed: true, connected: false, version: null, probe: 'ok' as const, detail: CLAUDE_AUTH_COPY.required }, statusFailed: false, connState: 'need-login' as const } : {})
+      ...(snapshot.authRequired ? { status: { installed: true, connected: false, version: null, probe: 'ok' as const, detail }, statusFailed: false, connState: 'need-login' as const } : {})
     })
   },
   loadModels: async (provider = get().provider) => {

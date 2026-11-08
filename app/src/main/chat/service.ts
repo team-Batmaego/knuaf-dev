@@ -1,11 +1,11 @@
-import { CLAUDE_AUTH_COPY, MODEL_SELECTION_COPY } from '../../shared/copy'
+import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY, MODEL_SELECTION_COPY } from '../../shared/copy'
 import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
-import { CodexConnection } from './codex'
+import { CodexAuthenticationError, CodexConnection } from './codex'
 import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
@@ -19,6 +19,11 @@ function parseChat(text: string, provider: Provider): ChatSnapshot {
   return v
 }
 
+const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
+// 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
+const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
+  (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
+
 export class ChatService {
   private snapshots = new Map<string, ChatSnapshot>()
   private connections = new Map<string, AgentConnection>()
@@ -26,6 +31,7 @@ export class ChatService {
   private runs = new Map<string, Promise<void>>()
   private shuttingDown = false
   private authRequired = new Set<Provider>()
+  private authGeneration: Record<Provider, number> = { codex: 0, claude: 0 }
   private reauthenticating = new Map<Provider, AgentConnection>()
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
@@ -33,30 +39,33 @@ export class ChatService {
   suspend(): void { agentActivity.suspend() }
   resume(): void { agentActivity.resume() }
   private async checkedStatus(provider: Provider, connection: AgentConnection): Promise<ConnectionStatus> {
-    if (!this.authRequired.has(provider)) {
-      const status = await connection.status()
-      if (status.connected) this.pendingLogins.delete(provider)
-      if (!this.authRequired.has(provider)) return status
-    }
     const login = this.reauthenticating.get(provider)
-    if (login && (!(login instanceof ClaudeConnection) || login.loginConfirmed)) {
+    if (login) {
       const status = await login.status()
-      if (status.connected && this.reauthenticating.get(provider) === login
-        && (!(login instanceof ClaudeConnection) || login.loginConfirmed)) {
+      if (status.connected && this.reauthenticating.get(provider) === login &&
+          (!(login instanceof ClaudeConnection) || login.loginConfirmed)) {
+        this.authGeneration[provider]++
         this.pendingLogins.delete(provider)
         this.authRequired.delete(provider)
         this.reauthenticating.delete(provider)
         return status
       }
+      return { installed: true, connected: false, version: null, probe: 'ok', detail: authCopy(provider) }
     }
-    return { installed: true, connected: false, version: null, probe: 'ok', detail: CLAUDE_AUTH_COPY.required }
+    if (this.authRequired.has(provider)) return { installed: true, connected: false, version: null, probe: 'ok', detail: authCopy(provider) }
+    const status = await connection.status()
+    if (status.connected) this.pendingLogins.delete(provider)
+    return status
   }
   private async startLogin(provider: Provider, connection: AgentConnection): Promise<void> {
     this.pendingLogins.add(provider)
-    try {
-      await connection.login()
-      if (this.authRequired.has(provider)) this.reauthenticating.set(provider, connection)
-    } catch (error) { this.pendingLogins.delete(provider); throw error }
+    this.reauthenticating.set(provider, connection)
+    try { await connection.login() }
+    catch (error) {
+      if (this.reauthenticating.get(provider) === connection) this.reauthenticating.delete(provider)
+      this.pendingLogins.delete(provider)
+      throw error
+    }
   }
   /** 종료 시작과 동시에 새 연결·상태 확인을 막는다. 기존 연결은 close()가 정리한다. */
   beginShutdown(): void { this.shuttingDown = true }
@@ -406,7 +415,7 @@ export class ChatService {
         const c = this.globalConnection(provider)
         if (c.reopenLogin) await c.reopenLogin()
         else await c.login()
-        if (this.authRequired.has(provider)) this.reauthenticating.set(provider, c)
+        this.reauthenticating.set(provider, c)
       } catch (error) { this.pendingLogins.delete(provider); throw error }
     })
   }
@@ -434,7 +443,7 @@ export class ChatService {
         s.messages.push({ id: randomUUID(), role: 'system', text: `규칙집이 갱신됐어요 (이전 ${old} → 현재 ${version})`, at: new Date().toISOString() })
       } else installSkill(source, skill, version) // Refresh GUI ownership even for an unchanged copy.
       const connection = this.connection(root, provider)
-      if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? CLAUDE_AUTH_COPY.required : 'AI 계정 연결을 먼저 완료해 주세요.')
+      if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로
       // 조용히 보내는 대신 학생에게 오류로 알린다(검토 MC1-01).
       await connection.prepare?.(s.sessionId)
@@ -453,6 +462,7 @@ export class ChatService {
     // 서버 재생(과거 턴)은 스냅샷에 assistant 기록이 하나도 없을 때만 — 이미 있으면
     // item-N/msg_* id가 달라 중복으로 들어온다.
     const replayHistory = !s.messages.some(m => m.role === 'assistant')
+    const authGeneration = this.authGeneration[s.provider]
     /**
      * 답장이 오기 시작했으면 전달된 것이다. 예전에는 run() 이 끝나야 'sent' 로 바꿨는데,
      * 에이전트 턴은 몇 분씩 가므로 도우미가 눈앞에서 말하는 내내 학생 메시지에
@@ -499,13 +509,15 @@ export class ChatService {
       // 학생이 멈춘 것은 실패가 아니다 — 취소로 끝난 턴에 오류 문구를 붙이지 않는다.
       // (중단하면 연결이 끊겨 run 이 예외로 끝나므로 여기로 온다.)
       if (s.state !== 'stopped') {
-        if (s.provider === 'claude' && e instanceof ClaudeAuthenticationError) {
-          this.authRequired.add(s.provider)
-          this.reauthenticating.delete(s.provider)
-          s.authRequired = true
+        if ((s.provider === 'claude' && e instanceof ClaudeAuthenticationError) || (s.provider === 'codex' && codexAuthFailure(e))) {
+          if (authGeneration === this.authGeneration[s.provider]) {
+            this.authRequired.add(s.provider)
+            s.authRequired = true
+          }
+          s.error = authGeneration === this.authGeneration[s.provider] ? authCopy(s.provider) : '이전 답변의 인증이 만료됐어요. 보냈는지 확인한 뒤 이어서 보내 주세요.'
         }
         if (s.state !== 'interrupted') s.state = 'error'
-        s.error = e instanceof Error ? e.message : '작업이 완료되지 않았어요.'
+        s.error ??= e instanceof Error ? e.message : '작업이 완료되지 않았어요.'
       }
     } finally { s.permission = undefined; this.waiting.delete(key); this.publish(s) }
   }
