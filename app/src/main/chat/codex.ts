@@ -2,6 +2,7 @@ import { MODEL_SELECTION_COPY } from '../../shared/copy'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
+import { applyRejection, recordRejection } from './rejectLog'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
@@ -137,6 +138,13 @@ export class CodexConnection implements AgentConnection {
       } else if (method === 'item/completed' && p.item?.type === 'fileChange') {
         const key = fileChangeKey(p.threadId, p.turnId, p.item.id)
         this.rememberFileChanges(key, undefined)
+      } else if (method === 'item/completed' && p.item?.type === 'commandExecution') {
+        // 정본 등록 거절은 도우미의 셸 출력으로만 돌아오고 지금까지 어디에도 남지 않았다
+        // (윈도우 W-08). 출력에서 거절 결과를 찾아 한 줄 남긴다 — 학생 화면은 그대로다.
+        const record = applyRejection({
+          provider: 'codex', command: p.item.command, output: p.item.aggregatedOutput, exitCode: p.item.exitCode
+        })
+        if (record) recordRejection(join(this.options.root, '.knuaf-gui', 'apply-reject.log'), record)
       }
       if (method === 'item/agentMessage/delta') {
         const text = (this.messages.get(p.itemId) ?? '') + p.delta
