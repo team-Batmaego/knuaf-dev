@@ -139,9 +139,11 @@ export class JobRunner {
       await this.execute(next)
     }
   }
-  private accountFailure(account: ExecutionAccount | null, consent = true): 'auth' | 'unknown' | 'limit' | 'rejected' | null {
+  private accountFailure(account: ExecutionAccount | null, consent = true, gateInTurn = false): 'auth' | 'unknown' | 'limit' | 'rejected' | null {
     if (!account?.connected || !subscriptionCheck(account.account).usable || account.usage === 'auth') return 'auth'
     if (consent && !account.consented) return 'rejected'
+    // ㉠: 첫 턴 안에서 limit을 판정해 닫을 수 있다고 선언한 연결만 unknown을 넘긴다.
+    if (account.usage === 'unknown' && gateInTurn) return null
     if (account.usage !== 'allowed') return account.usage
     return null
   }
@@ -173,7 +175,9 @@ export class JobRunner {
       const account = await this.options.account(spec.company)
       if (current.stopped) return
       const failure = this.accountFailure(account)
-      if (failure) { this.update(record, failure); return }
+      // ㉠: 제1판정은 unknown을 보류로만 둔다. 연결 선언이 없으면 뒤에서 막지 못하므로
+      // unknown 보류는 제2판정에서 선언 기준으로 재판정된다. auth·limit·동의 없이는 이미 닫힌다.
+      if (failure && failure !== 'unknown') { this.update(record, failure); return }
       if (!account || account.account.company !== spec.company || !this.listed(account, spec)) { this.update(record, 'rejected'); return }
       if (approval) {
         const proposal = this.state.proposals.find(p => p.proposalId === approval.proposalId)!
@@ -193,7 +197,7 @@ export class JobRunner {
       if (!status.connected) { this.update(record, status.probe === 'failed' ? 'unknown' : 'auth'); return }
       const live = await connection.availability()
       if (current.stopped) return
-      const liveFailure = this.accountFailure(live)
+      const liveFailure = this.accountFailure(live, true, connection.gateInTurn === true)
       if (liveFailure) { this.update(record, liveFailure); return }
       if (fingerprint(live) !== fingerprint(account)) { this.update(record, 'rejected'); return }
       // Restore the app-authorized specification immediately before the engine reads its job file.
