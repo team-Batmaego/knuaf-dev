@@ -147,13 +147,30 @@ test('kill이 exit를 못 만들면 t2가 닫고 pending을 거절하며 onClose
 })
 
 /**
- * 자식을 정말 살려 둔 채로 부모가 스스로 끝나는지 본다(RT 3회차 중요 1).
+ * 자식을 정말 살려 둔 채로 부모가 스스로 끝나는지 본다(RT 3회차 중요 1, 4회차 견고성).
  * 같은 프로세스에서는 직접 SIGKILL이 자식을 죽이므로 unref를 지워도 통과한다.
  * 그래서 부모를 별도 프로세스로 띄운다: ChildProcess.prototype.kill을 no-op으로 바꾸고
  * killFn도 no-op으로 하면 자식은 stop 뒤에도 산다. 이때 부모가 끝나는 유일한 길은
  * detach의 child.unref()뿐이므로, unref를 지운 변이에서는 부모가 남았다가 timeout으로 실패한다.
+ *
+ * 견고성(4회차):
+ * - 부모가 stop 전에 runner pid 파일 생성과 생존을 확인한다. 확인 못하면 exit 2로 명시 실패한다
+ *   (래퍼·runner가 시작 못 한 경우의 거짓 통과를 막는다).
+ * - spawner는 pid 파일이 없을 때 spawnSync 반환 뒤 3초까지 출현을 기다려 kill한다(늦은 runner 회수).
+ * - 기동 상한과 전체 상한을 분리한다: 부모 자체 대기 10s, spawnSync 전체 30s, stop 이후 종료는
+ *   자연 종료(exit 코드 0)까지 기다리는 계약이다.
+ * - --experimental-strip-types는 Node 22.6.0+가 필요하다. 그보다 낮으면 명시 실패로 중단한다
+ *   (CI는 actions/setup-node의 node-version: 22라 최신 22.x가 깔린다).
  */
 test('자식이 살아 있어도 unref 덕에 부모가 스스로 끝난다 (RT3)', () => {
+  const major = Number(process.versions.node.split('.')[0] ?? 0)
+  const minor = Number(process.versions.node.split('.')[1] ?? 0)
+  const stripOk = major > 22 || (major === 22 && minor >= 6) || major > 22
+  // Node 22.6 미만은 기능 자체가 없으므로 통과가 아니라 명시 실패로 알린다.
+  // CI(node-version: 22 최신)에서는 이 분기가 실행되지 않는다.
+  if (!stripOk) {
+    throw new Error(`RT3는 Node 22.6+가 필요합니다 (현재 ${process.versions.node}) — --experimental-strip-types 없음`)
+  }
   const dir = mkdtempSync(join(tmpdir(), 'kd-transport-parent-'))
   const pidFile = join(dir, 'tool.pid')
   const runner = join(dir, 'runner.mjs')
@@ -167,33 +184,66 @@ test('자식이 살아 있어도 unref 덕에 부모가 스스로 끝난다 (RT3
   const parent = join(dir, 'parent.mjs')
   writeFileSync(parent, [
     `import { JsonRpcProcess } from './transport.ts'`,
-    `import { writeFileSync } from 'node:fs'`,
+    `import { writeFileSync, readFileSync, existsSync } from 'node:fs'`,
     `import { join } from 'node:path'`,
     `import cp from 'node:child_process'`,
     `// killTree와 detach의 직접 kill을 함께 막아 자식은 살아 남게 한다 — exit는 안 온다.`,
     `cp.ChildProcess.prototype.kill = function () { return false }`,
     `const WIN = process.platform === 'win32'`,
     `const runner = join(process.cwd(), 'runner.mjs')`,
+    `const pidPath = join(process.cwd(), 'tool.pid')`,
     `const binary = join(process.cwd(), WIN ? 'fake.cmd' : 'fake')`,
     `if (WIN) writeFileSync(binary, '@echo off\\r\\n"${process.execPath}" "' + runner + '"\\r\\n', 'utf-8')`,
     `else writeFileSync(binary, '#!/bin/sh\\nexec ' + JSON.stringify(process.execPath) + ' ' + JSON.stringify(runner) + '\\n', { mode: 0o755 })`,
-    `const rpc = new JsonRpcProcess(binary, [], process.cwd(), { ...process.env, TOOL_PID_FILE: join(process.cwd(), 'tool.pid') }, { killFn: () => {} })`,
+    `const rpc = new JsonRpcProcess(binary, [], process.cwd(), { ...process.env, TOOL_PID_FILE: pidPath }, { killFn: () => {} })`,
     `rpc.request('account/read', {}).catch(e => console.log('parent: pending rejected'))`,
+    `// 기동 확인: 자식이 떴고 살아 있을 때만 stop한다. 못 떴으면 거짓 통과가 아니라 exit 2로 실패한다.`,
+    `async function waitRunner() {`,
+    `  const deadline = Date.now() + 10_000`,
+    `  while (Date.now() < deadline) {`,
+    `    if (existsSync(pidPath)) {`,
+    `      const pid = Number(readFileSync(pidPath, 'utf-8').trim())`,
+    `      try { process.kill(pid, 0); return pid } catch { break }`,
+    `    }`,
+    `    await new Promise(r => setTimeout(r, 100))`,
+    `  }`,
+    `  console.error('parent: runner did not start or died')`,
+    `  process.exit(2)`,
+    `}`,
+    `await waitRunner()`,
     `await rpc.stop()`,
     `console.log('parent: stop returned closed=' + rpc.closed)`,
     // 부모는 이제 아무것도 남기지 않는다 — unref가 있으면 바로 exit, 없으면 자식 핸들이 붙잡는다.
     ``
   ].join('\n'), 'utf-8')
-  writeFileSync(join(dir, 'runner-ready-check.tmp'), 'x', 'utf-8')
   let verdict = ''
   try {
-    const r = spawnSync(process.execPath, ['--experimental-strip-types', parent], { cwd: dir, timeout: 12_000, encoding: 'utf8' })
+    const r = spawnSync(process.execPath, ['--experimental-strip-types', parent], { cwd: dir, timeout: 30_000, encoding: 'utf8' })
     verdict = `status=${r.status} signal=${r.signal} error=${r.error?.message ?? ''} timedOut=${(r.error as NodeJS.ErrnoException)?.code === 'ETIMEDOUT'}\nstdout=${r.stdout}\nstderr=${r.stderr}`
-    expect((r.error as NodeJS.ErrnoException)?.code, '부모가 N초 안에 끝나지 않았다 — unref가 없다면 남는다\n' + verdict).not.toBe('ETIMEDOUT')
+    expect((r.error as NodeJS.ErrnoException)?.code, '부모가 상한 안에 끝나지 않았다 — unref가 없다면 남는다\n' + verdict).not.toBe('ETIMEDOUT')
     expect(r.status, '부모가 비정상 종료했다\n' + verdict).toBe(0)
     expect(String(r.stdout), '부모 로그에 stop 완료가 있어야 한다\n' + verdict).toContain('stop returned')
   } finally {
-    try { process.kill(Number(readFileSync(pidFile, 'utf-8').trim()), 'SIGKILL') } catch { /* 이미 죽었거나 없음 */ }
+    // pid 파일이 없을 때 spawnSync가 이미 끝났으면 늦게 뜬 runner를 3초까지 기다려 회수한다.
+    const deadline = Date.now() + 3_000
+    let pid = 0
+    while (!pid && Date.now() < deadline) {
+      try {
+        if (existsSync(pidFile)) {
+          pid = Number(readFileSync(pidFile, 'utf-8').trim())
+          if (pid > 0) { try { process.kill(pid, 'SIGKILL') } catch { /* 이미 죽었거나 없음 */ } break }
+        }
+      } catch { /* 파일이 아직 없음 */ }
+      if (!pid) {
+        const busy = new Int32Array(new SharedArrayBuffer(4))
+        Atomics.wait(busy, 0, 0, 100)
+      }
+    }
+    if (!pid) {
+      try {
+        if (existsSync(pidFile)) process.kill(Number(readFileSync(pidFile, 'utf-8').trim()), 'SIGKILL')
+      } catch { /* 이미 죽었거나 없음 */ }
+    }
   }
   expect(verdict, '부모 프로세스가 스스로 끝났는가').not.toContain('timedOut=true')
 })
