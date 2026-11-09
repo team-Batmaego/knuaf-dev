@@ -19,7 +19,7 @@ def test_export_survives_default_encoding_warning_as_error(project):
 
 def test_paper_writes_utf8_regardless_of_locale(project):
     spec = project / "paper.json"  # must live inside the project (core.local confinement)
-    spec.write_text('{"title": "테스트 논문", "writing_year": 2026, "school_profile": '
+    spec.write_text('{"title": "테스트 논문", "writing_year": 2026, "start_year": 2027, "school_profile": '
                     '{"school": "Synthetic school", "department": "Synthetic department"}}', encoding="utf-8")
     r = run_gg(project, "paper", "--input", "paper.json", "--out", "build/본문.md",
                "--major", "specialty_crops", env={**STRICT_ENC, "PYTHONUTF8": "0"})

@@ -31,7 +31,7 @@ def price_source(sid, channel, values):
 
 BASE = {
     "profile": "school_17_sheet_v1", "unit": "천원", "quantity_unit": "kg",
-    "writing_year": 2026, "source_refs": ["answers.md#재무"],
+    "writing_year": 2026, "start_year": 2027, "source_refs": ["answers.md#재무"],
     "production_evidence": {k: "인터뷰 Q2 근거" for k in
                             ("area", "seedlings", "yield", "growth", "commodity")},
     "area_m2": "2000", "production_kg": "5000",
