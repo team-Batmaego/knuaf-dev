@@ -608,6 +608,15 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .qcard kbd { font: inherit; font-size: 11px; border: var(--hairline) solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; color: var(--muted); background: var(--panel); }
 /* 카드가 떠 있는 동안 대화 원문에서 접은 보기 자리. */
 .q-fold { display: flex; align-items: center; gap: 6px; margin-top: var(--sp-2); }
+/* 한 턴의 중간말 묶음 — Claude·Codex 앱처럼 한 줄로 접는다(형님 2026-11-09). 색선·바탕 띠 없이
+   글자와 쉐브론만. 펼치면 원문 그대로이고, 중간말이라 본문보다 한 단 작고 옅다. */
+.progress-fold { display: flex; flex-direction: column; gap: 6px; }
+.progress-fold-head { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; border: 0; background: none;
+  padding: 2px 0; margin: 0; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+.progress-fold-head:hover { color: var(--ink-2); }
+.progress-fold-head svg { flex: none; }
+.progress-fold-body { display: flex; flex-direction: column; gap: 14px; padding-left: 19px; }
+.progress-fold-body .prose { font-size: .875rem; color: var(--ink-2); }
 
 /* ---- 아래 칸: 허락 카드 (DESIGN §3-2) — 같은 자리를 아이스 그레이가 덮는다 ---- */
 .askcard { border: var(--hairline) solid var(--alert-border); border-radius: var(--r-xl); background: var(--alert-bg); padding: var(--sp-4) 18px 14px; margin-top: var(--sp-4); }
