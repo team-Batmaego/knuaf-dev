@@ -6,6 +6,7 @@ import {
   lastValidProgress,
   parseStoredProgress,
   pickProgress,
+  progressSignature,
   type ProgressPick,
   type StoredProgress,
 } from '../../../shared/progress-list'
@@ -59,9 +60,10 @@ export function useProgress(): UseProgressResult {
   }
 
   const result = pickProgress(conv, stored, snap?.root ?? null, root)
-  // 선택한 답의 변경을 감지한다 — messageId가 바뀌면 그 답이 최신 진행값이다.
-  // (Roh [중요 1] — effect deps가 바뀌지 않으면 1→2→4단계에서 저장값이 1단계에 남았다.)
-  const convKey = conv ? `${conv.messageId}|${conv.at}|${provider}` : null
+  // 저장 여부는 고른 진행값 자체(단계 상태 서명)로 판단한다 — 답 id·at이 아니라.
+  // (Roh [중요 1] — 같은 messageId로 text만 갱신되는 스트리밍(1단계 덩어리 뒤
+  //  4단계 덩어리가 붙음)에서는 id·at이 안 바뀌어 저장이 안 됐다.)
+  const valueSig = progressSignature(result.kind === 'none' ? null : result.pick)
 
   useEffect(() => {
     // 깨진 저장값은 지운다.
@@ -82,9 +84,9 @@ export function useProgress(): UseProgressResult {
         /* 무시 — 제목줄은 그대로 보인다 */
       }
     }
-    // snapshot.messageId/at은 convKey로, root/provider는 직접 본다.
+    // snapshot.messageId/at은 valueSig로 — 고른 진행값이 바뀌면 한 번 더 저장한다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, snap?.root, provider, result.kind, convKey])
+  }, [root, snap?.root, provider, result.kind, valueSig])
 
   if (result.kind === 'none') return { pick: null }
   return { pick: result.pick }

@@ -66,6 +66,23 @@ export interface ProgressBlock {
   n: number
 }
 
+/**
+ * 고른 진행값 자체의 서명 — 답 id·시각이 아니라 단계 상태로 만든다.
+ * (Roh [중요 1] — 같은 messageId로 text만 갱신되는 스트리밍은 id·at이 안 바뀌어
+ *  저장 효과가 안 돌았다. 1단계→4단계 덩어리 교체 때는 이 서명이 바뀐다.)
+ */
+export function progressSignature(pick: ProgressPick | null): string | null {
+  if (!pick) return null
+  const b = pick.block
+  return JSON.stringify([
+    b.n,
+    b.steps.map((s) => [s.state, s.note ?? '', s.uncertain ? 1 : 0]),
+    b.flags,
+    b.after,
+    b.reviewPending,
+  ])
+}
+
 export interface ParsedProgress {
   /** 유효 덩어리들 — 순서대로, 상태값은 마지막 덩어리. */
   blocks: ProgressBlock[]

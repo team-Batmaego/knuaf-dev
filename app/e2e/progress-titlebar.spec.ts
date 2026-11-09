@@ -307,3 +307,89 @@ test('U8-small 작은 창(높이 720) — [제출 전 점검]이 펼침 안에 �
     await electronApp.close()
   }
 })
+
+// Roh [중요 1] 보강: 같은 messageId로 text만 갱신되는 스트리밍 — 1단계 덩어리 뒤 4단계 덩어리 붙음.
+// service.ts는 같은 id로 text만 바꾼다. 저장 여부는 고른 진행값 자체(단계 상태)로 판단한다.
+test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값 4, Codex 전환에도 4/7', async () => {
+  const dir = scratch()
+  const bin = join(dir, 'bin')
+  const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
+  writeFakeClaude(bin)
+  const root = synthProject()
+  const STEP4_TEXT = [
+    '**창업논문 진행 목록** · 7단계 중 4단계 진행 중 · 독립 내용검토 전 (논문은 아직 완성 전)',
+    '✓ 1–3단계 끝남 — 전공·계획·근거',
+    '▶ 4 본문 Ⅰ~Ⅵ 초안 — Ⅰ·Ⅱ장 끝, 이번에 Ⅲ장',
+    '○ 5–7단계 남음',
+    '그 뒤: 한글 마무리(글꼴·여백·쪽번호)·교수 승인 — 학생 몫',
+    '',
+    '- **다음 작업**: Ⅲ장을 이어갑니다.',
+    '- **지금 확인할 것**: 아래 Q3 두 가지.',
+  ].join('\n')
+  const at0 = at(0)
+  const at1 = at(1)
+  const writeChat = (messages: unknown[], provider: 'codex' | 'claude' = 'codex') => {
+    mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
+    writeFileSync(join(root, '.knuaf-gui', `chat-${provider}.json`), JSON.stringify({
+      root, provider, state: 'idle', messages,
+    }), 'utf-8')
+  }
+  const readStoredN = async (page: Page): Promise<number | null> =>
+    page.evaluate((r) => {
+      try {
+        const raw = window.localStorage.getItem(`knuaf.progress.v1:${r}`)
+        return raw ? JSON.parse(raw).block.n : null
+      } catch { return null }
+    }, root)
+
+  // ① 처음 1단계 덩어리만 든 스트리밍 답 (claude provider와 일치 — userData는 claude)
+  writeChat([
+    { id: 'u0', role: 'user', text: '시작하기', at: at0, delivery: 'sent' },
+    { id: 'm-stream', role: 'assistant', text: REAL_STEP2, at: at1 },
+  ], 'claude')
+  writeChat([
+    { id: 'u0', role: 'user', text: '시작하기', at: at0, delivery: 'sent' },
+    { id: 'm-codex-2', role: 'assistant', text: REAL_STEP4_CODEX_OLD, at: at1 },
+  ], 'codex')
+  const userData = userDataWith(dir, { helper_mode: 'claude-chat', provider_choice: { provider: 'claude', at: new Date().toISOString() } })
+  const { electronApp, page } = await launch({ env, userData })
+
+  try {
+    await openProject(page, root, splitReady)
+    await expect(titlebar(page)).toContainText('1/7')
+    await expect(titlebar(page)).toContainText('자료·전공 확인')
+    expect(await readStoredN(page)).toBe(1)
+
+    // ② 같은 id로 text만 4단계로 갱신 — id·at·provider 불변.
+    writeChat([
+      { id: 'u0', role: 'user', text: '시작하기', at: at0, delivery: 'sent' },
+      { id: 'm-stream', role: 'assistant', text: STEP4_TEXT, at: at1 },
+    ], 'claude')
+    // 파일만 바꾸면 메모리 스냅샷이 안 갱신된다 — 앱을 다시 띄우면 새 파일에서 읽는다.
+    // 앱을 다시 띄우면 새 파일에서 읽어 focus가 4단계로 바뀐다(고른 진행값 서명 변경).
+    // 이 흐름은 file→load 경로를 그대로 확인한다.
+    await electronApp.close()
+    const second = await launch({ env, userData })
+    try {
+      await openProject(second.page, root, splitReady)
+      await expect.poll(async () => {
+        try { return await readStoredN(second.page) } catch { return null }
+      }, { timeout: 20_000 }).toBe(4)
+      await expect(titlebar(second.page)).toContainText('4/7')
+      await expect(titlebar(second.page)).toContainText('본문 Ⅰ~Ⅵ 초안')
+
+      // Codex전환 확인 전에도 localStorage는 4인지 확인한다.
+      // ③ Codex 전환(옛날 2단계 대화) — 여전히 4/7.
+      await second.page.getByTitle('이 논문의 도우미').click()
+      await second.page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
+      await expect(second.page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+      await expect(titlebar(second.page), '스트리밍 갱신 후 전환에 진행이 되돌아갔다').toContainText('4/7')
+      expect(await readStoredN(second.page)).toBe(4)
+      await shot(second.page, 'u-stream')
+    } finally {
+      await second.electronApp.close()
+    }
+  } finally {
+    try { await electronApp.close() } catch { /* 이미 닫혔다 */ }
+  }
+})
