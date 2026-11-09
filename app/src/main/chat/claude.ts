@@ -1022,15 +1022,17 @@ export class ClaudeRelayConnection implements JobConnection {
   async runJob(text: string, events: JobEvents): Promise<void> {
     if (this.running) throw new Error('이 담당 연결은 이미 한 주문을 실행 중이에요.')
     this.running = true
-    const status = await this.status()
-    if (!status.connected) throw new JobFailure('auth', status.detail || 'Claude 구독 계정 로그인이 필요해요.')
-    this.controller = new AbortController()
-    const plugin = this.pluginDir()
-    const q = this.active = query({ prompt: this.relayPrompt(text), options: this.queryOptions(this.controller, plugin) })
+    // 앞 단계(상태 확인·플러그인 조립·query 생성)에서 던져도 잠금과 핸들이 남지 않게 한다.
+    let q: Query | undefined
     // 한도가 턴 중간에 깨졌는가 — `events.availability` 는 `connection.stop()` 을 부르므로
     // 우리도 같은 사실을 알고 `JobFailure('limit')` 로 정확히 닫는다(설계 §3.5 규칙 3).
     let verdict: 'limit' | null = null
     try {
+      const status = await this.status()
+      if (!status.connected) throw new JobFailure('auth', status.detail || 'Claude 구독 계정 로그인이 필요해요.')
+      this.controller = new AbortController()
+      const plugin = this.pluginDir()
+      q = this.active = query({ prompt: this.relayPrompt(text), options: this.queryOptions(this.controller, plugin) })
       const commands = await q.supportedCommands()
       if (!Array.isArray(commands) || !commands.some(c => c.name === 'knuaf-dev' || c.name.endsWith(':knuaf-dev'))) {
         throw new Error('담당 세션에서 knuaf-dev 스킬을 찾지 못했어요.')
@@ -1065,7 +1067,7 @@ export class ClaudeRelayConnection implements JobConnection {
       if (verdict) throw new JobFailure(verdict, '담당이 기본 사용 한도를 넘어 멈췄어요.')
       if (!announced) throw new Error('담당 세션이 초기화를 알려 주지 않았어요.')
     } finally {
-      q.close(); this.active = undefined; this.running = false
+      q?.close(); this.active = undefined; this.running = false
     }
   }
 
