@@ -111,10 +111,25 @@ export class ChatService {
   private pendingDeliveries = new Map<string, { owner: ConversationOwner; result: JobResult }>()
   /** 다시 넣기 운전 중인 폴더 — 같은 결과를 두 번 넣지 않는다. */
   private drivingDeliveries = new Set<string>()
+  /**
+   * 보류 재구동은 **한 번에 하나**만 돈다. 목록을 복사해 돌면 기다리는 사이 다른 호출이
+   * 같은 결과를 먼저 넣거나 학생이 취소해 지운 결과를 이 복사본이 다시 넣는다.
+   */
+  private drivingPending: Promise<void> | null = null
+  /**
+   * 학생이 중단할 때마다 오르는 폴더별 세대. `prepare()` 처럼 오래 기다리는 구간을 지나
+   * 돌아왔을 때 "그 사이 중단됐는가"를 화면 상태와 별개로 확정한다(상태 문자열은 다른
+   * 경로가 다시 'running' 으로 덮을 수 있다).
+   */
+  private stopEpoch = new Map<string, number>()
   /** 수집이 꺼진 사실을 폴더·공급자당 한 번만 알린다. */
   private collectDisabled = new Set<string>()
   /** 같은 주문 번호가 다른 폴더에 있어 건너뛴 사실을 폴더·번호당 한 번만 알린다. */
   private duplicateNotified = new Set<string>()
+  /** 남의 폴더 대기 주문을 이번 차례에서 미뤘다는 사실을 폴더·주문 묶음당 한 번만 남긴다. */
+  private deferredNotified = new Set<string>()
+  /** 러너 전달 기록 ↔ 앱 전달 기록 대조를 이미 했는가(프로세스당 한 번). */
+  private reconciled = false
   /** 보류한 전달을 다시 시도하는 타이머 — 폴더가 빌거나 업데이트 준비가 풀리면 깨어난다. */
   private pendingTimer: ReturnType<typeof setTimeout> | null = null
   /** 주문 수집 직렬화 — 러너의 `skill()` 이 폴더 인자를 받지 않는 계약 때문이다. */
@@ -292,6 +307,13 @@ export class ChatService {
    */
   private surfaceUncertain(root: string, s: ChatSnapshot): void {
     if (!this.opts.jobConnectionFactory || !this.opts.jobAccount) return
+    // 복구 대조는 프로세스당 한 번 — 첫 스냅샷에서 러너 기록과 앱 기록을 맞춰 본다.
+    if (!this.reconciled) {
+      this.reconciled = true
+      try { this.reconcileDeliveries() } catch (error) {
+        console.error('[knuaf] jobs', JSON.stringify({ type: 'delivery-reconcile', error: error instanceof Error ? error.message : String(error) }))
+      }
+    }
     let pending: { rootJobId: string; at: string }[]
     try { pending = this.store().undelivered(root) } catch (error) {
       console.error('[knuaf] jobs', JSON.stringify({ type: 'store', error: error instanceof Error ? error.message : String(error) }))
@@ -332,20 +354,61 @@ export class ChatService {
    */
   private async drivePending(): Promise<void> {
     if (this.shuttingDown || this.jobsClosing) return
+    // 업데이트 인계는 바깥 `agentActivity` 를 먼저 정지시킨다(handoff.ts). 정지 중에는
+    // `acquire()` 가 `UpdateSuspendedError` 를 던지므로 실행이 재개되지 않는다 — 여기서는
+    // 헛되이 꺼내지 않고 깨어날 때까지 미룬다. 정지는 인계가 끝나며 풀린다.
+    if (agentActivity.suspended) { this.schedulePending(); return }
     if (this.pendingTimer) { clearTimeout(this.pendingTimer); this.pendingTimer = null }
+    // 단일 비행 — 겹친 호출은 이미 도는 회차에 합류한다. 두 회차가 같은 목록을 복사해
+    // 돌면 `await deliverResult(A)` 사이에 다른 회차가 B 를 넣거나 `stop(B)` 가 B 를
+    // 지운 뒤에도 복사본이 B 를 다시 넣는다(재현: `A,B,B` / 취소 뒤 `A,B`).
+    if (!this.drivingPending) {
+      this.drivingPending = this.drivePendingOnce()
+        .catch(error => console.error('[knuaf] jobs', JSON.stringify({ type: 'deliver-drive', error: error instanceof Error ? error.message : String(error) })))
+        .finally(() => { this.drivingPending = null })
+    }
+    await this.drivingPending
+  }
+  /**
+   * 보류 목록을 **꺼내는 순간마다** 살아 있는 지도에서 다시 확인한다. 복사본을 미리 돌지
+   * 않는다 — 그 사이 지워진 결과·이미 넣은 결과를 다시 넣지 않기 위해서다.
+   */
+  private async drivePendingOnce(): Promise<void> {
     let parked = false
-    for (const [rootJobId, entry] of [...this.pendingDeliveries]) {
-      const parsed = this.ownerOf(entry.owner)
-      if (!parsed) { this.pendingDeliveries.delete(rootJobId); continue }
-      if (this.drivingDeliveries.has(parsed.root) || this.busy(parsed.root)) { parked = true; continue }
-      this.pendingDeliveries.delete(rootJobId)
-      this.drivingDeliveries.add(parsed.root)
+    for (;;) {
+      if (this.shuttingDown || this.jobsClosing) return
+      const next = this.takeParked()
+      if (next === 'blocked') { parked = true; break }
+      if (!next) return
+      const [rootJobId, root, entry] = next
+      this.drivingDeliveries.add(root)
       try { await this.deliverResult(entry.owner, entry.result) }
       catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'deliver-drive', rootJobId, error: error instanceof Error ? error.message : String(error) })) }
-      finally { this.drivingDeliveries.delete(parsed.root) }
-      if (this.pendingDeliveries.has(rootJobId)) parked = true
+      finally { this.drivingDeliveries.delete(root) }
     }
     if (parked) this.schedulePending()
+  }
+  /**
+   * 지금 넣을 수 있는 보류 하나를 지도에서 꺼낸다. 주인을 못 읽거나 claim 이 닫힌 항목은
+   * 지우고 넘어간다. 남은 것이 모두 다른 회차·바쁜 폴더 소유면 `'blocked'`.
+   */
+  private takeParked(): [string, string, { owner: ConversationOwner; result: JobResult }] | 'blocked' | null {
+    for (const [rootJobId, entry] of [...this.pendingDeliveries]) {
+      // 순회 중 지워졌거나 같은 키로 바뀌었으면 이 복사본은 낡았다.
+      if (this.pendingDeliveries.get(rootJobId) !== entry) continue
+      const parsed = this.ownerOf(entry.owner)
+      if (!parsed) { this.pendingDeliveries.delete(rootJobId); continue }
+      // claim 이 이미 닫힌 결과(다른 경로가 넣었거나 학생이 중단으로 닫음)는 다시 넣지 않는다.
+      if (!this.claimOpen(rootJobId)) { this.pendingDeliveries.delete(rootJobId); continue }
+      if (this.drivingDeliveries.has(parsed.root) || this.busy(parsed.root)) continue
+      this.pendingDeliveries.delete(rootJobId)
+      return [rootJobId, parsed.root, entry]
+    }
+    return this.pendingDeliveries.size ? 'blocked' : null
+  }
+  /** 이 결과의 전달 기록이 아직 열려 있는가(다른 경로가 `done`·`uncertain` 으로 닫지 않았는가). */
+  private claimOpen(rootJobId: string): boolean {
+    try { return this.store().deliveryState(rootJobId) === 'started' } catch { return true } // 저장소를 못 읽으면 기존 동작(넣기 시도)을 유지한다.
   }
   /** 보류 전달이 남아 있으면 잠시 뒤 다시 시도한다 — 조건이 밖에서 풀릴 때까지. */
   private schedulePending(): void {
@@ -713,6 +776,44 @@ export class ChatService {
     return this.jobRunner
   }
   /**
+   * 러너 `delivered[]` ↔ 앱 저장소 전달 기록을 **복구 시 한 번** 대조한다.
+   *
+   * 러너는 자기 `delivered[]` 를 먼저 영속하고 그 다음 앱 claim(`beginDelivery`)을 부른다.
+   * 두 쓰기 사이에 앱이 죽으면 앱 쪽 기록이 없어 '확인하지 못했어요' 가 뜨지 않고 결과가
+   * 조용히 사라졌다. 파일 두 개를 한 트랜잭션으로 묶을 수는 없으므로, 다음 실행이 두 기록을
+   * 맞춰 보고 **러너는 전달했다는데 앱 기록이 없는** 결과를 `uncertain` 으로 드러낸다
+   * (다시 보내지는 않는다 — at-most-once 는 그대로다).
+   *
+   * 중단(`stopped`)·중단된 재시작(`interrupted`)·진행 중(`running`·`queued`)은 러너가
+   * `delivered` 에 넣어도 전달한 것이 아니므로 제외한다.
+   */
+  private reconcileDeliveries(): void {
+    const runner = this.runnerFor()
+    if (!runner) return
+    const deliveredStatuses = new Set(['completed', 'limit', 'error', 'auth', 'unknown', 'rejected', 'violation'])
+    let records: ReturnType<JobRunner['records']>
+    try { records = runner.records() } catch { return }
+    const latest = new Map<string, (typeof records)[number]>()
+    for (const record of records) latest.set(record.rootJobId, record)
+    const store = this.store()
+    const orphans: string[] = []
+    for (const rootJobId of runner.deliveredRootJobs()) {
+      const record = latest.get(rootJobId)
+      if (!record || !deliveredStatuses.has(record.status)) continue
+      try { if (store.deliveryState(rootJobId) !== null) continue } catch { continue }
+      orphans.push(rootJobId)
+    }
+    if (!orphans.length) return
+    for (const rootJobId of orphans) {
+      const record = latest.get(rootJobId)!
+      try { store.adoptOrphan(rootJobId, record.root, record.owner.id) } catch (error) {
+        console.error('[knuaf] jobs', JSON.stringify({ type: 'delivery-reconcile', rootJobId, error: error instanceof Error ? error.message : String(error) }))
+        continue
+      }
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'delivery-reconcile', rootJobId, outcome: 'adopted-uncertain' }))
+    }
+  }
+  /**
    * 설치본의 `delegation.json` — 앱이 실제로 고른 스킬의 선언만 근거로 삼는다.
    * 설치기는 이 파일을 복사하지 않으므로(agent.ts 의 SKILL_METADATA) 설치본에 없으면
    * **지금 설치본과 같은 판임을 확인한** 묶음 원본에서 읽는다. 어느 쪽도 아니면 `null`.
@@ -824,12 +925,22 @@ export class ChatService {
         console.error('[knuaf] jobs', JSON.stringify({ type: 'collect-skip', id, error: error instanceof Error ? error.message : String(error) }))
       }
     }
-    if (queued) {
-      // 러너의 `skill()` 은 폴더 인자를 받지 않는 계약이다(jobs/types.ts). 남의 폴더에서
-      // 남아 있던 대기 주문을 이번 폴더의 스킬 경로로 실행하는 경우를 드러낸다.
+    // 이번에 새로 넣은 주문이 없어도 이 폴더의 대기 주문이 남아 있을 수 있다(재시작 뒤,
+    // 다른 폴더의 차례에서 미뤄진 주문). 그때도 이 폴더 차례에 실행한다.
+    const pendingForRoot = queued || runner.records().some(record => record.status === 'queued' && record.root === root)
+    if (pendingForRoot) {
+      // `runQueued(root)` 는 **이 폴더의** 대기 주문만 돈다. 러너의 `skill()` 은 폴더 인자를
+      // 받지 않는 계약이라, 남의 폴더 주문을 지금 돌리면 이번 폴더의 스킬 경로가 그 주문에
+      // 넘어간다(잘못된 스킬로 실행). 그 주문은 자기 폴더의 수집 차례까지 기다린다.
       const foreign = runner.records().filter(record => record.status === 'queued' && record.root !== root)
-      if (foreign.length) console.error('[knuaf] jobs', JSON.stringify({ type: 'drain-foreign-root', root, ids: foreign.map(record => record.spec.id) }))
-      await runner.runQueued()
+      if (foreign.length) {
+        const deferred = `${root}\0${foreign.map(record => record.spec.id).join(',')}`
+        if (!this.deferredNotified.has(deferred)) {
+          this.deferredNotified.add(deferred)
+          console.error('[knuaf] jobs', JSON.stringify({ type: 'defer-foreign-root', root, ids: foreign.map(record => record.spec.id) }))
+        }
+      }
+      await runner.runQueued(root)
     }
   }
   /** `owner.id` = `<provider>\0<canonical root>` — 재시작 뒤에도 메모리 지도에 기대지 않는다. */
@@ -871,6 +982,9 @@ export class ChatService {
     // 앱이 곧 종료된다. claim 은 이미 영속됐으므로 여기서 started 로 두면 다음 실행이
     // `uncertain` 으로 드러낸다 — 다시 보내지 않는다.
     if (this.shuttingDown) return
+    // 다른 경로(겹친 재구동·학생 중단)가 이미 이 결과를 닫았으면 넣지 않는다. 보류 목록에서
+    // 꺼낸 시점과 여기 사이에 상태가 바뀔 수 있으므로 **넣기 직전**에 한 번 더 확인한다.
+    if (!this.claimOpen(result.rootJobId)) return
     if (this.jobsClosing || this.busy(root)) { park(); return }
     let release: (() => void) | null = null
     let s: ChatSnapshot
@@ -890,6 +1004,7 @@ export class ChatService {
       s = this.snapshots.get(key)!
       const connection = this.connection(root, provider)
       const text = deliveryText(result, root)
+      const epoch = this.stopEpoch.get(this.key(root, provider)) ?? 0
       // 전달 차례도 `runs` 에 올린다 — 학생이 중단하면 `stopped` 로 표시되고
       // `close()` 가 이 차례가 끝나기를 기다린다. 주문은 줍지 않는다(수집은 `send` 몫).
       // async 본문은 첫 await 전까지 동기로 돌므로 `state='running'` 과 줄 넣기가
@@ -898,7 +1013,7 @@ export class ChatService {
         s.state = 'running'; s.error = undefined; s.authRequired = undefined
         s.messages.push({ id: randomUUID(), role: 'system', text, at: new Date().toISOString() })
         this.publish(s)
-        delivered = await this.deliveryTurn(s, connection, text, owner.sessionId)
+        delivered = await this.deliveryTurn(s, connection, text, owner.sessionId, result.rootJobId, epoch)
         if (s.state === 'running') s.state = 'idle'
         this.publish(s)
       })()
@@ -928,12 +1043,27 @@ export class ChatService {
     }
     try { store.finishDelivery(result.rootJobId) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'delivery-record', error: error instanceof Error ? error.message : String(error) })) }
   }
+  /**
+   * 이 전달 차례가 시작된 뒤 학생이 멈췄는가. 화면 상태와 중단 세대를 함께 본다 — `prepare()`
+   * 가 오래 걸리는 동안 `stop()` 이 상태를 'stopped' 로 바꾸고 세대도 올린다.
+   */
+  private deliveryCancelled(s: ChatSnapshot, epoch: number): boolean {
+    return s.state === 'stopped' || (this.stopEpoch.get(this.key(s.root, s.provider)) ?? 0) !== epoch
+  }
   /** 전달 차례가 결과를 대화에 넣었는가. 실패는 던지지 않고 false 로 돌려준다. */
-  private async deliveryTurn(s: ChatSnapshot, connection: AgentConnection, text: string, sessionId: string): Promise<boolean> {
+  private async deliveryTurn(s: ChatSnapshot, connection: AgentConnection, text: string, sessionId: string, rootJobId: string, epoch: number): Promise<boolean> {
     const key = this.key(s.root, s.provider)
     try {
       // send() 와 같은 계약 — 재개한 대화의 기본값 복귀를 전달 전에도 확인한다.
       await connection.prepare?.(sessionId)
+      // `prepare()` 는 네트워크를 타므로 그 사이 학생이 멈출 수 있다(시험 ⑨ 는 `run()` 에
+      // 들어간 뒤만 잡는다). 준비가 끝난 뒤에도 취소 상태면 새 차례를 열지 않는다 —
+      // 멈춘 대화에 결과를 밀어 넣으면 중단 표시가 실행으로 덮인다.
+      if (this.deliveryCancelled(s, epoch)) {
+        // 학생이 멈춘 것이면 중단으로, 업데이트·종료면 실패로 갈린다(아래 `!delivered` 처리).
+        console.error('[knuaf] jobs', JSON.stringify({ type: 'deliver-stopped', rootJobId, phase: 'after-prepare' }))
+        return false
+      }
       await connection.run(text, sessionId, {
         session: id => { if (id) s.sessionId = id; this.publish(s) },
         skill: () => { s.skillLoaded = true; this.publish(s) },
@@ -995,6 +1125,9 @@ export class ChatService {
   /** 학생이 중단: 진행 담당·열린 제안·본대화를 함께 멈춘다(설계 §3.5). */
   async stop(root: string, provider: Provider) {
     this.jobRoots.add(canonical(root))
+    // 이 폴더에서 이미 시작된 전달 차례가 `prepare()` 를 마치고 돌아와도 새 차례를 열지 않게 한다.
+    const stoppedKey = this.key(root, provider)
+    this.stopEpoch.set(stoppedKey, (this.stopEpoch.get(stoppedKey) ?? 0) + 1)
     try { await this.jobRunner?.stop(root) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: error instanceof Error ? error.message : String(error) })) }
     await this.stopMain(root, provider)
     // 아직 넣지 못한 결과도 학생의 중단을 따른다 — 잠시 뒤 타이머가 몰래 넣지 않는다.

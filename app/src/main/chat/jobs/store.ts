@@ -139,6 +139,39 @@ export class JobStore {
     return this.state.consent[consentKey(company, accountId)] === true
   }
 
+  /** 기록이 있으면 그 상태 — 재구동이 「이미 닫힌 claim」을 가려내는 데 쓴다. */
+  deliveryState(rootJobId: string): DeliveryRecord['state'] | null {
+    return this.state.deliveries[rootJobId]?.state ?? null
+  }
+
+  /**
+   * 러너는 자기 `delivered[]` 를 먼저 영속하고(jobs.ts `deliver`) 이 claim 을 부른다. 그 두
+   * 쓰기 **사이**에 앱이 죽으면 기록이 없어 다음 실행이 '확인하지 못함'을 띄우지 않고
+   * 결과가 조용히 사라진다. 두 파일을 한 트랜잭션으로 묶을 수 없으므로, 복구할 때 러너
+   * 기록과 대조해 **이 창에 걸린 것으로 보이는** 결과를 드러낸다.
+   *
+   * 근거는 "러너는 전달했다는데 이쪽 기록이 없다"뿐이다. 그러므로 이 대조는 알림만 하고
+   * 다시 보내지 않는다(at-most-once 계약 유지).
+   */
+  orphanedDeliveries(delivered: readonly string[]): string[] {
+    return delivered.filter(rootJobId => !(rootJobId in this.state.deliveries))
+  }
+
+  /**
+   * 창에 걸린 것으로 보이는 결과를 `uncertain` 으로 세운다. `notified` 는 세우지 않는다 —
+   * 다음 스냅샷이 '확인하지 못했어요' 줄로 한 번 드러내고 그때 닫는다(다시 보내지 않음).
+   */
+  adoptOrphan(rootJobId: string, root: string, ownerId: string): void {
+    if (!rootJobId || rootJobId in this.state.deliveries) return
+    this.state.deliveries[rootJobId] = {
+      state: 'uncertain',
+      root: (() => { try { return canonical(root) } catch { return root } })(),
+      ownerId,
+      at: new Date().toISOString()
+    }
+    this.persist()
+  }
+
   /**
    * At-most-once: `done`·`uncertain`·이미 진행 중이면 false — 다시 전달하지 않는다.
    *

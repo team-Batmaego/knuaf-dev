@@ -505,3 +505,230 @@ test('student stop discards a parked delivery instead of inserting it later', as
   expect((w.svc as any).pendingDeliveries.size).toBe(0)
   await w.svc.close()
 })
+
+// ---------------------------------------------------------------- 고침2 (FAIL 지적 잠금)
+
+/** 서비스 하나에 두 번째 폴더를 붙인다 — 폴더별 경로·스킬 차이를 재현하는 데 쓴다. */
+function branch(prefix: string): string {
+  const base = canonical(mkdtempSync(join(tmpdir(), prefix)))
+  const root = join(base, 'thesis')
+  mkdirSync(root); writeFileSync(join(root, 'project.json'), '{}')
+  mkdirSync(join(root, '.knuaf-gui', 'jobs'), { recursive: true })
+  return root
+}
+/** 한 폴더 대화에 들어온 담당 결과 줄. */
+function deliveriesAt(svc: ChatService, root: string): { id: string; role: string; text: string }[] {
+  return svc.snapshot(root, 'codex').messages.filter((m) => m.text.startsWith('자료 담당('))
+}
+
+// ⑭ 겹친 재구동 — 첫 회차가 A 를 넣는 동안 다른 회차가 B 를 넣는다. 첫 회차의 낡은 복사본이
+// B 를 다시 넣지 않는다(검토자 재현 `A,B,B`).
+test('an overlapped re-drive inserts each parked result exactly once', async () => {
+  const ud = mkdtempSync(join(tmpdir(), 'kd-wire-ud-'))
+  const skill = fakeSkill()
+  const rootB = branch('kd-wire-ov-')
+  let w: ReturnType<typeof wire>
+  const holds: Record<string, (() => void) | null> = { 'job-a': null, 'job-b': null }
+  let releaseA: () => void = () => {}
+  let aEntered = false
+  w = wire({
+    userData: ud, skill,
+    mainBehavior: async (text, events) => {
+      if (text.startsWith('자료 담당') && text.includes('job-a')) {
+        aEntered = true
+        await new Promise<void>((resolve) => { releaseA = resolve })
+      }
+      events.session('main-session')
+    },
+    jobBehavior: async (request, events) => {
+      events.session(`job-${request.jobId}`)
+      writeFileSync(join(request.cwd, 'result.md'), `${request.jobId} result`)
+      // 담당이 끝난 순간 그 폴더를 다른 작업이 쥐고 있게 만든다 → 전달이 보류된다.
+      holds[request.jobId] = w.svc.acquire(request.jobId === 'job-a' ? w.root : rootB)
+    }
+  })
+  for (const root of [w.root, rootB]) {
+    w.svc.approvePlan(root, planFromRow('both-high'))
+    w.svc.setConsent('codex', 'codex-account', true)
+  }
+  writeFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), JSON.stringify(order(w.root, 'job-a')))
+  writeFileSync(join(rootB, '.knuaf-gui', 'jobs', 'job-b.json'), JSON.stringify(order(rootB, 'job-b')))
+
+  await w.svc.send(w.root, 'codex', 'A', 'r-a')
+  await until(() => holds['job-a'] !== null)
+  await w.svc.send(rootB, 'codex', 'B', 'r-b')
+  await until(() => holds['job-b'] !== null)
+  await until(() => deliveryRecord(w.userData, 'job-a')?.state === 'started' && deliveryRecord(w.userData, 'job-b')?.state === 'started')
+  expect(deliveriesAt(w.svc, w.root)).toHaveLength(0)
+  expect(deliveriesAt(w.svc, rootB)).toHaveLength(0)
+
+  // ① A 만 풀어 첫 회차를 띄운다 — 이 회차는 목록 복사본에 B 도 들고 있다.
+  holds['job-a']!()
+  await until(() => aEntered)
+  // ② 그 회차가 A 를 넣는 동안 B 의 잠금도 푼다. 재구동은 한 번에 하나만 돌므로 B 는 아직
+  //    들어가지 않아야 한다 — 예전에는 둘째 회차가 곧바로 B 를 넣어 A 회차의 낡은 복사본과
+  //    겹쳤다(`A,B,B`).
+  holds['job-b']!()
+  await new Promise<void>((resolve) => setTimeout(resolve, 800))
+  expect(deliveryRecord(w.userData, 'job-b')?.state).toBe('started')
+  expect(deliveriesAt(w.svc, rootB)).toHaveLength(0)
+  // ③ 첫 회차를 풀면 낡은 복사본이 B 에 도달한다 — 다시 넣지 않아야 한다.
+  releaseA()
+  await until(() => deliveryRecord(w.userData, 'job-b')?.state === 'done')
+  await until(() => deliveryRecord(w.userData, 'job-a')?.state === 'done')
+  await new Promise<void>((resolve) => setTimeout(resolve, 2_500))
+  expect(deliveriesAt(w.svc, w.root)).toHaveLength(1)
+  expect(deliveriesAt(w.svc, rootB)).toHaveLength(1)
+  expect(deliveriesAt(w.svc, rootB)[0].text).toContain('job-b')
+  await w.svc.close()
+})
+
+// ⑮ 처리 중 취소 — 첫 회차가 A 를 넣는 동안 B 폴더가 중단되면, 낡은 복사본이 취소된 B 를 되살리지 않는다.
+test('a parked result cancelled mid-drive is never inserted afterwards', async () => {
+  const ud = mkdtempSync(join(tmpdir(), 'kd-wire-ud-'))
+  const skill = fakeSkill()
+  const rootB = branch('kd-wire-cancel-')
+  let w: ReturnType<typeof wire>
+  const holds: Record<string, (() => void) | null> = { 'job-a': null, 'job-b': null }
+  let releaseA: () => void = () => {}
+  let aEntered = false
+  w = wire({
+    userData: ud, skill,
+    mainBehavior: async (text, events) => {
+      if (text.startsWith('자료 담당') && text.includes('job-a')) {
+        aEntered = true
+        await new Promise<void>((resolve) => { releaseA = resolve })
+      }
+      events.session('main-session')
+    },
+    jobBehavior: async (request, events) => {
+      events.session(`job-${request.jobId}`)
+      writeFileSync(join(request.cwd, 'result.md'), `${request.jobId} result`)
+      holds[request.jobId] = w.svc.acquire(request.jobId === 'job-a' ? w.root : rootB)
+    }
+  })
+  for (const root of [w.root, rootB]) {
+    w.svc.approvePlan(root, planFromRow('both-high'))
+    w.svc.setConsent('codex', 'codex-account', true)
+  }
+  writeFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), JSON.stringify(order(w.root, 'job-a')))
+  writeFileSync(join(rootB, '.knuaf-gui', 'jobs', 'job-b.json'), JSON.stringify(order(rootB, 'job-b')))
+
+  await w.svc.send(w.root, 'codex', 'A 부탁', 'r-a')
+  await until(() => holds['job-a'] !== null)
+  await w.svc.send(rootB, 'codex', 'B 부탁', 'r-b')
+  await until(() => holds['job-b'] !== null)
+  await until(() => deliveryRecord(w.userData, 'job-a')?.state === 'started' && deliveryRecord(w.userData, 'job-b')?.state === 'started')
+
+  // 첫 회차를 띄우고(복사본에 B 포함) A 전달을 붙잡는다. B 의 잠금도 풀어 두어야 그 회차가
+  // B 까지 꺼낸다 — 잠겨 있으면 기준 판도 건너뛰어 이 경합이 드러나지 않는다.
+  holds['job-a']!()
+  await until(() => aEntered)
+  holds['job-b']!()
+  // B 폴더의 학생이 그 사이 중단한다 — 보류 B 는 닫힌다.
+  await w.svc.stop(rootB, 'codex')
+  expect(deliveryRecord(w.userData, 'job-b')?.state).toBe('done')
+  releaseA()
+  await until(() => deliveryRecord(w.userData, 'job-a')?.state === 'done')
+  await new Promise<void>((resolve) => setTimeout(resolve, 2_500))
+  expect(deliveriesAt(w.svc, rootB)).toHaveLength(0)
+  expect((w.svc as any).pendingDeliveries.size).toBe(0)
+  holds['job-b']?.()
+  await w.svc.close()
+})
+
+// ⑯ 준비 중 중단 — `prepare()` 를 기다리는 사이 멈추면, 준비가 끝나도 새 차례를 열지 않는다.
+test('a stop during prepare does not start the delivery run', async () => {
+  const w = wire({ orders: once('job-one') })
+  w.svc.approvePlan(w.root, planFromRow('both-high'))
+  w.svc.setConsent('codex', 'codex-account', true)
+  const conn = (w.svc as any).connection(w.root, 'codex')
+  const origPrepare = conn.prepare
+  const origStop = conn.stop
+  let releasePrepare: () => void = () => {}
+  let prepares = 0
+  let prepareEntered = false
+  conn.prepare = async (...args: any[]) => {
+    if (++prepares === 2) { prepareEntered = true; await new Promise<void>((resolve) => { releasePrepare = resolve }); return }
+    return origPrepare?.(...args)
+  }
+  // 학생 중단은 러너 `stop` → `draining` 을 기다린다. 그 드레인이 이 `prepare` 에 걸려 있으므로
+  // 중단 쪽에서 풀어 줘야 교착이 아니다(실제 연결도 stop 이 대기 중 호출을 정리한다).
+  conn.stop = async () => { releasePrepare(); return origStop() }
+  await w.svc.send(w.root, 'codex', '부탁', 'req-1')
+  await until(() => prepareEntered)
+  await w.svc.stop(w.root, 'codex')
+  await new Promise<void>((resolve) => setTimeout(resolve, 400))
+  // 본대화 차례 하나만 돌았다 — 전달 차례는 `run()` 에 들어가지 않았다.
+  expect(w.mainRuns).toEqual(['부탁'])
+  const s = w.svc.snapshot(w.root, 'codex')
+  expect(s.state).toBe('stopped')
+  expect(s.error).toBeUndefined()
+  await w.svc.close()
+})
+
+// ⑰ 남의 폴더 대기 주문 — 이번 폴더의 skill 경로로 실행하지 않고, 자기 폴더 차례까지 기다린다.
+test('a queued order from another folder waits for its own folder turn', async () => {
+  const ud = mkdtempSync(join(tmpdir(), 'kd-wire-ud-'))
+  const skill = fakeSkill()
+  const rootB = branch('kd-wire-foreign-')
+  let n = 0
+  const w = wire({ userData: ud, skill, orders: (root, text) => (text.startsWith('자료 담당') ? [] : [order(root, `job-a${++n}`)]) })
+  for (const root of [w.root, rootB]) {
+    w.svc.approvePlan(root, planFromRow('both-high'))
+    w.svc.setConsent('codex', 'codex-account', true)
+  }
+  // 첫 수집이 끝나면 러너의 `skill()` 이 열린다 — 그 뒤 폴더 B 의 대기 주문을 직접 넣는다
+  // (재시작 뒤 큐에 남은 주문과 같은 상태).
+  await w.svc.send(w.root, 'codex', 'A 처음', 'r-a1')
+  await until(() => w.jobRuns.includes('job-a1') && !w.svc.busy(w.root))
+  const runner = (w.svc as any).runnerFor()
+  runner.enqueue(rootB, order(rootB, 'job-b') as any,
+    { id: `codex\0${canonical(rootB)}`, sessionId: 'b-session', company: 'codex' }, 'b-author')
+  expect(runner.records().find((r: any) => r.spec.id === 'job-b').status).toBe('queued')
+
+  await w.svc.send(w.root, 'codex', 'A 다음', 'r-a2')
+  await until(() => w.jobRuns.includes('job-a2'))
+  await new Promise<void>((resolve) => setTimeout(resolve, 700))
+  // B 는 A 폴더의 수집에서 실행되지 않았다 — 자기 폴더 차례를 기다린다.
+  expect(w.jobRuns).not.toContain('job-b')
+  expect(statusOf(rootB, 'job-b')).toBe('queued')
+
+  await w.svc.send(rootB, 'codex', 'B 부탁', 'r-b')
+  await until(() => w.jobRuns.includes('job-b'))
+  await until(() => statusOf(rootB, 'job-b') === 'completed')
+  await w.svc.close()
+})
+
+// ⑱ 크래시 창 복구 — 러너가 전달했다고 기록했는데 앱 기록이 없으면 복구 때 '확인하지 못함'으로 드러낸다.
+test('recovery surfaces a delivery the runner recorded but the app never claimed', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-wire-crash-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root); writeFileSync(join(root, 'project.json'), '{"original":true}')
+  mkdirSync(join(root, '.knuaf-gui', 'jobs'), { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-wire-ud-'))
+  mkdirSync(join(userData, 'jobs'), { recursive: true })
+  const ownerId = `codex\0${canonical(root)}`
+  // 러너: 결과를 `delivered` 에 넣고 영속한 뒤, 앱 claim 전에 프로세스가 죽은 상태.
+  writeFileSync(join(userData, 'jobs', 'jobrunner.json'), JSON.stringify({
+    version: 1, proposals: [], delivered: ['job-crash'],
+    jobs: [{
+      rootJobId: 'job-crash', root: canonical(root), owner: { id: ownerId, sessionId: 'main-session', company: 'codex' },
+      authorSessionId: 'author', status: 'completed', contentHash: 'h', outputs: [], createdAt: '2026-11-09T00:00:00.000Z',
+      spec: { schema: 1, id: 'job-crash', lane: 'research', task: 't', inputs: [], outputs: ['result.md'],
+        contractVersion: 'role-v1', company: 'codex', model: 'gpt-6.1-astra', effort: null }
+    }]
+  }))
+  writeFileSync(join(userData, 'jobs', 'store.json'), JSON.stringify({ version: 1, approvals: {}, consent: {}, deliveries: {} }))
+
+  const w = wire({ root, userData })
+  const lines = w.svc.snapshot(root, 'codex').messages.filter((m) => m.text.includes('확인하지 못했어요'))
+  expect(lines).toHaveLength(1)
+  expect(deliveryRecord(userData, 'job-crash')?.state).toBe('uncertain')
+  // 다시 보내지 않는다 — 본대화·담당 차례 모두 0.
+  expect(w.mainRuns).toEqual([])
+  expect(w.jobRuns).toEqual([])
+  // 다음 스냅샷은 같은 줄을 또 넣지 않는다.
+  expect(w.svc.snapshot(root, 'codex').messages.filter((m) => m.text.includes('확인하지 못했어요'))).toHaveLength(1)
+  await w.svc.close()
+})

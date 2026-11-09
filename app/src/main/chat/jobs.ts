@@ -31,6 +31,7 @@ export class JobRunner {
   private approvals = new Map<string, Approval>()
   private active: { record: JobRecord; connection: JobConnection | null; stopped: boolean; failure?: 'limit' | 'unknown' | 'auth' } | null = null
   private draining: Promise<void> | null = null
+  private drainScopes = new Set<string>()
   private generations = new Map<string, number>()
   private ownerTransitions = new Map<string, object>()
   private pendingDeliveries = new Set<JobRecord>()
@@ -111,13 +112,29 @@ export class JobRunner {
   private update(record: JobRecord, status: JobStatus, reason?: string): void {
     record.status = status; record.reason = reason; this.persist(); this.publish(record)
   }
-  runQueued(): Promise<void> {
-    if (!this.draining) this.draining = this.drain().finally(() => { this.draining = null })
-    return this.draining
+  /**
+   * 예약된 주문을 실행한다. `root` 를 주면 **그 폴더의** 주문만 돈다 — 러너의 `skill()` 이
+   * 폴더 인자를 받지 않는 계약이라, 남의 폴더 대기 주문을 이번 수집 폴더의 스킬 경로로
+   * 실행하지 않으려면 실행 자체를 폴더 단위로 가둬야 한다. 그 주문은 자기 폴더의 수집
+   * 차례가 올 때 실행된다. 인자를 주지 않으면 예전처럼 전부 돈다(러너 단독 시험용).
+   */
+  runQueued(root?: string): Promise<void> {
+    const scope = root ? canonical(root) : ''
+    // 같은 폴더의 재요청은 이미 예약·진행 중인 회차에 합류한다.
+    if (this.drainScopes.has(scope)) return this.draining ?? Promise.resolve()
+    const run = (this.draining ?? Promise.resolve()).catch(() => {}).then(() => {
+      this.drainScopes.add(scope)
+      return this.drain(scope || null).finally(() => { this.drainScopes.delete(scope) })
+    })
+    this.draining = run
+    void run.catch(() => {}).finally(() => { if (this.draining === run) this.draining = null })
+    return run
   }
-  private async drain(): Promise<void> {
+  /** 러너가 이미 전달 처리한 결과 번호 — 앱 저장소 기록과 대조하는 복구 점검이 쓴다. */
+  deliveredRootJobs(): string[] { return [...this.state.delivered] }
+  private async drain(scope: string | null): Promise<void> {
     for (;;) {
-      const next = this.state.jobs.find(j => j.status === 'queued')
+      const next = this.state.jobs.find(j => j.status === 'queued' && (scope === null || j.root === scope))
       if (!next) return
       await this.execute(next)
     }
