@@ -353,6 +353,9 @@ def test_paper_generate_passes_body_through(sidecar, tmp_path, publication_skill
     )
     (root / "spec.json").write_text(_json.dumps({
         "writing_year": 2026,
+        # The student's confirmed start of farming; the skill refuses a spec
+        # without it (v0.4.5+) instead of assuming writing_year + 1.
+        "start_year": 2027,
         "school_profile": {"mode": "school", "layout": "forms_1_to_4",
                            "title": "시험 논문", "author": "합성 작성자",
                            "department": "특용작물학과", "school": "한국농수산대학교"},
