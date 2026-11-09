@@ -1,16 +1,28 @@
 """audit H4/H5/H6: inspect map derives from the inventory, clear reports mapped
 cells that do not exist, and print_titles lands inside <definedNames>."""
 import json
+import shutil
 import zipfile
 
 import pytest
 
-from conftest import bound_test_context, parse_json, run_script
+from conftest import SCRIPTS, bound_test_context, parse_json, run_script
 
 openpyxl = pytest.importorskip("openpyxl")
 
 SHEET_A = "1. 입력"
 SHEET_B = "계획 시트"
+
+# `clear` only accepts a workbook declared as, and supported by, the bound major.
+# The shipped school form is the one real 17-sheet form; the blank-template
+# guarantee is locked against it rather than against a synthetic stand-in.
+SCHOOL_FORM = SCRIPTS.parent / "assets" / "templates" / "finance-template.xlsx"
+SCHOOL_PROFILE = "school_17_sheet_v1"
+FORM_BASE = "1. 기초재무상태조사"        # formula E41=SUM(E39:F39), merge E39:F39
+FORM_MEMO = "참고1. 모델농장분석"       # hidden reference sheet
+FORM_LITERALS = {(FORM_BASE, "C39"): "합성 계좌",   # label cell next to cash row
+                 (FORM_BASE, "E39"): 1234,          # merged anchor, feeds E41
+                 (FORM_MEMO, "C5"): "합성 농장"}     # value on the hidden sheet
 
 
 def build_workbook(path):
@@ -51,11 +63,15 @@ def clear(src, map_path, out, receipt, *extra):
                       "--major", "specialty_crops", *extra)
 
 
-def review_map(path, cells):
+def review_map(path, cells, *, declared_profile=None):
     """A synthetic author's explicit review, never automatic approval of inventory candidates."""
     data = json.loads(path.read_text(encoding="utf-8"))
     data["layout"]["mapOrigin"] = "reviewed_custom"
     data["mapStatus"] = "ok"
+    if declared_profile is not None:
+        # A reviewer declares which school form the map covers; the runtime
+        # still re-reads the source and re-checks the form itself.
+        data["workbook_profile"] = declared_profile
     for entry in data["entries"]:
         if (entry["sheet"], entry["range"]) in cells:
             entry.update(action="clear", explicit=True, semanticField="synthetic.reviewed_input",
@@ -64,6 +80,23 @@ def review_map(path, cells):
 
 
 REVIEWED_CELLS = {(SHEET_A, "C1"), (SHEET_A, "C2"), (SHEET_B, "B2"), (SHEET_B, "C2")}
+
+
+@pytest.fixture
+def school_source(tmp_path):
+    """The shipped school form with synthetic literals standing in for student data.
+
+    The bundled form is a blank template, so a literal has to be written before
+    it can be cleared.  Nothing here is real student data.
+    """
+    assert SCHOOL_FORM.is_file(), f"missing shipped school form: {SCHOOL_FORM}"
+    src = tmp_path / "원본 계획.xlsx"
+    shutil.copyfile(SCHOOL_FORM, src)
+    wb = openpyxl.load_workbook(src)
+    for (sheet, cell), value in FORM_LITERALS.items():
+        wb[sheet][cell] = value
+    wb.save(src)
+    return src
 
 
 def test_inspect_derives_entries_from_inventory(source, tmp_path):
@@ -91,29 +124,43 @@ def test_inspect_derives_entries_from_inventory(source, tmp_path):
         assert by_cell[key]["action"] == "preserve", key
 
 
-def test_inspect_then_clear_blanks_literals_and_keeps_formula(source, tmp_path):
+def assert_receipt_profile(rec):
+    """A runtime that records the workbook profile must record the school form.
+
+    Older skill versions omit the field entirely; the clear itself is still
+    gated by the major contract there, so nothing is lost by skipping it.
+    """
+    if "workbook_profile" in rec:
+        assert rec["workbook_profile"] == SCHOOL_PROFILE
+
+
+def test_inspect_then_clear_blanks_literals_and_keeps_formula(school_source, tmp_path):
     out_map = tmp_path / "map.json"
-    assert inspect(source, out_map).returncode == 0
-    review_map(out_map, REVIEWED_CELLS)
+    assert inspect(school_source, out_map).returncode == 0
+    review_map(out_map, set(FORM_LITERALS), declared_profile=SCHOOL_PROFILE)
+    merged_before = {str(m) for m in openpyxl.load_workbook(school_source)[FORM_BASE].merged_cells.ranges}
     out = tmp_path / "blank.xlsx"
     receipt = tmp_path / "receipt.json"
-    r = clear(source, out_map, out, receipt)
-    assert r.returncode == 0, r.stderr
+    r = clear(school_source, out_map, out, receipt)
+    assert r.returncode == 0, r.stdout + r.stderr
     summary = parse_json(r.stdout)
-    assert summary["cleared"] >= 4
+    assert summary["cleared"] == len(FORM_LITERALS)
     assert summary["missing"] == 0
+    assert summary["status"] == "blank_template"
     wb = openpyxl.load_workbook(out)
-    ws, ws2 = wb[SHEET_A], wb[SHEET_B]
-    assert ws["C1"].value is None and ws["C2"].value is None
-    assert ws2["B2"].value is None and ws2["C2"].value is None
-    assert ws["C3"].value == "=C1*2"
-    assert ws["B1"].value == "면적(평):" and ws["A1"].value == "기초 정보"
-    assert ws["B5"].value == "병합 제목"
+    ws = wb[FORM_BASE]
+    for (sheet, cell) in FORM_LITERALS:
+        assert wb[sheet][cell].value is None, (sheet, cell)
+    assert ws["E41"].value == "=SUM(E39:F39)"
+    assert {str(m) for m in ws.merged_cells.ranges} == merged_before
+    assert ws["B2"].value == "1. 기초 재무상태 조사"
+    assert wb.sheetnames[0] == "목록" and len(wb.sheetnames) == 17
     rec = json.loads(receipt.read_text(encoding="utf-8"))
     assert rec["missingCells"] == []
-    assert rec["formulaCellsProtected"] == 0
+    assert {e["cell"] for e in rec["cleared"]} == {cell for _, cell in FORM_LITERALS}
+    assert_receipt_profile(rec)
     # source untouched
-    assert openpyxl.load_workbook(source)[SHEET_A]["C1"].value == 600
+    assert openpyxl.load_workbook(school_source)[FORM_BASE]["E39"].value == 1234
 
 
 def test_unknown_layout_never_approves_the_legacy_map(source, tmp_path):
@@ -126,12 +173,13 @@ def test_unknown_layout_never_approves_the_legacy_map(source, tmp_path):
     assert not out.exists() and not receipt.exists()
 
 
-def _map_with_extra_cell(source, tmp_path, extra_cell="Z99"):
+def _map_with_extra_cell(school_source, tmp_path, extra_cell="Z99"):
+    """A reviewed school-form map plus one mapped cell the source lacks."""
     out_map = tmp_path / "map.json"
-    assert inspect(source, out_map).returncode == 0
-    review_map(out_map, REVIEWED_CELLS)
+    assert inspect(school_source, out_map).returncode == 0
+    review_map(out_map, set(FORM_LITERALS), declared_profile=SCHOOL_PROFILE)
     data = json.loads(out_map.read_text(encoding="utf-8"))
-    data["entries"].append({"sheet": SHEET_B, "range": extra_cell, "semanticField": "ghost",
+    data["entries"].append({"sheet": FORM_MEMO, "range": extra_cell, "semanticField": "ghost",
                             "role": "input_candidate", "reason": "test", "action": "clear",
                             "explicit": True})
     edited = tmp_path / "map-missing.json"
@@ -139,36 +187,37 @@ def _map_with_extra_cell(source, tmp_path, extra_cell="Z99"):
     return edited
 
 
-def test_clear_fails_closed_on_mapped_cell_missing_from_source(source, tmp_path):
-    map_path = _map_with_extra_cell(source, tmp_path)
+def test_clear_fails_closed_on_mapped_cell_missing_from_source(school_source, tmp_path):
+    map_path = _map_with_extra_cell(school_source, tmp_path)
     out = tmp_path / "blank.xlsx"
     receipt = tmp_path / "receipt.json"
-    r = clear(source, map_path, out, receipt)
+    r = clear(school_source, map_path, out, receipt)
     assert r.returncode == 2
+    assert "missing from source" in r.stderr
     assert not out.exists() and not receipt.exists()
 
 
-def test_clear_allow_missing_reports_in_receipt(source, tmp_path):
-    map_path = _map_with_extra_cell(source, tmp_path)
+def test_clear_allow_missing_reports_in_receipt(school_source, tmp_path):
+    map_path = _map_with_extra_cell(school_source, tmp_path)
     out = tmp_path / "blank.xlsx"
     receipt = tmp_path / "receipt.json"
-    r = clear(source, map_path, out, receipt, "--allow-missing")
-    assert r.returncode == 0, r.stderr
+    r = clear(school_source, map_path, out, receipt, "--allow-missing")
+    assert r.returncode == 0, r.stdout + r.stderr
     summary = parse_json(r.stdout)
     assert summary["missing"] == 1
     assert summary["status"] == "partial"
     rec = json.loads(receipt.read_text(encoding="utf-8"))
-    assert rec["missingCells"] == [{"sheet": SHEET_B, "cell": "Z99"}]
+    assert rec["missingCells"] == [{"sheet": FORM_MEMO, "cell": "Z99"}]
     assert rec["output"]["status"] == "partial"
 
 
-def test_clear_refuses_to_overwrite_output(source, tmp_path):
+def test_clear_refuses_to_overwrite_output(school_source, tmp_path):
     out_map = tmp_path / "map.json"
-    assert inspect(source, out_map).returncode == 0
-    review_map(out_map, REVIEWED_CELLS)
+    assert inspect(school_source, out_map).returncode == 0
+    review_map(out_map, set(FORM_LITERALS), declared_profile=SCHOOL_PROFILE)
     out = tmp_path / "blank.xlsx"
     out.write_bytes(b"x")
-    r = clear(source, out_map, out, tmp_path / "receipt.json")
+    r = clear(school_source, out_map, out, tmp_path / "receipt.json")
     assert r.returncode == 2
     assert out.read_bytes() == b"x"
 
@@ -314,29 +363,29 @@ def test_inspect_keeps_exact_sheet_names_and_lists_hidden(structured_source, tmp
     assert {e["sheet"] for e in data["entries"]} == {SHEET_SPACE, SHEET_HIDDEN}
 
 
-def test_clear_preserves_structure_and_empties_literals(structured_source, tmp_path):
+def test_clear_preserves_structure_and_empties_literals(school_source, tmp_path):
     out_map = tmp_path / "map.json"
-    assert inspect(structured_source, out_map).returncode == 0
-    review_map(out_map, {(SHEET_SPACE, "B2"), (SHEET_SPACE, "B3"), (SHEET_HIDDEN, "B1")})
+    assert inspect(school_source, out_map).returncode == 0
+    review_map(out_map, set(FORM_LITERALS), declared_profile=SCHOOL_PROFILE)
     out = tmp_path / "blank.xlsx"
     receipt = tmp_path / "receipt.json"
-    r = clear(structured_source, out_map, out, receipt)
-    assert r.returncode == 0, r.stderr
+    r = clear(school_source, out_map, out, receipt)
+    assert r.returncode == 0, r.stdout + r.stderr
     summary = parse_json(r.stdout)
     assert summary["missing"] == 0
-    assert summary["cleared"] >= 3
-    assert_structure_preserved(structured_source, out)
+    assert summary["cleared"] == len(FORM_LITERALS)
+    # Every sheet name (including the leading-space and trailing-space names),
+    # its order, hidden state, merged ranges and every formula survive.
+    assert_structure_preserved(school_source, out)
     wb = openpyxl.load_workbook(out)
-    ws, hidden = wb[SHEET_SPACE], wb[SHEET_HIDDEN]
-    assert hidden.sheet_state == "hidden"
-    assert ws["B2"].value is None and ws["B3"].value is None
-    assert hidden["B1"].value is None
-    assert ws["B4"].value == "=B2*B3" and hidden["B2"].value == "=B1*10"
-    assert ws["A1"].value == "판매 계획" and ws["A2"].value == "수량:"
-    assert {str(m) for m in ws.merged_cells.ranges} == {"A1:C1"}
-    assert {str(m) for m in hidden.merged_cells.ranges} == {"A4:B4"}
+    assert wb[FORM_MEMO].sheet_state == "hidden"
+    for (sheet, cell) in FORM_LITERALS:
+        assert wb[sheet][cell].value is None, (sheet, cell)
+    assert wb[FORM_BASE]["E41"].value == "=SUM(E39:F39)"
+    assert "10. 감가상각비계획 " in wb.sheetnames and " 5. 판매계획" in wb.sheetnames
     rec = json.loads(receipt.read_text(encoding="utf-8"))
     assert rec["missingCells"] == []
+    assert_receipt_profile(rec)
 
 
 def test_assert_structure_preserved_detects_drift(structured_source, tmp_path):

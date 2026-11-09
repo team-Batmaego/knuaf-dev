@@ -89,7 +89,7 @@ def test_paper_runs_from_the_project_dir(project, tmp_path):
     the fault is in the sidecar's runner rather than in gg.py itself.
     """
     (project / "paper.json").write_text(
-        json.dumps({"title": "T", "writing_year": 2026,
+        json.dumps({"title": "T", "writing_year": 2026, "start_year": 2027,
                     "school_profile": {"school": "Synthetic school", "department": "Synthetic department"}}),
         encoding="utf-8",
     )

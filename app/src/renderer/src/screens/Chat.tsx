@@ -629,8 +629,14 @@ export function Chat() {
    *  - 한 턴의 중간말: 그 턴의 마지막 assistant 말만 최종 답으로 펴고 앞말은 `ProgressFold` 한 줄로 묶는다.
    *  - 지금 질문 카드가 읽는 말: 카드가 이미 보여 주는 줄(보기 목록·번호 칸)을 원문에서 접는다.
    * 어느 축이든 **글자를 지우지 않는다** — 펼치면 원문 그대로다.
+   *
+   * 카드가 **실제로 보일 때만** 원문을 접는다. 형식 질문에서 '자유롭게 답하기'를 누르면 카드는 숨고
+   * 입력칸이 뜨는데(`freeForm`), 그때까지 접어 두면 학생은 무엇에 답해야 하는지 '여기에 펼치기'를
+   * 눌러야 볼 수 있다. 접힘은 카드가 보여 주는 글의 대역이므로 카드와 함께 사라져야 한다(검토 wFJ:p1).
    */
-  const cardId = zone.kind === 'question' || zone.kind === 'form' ? zone.messageId : null
+  const cardId = zone.kind === 'question' ? zone.messageId
+    : zone.kind === 'form' && !freeForm ? zone.messageId
+      : null
   /** 여러 칸 질문 카드는 `parseQuestionForm` 이 읽은 원문의 머리 줄~마지막 칸 줄을 이미 보여 준다. */
   const formFold = zone.kind === 'form'
     ? (() => {
