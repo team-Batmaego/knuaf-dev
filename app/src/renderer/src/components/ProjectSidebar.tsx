@@ -15,7 +15,7 @@ export function ProjectSidebar() {
   const start = (): void => {
     if (busy || loading) return
     useProject.setState({
-      root: null, hasProject: false, status: null, peek: null, sidecar: null, depsReady: null,
+      root: null, hasProject: false, status: null, peek: null, sidecar: null,
       newProjectSeq: useProject.getState().newProjectSeq + 1,
       sections: null, materials: null, artifacts: null, buildTree: null, projectLoad: null,
       events: [], focusedSection: null, paneView: 'chat', error: null, openFailure: null, retryFailed: null

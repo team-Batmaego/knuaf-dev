@@ -129,7 +129,6 @@ export function Artifacts() {
       )}
       {listState === 'failed' && (
         <Feedback kind="error" title={ARTIFACTS.listFailed.title} body={ARTIFACTS.listFailed.body}
-          details={artifactsError ? <code>{artifactsError}</code> : undefined}
           actions={<><button onClick={() => void loadLists()}>{ARTIFACTS.retry}</button><button onClick={() => void openFolder()}>{ARTIFACTS.revealFolder}</button></>} />
       )}
       {listState === 'empty' && <EmptyState icon="box" title={EMPTY.artifacts.title} body={EMPTY.artifacts.body} />}

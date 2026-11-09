@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import type { AppInfo } from '../../../shared/types'
 import { useChat, chatProvider, resolveChatMode, type ChatMode } from '../store/chat'
@@ -13,9 +13,20 @@ import { CREDIT, HELPER, PRIVACY_NOTE, SETTINGS, describeError, type DescribedEr
 import { useShallow } from 'zustand/react/shallow'
 import { APP_NAME } from '../../../shared/name'
 import { UpdateSettings } from '../components/Updates'
+import { settingsSectionForFocus, type SettingsSection } from '../copy-menus'
+
+const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
+  { id: 'helper', label: '도우미 연결' },
+  { id: 'folder', label: '폴더' },
+  { id: 'trouble', label: '문제 해결' },
+  { id: 'tools', label: '고급 도구' },
+  { id: 'python', label: 'Python 실행기' },
+  { id: 'info', label: '앱 정보' }
+]
 
 export function SettingsScreen() {
   const { root, settings, loadSettings, sidecar, refreshSidecar, logs, clearLogs, openHelper, open, loading, settingsFocus, clearSettingsFocus } = useProject(useShallow((s) => ({ root: s.root, settings: s.settings, loadSettings: s.loadSettings, sidecar: s.sidecar, refreshSidecar: s.refreshSidecar, logs: s.logs, clearLogs: s.clearLogs, openHelper: s.openHelper, open: s.open, loading: s.loading, settingsFocus: s.settingsFocus, clearSettingsFocus: s.clearSettingsFocus })))
+  const [section, setSection] = useState<SettingsSection>(() => settingsSectionForFocus(settingsFocus))
   const setMode = useChat((s) => s.setMode)
   const [override, setOverride] = useState('')
   const [restarting, setRestarting] = useState(false)
@@ -31,12 +42,14 @@ export function SettingsScreen() {
   useEffect(() => { void window.knuaf.appInfo().then(setInfo) }, [])
   useEffect(() => { setOverride(settings?.python_override ?? ''); void refreshSidecar() }, [settings])
   /** Failure deep links: open the matching 펼침, then clear so it behaves like a normal disclosure. */
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!settingsFocus) return
+    const target = settingsSectionForFocus(settingsFocus)
+    if (section !== target) { setSection(target); return }
     const el = body.current?.querySelector<HTMLDetailsElement>(`details[data-preset="${CSS.escape(settingsFocus)}"]`)
     if (el) { el.open = true; el.scrollIntoView({ block: 'start' }) }
     clearSettingsFocus()
-  }, [settingsFocus])
+  }, [settingsFocus, section, clearSettingsFocus])
   const save = async () => {
     setRestarting(true); setRestartErr(null)
     try {
@@ -74,8 +87,15 @@ export function SettingsScreen() {
   const pickFolder = async () => { const d = await window.knuaf.pickFolder(); if (d) void tryOpen(d) }
   const base = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
   return (
-    <div ref={body}>
-      <section className="card">
+    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
+      <nav aria-label={SETTINGS.title} style={{ width: 196, flex: '0 0 196px', overflowY: 'auto', padding: 10, background: 'var(--bg-2)' }}>
+        {SETTINGS_SECTIONS.map(({ id, label }) => <button key={id} type="button" aria-current={section === id ? 'page' : undefined}
+          onClick={() => setSection(id)} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8,
+            border: section === id ? 'var(--hairline) solid var(--line)' : 'var(--hairline) solid transparent',
+            background: section === id ? 'var(--panel)' : 'transparent', fontWeight: section === id ? 600 : 400 }}>{label}</button>)}
+      </nav>
+      <div ref={body} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '0 16px' }}>
+      <section className="card" hidden={section !== 'folder'}>
         <div className="card-head"><h2>{SETTINGS.folderTitle}</h2></div>
         {root && <div className="row"><strong>{base(root)}</strong><span className="caption">{root}</span></div>}
         {openErr && (
@@ -115,7 +135,7 @@ export function SettingsScreen() {
         </Disclosure>
       </section>
 
-      <section className="card">
+      <section className="card" hidden={section !== 'helper'}>
         <div className="card-head"><h2>{SETTINGS.helperTitle}</h2></div>
         {/* 내 논문은 항상 앱 채팅 — 여기서 고르는 것은 어느 도우미인지뿐. */}
         <div className="caption" style={{ marginBottom: 'var(--sp-1)' }}>{SETTINGS.helperChatWhich}</div>
@@ -142,17 +162,17 @@ export function SettingsScreen() {
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}><button onClick={() => void openHelper()}>{HELPER.button}</button></div>
       </section>
 
-      <section className="card">
+      <section className="card" hidden={section !== 'trouble'}>
         <div className="card-head"><h2>{SETTINGS.troubleTitle}</h2></div>
         <TroubleshootSections />
       </section>
 
-      <section className="card">
+      <section className="card" hidden={section !== 'tools'}>
         <div className="card-head"><h2>{SETTINGS.toolsTitle}</h2><span className="caption">{SETTINGS.toolsNote}</span></div>
         <OutputsTools />
       </section>
 
-      <section className="card">
+      <section className="card" hidden={section !== 'python'}>
         <div className="card-head"><h2>{SETTINGS.pythonTitle}</h2>{sidecar && <Badge label={sidecar.kind} />}</div>
         <div className="caption">현재 <code>{sidecar?.python ?? '—'}</code></div>
         {/* 상시 버튼(D8) — 오류 카드가 없어도 여기서 앱 전용 Python을 준비할 수 있다. */}
@@ -168,7 +188,7 @@ export function SettingsScreen() {
         </Disclosure>
       </section>
 
-      <section className="card">
+      <section className="card" hidden={section !== 'info'}>
         <div className="card-head"><h2>{SETTINGS.appInfoTitle}</h2>{info && <Badge label={`버전 ${info.version}`} />}</div>
         <UpdateSettings />
         <div className="caption">{APP_NAME} · 초기 베타{info ? ` · Electron ${info.electron} · ${info.packaged ? '설치판' : '개발 모드'}` : ''}</div>
@@ -181,6 +201,7 @@ export function SettingsScreen() {
         </div>}
         <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>{PRIVACY_NOTE}</p>
       </section>
+      </div>
 
       <HelperSheet />
     </div>

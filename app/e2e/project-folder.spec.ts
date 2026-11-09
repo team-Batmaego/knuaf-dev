@@ -82,6 +82,7 @@ test('Windows first-open write failure explains the current action and lets the 
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [paths[next++]], bookmarks: [] })) as typeof dialog.showOpenDialog
     }, [notFolder, otherRoot])
     await electronApp.evaluate(() => Object.defineProperty(process, 'platform', { value: 'win32', configurable: true }))
+    await page.waitForSelector('.project-sidebar', { state: 'visible', timeout: 30_000 })
     await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-folder' }))
     const gate = page.locator('dialog[data-screen="first-project-gate"]')
     await expect(gate).toContainText('지금 하려던 일')
@@ -157,14 +158,17 @@ for (const route of ['sidebar add', 'sidebar recent', 'titlebar create', 'titleb
       await electronApp.evaluate(({ dialog }, selected) => {
         dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [selected], bookmarks: [] })) as typeof dialog.showOpenDialog
       }, root)
+      await page.waitForSelector('.project-sidebar', { state: 'visible', timeout: 30_000 })
       if (route === 'sidebar add') await page.getByRole('button', { name: '+ 논문 추가' }).click()
       else if (route === 'sidebar recent') await page.locator('.project-sidebar button[title]').first().click()
       else if (route === 'titlebar create' || route === 'titlebar other') {
         await page.getByTitle('다른 논문 열기').click()
-        await page.getByText(route === 'titlebar create' ? '새 폴더 만들기' : '다른 폴더 열기…', { exact: true }).click()
+        const menu = page.locator('.titlebar .popover')
+        await expect(menu).toBeVisible()
+        await menu.getByRole('button', { name: route === 'titlebar create' ? '새 폴더 만들기' : '다른 폴더 열기…', exact: true }).click()
       } else if (route === 'titlebar recent') {
         await page.getByTitle('다른 논문 열기').click()
-        await page.locator('.popover').getByRole('button', { name: 'first-folder' }).click()
+        await page.locator('.titlebar .popover').getByRole('button', { name: 'first-folder' }).click()
       } else if (route === 'app menu open') {
         await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-folder' }))
       } else {

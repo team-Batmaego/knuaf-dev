@@ -1,6 +1,6 @@
 import { create } from 'zustand'
-import { CLAUDE_AUTH_COPY } from '../../../shared/copy'
-import { isPreparing, waitPrepared } from './prep'
+import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY } from '../../../shared/copy'
+import { isPreparing, preparationFailureTitle, usePrep, waitPrepared } from './prep'
 import { beginLoginAttempt, connInfoOf, loginAttemptLive, startPoll, stopPoll, useConnect, type ConnState } from './connect'
 import type { ChatModelInfo, ChatModels, ChatSnapshot, ConnectionStatus, ModelChoice, Provider } from '../../../shared/chat'
 
@@ -302,15 +302,17 @@ export const useChat = create<ChatState>((set, get) => ({
       // 폴더 이동으로 전송이 취소돼도 원래 논문의 보관본은 이미 메인에 있다.
       if (left()) return false
     }
-    // 폴더 준비 중이면 main 이 전송을 거절한다 — 거절당하지 않고 끝날 때까지 기다렸다 보낸다.
-    // 그 사이 다른 대화로 떠나면 보내지 않는다. 잠금·진행 표시는 새 방문을 연 `load` 가 이미 풀었다.
+    // A zero work counter is not success: blocked/idle visits keep the draft and do not send.
+    let ready = usePrep.getState().dependencies[root]?.phase === 'ready'
     if (isPreparing(root)) {
       set({ waitingPrep: true })
-      const ready = await waitPrepared(root, left, (check) => useChat.subscribe(check))
-      // 준비가 끝난 뒤 이 줄로 돌아오기 전에도 방문이 바뀔 수 있다 — 상태를 바꾸거나 보내기 **전에**
-      // 다시 본다(검토 확인 WINFB-R1-01: 준비 완료와 폴더 전환이 맞물리면 떠난 요청이 나갔다).
-      if (!ready || left()) return false
-      set({ waitingPrep: false })
+      ready = await waitPrepared(root, left, (check) => useChat.subscribe(check))
+    }
+    if (left()) return false
+    set({ waitingPrep: false })
+    if (!ready) {
+      set({ busy: false, error: preparationFailureTitle(usePrep.getState().dependencies[root]?.error) })
+      return false
     }
     const requestId = crypto.randomUUID()
     const snapshotAtSend = get().snapshot
@@ -361,9 +363,10 @@ export const useChat = create<ChatState>((set, get) => ({
     set({ error: messageOf(r) })
   },
   onSnapshot: (snapshot) => {
-    if (snapshot.authRequired) useConnect.getState().observeChat(snapshot.provider, { state: 'need-login', detail: CLAUDE_AUTH_COPY.required, version: null })
+    const detail = snapshot.provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
+    if (snapshot.authRequired) useConnect.getState().observeChat(snapshot.provider, { state: 'need-login', detail, version: null })
     if (snapshot.root === get().root && snapshot.provider === get().provider) set({ snapshot,
-      ...(snapshot.authRequired ? { status: { installed: true, connected: false, version: null, probe: 'ok' as const, detail: CLAUDE_AUTH_COPY.required }, statusFailed: false, connState: 'need-login' as const } : {})
+      ...(snapshot.authRequired ? { status: { installed: true, connected: false, version: null, probe: 'ok' as const, detail }, statusFailed: false, connState: 'need-login' as const } : {})
     })
   },
   loadModels: async (provider = get().provider) => {

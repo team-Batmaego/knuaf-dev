@@ -16,8 +16,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement, Fragment } from 'react'
 import { useChat } from '../src/renderer/src/store/chat'
 import { usePrep, waitKind } from '../src/renderer/src/store/prep'
-import { rpc } from '../src/renderer/src/rpc'
-import { describeChatError, CHAT } from '../src/renderer/src/copy'
+import { rpc, RpcFailure } from '../src/renderer/src/rpc'
 import { withBold } from '../src/renderer/src/inline'
 import { APP_DIRS, forgetHidden, hideAppDirs } from '../src/main/hidden'
 import type { ChatSnapshot, ConnectionStatus } from '../src/shared/chat'
@@ -38,7 +37,10 @@ function harness() {
     snapshot: async (root: string) => ({ result: snap(root) }),
     status: async () => ({ result: CONNECTED }),
     draft: async () => ({ result: '' }) } } }
-  usePrep.setState({ counts: {} })
+  usePrep.setState({ prep: {}, write: {}, dependencies: {
+    [ROOT]: { visit: 0, operationId: 'verified-fixture', phase: 'ready' },
+    '/p/other': { visit: 0, operationId: 'verified-other', phase: 'ready' }
+  } })
   useChat.setState({ root: ROOT, provider: 'codex', snapshot: snap(), status: CONNECTED, draft: '', draftSeq: 0, busy: false, waitingPrep: false, error: null })
   return { sent }
 }
@@ -137,12 +139,6 @@ test('① 다른 폴더가 준비 중이면 기다리지 않는다', async () =>
   usePrep.getState().end('/p/elsewhere')
 })
 
-test('② "저장·검사 중" 거절은 빨간 오류가 아니라 기다리면 되는 안내다', () => {
-  const d = describeChatError('앱이 저장·검사 작업 중이에요. 끝난 뒤 답변을 보내 주세요.')
-  expect(d.kind).toBe('warning')
-  expect(d.title).toBe(CHAT.appBusyTitle)
-  expect(d.raw).toContain('저장·검사')
-})
 
 const html = (text: string): string => renderToStaticMarkup(createElement(Fragment, null, withBold(text, (part) => part)))
 const html2 = (text: string, rest: (p: string) => string): string => renderToStaticMarkup(createElement(Fragment, null, withBold(text, rest)))
@@ -206,17 +202,21 @@ test('④ 이 기계의 실제 동작 — 윈도우면 탐색기 숨김 속성�
 
 test('② 앱의 쓰기 작업(내보내기 등)이 도는 동안 그 폴더는 "저장·검사 중" 기다림이다 (알림창 B안)', async () => {
   harness()
-  let finish: (v: unknown) => void = () => {}
+  const { promise, resolve: finish } = Promise.withResolvers<unknown>()
   const win = (globalThis as unknown as { window: { knuaf: Record<string, unknown> } }).window
-  win.knuaf.call = () => new Promise((r) => { finish = r })
+  const binding = { major_id: 'specialty_crops', basis: 'legacy_record', binding_evidence: 'facts:major',
+    module_version: 'synthetic-version', contract_version: 'knuaf-major-contract/1', project_revision: 1 }
+  win.knuaf.call = (method: string) => method === 'project.major'
+    ? Promise.resolve({ result: binding }) : promise
   const exporting = rpc.export(ROOT, 'review')
-  expect(waitKind(usePrep.getState(), ROOT)).toBe('write')
+  await expect.poll(() => waitKind(usePrep.getState(), ROOT)).toBe('write')
   expect(waitKind(usePrep.getState(), '/p/elsewhere')).toBeNull()
-  finish({ result: { path: 'out.docx', kind: 'review' } })
+  finish({ result: { path: 'out.md', kind: 'review', status: 'generated', request_id: 'synthetic-export' } })
   await exporting
   expect(waitKind(usePrep.getState(), ROOT), '끝났는데 기다림이 남았다').toBeNull()
   // 실패해도 기다림은 풀린다.
-  win.knuaf.call = async () => ({ error: { code: 'x', message: '실패' } })
+  win.knuaf.call = async (method: string) => method === 'project.major'
+    ? { result: binding } : { error: { code: 'x', message: '실패' } }
   await expect(rpc.export(ROOT, 'review')).rejects.toThrow('실패')
   expect(waitKind(usePrep.getState(), ROOT)).toBeNull()
   // 읽기 작업은 기다림이 아니다.
@@ -224,4 +224,87 @@ test('② 앱의 쓰기 작업(내보내기 등)이 도는 동안 그 폴더는 
   const reading = rpc.status(ROOT)
   expect(waitKind(usePrep.getState(), ROOT)).toBeNull()
   await reading
+})
+
+const PREFLIGHT_BINDING = {
+  major_id: 'specialty_crops', basis: 'legacy_record', binding_evidence: 'facts:major',
+  module_version: 'synthetic-version', contract_version: 'knuaf-major-contract/1', project_revision: 1
+}
+
+for (const remoteAcknowledges of [false, true]) {
+  test(`R1-02: 전공 조회 중 취소는 출력으로 넘어가지 않는다 (main ack=${remoteAcknowledges})`, async () => {
+    harness()
+    usePrep.setState({ prep: { [ROOT]: 1 }, write: { '/p/other': 1 } })
+    const major = Promise.withResolvers<{ result: typeof PREFLIGHT_BINDING }>()
+    const calls: { method: string; clientId?: string }[] = []
+    // harness() installs this partial in-process API rather than a browser Window.
+    const host = globalThis as unknown as { window: { knuaf: Record<string, unknown> } }
+    const win = host.window
+    win.knuaf.call = (method: string, _params: unknown, _event: unknown, clientId?: string) => {
+      calls.push({ method, clientId })
+      if (method === 'project.major') return major.promise
+      throw new Error('cancelled preflight dispatched an output')
+    }
+    win.knuaf.cancel = async () => remoteAcknowledges
+    const id = rpc.newClientId()
+    let outcome: unknown = null
+    const running = rpc.script('paper.generate', { root: ROOT, input: 'spec.json', out: 'build/paper.md' }, undefined, id)
+      .then((result) => { outcome = result }, (error) => { outcome = error })
+    try {
+      expect(await rpc.cancel(id)).toBe(true)
+      await expect.poll(() => outcome instanceof RpcFailure ? outcome.code : null).toBe('cancelled')
+      expect(usePrep.getState().prep).toEqual({ [ROOT]: 1 })
+      expect(usePrep.getState().write).toEqual({ '/p/other': 1 })
+    } finally {
+      major.resolve({ result: PREFLIGHT_BINDING })
+      await running
+    }
+    expect(calls).toEqual([{ method: 'project.major', clientId: id }])
+    // A completed request leaves no local cancellation handler behind.
+    expect(await rpc.cancel(id)).toBe(remoteAcknowledges)
+    usePrep.setState({ prep: {}, write: {} })
+  })
+}
+
+test('R1-02: 전공 조회 오류 뒤에도 출력과 준비 카운터가 남지 않는다', async () => {
+  harness()
+  usePrep.setState({ prep: { [ROOT]: 1 }, write: { '/p/other': 1 } })
+  const methods: string[] = []
+  // harness() installs this partial in-process API rather than a browser Window.
+  const host = globalThis as unknown as { window: { knuaf: Record<string, unknown> } }
+  const win = host.window
+  win.knuaf.call = async (method: string) => {
+    methods.push(method)
+    return { error: { code: 'major_required', message: 'synthetic invalid binding' } }
+  }
+  win.knuaf.cancel = async () => false
+  const id = rpc.newClientId()
+  await expect(rpc.script('paper.generate', { root: ROOT }, undefined, id)).rejects.toMatchObject({ code: 'major_required' })
+  expect(methods).toEqual(['project.major'])
+  expect(usePrep.getState().prep).toEqual({ [ROOT]: 1 })
+  expect(usePrep.getState().write).toEqual({ '/p/other': 1 })
+  expect(await rpc.cancel(id)).toBe(false)
+  usePrep.setState({ prep: {}, write: {} })
+})
+
+test('R1-02: 출력 시작 뒤 취소는 기존 main 경로를 사용하고 쓰기 대기를 끝낸다', async () => {
+  harness()
+  usePrep.setState({ prep: {}, write: {} })
+  const output = Promise.withResolvers<unknown>()
+  // harness() installs this partial in-process API rather than a browser Window.
+  const host = globalThis as unknown as { window: { knuaf: Record<string, unknown> } }
+  const win = host.window
+  win.knuaf.call = (method: string) => method === 'project.major'
+    ? Promise.resolve({ result: PREFLIGHT_BINDING }) : output.promise
+  win.knuaf.cancel = async () => {
+    output.resolve({ error: { code: 'cancelled', message: 'request cancelled' } })
+    return true
+  }
+  const id = rpc.newClientId()
+  const running = rpc.script('paper.generate', { root: ROOT }, undefined, id)
+  const stopped = expect(running).rejects.toMatchObject({ code: 'cancelled' })
+  await expect.poll(() => waitKind(usePrep.getState(), ROOT)).toBe('write')
+  expect(await rpc.cancel(id)).toBe(true)
+  await stopped
+  expect(usePrep.getState().write).toEqual({})
 })

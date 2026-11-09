@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, type ReactNode } from 'react'
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { useProject } from '../store/project'
+import { preparationFailureTitle, usePrep } from '../store/prep'
 import { useChat } from '../store/chat'
 import { rpc, RpcFailure } from '../rpc'
 import type { Envelope } from '../../../shared/types'
 import type { RunnerLine, RunnerPhase } from './useRunner'
 import { versioned } from '../screens/Outputs'
 import { useStage } from './useStage'
-import { ARTIFACTS, CHECKUP, COMPLETION, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, checkLabel, describeError } from '../copy'
+import { ARTIFACTS, CHECKUP, COMPLETION, EXISTING_OUTPUT_NOTE, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, OUTPUT_COPY, checkLabel, describeError } from '../copy'
 import type { FeedbackKind } from './Feedback'
 
 const PAPER_IN = 'paper-input.json'
@@ -64,6 +65,7 @@ export interface Make {
 }
 
 interface MakeState {
+  root: string | null
   making: MakeKind | null
   feedback: MakeFeedback | null
   /** 그 피드백이 어느 줄에서 났는가 — 팝오버가 그 줄 바로 아래에 그린다. */
@@ -76,6 +78,7 @@ interface MakeState {
   lines: RunnerLine[]
   env: Envelope | null
   err: string | null
+  errCode: string | null
   cancelled: boolean
   phase: RunnerPhase | null
   elapsedMs: number
@@ -83,8 +86,9 @@ interface MakeState {
 }
 
 const INITIAL: MakeState = {
+  root: null,
   making: null, feedback: null, feedbackKind: null, failedTool: null, hasPaperInput: false, lastOk: false, lastPath: null,
-  busy: false, lines: [], env: null, err: null, cancelled: false, phase: null, elapsedMs: 0, clientId: null
+  busy: false, lines: [], env: null, err: null, errCode: null, cancelled: false, phase: null, elapsedMs: 0, clientId: null
 }
 
 /**
@@ -107,7 +111,7 @@ async function runScript(method: string, params: Record<string, unknown>): Promi
   const id = rpc.newClientId()
   clientRef = id
   startedAt = Date.now()
-  patch({ busy: true, lines: [], env: null, err: null, cancelled: false, phase: null, elapsedMs: 0, clientId: id })
+  patch({ busy: true, lines: [], env: null, err: null, errCode: null, cancelled: false, phase: null, elapsedMs: 0, clientId: id })
   clock = setInterval(() => patch({ elapsedMs: Date.now() - startedAt }), 250)
   try {
     const env = await rpc.script(method, params, (event, data) => {
@@ -118,7 +122,7 @@ async function runScript(method: string, params: Record<string, unknown>): Promi
     return env
   } catch (e) {
     if (e instanceof RpcFailure && e.code === 'cancelled') patch({ cancelled: true })
-    else { const d = describeError(e); patch({ err: `${d.title}${d.action ? ` ${d.action}` : ''}` }) }
+    else { const d = describeError(e); patch({ err: `${d.title}${d.action ? ` ${d.action}` : ''}`, errCode: d.code }) }
     return null
   } finally {
     if (clientRef === id) clientRef = null
@@ -194,44 +198,63 @@ export function useMake(): Make {
     },
     // 제출용은 관문이 막혀도 활성 — 누르는 순간이 고지의 자리다(Q1·#4 기각).
     { kind: 'submission_candidate', label: ARTIFACTS.make.submit, body: status ? ARTIFACTS.make.submitBody : '', enabled: !!status },
-    { kind: 'xlsx', label: ARTIFACTS.make.xlsx, body: !status ? '' : hasStudentFinance ? ARTIFACTS.make.xlsxBody : ARTIFACTS.make.xlsxBundled, enabled: !!status }
+    { kind: 'xlsx', label: ARTIFACTS.make.xlsx, body: !status ? '' : hasStudentFinance ? ARTIFACTS.make.xlsxBody : OUTPUT_COPY.templateChoice, enabled: !!status }
   ]
 
   // SKILL.md:34 / Q1 — 고지는 시도와 결과 양쪽의 첫 줄이다.
   const [noticeFirst, noticeRest] = INDEPENDENT_REVIEW_MISSING.body.split(/(?<=.)\. /)
   const noticeTitle = `${INDEPENDENT_REVIEW_MISSING.title} — ${noticeFirst}`
   const tellHelper = (lines: string): void => { appendDraft(lines); closeSheet() }
+  const requestMajor = (kind: MakeKind): void => {
+    patch({
+      feedbackKind: kind,
+      feedback: {
+        kind: 'warning', title: OUTPUT_COPY.majorTitle, body: OUTPUT_COPY.majorBody,
+        actions: <button onClick={() => tellHelper(OUTPUT_COPY.majorPrompt)}>{OUTPUT_COPY.askMajor}</button>
+      }
+    })
+  }
 
   const doExport = useCallback(async (kind: 'review' | 'submission_candidate') => {
     if (!root) return
-    patch({ making: kind, feedback: null, feedbackKind: null, lastOk: false, lastPath: null })
+    patch({ root, making: kind, feedback: null, feedbackKind: null, lastOk: false, lastPath: null })
     // 시도 시점의 첫 줄: 독립검토 미실행 고지(버튼은 항상 활성 — 경고가 관문, 잠금이 아님).
     if (missingReview) patch({ feedback: { kind: 'warning', title: noticeTitle, body: noticeRest }, feedbackKind: kind })
     try {
       const r = await rpc.export(root, kind)
+      // v0.3.x export_locked dedupes the same revision+content through its receipt and
+      // returns the existing path. That is success, but no new file was made — say so.
+      const again = r.status === 'existing'
       const unverified = status ? status.gate.filter((g) => g.status !== 'pass' && g.severity === 'error') : []
+      // Keep the run admitted until refresh settles, then publish only its terminal state.
+      await refresh()
       patch({
-        lastOk: true, lastPath: r.path, feedbackKind: kind,
+        making: null, lastOk: true, lastPath: r.path, feedbackKind: kind,
         feedback: missingReview
           ? {
             kind: 'warning',
             title: noticeTitle,
-            body: <><div>{noticeRest}</div><div>{COMPLETION.exported}: <code>{r.path}</code></div><div className="caption" style={{ marginTop: 'var(--sp-1)' }}>{NOT_APPROVAL_NOTE}</div></>,
+            body: <><div>{noticeRest}</div><div>{again ? COMPLETION.exported_existing : COMPLETION.exported}: <code>{r.path}</code></div>{again && <div>{EXISTING_OUTPUT_NOTE}</div>}<div className="caption" style={{ marginTop: 'var(--sp-1)' }}>{NOT_APPROVAL_NOTE}</div></>,
             actions: <button onClick={() => window.knuaf.reveal(r.path)}>{ARTIFACTS.reveal}</button>
           }
           : {
             kind: 'completion',
-            title: COMPLETION.exported,
-            body: <><code>{r.path}</code><br /><span className="caption">{NOT_APPROVAL_NOTE}</span></>,
+            title: again ? COMPLETION.exported_existing : COMPLETION.exported,
+            body: <><code>{r.path}</code>{again && <><br /><span>{EXISTING_OUTPUT_NOTE}</span></>}<br /><span className="caption">{NOT_APPROVAL_NOTE}</span></>,
             actions: <button onClick={() => window.knuaf.reveal(r.path)}>{ARTIFACTS.reveal}</button>,
             details: unverified.length > 0
               ? <div><div className="caption">{ARTIFACTS.make.unverified(unverified.length)}</div><ul>{unverified.slice(0, 12).map((g, i) => <li key={i}><code>{g.check_id}</code> {g.target}: {g.reason}</li>)}{unverified.length > 12 && <li>…</li>}</ul></div>
               : undefined
           }
       })
-      await refresh()
     } catch (e) {
+      if (e instanceof RpcFailure && e.code === 'major_required') { requestMajor(kind); return }
       const d = describeError(e)
+      if (d.code === 'committed_cleanup_pending' || d.code === 'indeterminate') {
+        await refresh()
+        patch({ making: null, feedbackKind: kind, feedback: { kind: 'warning', title: d.title, body: d.action, details: <pre>{d.raw}</pre> } })
+        return
+      }
       if (kind === 'submission_candidate') {
         // 관문 미충족: 무엇이 필요한지는 문장으로, check id 는 자세히 안에(03-화면/09).
         const unmet = (status?.gate ?? []).filter((g) => g.status !== 'pass' && g.severity === 'error')
@@ -267,14 +290,20 @@ export function useMake(): Make {
 
   const doDocx = useCallback(async () => {
     if (!root) return
-    patch({ making: 'docx', feedback: null, feedbackKind: null, lastOk: false, lastPath: null })
+    patch({ root, making: 'docx', feedback: null, feedbackKind: null, lastOk: false, lastPath: null })
     const lastLine = (t?: string | null): string | undefined => t?.trim().split('\n').filter(Boolean).at(-1) || undefined
     /**
      * 실패를 화면에 남긴다. `env` 가 null 인 경우(스크립트 호출 자체가 실패: 준비 안 됨·시간 초과 등)도
      * **이유를 말한다** — 예전에는 null 을 그냥 돌려보내 두 새 자리에 아무것도 남지 않았다
      * (검토 확인 1회째 반례 ②). 취소는 실패가 아니므로 삼킨다.
      */
-    const fail = (env: { block_reason?: string | null; stderr?: string; stdout?: string } | null, tool: string): void => {
+    const fail = (env: Envelope | null, tool: string): void => {
+      if (useMakeState.getState().errCode === 'major_required') { requestMajor('docx'); return }
+      if (env?.commit_state === 'committed_cleanup_pending' || env?.commit_state === 'indeterminate') {
+        const d = describeError({ code: env.commit_state, message: env.block_reason ?? '', data: env.data })
+        patch({ feedbackKind: 'docx', feedback: { kind: 'warning', title: d.title, body: d.action, details: <pre>{d.raw}</pre> } })
+        return
+      }
       const reason = env
         ? (lastLine(env.block_reason) ?? lastLine(env.stderr) ?? lastLine(env.stdout) ?? ARTIFACTS.make.failNoReason)
         : useMakeState.getState().err
@@ -310,8 +339,9 @@ export function useMake(): Make {
       if (!env?.ok) { fail(env, 'tools:docx'); return }
       // 성공도 같은 자리에 남긴다 — 결과 한 줄 + 폴더에서 보기(검토 확인 1회째 반례 ③).
       const path = env.path ?? out
+      await refresh()
       patch({
-        lastOk: true, lastPath: path, feedbackKind: 'docx',
+        making: null, lastOk: true, lastPath: path, feedbackKind: 'docx',
         feedback: {
           kind: 'completion',
           title: COMPLETION.docx_built,
@@ -319,19 +349,32 @@ export function useMake(): Make {
           actions: <button onClick={() => window.knuaf.reveal(path)}>{ARTIFACTS.reveal}</button>
         }
       })
-      await refresh()
     } finally { patch({ making: null }) }
   }, [root, hasMdInput, st.hasPaperInput, reviewMd, refresh, openSettings])
 
-  const doXlsx = useCallback(async () => {
+  const doXlsx = useCallback(async (templateRef?: 'X01'): Promise<void> => {
     if (!root) return
-    patch({ making: 'xlsx', feedback: null, feedbackKind: null, lastOk: false, lastPath: null, failedTool: 'tools:excel' })
+    patch({ root, making: 'xlsx', feedback: null, feedbackKind: null, lastOk: false, lastPath: null, failedTool: 'tools:excel' })
     try {
+      const binding = await rpc.major(root)
+      if (!hasStudentFinance && !templateRef) {
+        patch({
+          feedbackKind: 'xlsx',
+          feedback: {
+            kind: 'warning', title: OUTPUT_COPY.templateTitle, body: OUTPUT_COPY.templateBody,
+            actions: <>
+              {binding.major_id === 'specialty_crops' && <button onClick={() => void doXlsx('X01')}>{OUTPUT_COPY.chooseX01}</button>}
+              <button className="quiet" onClick={() => tellHelper(OUTPUT_COPY.templatePrompt)}>{OUTPUT_COPY.askTemplate}</button>
+            </>
+          }
+        })
+        return
+      }
       const out = versioned('build/검토전_재무.xlsx', taken)
-      // The sidecar chooses the registered student workbook before the bundled blank.
-      const env = await runScript('excel.create', { root, out })
+      const env = await runScript('excel.create', { root, out, major_id: binding.major_id, ...(templateRef ? { template_ref: templateRef } : {}) })
       if (!env?.ok) {
         if (useMakeState.getState().cancelled) return
+        if (useMakeState.getState().errCode === 'major_required') { requestMajor('xlsx'); return }
         patch({
           feedbackKind: 'xlsx',
           feedback: {
@@ -343,38 +386,58 @@ export function useMake(): Make {
         return
       }
       const path = env.path ?? out
+      await refresh()
       patch({
-        lastOk: true, lastPath: path, feedbackKind: 'xlsx',
+        making: null, lastOk: true, lastPath: path, feedbackKind: 'xlsx',
         feedback: {
           kind: 'completion', title: ARTIFACTS.make.xlsxCreated,
           body: <><code>{path}</code><br /><span className="caption">{ARTIFACTS.make.xlsxNext}</span></>,
           actions: <button onClick={() => window.knuaf.reveal(path)}>{ARTIFACTS.reveal}</button>
         }
       })
-      await refresh()
+    } catch (e) {
+      if (e instanceof RpcFailure && e.code === 'major_required') requestMajor('xlsx')
+      else {
+        const d = describeError(e)
+        patch({ feedbackKind: 'xlsx', feedback: { kind: d.kind, title: d.title, body: d.action, details: <code>{d.raw}</code> } })
+      }
     } finally { patch({ making: null }) }
-  }, [root, artifacts, refresh, openSettings])
+  }, [root, artifacts, hasStudentFinance, refresh, openSettings])
 
   const run = useCallback(async (kind: MakeKind): Promise<void> => {
     const s = useMakeState.getState()
     if (s.making || s.busy) return
+    const preparation = root ? usePrep.getState().dependencies[root] : undefined
+    if (preparation?.phase !== 'ready' || (root && (usePrep.getState().prep[root] ?? 0) > 0)) {
+      patch({ root, feedbackKind: kind, feedback: {
+        kind: 'warning', title: preparation?.phase === 'blocked' ? preparationFailureTitle(preparation.error) : '논문 폴더를 준비하고 있어요',
+        body: '설정 > 문제 해결에서 준비 상태를 확인한 뒤 다시 만들어 주세요.',
+        details: preparation?.error ? <code>{preparation.error.message}</code> : undefined
+      } })
+      return
+    }
     if (kind === 'xlsx') { await doXlsx(); return }
     if (kind === 'docx') { await doDocx(); return }
     await doExport(kind)
-  }, [doExport, doDocx, doXlsx])
+  }, [root, doExport, doDocx, doXlsx])
 
-  // 진행·결과 필드는 모듈 상태에서 읽는다(화면이 바뀌어도 같은 값).
-  const live: MakeRunner = { ...runner, ...st }
+  // A choice callback or result from another project must never be offered here.
+  const ownsResult = st.root === root
+  const live: MakeRunner = {
+    ...runner, ...st,
+    env: ownsResult ? st.env : null, err: ownsResult ? st.err : null,
+    lines: ownsResult ? st.lines : [], phase: ownsResult ? st.phase : null
+  }
   return {
     rows,
     blocked,
     runner: live,
     making: st.making,
-    feedback: st.feedback,
-    feedbackKind: st.feedbackKind,
+    feedback: ownsResult ? st.feedback : null,
+    feedbackKind: ownsResult ? st.feedbackKind : null,
     clearFeedback: () => patch({ feedback: null, feedbackKind: null }),
     run,
-    failedTool: st.failedTool,
-    finish: { ok: st.lastOk, path: st.lastPath }
+    failedTool: ownsResult ? st.failedTool : null,
+    finish: { ok: ownsResult && st.lastOk, path: ownsResult ? st.lastPath : null }
   }
 }

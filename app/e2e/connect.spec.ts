@@ -40,8 +40,9 @@ test('로그인을 기다리는 동안에는 확인이 로그인 필요를 돌�
   const need: ConnInfo = { state: 'need-login', detail: '', version: null }
   expect(displayState(need, true)).toBe('logging-in')
   expect(displayState(need, false)).toBe('need-login')
-  // 끝난 사실은 기다림보다 세다 — 연결됨·확인 실패·도구 없음은 덮지 않는다.
-  expect(displayState({ ...need, state: 'connected' }, true)).toBe('connected')
+  // 연결됨은 폴링이 로그인 표시를 내릴 때까지 기다린다.
+  expect(displayState({ ...need, state: 'connected' }, true)).toBe('logging-in')
+  expect(displayState({ ...need, state: 'connected' }, false)).toBe('connected')
   expect(displayState({ ...need, state: 'failed' }, true)).toBe('failed')
   expect(displayState({ ...need, state: 'no-tool' }, true)).toBe('no-tool')
 })

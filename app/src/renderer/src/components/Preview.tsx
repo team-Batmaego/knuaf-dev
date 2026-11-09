@@ -102,10 +102,11 @@ function WordRender({ root, input, item, items, onRendered, showStatus }: { root
 function XlsxView({ data }: { data: Extract<PreviewPayload, { kind: 'xlsx' }> }) {
   const [sheet, setSheet] = useState(0)
   const s = data.sheets[sheet] ?? data.sheets[0]
+  if (!s) return <Feedback kind="status" title={PREVIEW.empty} />
   return <div>
     {data.formulas_uncalculated && <div style={{ marginBottom: 'var(--sp-3)' }}><Feedback kind="warning" title={PREVIEW.uncalculatedTitle} body={PREVIEW.uncalculatedBody} /></div>}
     <div className="row" style={{ marginBottom: 'var(--sp-2)' }}>
-      {data.sheets.length > 1 && <SegmentedControl value={String(sheet)} options={data.sheets.map((sh, i) => ({ id: String(i), label: sh.name }))} onChange={(v) => setSheet(Number(v))} label="시트" />}
+      {data.sheets.length > 1 && <div className="sheet-tabs"><SegmentedControl value={String(sheet)} options={data.sheets.map((sh, i) => ({ id: String(i), label: sh.name }))} onChange={(v) => setSheet(Number(v))} label="시트" /></div>}
       {s?.truncated && <Badge label={PREVIEW.truncated} />}
     </div>
     {s && <div className="preview-table-wrap"><table className="preview-table"><tbody>
@@ -176,6 +177,9 @@ function PreviewBody({ payload, root, item, items, target, onRendered }: { paylo
   if (payload.kind === 'preview_error') return payload.reason === 'too_large'
     ? <Feedback kind="status" title={PREVIEW.tooLargeTitle} body={PREVIEW.tooLargeBody} />
     : <Feedback kind="warning" title={PREVIEW.loadFailed} body={'"원래 앱으로 열기"로 직접 확인해 주세요.'} />
+  if (payload.kind === 'unavailable') return <Feedback kind="warning" title={PREVIEW.loadFailed} body={<>
+    <p>{payload.reason}</p><p>{PREVIEW.readFailedBody}</p>
+  </>} />
   if (payload.kind === 'unsupported') return <Feedback kind="status" title={PREVIEW.unsupportedTitle} body={PREVIEW.unsupportedBody} />
   return null
 }

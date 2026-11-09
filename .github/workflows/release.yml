@@ -31,13 +31,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: skills/knuaf-dev/scripts/requirements-runtime.txt
-      - run: python -m pip install -r skills/knuaf-dev/scripts/requirements-runtime.txt pytest pytest-timeout
-      - run: python -m pytest
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -46,12 +39,32 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: app/skill-source.json
+      - run: python -m pip install -r "$(node app/scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
+      - run: node app/scripts/stage-skill.mjs --python python
+      - run: python -m pytest
       - run: pnpm install --frozen-lockfile
         working-directory: app
       - run: pnpm typecheck
         working-directory: app
       - run: pnpm build
         working-directory: app
+      # xlsx-preview.spec.ts 는 Playwright 의 headless Chromium 셸로 실제 화면을 띄운다.
+      # 러너 이미지에는 브라우저가 없어서, 이 단계가 없으면 태그 실행이 여기서 죽는다
+      # (v0.6.0 release 42464591854 — "Executable doesn't exist at …/chrome-headless-shell").
+      # ci.yml 과 같은 캐시 키를 써서 브랜치 CI 가 받아 둔 브라우저를 그대로 재사용한다.
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
+      - name: Install Playwright Chromium headless shell
+        working-directory: app
+        run: pnpm exec playwright install chromium --only-shell
       - run: pnpm exec playwright test --grep-invert "screenshots|real window capture"
         working-directory: app
         env:
@@ -89,6 +102,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - run: python -m pip install -r "$(node app/scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
 
       - run: pnpm install --frozen-lockfile
         working-directory: app
@@ -203,6 +217,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - run: python -m pip install -r "$(node app/scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
 
       - run: pnpm install --frozen-lockfile
         working-directory: app

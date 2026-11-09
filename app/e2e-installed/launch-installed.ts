@@ -5,7 +5,7 @@
 // 바로 "저장소가 아니라 번들 안의 python·스킬로 도는가"이므로 그 두 값을 덮으면 시험이 사라진다.
 // 그래서 이 파일은 그 변수들을 **지우고** 띄운다 — 설치본의 자동 선택 경로(`bundled`)를 그대로 탄다.
 //
-// 실행: KNUAF_INSTALLED_APP="/Applications/KNUAF-Dev · 창업논문 작성 도우미.app" \
+// 실행: KNUAF_INSTALLED_APP="/Applications/창업논문 도우미.app" \
 //         pnpm exec playwright test --config playwright.installed.config.ts
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
 import { execFileSync } from 'node:child_process'

@@ -64,17 +64,19 @@ test('경고 상자 바탕은 호박이 아니라 아이스 그레이(허락 카
   try {
     await openProject(page, root)
     await navTo(page, '결과물')
-    const fb = page.locator('.feedback.warning').first()
+    const reviewRow = page.locator('.paper-head .popover [data-make="review"]')
+    await reviewRow.getByRole('button').click()
+    const fb = reviewRow.locator('.make-fb.warning')
     await expect(fb).toBeVisible({ timeout: 20_000 })
-    // 계산된 배경색을 `--alert-bg`(아이스 그레이)와 견준다 — 토큰을 그대로 프로브로 재서
-    // 테마가 바뀌어도 같은 규칙을 본다. 호박 바탕(`--warn-soft`)이면 여기서 걸린다.
+    // 경고 카드의 계산된 배경색을 `--alert-bg`(아이스 그레이)와 견준다.
     const { got, want } = await page.evaluate(() => {
       const probe = document.createElement('div')
       probe.style.background = 'var(--alert-bg)'
       document.body.appendChild(probe)
       const want = getComputedStyle(probe).backgroundColor
       probe.remove()
-      const el = document.querySelector('.feedback.warning') as HTMLElement
+      const el = document.querySelector<HTMLElement>('.paper-head .popover [data-make="review"] .make-fb.warning')
+      if (!el) throw new Error('review warning disappeared before its style was measured')
       return { got: getComputedStyle(el).backgroundColor, want }
     })
     expect(got, '경고 상자 바탕이 아이스 그레이가 아니다').toBe(want)

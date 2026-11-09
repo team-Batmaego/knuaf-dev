@@ -2,11 +2,8 @@ import React, { useEffect } from 'react'
 import { useProject, type Screen } from './store/project'
 import { connInfoOf, useConnect } from './store/connect'
 import { useChat } from './store/chat'
-import { Chat } from './screens/Chat'
-import { Materials } from './screens/Materials'
-import { Artifacts } from './screens/Artifacts'
+import { Chat, requestReport } from './screens/Chat'
 import { Checkup } from './screens/Checkup'
-import { SettingsScreen } from './screens/Settings'
 import { Shell } from './components/Shell'
 import { TitleBar } from './components/TitleBar'
 import { Workspace } from './components/Workspace'
@@ -14,14 +11,16 @@ import { PaperPane } from './components/PaperPane'
 import { Sheet } from './components/Sheet'
 import { FirstProjectGate } from './components/FirstProjectGate'
 import { SheetOver } from './components/SheetOver'
-import { PreviewSheet } from './components/PreviewSheet'
+import { RightPane } from './components/RightPane'
+import { SettingsModal } from './components/SettingsModal'
+import { Splash } from './components/Splash'
 import { showsPaper, useLayout } from './components/useLayout'
-import { ARTIFACTS, CHECKUP, MATERIALS, SETTINGS } from './copy'
+import { CHECKUP } from './copy'
 import { useShallow } from 'zustand/react/shallow'
 import type { Provider } from '../../shared/chat'
 
 /** 메뉴 막대(`main/menu.ts`)가 보낼 수 있는 화면 이름 — 'chat' 은 "시트를 닫아라"는 뜻이다. */
-const SHEETS: Screen[] = ['materials', 'artifacts', 'checkup', 'settings']
+const SHEETS: Screen[] = ['checkup', 'settings']
 
 /**
  * 앱 — 제목줄 하나, 작업 공간(대화 | 내 논문) 하나, 그 위에 덮이는 시트들 (IMPL-PLAN §4-5).
@@ -38,6 +37,15 @@ export function App() {
   })))
   const layout = useLayout()
   const [dragging, setDragging] = React.useState(false)
+  const [splashVisible, setSplashVisible] = React.useState(true)
+  const finishSplash = React.useCallback(() => setSplashVisible(false), [])
+  const menuBlocked = React.useRef(true)
+  const pendingMenu = React.useRef<Array<() => void>>([])
+  useEffect(() => {
+    if (splashVisible) return
+    menuBlocked.current = false
+    pendingMenu.current.splice(0).forEach((run) => run())
+  }, [splashVisible])
   useEffect(() => {
     const targets = new Set<Provider>()
     let saving = false
@@ -46,6 +54,13 @@ export function App() {
     let fromChat = false
     const offChat = useChat.subscribe((state, before) => {
       if (quitting) return
+      const previous = before.snapshot
+      const next = state.snapshot
+      if (previous && next && previous.root === next.root && previous.provider === next.provider &&
+          (previous.state === 'running' || previous.state === 'permission') &&
+          next.state !== 'running' && next.state !== 'permission' && next.root === useProject.getState().root) {
+        void useProject.getState().loadLists()
+      }
       if (!state.root || state.connState === 'checking') return
       if (state.status === before.status && state.statusFailed === before.statusFailed && state.connState === before.connState) return
       const info = state.statusFailed || !state.status
@@ -82,18 +97,23 @@ export function App() {
     const off = window.knuaf.onSidecarLog(pushLog)
     const offChat = window.knuaf.onChatSnapshot((s) => useChat.getState().onSnapshot(s))
     const offMenu = window.knuaf.onMenu((a) => {
-      const st = useProject.getState()
-      if (a.type === 'open-folder') void window.knuaf.pickFolder().then((d) => { if (d) void st.open(d) })
-      else if (a.type === 'open-recent' && a.root) void st.open(a.root)
-      else if (a.type === 'refresh') void st.refresh()
-      // 시트가 없는 화면 이름('chat')은 "대화로 돌아가기"다 — 논문은 언제나 깔려 있다.
-      else if (a.type === 'settings') st.openSheet('settings')
-      else if (a.type === 'ai-helper') st.closeSheet()
-      else if (a.type === 'screen') {
-        const name = a.screen as Screen
-        if (SHEETS.includes(name)) st.openSheet(name)
-        else st.closeSheet()
+      const run = () => {
+        const st = useProject.getState()
+        if (a.type === 'open-folder') void window.knuaf.pickFolder().then((d) => { if (d) void st.open(d) })
+        else if (a.type === 'open-recent' && a.root) void st.open(a.root)
+        else if (a.type === 'refresh') void st.refresh()
+        // 시트가 없는 화면 이름('chat')은 "대화로 돌아가기"다 — 논문은 언제나 깔려 있다.
+        else if (a.type === 'settings') st.openSheet('settings')
+        else if (a.type === 'ai-helper') st.closeSheet()
+        else if (a.type === 'screen') {
+          const name = a.screen as Screen
+          if (name === 'materials' || name === 'artifacts') st.openList(name === 'materials' ? 'materials' : 'files')
+          else if (SHEETS.includes(name)) st.openSheet(name)
+          else st.closeSheet()
+        }
       }
+      if (menuBlocked.current) pendingMenu.current.push(run)
+      else run()
     })
     return () => { off(); offChat(); offMenu() }
   }, [])
@@ -121,7 +141,7 @@ export function App() {
   }, [settings, root])
 
   const paperOnScreen = showsPaper(layout, paneView)
-  const checkup = sheet === 'checkup' && paperOnScreen
+  const checkup = !splashVisible && sheet === 'checkup' && paperOnScreen
     ? <SheetOver open screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></SheetOver>
     : null
 
@@ -129,19 +149,17 @@ export function App() {
     <div style={{ height: '100%' }} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop} data-dragging={dragging || undefined}>
       {!settings ? null : (
         <Shell
-          titleBar={<TitleBar />}
-          sheets={<>
-            {sheet === 'materials' && <Sheet open side screen="materials" title={MATERIALS.title} onClose={closeSheet}><Materials /></Sheet>}
-            {sheet === 'artifacts' && <Sheet open side screen="artifacts" title={ARTIFACTS.title} onClose={closeSheet}><Artifacts /></Sheet>}
-            {sheet === 'settings' && <Sheet open side screen="settings" title={SETTINGS.title} onClose={closeSheet}><SettingsScreen /></Sheet>}
+          titleBar={<TitleBar onReport={() => requestReport()} />}
+          sheets={!splashVisible && <>
+            <SettingsModal open={sheet === 'settings'} onClose={closeSheet} />
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}
-            <PreviewSheet />
             <FirstProjectGate />
           </>}
         >
-          <Workspace chat={<Chat />} paper={<PaperPane overlay={checkup} />} />
+          <Workspace chat={<Chat />} paper={<RightPane paper={<PaperPane overlay={checkup} />} />} />
         </Shell>
       )}
+      {splashVisible && <Splash ready={!!settings} onDone={finishSplash} />}
     </div>
   )
 }

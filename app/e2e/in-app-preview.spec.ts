@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync, symlinkSync, writeFi
 import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { launch, navTo, openProject, python, repo, seedChat, shellCalls, spyShell, synthProject } from './helpers'
+import { OUTPUT_COPY } from '../src/renderer/src/copy'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/4xoAAAAASUVORK5CYII='
 
@@ -126,7 +127,7 @@ test('DOCX font names stay inert and CSS escapes remain blocked by CSP', async (
     await openProject(page, root)
     for (const [name, variant] of fixtures) {
       await page.getByRole('button', { name, exact: true }).click()
-      const preview = page.locator('dialog[data-screen="preview"]')
+      const preview = page.locator('[data-doc-content]')
       await expect(preview.getByRole('heading', { name })).toBeVisible()
       const frame = page.frameLocator('iframe[title="DOCX 미리보기"]')
       await expect(frame.getByText('한글 문서 견본')).toBeVisible({ timeout: 30_000 })
@@ -143,6 +144,7 @@ test('DOCX font names stay inert and CSS escapes remain blocked by CSP', async (
         (body.ownerDocument.defaultView as (Window & { __preview_style_escape?: boolean }) | null)?.__preview_style_escape
       )
       expect(scriptRan).toBeUndefined()
+      await page.getByRole('tab', { name, exact: true }).focus()
       await page.keyboard.press('Escape')
       await expect(preview).toHaveCount(0)
     }
@@ -230,7 +232,7 @@ test('file existence IPC reports current files and rejects a project-root escape
   }
 })
 
-test('file popover and checkup actions open the shared preview sheet', async () => {
+test('file popover and checkup actions open the shared document tab', async () => {
   const root = synthProject()
   makeDocx(join(root, 'build', '가짜-점검.docx'))
   const { electronApp, page } = await launch()
@@ -240,7 +242,7 @@ test('file popover and checkup actions open the shared preview sheet', async () 
     await page.getByRole('button', { name: /가짜-점검\.docx/ }).click()
     await expect(page.getByRole('heading', { name: '가짜-점검.docx' })).toBeVisible()
     await expect(page.frameLocator('iframe[title="DOCX 미리보기"]').getByText('한글 문서 견본')).toBeVisible()
-    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
     await navTo(page, '점검')
     await page.waitForSelector('[data-screen="checkup"]', { timeout: 30_000 })
     const fileAction = page.locator('button:has-text("미리보기")').first()
@@ -251,31 +253,34 @@ test('file popover and checkup actions open the shared preview sheet', async () 
     await electronApp.close()
   }
 })
-test('absolute result-card paths preview the generated workbook from Artifacts and Checkup', async () => {
+test('파일 목록과 점검에서 만든 엑셀을 문서 탭으로 연다', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()
   try {
     await openProject(page, root)
-    await navTo(page, '결과물')
-    const artifacts = page.locator('[data-screen="artifacts"]')
-    await artifacts.locator('.make-row', { hasText: '재무 엑셀 만들기' }).getByRole('button', { name: '만들기' }).click()
-    const result = artifacts.locator('.result-ok')
-    await expect(result).toBeVisible({ timeout: 30_000 })
-    const path = await result.locator('.result-path code').innerText()
+    await page.getByRole('button', { name: /파일 \d+/ }).click()
+    const list = page.locator('.paper-head .popover')
+    await list.locator('[data-make="xlsx"]').getByRole('button', { name: '만들기' }).click()
+    await expect(list.locator('[data-make="xlsx"]')).toContainText(OUTPUT_COPY.templateTitle)
+    expect(existsSync(join(root, 'build', '검토전_재무.xlsx'))).toBe(false)
+    await list.getByRole('button', { name: OUTPUT_COPY.chooseX01, exact: true }).click()
+    const workbook = list.getByRole('button', { name: /검토전_재무\.xlsx/ })
+    await expect(workbook).toBeVisible({ timeout: 30_000 })
+    await workbook.click()
+    const preview = page.locator('[data-doc-content]')
+    await expect(preview.getByRole('heading', { name: '검토전_재무.xlsx' })).toBeVisible()
+    await expect(preview.locator('table.preview-table')).toBeVisible()
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
+    await navTo(page, '점검')
+    const card = page.locator('[data-screen="checkup"] .result-ok')
+    await expect(card).toBeVisible()
+    const path = await card.locator('.result-path code').innerText()
     expect(existsSync(path)).toBeTruthy()
-    for (const destination of ['결과물', '점검']) {
-      if (destination === '점검') await navTo(page, destination)
-      const card = page.locator(`[data-screen="${destination === '결과물' ? 'artifacts' : 'checkup'}"] .result-ok`)
-      await expect(card).toBeVisible()
-      expect(await card.locator('.result-path code').innerText()).toBe(path)
-      await card.getByRole('button', { name: '열기' }).click()
-      const preview = page.locator('dialog[data-screen="preview"]')
-      await expect(preview).toBeVisible()
-      await expect(preview.getByRole('heading', { name: '검토전_재무.xlsx' })).toBeVisible()
-      await expect(preview.locator('table.preview-table')).toBeVisible()
-      await page.keyboard.press('Escape')
-      await expect(preview).toHaveCount(0)
-    }
+    await card.getByRole('button', { name: '열기' }).click()
+    await expect(preview.getByRole('heading', { name: '검토전_재무.xlsx' })).toBeVisible()
+    await expect(preview.locator('table.preview-table')).toBeVisible()
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
+    await expect(preview).toHaveCount(0)
   } finally {
     await electronApp.close()
   }
@@ -290,7 +295,7 @@ test('long-file preview notice uses the compact local badge shape', async ({}, t
   try {
     await openProject(page, root)
     await page.getByRole('button', { name: '긴.csv', exact: true }).click()
-    const preview = page.locator('dialog[data-screen="preview"]')
+    const preview = page.locator('[data-doc-content]')
     await expect(preview.getByText(/파일이 길어서 앞부분만 보여 줘요/)).toBeVisible()
     const badge = preview.locator('.preview-truncation-badge .badge')
     await expect(badge).toBeVisible()
@@ -315,7 +320,7 @@ test('DOCX preview finds listed and source-folder sibling PDFs without exposing 
     await openProject(page, root)
     for (const name of ['목록.docx', '출처.docx']) {
       await page.getByRole('button', { name, exact: true }).click()
-      const preview = page.locator('dialog[data-screen="preview"]')
+      const preview = page.locator('[data-doc-content]')
       await expect(page.frameLocator('iframe[title="DOCX 미리보기"]').getByText('한글 문서 견본')).toBeVisible()
       await expect(preview.getByRole('button', { name: 'PDF로 보기', exact: true })).toBeVisible()
       await expect(preview.getByRole('button', { name: 'Word로 PDF 만들기', exact: true })).toHaveCount(0)
@@ -324,7 +329,7 @@ test('DOCX preview finds listed and source-folder sibling PDFs without exposing 
       await expect(preview.getByText(name === '목록.docx' ? '목록.pdf' : '출처.pdf')).toBeVisible()
       await preview.getByRole('button', { name: '문서 보기', exact: true }).click()
       await expect(page.frameLocator('iframe[title="DOCX 미리보기"]').getByText('한글 문서 견본')).toBeVisible()
-      await page.keyboard.press('Escape')
+      await page.getByRole('button', { name: '파일 탭 닫기' }).click()
       await expect(preview).toHaveCount(0)
     }
   } finally {
@@ -344,20 +349,20 @@ test('preview read failures stay with the requested file; missing and outside pa
   try {
     await openProject(page, root)
     await page.getByRole('button', { name: '손상.xlsx', exact: true }).click()
-    const preview = page.locator('dialog[data-screen="preview"]')
+    const preview = page.locator('[data-doc-content]')
     await expect(preview).toBeVisible()
     await expect(preview.getByText('미리보기를 불러오지 못했어요.', { exact: true })).toBeVisible()
     await expect(preview.getByRole('button', { name: '원래 앱으로 열기', exact: true })).toBeVisible()
     await expect(preview.getByText('불러오는 중…', { exact: true })).toHaveCount(0)
-    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
 
     await page.getByRole('button', { name: '없음.txt', exact: true }).click()
-    const artifacts = page.locator('[data-screen="artifacts"]')
+    const artifacts = page.locator('.popover')
     await expect(artifacts.getByText('"없음.txt"을 찾지 못했어요.', { exact: true })).toBeVisible()
     await page.keyboard.press('Escape')
 
     await page.getByRole('button', { name: '밖.txt', exact: true }).click()
-    await expect(page.locator('[data-screen="artifacts"]').getByText('이 논문 폴더 밖의 파일은 열 수 없어요.', { exact: true })).toBeVisible()
+    await expect(page.locator('.popover').getByText('이 논문 폴더 밖의 파일은 열 수 없어요.', { exact: true })).toBeVisible()
   } finally {
     await electronApp.close()
   }
@@ -381,15 +386,15 @@ test('preview open errors and notices do not carry to another file or project', 
     await page.getByRole('button', { name: 'A.txt', exact: true }).click()
     await page.getByRole('button', { name: '원래 앱으로 열기', exact: true }).click()
     await expect(page.getByText(/파일을 열지 못해/)).toBeVisible()
-    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
     await page.getByRole('button', { name: 'B.txt', exact: true }).click()
-    const preview = page.locator('dialog[data-screen="preview"]')
+    const preview = page.locator('[data-doc-content]')
     await expect(preview.getByText('B 내용', { exact: true })).toBeVisible()
     await expect(preview.getByText(/파일을 열지 못해/)).toHaveCount(0)
-    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
 
     await page.getByRole('button', { name: '없음.xlsx', exact: true }).click()
-    await expect(page.locator('[data-screen="artifacts"]').getByText('"없음.xlsx"을 찾지 못했어요.', { exact: true })).toBeVisible()
+    await expect(page.locator('.popover').getByText('"없음.xlsx"을 찾지 못했어요.', { exact: true })).toBeVisible()
     await page.keyboard.press('Escape')
     await openProject(page, rootB)
     await navTo(page, '결과물')
@@ -426,7 +431,7 @@ test('late external-open failure does not attach to a reopened preview of the sa
     })
 
     const trigger = page.getByRole('button', { name: 'A.txt', exact: true })
-    const preview = page.locator('dialog[data-screen="preview"]')
+    const preview = page.locator('[data-doc-content]')
     await trigger.click()
     await expect(preview.getByText('A 내용', { exact: true })).toBeVisible()
     await preview.getByRole('button', { name: '원래 앱으로 열기', exact: true }).click()
@@ -434,7 +439,7 @@ test('late external-open failure does not attach to a reopened preview of the sa
       (globalThis as typeof globalThis & { __heldShellOpen?: { entered: boolean } }).__heldShellOpen?.entered
     )).toBe(true)
 
-    await preview.getByRole('button', { name: '닫기', exact: true }).click()
+    await page.getByRole('button', { name: '파일 탭 닫기', exact: true }).click()
     await expect(preview).toHaveCount(0)
     await trigger.click()
     await expect(preview.getByText('A 내용', { exact: true })).toBeVisible()
@@ -473,10 +478,10 @@ test('empty and undecodable images explain why no image is shown', async ({}, te
   try {
     await openProject(page, root)
     await page.getByRole('button', { name: '빈.png', exact: true }).click()
-    const preview = page.locator('dialog[data-screen="preview"]')
+    const preview = page.locator('[data-doc-content]')
     await expect(preview.getByText('비어 있는 파일이에요', { exact: true })).toBeVisible()
     await expect(preview.locator('img')).toHaveCount(0)
-    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: '파일 탭 닫기' }).click()
 
     await page.getByRole('button', { name: '손상.png', exact: true }).click()
     await expect(preview.getByText('이미지를 표시하지 못했어요', { exact: true })).toBeVisible()
@@ -489,7 +494,7 @@ test('empty and undecodable images explain why no image is shown', async ({}, te
   }
 })
 
-test('preview close restores its trigger and Files count fallback without closing Checkup', async () => {
+test('file close restores its trigger and closes Checkup when a preview is opened', async () => {
   const root = synthProject()
   makeDocx(join(root, 'build', '초점.docx'))
   seedChat(root, '[초점.docx](build/초점.docx)')
@@ -498,16 +503,16 @@ test('preview close restores its trigger and Files count fallback without closin
     await openProject(page, root)
     const chatTrigger = page.getByRole('button', { name: '초점.docx', exact: true })
     await chatTrigger.click()
-    const preview = page.locator('dialog[data-screen="preview"]')
+    const preview = page.locator('[data-doc-content]')
     await expect(preview).toBeVisible()
-    await preview.getByRole('button', { name: '닫기', exact: true }).click()
+    await page.getByRole('button', { name: '파일 탭 닫기', exact: true }).click()
     await expect(chatTrigger).toBeFocused()
 
     const filesTrigger = page.getByRole('button', { name: /파일 \d+/ })
     await filesTrigger.click()
     await page.locator('.popover').getByRole('button', { name: /초점\.docx/ }).click()
     await expect(preview).toBeVisible()
-    await preview.getByRole('button', { name: '닫기', exact: true }).click()
+    await page.getByRole('button', { name: '파일 탭 닫기', exact: true }).click()
     await expect(filesTrigger).toBeFocused()
 
     await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 800))
@@ -521,16 +526,12 @@ test('preview close restores its trigger and Files count fallback without closin
     await checkTrigger.focus()
     await checkTrigger.press('Enter')
     await expect(preview).toBeVisible()
+    await expect(checkup).toHaveCount(0)
+    await page.locator('[role="tab"][aria-selected="true"]').last().focus()
     await page.keyboard.press('Escape')
     await expect(preview).toHaveCount(0)
-    await expect(checkup).toBeVisible()
-    await expect(checkTrigger).toBeFocused()
-
-    await checkTrigger.click()
-    await expect(preview).toBeVisible()
-    await preview.getByRole('button', { name: '닫기', exact: true }).click()
-    await expect(checkup).toBeVisible()
-    await expect(checkTrigger).toBeFocused()
+    await expect(checkup).toHaveCount(0)
+    await expect(page.locator('.paperpane')).toBeVisible()
   } finally {
     await electronApp.close()
   }

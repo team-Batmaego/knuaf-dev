@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import sys
+from itertools import chain
 from pathlib import Path
 
 from .rpc import RpcError
+from .diagnostic_trace import trace_doctor
 
 REVIEW_KINDS = ("content", "logic", "calculation", "docx", "xlsx", "render")
 
@@ -79,6 +81,18 @@ def project_init(ctx, params):
 def project_load(ctx, params):
     p = _core().load(_root(params))
     return {"project": p, "revision": p["revision"], "schema_version": p["schema_version"]}
+
+
+def project_major(ctx, params):
+    """Read the confirmed binding; never infer a major or write a selection."""
+    import gg_major_contract as mc
+
+    project = _core().load(_root(params))
+    try:
+        binding = mc.binding_from_project(mc.default_registry(), project)
+    except mc.MajorContractError as error:
+        raise RpcError("major_required", str(error), mc.common_only_plan(error)) from error
+    return dict(vars(binding), project_revision=project["revision"])
 
 
 def project_status(ctx, params):
@@ -169,8 +183,8 @@ def project_export(ctx, params):
     kind = params.get("kind", "review")
     if kind not in ("draft", "review", "submission_candidate"):
         raise RpcError("invalid_params", "kind는 draft|review|submission_candidate")
-    path = _core().export(_root(params), kind)
-    return {"path": path, "kind": kind}
+    result = _core().export(_root(params), kind, major_id=params.get("major_id"))
+    return dict(result, kind=kind)
 
 
 def project_history(ctx, params):
@@ -185,44 +199,74 @@ def project_restore(ctx, params):
 
 
 def lock_info(ctx, params):
-    return _core().lock_info(_root(params))
+    import gg_lock
+
+    root = _root(params)
+    return gg_lock.probe_lock(root) if params.get("probe") is True else gg_lock.inspect_lock(root)
 
 
 def lock_unlock(ctx, params):
-    return _core().unlock(_root(params))
+    import gg_lock
+
+    try:
+        return gg_lock.cleanup_owner(_root(params))
+    except gg_lock.LockError as error:
+        code = "lock_held" if error.status == "busy" else "lock_ambiguous"
+        raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
+
+
+def project_deps_report(report):
+    """Use only the project's probed venv; current Python remains diagnostic evidence."""
+    if not isinstance(report, dict) or report.get("error"):
+        raise RpcError("deps_doctor", "패키지 진단 응답 오류", report)
+    rows = report.get("dependencies")
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        raise RpcError("deps_doctor", "패키지 진단 dependencies가 없거나 손상됨", report)
+    if "venv_python" not in report or not isinstance(report.get("current_python"), str):
+        raise RpcError("deps_doctor", "패키지 진단 실행기 정보가 없거나 손상됨", report)
+    vpy = report.get("venv_python")
+    if vpy is not None and (not isinstance(vpy, str) or not vpy):
+        raise RpcError("deps_doctor", "패키지 진단 venv_python이 손상됨", report)
+    normalized = []
+    for row in rows:
+        if not isinstance(row.get("dist"), str) or not row["dist"] or not isinstance(row.get("current"), dict) or "venv" not in row:
+            raise RpcError("deps_doctor", "패키지 진단 dependency 행이 손상됨", report)
+        venv = row.get("venv")
+        if venv is not None and not isinstance(venv, dict):
+            raise RpcError("deps_doctor", "패키지 진단 venv 행이 손상됨", report)
+        if vpy and (not isinstance(venv, dict) or not {"imported", "version_in_range", "status"} <= venv.keys()):
+            raise RpcError("deps_doctor", "패키지 진단 venv 행이 손상됨", report)
+        if vpy and (
+            type(venv["imported"]) is not bool
+            or (venv["version_in_range"] is not None and type(venv["version_in_range"]) is not bool)
+            or not isinstance(venv["status"], str)
+        ):
+            raise RpcError("deps_doctor", "패키지 진단 venv 검증값이 손상됨", report)
+        installed = bool(vpy) and venv["imported"] is True and venv["version_in_range"] is True and venv["status"] == "installed"
+        status = "installed" if installed else (venv or {}).get("status", "missing")
+        if not installed and status == "installed":
+            status = "missing"
+        normalized.append({**row, "status": status})
+    return {
+        **report,
+        "ready": bool(vpy) and all(row["status"] == "installed" for row in normalized),
+        "selected_python": vpy,
+        "dependencies": normalized,
+    }
 
 
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
-    out = {"gg": core.doctor(root), "lock": core.lock_info(root)}
-    try:
-        import gg_deps
-
-        out["deps"] = gg_deps.doctor(root)
-    except Exception as error:  # noqa: BLE001 - diagnostics must not fail the call
-        out["deps"] = {"error": str(error)}
-    try:
-        import gg_kordoc
-
-        cli, kind = gg_kordoc._resolve_kordoc(None)
-        cache = gg_kordoc._cache_root(None)
-        legacy = [str(r) for r in gg_kordoc._legacy_cache_roots()]
-        out["kordoc"] = {
-            "cli_path": cli,
-            "source_kind": kind,
-            "cache_dir": str(cache),
-            "cache_present": (cache / gg_kordoc.VERSION).exists() or any((Path(r) / gg_kordoc.VERSION).exists() for r in legacy),
-            "legacy_cache_dirs": legacy,
-        }
-    except Exception as error:  # noqa: BLE001
-        out["kordoc"] = {"error": str(error)}
-    try:
-        out["snapshots"] = core.history(root)
-    except (OSError, ValueError) as error:
-        out["snapshots"] = {"error": str(error)}
-    out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
-    return out
+    with trace_doctor(ctx):
+        report = core.doctor(root, probe=params.get("probe") is True)
+        out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
+        try:
+            out["deps"] = project_deps_report(report["deps"])
+        except RpcError as error:
+            out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
+        out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
+        return out
 
 
 # --- materials / artifacts (read-only views over sources/ and build/) --------
@@ -357,8 +401,25 @@ def materials_list(ctx, params):
     }
 
 
+def _has_docx_receipt(file: Path, core):
+    """Recognize build_docx's receipt, not a filename or an input extension."""
+    if file.suffix.lower() != ".docx":
+        return False
+    try:
+        receipt = json.loads(file.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+        return (
+            isinstance(receipt, dict)
+            and receipt.get("kind") == "draft"
+            and isinstance(receipt.get("input_hash"), str)
+            and len(receipt["input_hash"]) == 64
+            and receipt.get("file_hash") == core.digest(file.read_bytes())
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def artifact_list(ctx, params):
-    """Previewable files under build/, newest first; `revision` from the outputs collection when known."""
+    """Build outputs, registered outputs, and receipt-backed root Word files."""
     core = _core()
     root = _root(params).resolve()
     p = core.load(root)
@@ -367,12 +428,23 @@ def artifact_list(ctx, params):
         path = out.get("path")
         if not isinstance(path, str) or not path:
             continue
-        key = Path(path).as_posix()
+        try:
+            key = core.local(root, path).relative_to(root).as_posix()
+        except (ValueError, OSError):
+            continue
         rev = out.get("revision")
         if isinstance(rev, int) and rev > (revisions.get(key) or 0):
             revisions[key] = rev
     items = []
-    for f in _visible_files(root / "build") or ():
+    seen = set()
+    registered_files = (root / path for path in revisions)
+    root_files = (
+        f for f in root.iterdir()
+        if f.is_file() and not f.name.startswith(".") and _has_docx_receipt(f, core)
+    )
+    for f in chain(registered_files, root_files, _visible_files(root / "build") or ()):
+        if not f.is_file():
+            continue
         kind = ARTIFACT_KINDS.get(f.suffix.lower())
         if kind is None:
             continue
@@ -381,6 +453,9 @@ def artifact_list(ctx, params):
             st = f.stat()
         except (ValueError, OSError):
             continue
+        if rel in seen:
+            continue
+        seen.add(rel)
         items.append(
             {
                 "path": rel,
@@ -513,6 +588,7 @@ def register(server):
     server.register("sys.hello", sys_hello)
     server.register("project.init", project_init, write=True)
     server.register("project.load", project_load)
+    server.register("project.major", project_major)
     server.register("project.status", project_status)
     server.register("project.checks", project_checks)
     server.register("project.next", project_next)

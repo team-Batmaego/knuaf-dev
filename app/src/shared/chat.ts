@@ -44,7 +44,13 @@ export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string
   delivery?: 'pending' | 'sent' | 'uncertain'
 }
-export interface PermissionRequest { id: string; title: string; detail: string }
+/** Codex fileChange 항목의 내용. add/delete의 diff는 파일 내용이고 update는 unified diff다. */
+export interface PermissionFileChange {
+  path: string
+  kind: { type: 'add' | 'delete' | 'update' | 'unknown'; move_path?: string | null }
+  diff: string | null
+}
+export interface PermissionRequest { id: string; title: string; detail: string; fileChanges?: PermissionFileChange[] }
 export interface ChatSnapshot {
   root: string; provider: Provider; sessionId?: string; state: RunState
   messages: ChatMessage[]; permission?: PermissionRequest; error?: string

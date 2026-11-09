@@ -25,7 +25,7 @@ const intakeFact = (id: string, field: string, value: string | null, state: stri
   }
 })
 
-test('자료 화면: 현재 작성물과 참고자료 구분 표시, 파일을 답변에 첨부', async () => {
+test('자료 팝오버: 현재 작성물과 참고자료를 구분하고 참고자료를 답변에 첨부한다', async () => {
   const root = synthProject()
   writeFileSync(join(root, 'sources', '초고.docx'), 'docx')
   applyChange(root, {
@@ -39,43 +39,41 @@ test('자료 화면: 현재 작성물과 참고자료 구분 표시, 파일을 �
   await openProject(page, root)
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
   await navTo(page, '자료')
-  await page.waitForSelector('[data-screen="materials"]', { timeout: 30_000 })
+  const pop = page.locator('.paper-head .popover')
+  await expect(pop).toBeVisible()
 
-  // decided manuscript shows the file; finance stays undecided
-  await expect(page.locator('text=현재 원고')).toBeVisible()
-  await expect(page.locator('text=초고.docx').first()).toBeVisible()
-  await expect(page.locator('text=재무 파일')).toBeVisible()
-  await expect(page.locator('text=아직 정해지지 않았어요').first()).toBeVisible()
+  // 현재 작성물과 참고자료는 별도 목록이고, 재무 파일은 아직 정해지지 않았다.
+  await expect(pop.getByText('현재 작성물', { exact: true })).toBeVisible()
+  const manuscriptRow = pop.locator('.pop-row').filter({ hasText: '현재 원고' })
+  await expect(manuscriptRow).toContainText('초고.docx')
+  const financeRow = pop.locator('.pop-row').filter({ hasText: '재무 파일' })
+  await expect(financeRow).toContainText('아직 없어요')
+  await expect(pop.getByText('참고자료', { exact: true })).toBeVisible()
+  await expect(pop.getByRole('button', { name: /answers\.md/ })).toBeVisible()
+  await expect(pop.getByRole('button', { name: '파일 고르기…' })).toBeVisible()
 
-  // sources/ files show filename in the head, relative path only in the caption;
-  // the manuscript is marked current, other files carry no badge
-  const manuscriptRow = page.locator('.item', { hasText: '초고.docx' })
-  await expect(manuscriptRow.locator('text=현재 작성물')).toBeVisible()
-  const answersRow = page.locator('.item', { hasText: 'answers.md' })
-  await expect(answersRow.locator('.head strong')).toHaveText('answers.md')
-  await expect(answersRow.locator('.badge')).toHaveCount(0)
-  // 자료와 점검을 오갈 수 있다 — 자료 시트 본문 끝에 있던 임시 "점검" 링크는 정식 진입점
-  // (제목줄 "지금 ▾" → 전체 과정 → 제출 점검·마무리)이 생기면서 지웠다(설계자 답 Q6).
+  // 점검으로 이동했다가 돌아와도 현재 작성물 선택은 바뀌지 않는다.
   await navTo(page, '점검')
   await page.waitForSelector('[data-screen="checkup"]', { timeout: 30_000 })
   await navTo(page, '자료')
-  await page.waitForSelector('[data-screen="materials"]', { timeout: 30_000 })
-  // no auto-adoption: the caption is always present
-  await expect(page.locator('text=넣는 것만으로 현재 작성물이 되지는 않아요')).toBeVisible()
+  await expect(pop).toBeVisible()
+  await expect(pop.locator('.pop-row').filter({ hasText: '현재 원고' })).toContainText('초고.docx')
 
   mkdirSync(OUT, { recursive: true })
   await page.screenshot({ path: join(OUT, 'materials.png') })
 
-  // attaching puts the absolute path into the answer draft and moves to 내 논문.
-  // connected → composer textarea; agent-less machine (CI) → the draft copy card
-  // holds it instead, so the draft is never silently swallowed. count() 를 바로 찍으면
-  // 상태 조회가 아직 안 끝난 순간을 볼 수 있으니, 둘 중 하나가 자리 잡을 때까지 기다린다.
-  await manuscriptRow.locator('button:has-text("답변에 첨부")').click()
+  // A reference attaches to the answer draft; it does not change the selected manuscript.
+  const answerRow = pop.locator('.pop-scroll > div').filter({ hasText: 'answers.md' })
+  await expect(answerRow).toHaveCount(1)
+  await expect(answerRow.getByRole('button', { name: /answers\.md/ })).toBeVisible()
+  await answerRow.getByRole('button', { name: '답변에 첨부' }).click()
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
   const draftTarget = page.locator('textarea').or(page.locator('.card', { hasText: '도우미에게 보낼 요청' }).locator('.prose'))
   await expect(draftTarget.first()).toBeVisible({ timeout: 30_000 })
   const ta = page.locator('textarea')
-  if (await ta.count()) expect(await ta.inputValue()).toContain(join('sources', '초고.docx'))
-  else await expect(page.locator('.card', { hasText: '도우미에게 보낼 요청' }).locator('.prose')).toContainText(join('sources', '초고.docx'))
+  if (await ta.count()) expect(await ta.inputValue()).toContain(join('sources', 'answers.md'))
+  else await expect(page.locator('.card', { hasText: '도우미에게 보낼 요청' }).locator('.prose')).toContainText(join('sources', 'answers.md'))
+  await navTo(page, '자료')
+  await expect(pop.locator('.pop-row').filter({ hasText: '현재 원고' })).toContainText('초고.docx')
   await electronApp.close()
 })

@@ -94,6 +94,77 @@ test('same/current signed app is not offered or installed, and untrusted hint mi
   expect(mismatch.requests).toEqual([CHANNEL_URL])
 })
 
+test('an absent app key returns idle and clears the prior candidate', async () => {
+  const f = fixture(), h = scenario(f)
+  expect((await h.updates.check()).phase).toBe('available')
+  delete (f.channel as unknown as Record<string, unknown>).app
+  expect(await h.updates.check()).toMatchObject({ phase: 'idle', latest: null, page: null })
+  await expect(h.updates.install()).rejects.toThrow(/먼저/)
+})
+
+test('a missing Windows x64 payload is not offered; Mac release-page behavior is unchanged', async () => {
+  const f = fixture(), h = scenario(f), opened: string[] = []
+  expect((await h.updates.check()).phase).toBe('available')
+  h.options.openExternal = async page => { opened.push(page) }
+  const app = (f.channel as unknown as Record<string, unknown>).app as Record<string, unknown>
+  delete app['win32-x64']
+  expect(await h.updates.check()).toMatchObject({
+    phase: 'unavailable', latest: null, page: null,
+    message: '새 앱 0.6.0은 아직 이 컴퓨터용으로 준비 중이에요. 지금 앱은 그대로 쓸 수 있어요.'
+  })
+  await expect(h.updates.install()).rejects.toThrow(/먼저/)
+  await expect(h.updates.openPage()).rejects.toThrow(/먼저/)
+  expect(opened).toEqual([])
+
+  const old = fixture('0.5.1')
+  delete ((old.channel as unknown as Record<string, unknown>).app as Record<string, unknown>)['win32-x64']
+  expect((await scenario(old).updates.check()).phase).toBe('idle')
+
+  const macFixture = fixture()
+  delete ((macFixture.channel as unknown as Record<string, unknown>).app as Record<string, unknown>)['win32-x64']
+  const macBase = scenario(macFixture), mac = new AppUpdates({ ...macBase.options, platform: 'darwin', openExternal: async page => { opened.push(page) } })
+  expect((await mac.check()).phase).toBe('available')
+  await mac.openPage()
+  expect(opened).toEqual([releasePage('0.6.0')])
+})
+
+for (const [label, value] of [
+  ['null', null],
+  ['empty object', {}],
+  ['empty string', '']
+] as const) test(`present app entry ${label} remains an error`, async () => {
+  const f = fixture()
+  ;(f.channel as unknown as Record<string, unknown>).app = value
+  expect((await scenario(f).updates.check()).phase).toBe('error')
+})
+
+for (const [label, entry] of [
+  ['null', null],
+  ['empty object', {}],
+  ['empty string', ''],
+  ['malformed string', 'not-an-envelope'],
+  ['empty envelope', { manifest: '', sig: '' }]
+] as const) test(`present Windows x64 entry ${label} remains an error`, async () => {
+  const f = fixture()
+  const app = (f.channel as unknown as Record<string, unknown>).app as Record<string, unknown>
+  app['win32-x64'] = entry
+  expect((await scenario(f).updates.check()).phase).toBe('error')
+})
+
+test('a present Windows x64 entry with a bad signature remains an error', async () => {
+  const f = fixture(), app = (f.channel as unknown as Record<string, unknown>).app as Record<string, unknown>
+  app['win32-x64'] = { ...f.envelope, sig: Buffer.alloc(64).toString('base64') }
+  expect((await scenario(f).updates.check()).phase).toBe('error')
+})
+
+test('a Windows x64 entry signed by another key remains an error', async () => {
+  const f = fixture(), app = (f.channel as unknown as Record<string, unknown>).app as Record<string, unknown>
+  const other = generateKeyPairSync('ed25519')
+  const sig = sign(null, Buffer.from(f.envelope.manifest, 'base64'), other.privateKey).toString('base64')
+  app['win32-x64'] = { ...f.envelope, sig }
+  expect((await scenario(f).updates.check()).phase).toBe('error')
+})
+
 test('Windows installs only after drain, tree confirmation, resources check and durable pending; quit waits for start acknowledgement', async () => {
   const h = scenario(), entered = Promise.withResolvers<void>(), accepted = Promise.withResolvers<void>()
   await h.chat.status(h.project, 'claude'); await h.chat.globalStatus('codex')
@@ -159,6 +230,31 @@ test('interrupted launch reuses only the signed verified cached installer', asyn
   const repaired = new AppUpdates(h.options)
   await repaired.install()
   expect(h.requests.length).toBe(requests.length + 1)
+})
+
+for (const missing of ['app', 'win32-x64'] as const) test(`recovered interrupted install survives missing ${missing} channel entry`, async () => {
+  const f = fixture(), h = scenario(f)
+  expect((await h.updates.check()).phase).toBe('available')
+  await h.updates.install()
+  expect(existsSync(join(h.root, 'app-update/pending.json'))).toBe(true)
+  agentActivity.resume()
+
+  const restarted = new AppUpdates(h.options)
+  await restarted.ready
+  const interrupted = {
+    phase: 'interrupted', latest: '0.6.0', page: releasePage('0.6.0'),
+    message: '업데이트가 끝나지 않았어요. 다시 시도할 수 있어요.'
+  }
+  expect(restarted.status()).toMatchObject(interrupted)
+  const channel = f.channel as unknown as Record<string, unknown>
+  if (missing === 'app') delete channel.app
+  else delete (channel.app as Record<string, unknown>)['win32-x64']
+
+  expect(await restarted.check()).toMatchObject(interrupted)
+  const requests = h.requests.slice()
+  await restarted.install()
+  expect(h.requests).toEqual(requests)
+  expect(h.quit()).toBe(2)
 })
 
 test('browser login aborts handoff immediately; outstanding probe must finish before any teardown', async () => {

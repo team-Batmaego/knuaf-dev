@@ -66,6 +66,29 @@ function clean(line: string): string {
 /** 장 이름(`Ⅲ장`). 로마 숫자는 학교 양식의 Ⅰ~Ⅹ까지 본다. */
 const CHAPTER = /[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+장/
 
+/** Explicit `X장` is decisive; a bare hyphenated number needs the canonical chapter-use annotation. */
+const CHAPTER_TOKEN = '(?:Ⅹ|Ⅸ|Ⅷ|Ⅶ|Ⅵ|Ⅴ|Ⅳ|Ⅲ|Ⅱ|Ⅰ|VIII|VII|VI|IX|IV|III|II|X|V|I|10|[1-9])'
+const CHAPTER_END = String.raw`(?=$|[^\p{L}\p{N}]|(?:은|는|이|가|을|를|의|에서|에게|에|와|과|으로|로|도|만|부터|까지)(?:는|도|만|의)?(?=$|[^\p{L}\p{N}]))`
+const CHAPTER_OF = new RegExp(
+  String.raw`(?:^|[^\p{L}\p{N}])(${CHAPTER_TOKEN})(?:-\d+)?장${CHAPTER_END}|\((${CHAPTER_TOKEN})-\d+\)에\s*쓰여요(?=$|[^\p{L}\p{N}])`,
+  'gu',
+)
+const NON_CHAPTER_REFERENCE = /(?:^|[^\p{L}\p{N}])(?:표|항목)\s*$/u
+const CHAPTER_NUMBER: Record<string, number> = {
+  'Ⅰ': 1, 'Ⅱ': 2, 'Ⅲ': 3, 'Ⅳ': 4, 'Ⅴ': 5, 'Ⅵ': 6, 'Ⅶ': 7, 'Ⅷ': 8, 'Ⅸ': 9, 'Ⅹ': 10,
+  I: 1, II: 2, III: 3, IV: 4, V: 5, VI: 6, VII: 7, VIII: 8, IX: 9, X: 10,
+  '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10
+}
+
+export function chapterOf(text: string): number | null {
+  for (const match of text.matchAll(CHAPTER_OF)) {
+    const numeral = match[1] ?? match[2]
+    if (!numeral) continue
+    if (match[2] !== undefined && NON_CHAPTER_REFERENCE.test(text.slice(0, match.index))) continue
+    return CHAPTER_NUMBER[numeral] ?? null
+  }
+  return null
+}
 export function parseQuestion(text: string): ParsedQuestion | null {
   const rawLines = text.split('\n')
   const lines = rawLines.map(clean)

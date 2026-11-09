@@ -28,14 +28,11 @@ export class SkillStore {
   readonly bundledVersion: string
   constructor(userData: string, readonly bundled: string, readonly appVersion: string, readonly keys: readonly string[]) {
     this.root = join(userData, 'skill-store')
-    // Pre-compose checkout is the design's initial trusted bundled S0 (1.0.0).
-    if (!existsSync(join(bundled, 'skill.json'))) this.bundledVersion = '1.0.0'
-    else {
-      const m = object(JSON.parse(readFileSync(join(bundled, 'skill.json'), 'utf8')))
-      version(m.version)
-      if (m.api !== SKILL_API) throw new Error('동봉 규칙집 약속의 판이 맞지 않아요.')
-      this.bundledVersion = m.version
-    }
+    // S0 must be a composed bundle, never an inferred version for an old checkout.
+    const m = object(JSON.parse(readFileSync(join(bundled, 'skill.json'), 'utf8')))
+    version(m.version)
+    if (m.api !== SKILL_API) throw new Error('동봉 규칙집 약속의 판이 맞지 않아요.')
+    this.bundledVersion = m.version
     mkdirSync(join(this.root, 'proofs'), { recursive: true })
   }
   state(): SkillState {

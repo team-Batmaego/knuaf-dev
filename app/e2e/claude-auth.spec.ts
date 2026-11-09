@@ -186,6 +186,40 @@ test('W1-4: 재로그인 취소·실패는 옛 loggedIn:true로 복구되지 않
   } finally { await r.svc.close() }
 })
 
+for (const order of ['failure-first', 'login-first'] as const) test(`Claude 인증 오류와 재로그인 완료 순서: ${order}`, async () => {
+  const release = join(mkdtempSync(join(tmpdir(), 'kd-claude-race-')), 'release-turn')
+  const r = rig({ W1_QUERY_RELEASE: release })
+  try {
+    await r.svc.send(r.root, 'claude', '이전 요청', 'old')
+    expect(r.svc.snapshot(r.root, 'claude').state).toBe('running')
+    // 가짜 CLI 는 user 메시지를 받는 순간 W1_AUTH_STATE 유무로 실패를 정한다. 기동이 느린
+    // 윈도우에서 로그인 완료 파일이 먼저 생기면 실패가 아니라 정상 답이 된다 — 받은 뒤에 로그인한다.
+    await expect.poll(() => existsSync(r.log) && readFileSync(r.log, 'utf8').split('\n')
+      .some(line => { try { return JSON.parse(line).type === 'user' } catch { return false } }),
+      { timeout: 15_000 }).toBe(true)
+    await r.svc.globalLogin('claude')
+    await expect.poll(() => r.opened.length).toBe(1)
+    if (order === 'login-first') {
+      writeFileSync(r.complete, 'complete fake login')
+      await expect.poll(async () => (await r.svc.globalStatus('claude')).connected).toBe(true)
+    }
+    writeFileSync(release, 'release fake failure')
+    const failed = await settled(r.svc, r.root)
+    expect(failed.messages.find(m => m.id === 'old')?.delivery).toBe('uncertain')
+    if (order === 'failure-first') {
+      expect((await r.svc.globalStatus('claude')).connected).toBe(false)
+      writeFileSync(r.complete, 'complete fake login')
+    }
+    await expect.poll(async () => (await r.svc.globalStatus('claude')).connected, { timeout: 10000 }).toBe(true)
+    expect(r.svc.hasPendingLogin()).toBe(false)
+    await r.svc.send(r.root, 'claude', '복구 뒤 새 요청', 'new')
+    const recovered = await settled(r.svc, r.root)
+    expect(recovered.state).toBe('idle')
+    expect(recovered.messages.find(m => m.id === 'new')?.delivery).toBe('sent')
+    expect(recovered.messages.filter(m => m.role === 'user')).toHaveLength(2)
+  } finally { await r.svc.close() }
+})
+
 test('W1-4: 로그인 시간 초과 뒤 종료 코드 0도 재인증 성공으로 세지 않는다', async () => {
   const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true })
   let timeout: () => void = () => { throw new Error('로그인 제한 타이머 없음') }
