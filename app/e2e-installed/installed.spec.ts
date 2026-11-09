@@ -87,7 +87,8 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
     expect(await electronApp.evaluate(() => process.env.KNUAF_PYTHON ?? null)).toBeNull()
     expect(await electronApp.evaluate(() => process.env.KNUAF_SCRIPTS_DIR ?? null)).toBeNull()
 
-    await openProject(page, root, (p) => paperReady(p, '600평'))
+    // 동봉 실행기 선택을 보므로 개발용 .venv seed와 준비 완료 대기를 제외한다.
+    await openProject(page, root, (p) => paperReady(p, '600평'), { preparation: 'pending' })
 
     const sc = await page.evaluate(() => window.knuaf.sidecarInfo())
     expect(sc.running, '사이드카가 떠 있지 않다').toBe(true)

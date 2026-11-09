@@ -20,7 +20,6 @@ on:
       # (`app/src/**`·`app/sidecar/**`·`electron.vite.config.ts` 등). 권한·비밀값·발행 성질은
       # 이 목록과 무관하게 그대로다(`contents: read`·`secrets` 0·`--publish never`).
       - "app/**"
-      - "skills/knuaf-dev/**"
       - "docs/학생용-사용안내.*"
       - ".github/workflows/build-installers.yml"
       - ".github/workflows/release.yml"
@@ -53,6 +52,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm prepare:resources
@@ -91,6 +91,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm prepare:resources

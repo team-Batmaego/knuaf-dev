@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { launch, openProject, rewriteSection, splitReady, synthProject } from './helpers'
 import { CHAT } from '../src/renderer/src/copy'
 
-const BANNER = '> KNUAF-Dev · 창업논문 작성 도우미'
+const BANNER = '> 창업논문 도우미'
 const TAIL = '여기가 답변의 맨 끝입니다'
 /** 앞머리는 배너·인용, 본문은 2,000자 한도를 훌쩍 넘긴다. */
 const LONG = `${BANNER}\n> prod. 시험용\n\n강의자료 발췌본을 그대로 옮깁니다.\n${'슬라이드 내용 '.repeat(500)}\n${TAIL}`

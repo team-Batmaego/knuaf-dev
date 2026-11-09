@@ -2,7 +2,6 @@
 import json
 
 import gg_core as core
-import gg_school_excel
 from conftest import parse_json, run_gg
 
 
@@ -19,11 +18,25 @@ def _add_fact(project, fid, unit, value="12000"):
     core.apply(project, change, core.load(project)["revision"])
 
 
-def test_money_fact_in_won_is_blocked_not_ignored(project):
+def test_money_fact_in_won_is_checked_not_ignored(project):
+    _add_fact(project, "매출액", "원", value="1000000")
+    p = core.load(project)
+    rows = [r for r in core.checks(project, p)
+            if r["check_id"] == "body_finance_crosscheck" and r["target"] == "매출액"]
+    assert len(rows) == 1, rows
+    assert rows[0]["status"] == "fail", rows[0]
+    assert core.blocks_skill_candidate(rows[0])
+
+
+def test_unit_price_is_explicitly_not_checked_as_a_monetary_amount(project):
     _add_fact(project, "price.kg", "원/kg")
     p = core.load(project)
-    rows = [r for r in core.checks(project, p) if r["check_id"] == "body_finance_crosscheck"]
-    assert any(r["target"] == "price.kg" and r["status"] == "blocked" and "미지원 단위" in r["reason"] for r in rows)
+    report = core.checks(project, p)
+    assert not any(r["check_id"] == "body_finance_crosscheck" and r["target"] == "price.kg"
+                   for r in report)
+    scope = [r for r in report if r["check_id"] == "body_finance_crosscheck_scope"]
+    assert len(scope) == 1, report
+    assert scope[0]["status"] == "not_checked", scope[0]
 
 
 # 시험주행 발견 20 — 본문 대조는 사실의 field_id 를 본문에서 찾아 그 옆의 숫자를 본다.
@@ -162,9 +175,3 @@ def test_malformed_claims_and_views_become_blocked_rows(project):
     assert {"source_claims_invalid", "view_invalid"} <= ids
 
 
-def test_legacy_school_layout_detection():
-    full = list(gg_school_excel.SCHOOL_SHEETS)
-    assert gg_school_excel._legacy_school_layout(full)
-    assert not gg_school_excel._legacy_school_layout(["목록", "내 계획"])
-    assert not gg_school_excel._legacy_school_layout(full[:1] + ["x"] * 16)
-    assert gg_school_excel._legacy_school_layout(full[:12] + ["x"] * 5)

@@ -1,8 +1,8 @@
 // Unit tests for src/main/agent.ts. Plain Playwright `test()` in Node: no Electron is launched.
 import { expect, test } from '@playwright/test'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mock } from 'node:test'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
@@ -12,6 +12,7 @@ import {
 import { serverArgsFor } from '../src/main/chat/codex'
 import { pathKeyOf } from '../src/main/chat/contracts'
 import { ChatService } from '../src/main/chat/service'
+import { APP_NAME } from '../src/shared/name'
 
 const appRoot = resolve(__dirname, '..')
 const source = skillSource(appRoot, false, '/nonexistent')
@@ -365,13 +366,6 @@ test.describe('findExecutable / probeVersion', () => {
 })
 
 test.describe('skill source + version', () => {
-  test('skillSource resolves the checkout and packaged layouts', () => {
-    expect(source).toBe(resolve(appRoot, '..', 'skills', 'knuaf-dev'))
-    expect(existsSync(join(source, 'SKILL.md'))).toBe(true)
-    // 패키지 배치는 `resourcesPath` 아래 `skill` 이다 — 조립은 join 이 하므로 기대값도 join 으로
-    // 만든다(윈도우에서는 역슬래시가 나온다). 리터럴 '/' 로 견주면 윈도우에서만 어긋난다.
-    expect(skillSource(appRoot, true, '/App/Contents/Resources')).toBe(join('/App/Contents/Resources', 'skill'))
-  })
 
   test('skillVersion is stable, 12 hex, and changes with content', () => {
     const a = skillVersion(source)
@@ -424,6 +418,67 @@ test.describe('skill source + version', () => {
 })
 
 test.describe('installSkill', () => {
+  test('a missing source preserves existing student copies, GUI marker and legacy skill', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kd-missing-source-'))
+    try {
+      const target = skillTargets(root).claude
+      const legacy = join(dirname(target), 'knuaf-doc')
+      for (const folder of [target, legacy, join(root, '.knuaf-gui')]) mkdirSync(folder, { recursive: true })
+      writeFileSync(join(target, 'SKILL.md'), '# student working copy\n')
+      writeFileSync(join(legacy, 'SKILL.md'), '# student legacy notes\n')
+      const marker = join(root, '.knuaf-gui', 'skill-install.json')
+      writeFileSync(marker, '{"student":"preserved"}')
+      expect(() => installSkill(join(root, 'missing-bundle'), target, 'new-version')).toThrow()
+      expect(readFileSync(join(target, 'SKILL.md'), 'utf8')).toBe('# student working copy\n')
+      expect(readFileSync(join(legacy, 'SKILL.md'), 'utf8')).toBe('# student legacy notes\n')
+      expect(readFileSync(marker, 'utf8')).toBe('{"student":"preserved"}')
+      expect(existsSync(skillBackupDir(target))).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  test('metadata-only bundle changes reinstall both providers, preserve backups and remain GUI-managed', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kd-composed-install-'))
+    try {
+      const origin = join(root, 'bundle'), project = join(root, 'project'), home = join(root, 'home')
+      cpSync(source, origin, { recursive: true })
+      mkdirSync(home)
+      const targets = skillTargets(project), previous = skillVersion(origin)
+      const metadata = JSON.parse(readFileSync(join(origin, 'skill.json'), 'utf8'))
+      for (const target of Object.values(targets)) {
+        installSkill(origin, target, previous)
+        writeFileSync(join(target, 'student-note.txt'), 'preserve student annotations')
+      }
+      writeFileSync(join(origin, 'skill.json'), JSON.stringify({ ...metadata, version: '1.0.1' }))
+      const current = skillVersion(origin)
+      expect(current).not.toBe(previous)
+      const localPython = resolve(appRoot, '../.venv-dev/bin/python')
+      const python = process.env.KNUAF_PYTHON ?? (existsSync(localPython) ? localPython : process.platform === 'win32' ? 'python' : 'python3')
+      // Execute the installed updater, but forbid every real network connection even on a regression.
+      const entry = `import runpy,sys
+def offline(event,args):
+    if event in ("socket.connect","socket.getaddrinfo"): raise RuntimeError("network forbidden in managed install test")
+sys.addaudithook(offline)
+sys.argv=[sys.argv[1],"auto"]
+runpy.run_path(sys.argv[0],run_name="__main__")`
+      for (const target of Object.values(targets)) {
+        expect(skillState(target, current)).toBe('outdated')
+        const result = installSkill(origin, target, current)
+        expect(result.action).toBe('updated')
+        expect(readFileSync(join(result.backup!, 'student-note.txt'), 'utf8')).toBe('preserve student annotations')
+        expect(JSON.parse(readFileSync(join(result.backup!, 'skill.json'), 'utf8'))).toEqual(metadata)
+        expect(JSON.parse(readFileSync(join(target, 'skill.json'), 'utf8')).version).toBe('1.0.1')
+        expect(skillVersion(target)).toBe(current)
+        const managed = spawnSync(python, ['-c', entry, join(target, 'scripts/gg_update.py')], {
+          encoding: 'utf8', timeout: 15_000, env: { ...process.env, HOME: home, USERPROFILE: home },
+        })
+        expect(managed.status, managed.stdout + managed.stderr).toBe(0)
+        expect(JSON.parse(managed.stdout).result).toBe('managed')
+      }
+      expect(readdirSync(join(project, '.claude/skills'))).toEqual(['knuaf-dev'])
+      expect(readdirSync(join(project, '.agents/skills'))).toEqual(['knuaf-dev'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   test('installs into a tmp project root, is unchanged on rerun, and backs up when tampered', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-root-'))
     const targets = skillTargets(root)
@@ -508,7 +563,7 @@ test.describe('buildLaunchScript', () => {
     // ~/.claude/CLAUDE.md의 @import가 외부 경로를 가리키면 학생에게 영어 보안 프롬프트가 뜬다 —
     // 이 앱이 띄우는 도우미는 메모리 파일을 아예 읽지 않는다.
     expect(s).toContain('export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1')
-    expect(s).toContain('KNUAF-Dev 가 AI 도우미를 엽니다')
+    expect(s).toContain(`${APP_NAME}가 AI 도우미를 엽니다`)
     // 비상구(외부 터미널)에도 채팅과 같은 가드레일 — 프로젝트 스킬만 유효 + 도구 팝업 차단.
     // `--disallowedTools=…` 는 `=` 필수 — 공백이면 가변 인자가 첫 프롬프트를 삼킨다.
     expect(s).toContain(`exec '/opt/homebrew/bin/claude' --setting-sources project,local '--disallowedTools=AskUserQuestion' '시작하기'`)
@@ -726,6 +781,15 @@ test.describe('buildLaunchScript', () => {
     expect(firstPromptFor(0)).toBe('시작하기')
     expect(firstPromptFor(null)).toBe('시작하기')
     expect(firstPromptFor(3)).toBe('이어서 하기')
+  })
+  test('the first work-folder prompt allows skill folders but forbids nested paper-work folders', () => {
+    const prompt = firstPromptFor(0, '/tmp/논문')
+    expect(prompt).toContain('작업 폴더: /tmp/논문')
+    expect(prompt).toContain('논문 작업 파일은 여기서 바로 다루세요.')
+    expect(prompt).toContain('논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요.')
+    expect(prompt).toContain('스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(.venv, sources/extracts 등)는 그대로 두어도 됩니다.')
+    expect(prompt).not.toContain('`.venv` 외의 하위 폴더')
+    expect(prompt).not.toContain('DOCX')
   })
 
   test('a stale global knuaf-dev copy is disabled for the external codex launch', () => {

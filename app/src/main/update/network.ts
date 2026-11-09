@@ -39,8 +39,8 @@ export async function readChannelDocument(config: UpdateConfig, fetch: Transport
   if (channel.schema !== 1) throw new Error('업데이트 채널 형식이 잘못됐어요.')
   return channel
 }
-export async function readChannel(config: UpdateConfig, fetch: Transport, signal: AbortSignal): Promise<VerifiedSkill> {
+export async function readChannel(config: UpdateConfig, fetch: Transport, signal: AbortSignal): Promise<VerifiedSkill | null> {
   const channel = await readChannelDocument(config, fetch, signal)
-  return verifySkill(channel.skill, config.keys)
+  return Object.hasOwn(channel, 'skill') ? verifySkill(channel.skill, config.keys) : null
 }
 export const downloadLimit = (size: number): number => Math.min(MAX_BYTES, size)

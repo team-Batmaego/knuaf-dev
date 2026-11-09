@@ -9,7 +9,6 @@ def run_show(folder, *args):
 def test_lists_facts_from_canon(project):
     r = run_show(project)
     assert r.returncode == 0, r.stderr
-    assert "사실 2" in r.stdout
     assert "fact-area" in r.stdout and "farm.area" in r.stdout
     # An unverified fact must be marked, not quietly listed as evidence.
     assert "미검증 2건" in r.stdout

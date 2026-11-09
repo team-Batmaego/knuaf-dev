@@ -8,6 +8,7 @@ import { ChatService } from '../src/main/chat/service'
 import { CodexConnection } from '../src/main/chat/codex'
 import { findExecutable, installSkill, skillSource, skillTargets, skillVersion } from '../src/main/agent'
 import { useChat } from '../src/renderer/src/store/chat'
+import { usePrep } from '../src/renderer/src/store/prep'
 import {
   CODEX_TIER_MODELS, codexRecommendations, effectiveModelChoice, isCrossProviderModelId, resolveCodexAlias,
   type ChatModelInfo, type ModelChoice
@@ -522,6 +523,9 @@ test('전송 전 확인이 실패하면 보낸 말이 대화에 남지 않는다
 })
 
 test('보내기가 오류로 막히면 초안은 그대로 남는다 (MC1-01)', async () => {
+  usePrep.setState({ prep: {}, write: {}, dependencies: {
+    '/p/model-draft': { visit: 0, operationId: 'verified-fixture', phase: 'ready' }
+  } })
   ;(globalThis as unknown as { window: unknown }).window = {
     knuaf: {
       chat: {

@@ -132,6 +132,7 @@ export function UpdateSettings() {
     : app.phase === 'preparing' ? UPDATE.appPreparing
     : app.phase === 'launching' ? UPDATE.appLaunching
     : app?.phase === 'blocked' ? UPDATE.appBlockedStatus
+    : app.phase === 'unavailable' && app.message ? app.message
     : appAvailable ? UPDATE.appAvailable : app.phase === 'idle' ? UPDATE.appLatest : UPDATE.appUnknown
   return <section aria-label={UPDATE.title} style={{ marginTop: 'var(--sp-3)' }}>
     <h3>{UPDATE.title}</h3>

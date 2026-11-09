@@ -162,6 +162,7 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .pop-row .c { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
 /* 긴 파일 이름은 한 줄 말줄임 — 전체 이름은 title 로(N-I06). */
 .pop-row .c b, .pop-row .c small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop-row .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-row .c b { font-weight: 600; }
 .pop-row .c small { color: var(--muted); font-size: 12.5px; }
 .pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--serif); text-align: center; }
@@ -299,6 +300,9 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .empty .t { color: var(--ink); font-weight: 500; }
 .progress { margin-top: var(--sp-4); border: var(--hairline) solid var(--line); border-radius: var(--r-md); overflow: hidden; }
 .progress-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) var(--sp-4); background: var(--panel-2); }
+/* 경과 시간·단계 글자가 바뀌어도 취소 단추의 위치는 고정한다. */
+.progress-head > span { flex: 1; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.progress-head > button { flex: none; }
 .progress-head .spin { width: 14px; height: 14px; border: 2px solid var(--line-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .progress-log, .log { font-family: var(--mono); font-size: 0.75rem; line-height: 1.5; background: #141614; color: #d8dbd5; padding: var(--sp-3) var(--sp-4); max-height: 240px; overflow: auto; white-space: pre-wrap; }
@@ -460,6 +464,11 @@ dialog.sheet .sheet-foot { display: flex; justify-content: flex-end; gap: var(--
 .docx-preview-frame { display: block; width: 100%; height: calc(100vh - 220px); min-height: 320px; border: var(--hairline) solid var(--line); border-radius: var(--r-md); }
 .preview-image { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; }
 .preview-truncation-badge .badge { border-radius: 5px; }
+/* 시트 이름은 한 줄로 읽힌다. 이름이 많거나 길면 탭 줄만 가로로 스크롤한다 — 한 글자씩
+   세로로 꺾이던 자리(실기기 W-12). 폭이 모자라면 버튼을 줄이지 않고 탭 줄을 민다. */
+.sheet-tabs { min-width: 0; max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+.sheet-tabs .segmented { width: max-content; vertical-align: top; }
+.sheet-tabs .segmented button { flex: 0 0 auto; white-space: nowrap; }
 .artifact-list { max-height: 60vh; overflow: auto; }
 .artifact-list .item { cursor: pointer; }
 .artifact-list .item.active { border-color: var(--accent); background: var(--accent-soft); }
@@ -609,6 +618,15 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .askcard-raw { font-family: var(--mono); font-size: 12.5px; color: var(--muted); white-space: pre-wrap; word-break: break-all;
   max-height: 168px; overflow: auto; background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 8px; padding: 6px 9px; margin: 4px 0 8px; }
 .askcard .prose { font-size: 0.8125rem; color: var(--ink-2); }
+.file-changes { max-height: min(40vh, 260px); overflow-y: scroll; scrollbar-width: thin; margin: 4px 0 8px; }
+.file-change + .file-change { margin-top: var(--sp-3); }
+.file-change-heading { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 13px; color: var(--ink-2); }
+.file-change-heading strong, .file-change-move { min-width: 0; overflow-wrap: anywhere; }
+.file-change-heading strong { color: var(--ink); }
+.file-change-move { font-size: 12.5px; color: var(--ink-2); }
+.file-change-lines { margin: 4px 0 0; padding: 6px 9px; font: 12.5px/1.5 var(--mono); color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; background: color-mix(in srgb, var(--ink) 5%, transparent); border-radius: 8px; }
+.file-change .disclosure { margin-top: 0; }
+.file-change .disclosure-body { padding-top: 0; }
 
 /* ---- 아래 칸: 작업 중 한 줄 (DESIGN §3) — 입력칸은 쓸 수 있고 보내기만 멈추기 ---- */
 .zone-status { display: flex; align-items: center; gap: var(--sp-2); font-size: 13.5px; color: var(--ink-2); margin-top: var(--sp-4); padding: 0 var(--sp-2); }

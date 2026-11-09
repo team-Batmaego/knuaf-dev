@@ -117,7 +117,9 @@ test('turning the permission toggle off records ask, and back on records trust',
   writeFileSync(join(userData, 'settings.json'), JSON.stringify({ trusted_roots: ['legacy-root'] }), 'utf-8')
   const { electronApp, page } = await launch({ userData })
   await navTo(page, '설정')
+  await page.locator('dialog[open] nav').getByRole('button', { name: '폴더', exact: true }).click()
   await expect(page.getByText('이 폴더에서만 항상 허용')).toHaveCount(0)
+  await page.locator('dialog[open] nav').getByRole('button', { name: '도우미 연결', exact: true }).click()
   await page.locator('input[name="permission-mode"]').nth(1).check()
   await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).permission_mode).toBe('ask')
   await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).trusted_roots).toEqual([])
@@ -132,10 +134,13 @@ test('turning global trust on preserves the inactive folder exception list', asy
   const { electronApp, page } = await launch({ userData })
   try {
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '폴더', exact: true }).click()
     await expect(page.getByText('이 폴더에서만 항상 허용')).toBeVisible()
+    await page.locator('dialog[open] nav').getByRole('button', { name: '도우미 연결', exact: true }).click()
     await page.locator('input[name="permission-mode"]').nth(0).check()
     await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).permission_mode).toBe('trust')
     await expect.poll(() => JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf-8')).trusted_roots).toEqual(['legacy-root'])
+    await page.locator('dialog[open] nav').getByRole('button', { name: '폴더', exact: true }).click()
     await expect(page.getByText('이 폴더에서만 항상 허용')).toHaveCount(0)
   } finally { await electronApp.close() }
 })
@@ -191,9 +196,9 @@ test('a bad folder path reports on settings and says the open folder stays', asy
   // 열린 폴더가 어떻게 됐는지도 같은 자리에서 알려야 한다.
   await expect(fb).toContainText('그대로')
 
-  // 실패한 자리에서 한 번이면 된다 — 내 논문에 같은 오류가 다시 뜨면 안 된다.
+  // 설정 창은 닫혀도 DOM에 남는다 — 다른 화면에 실제로 보이는 오류가 없는지만 확인한다.
   await navTo(page, '내 논문')
-  await expect(page.locator('.feedback.error')).toHaveCount(0)
+  await expect(page.locator('.feedback.error:visible')).toHaveCount(0)
   await electronApp.close()
 })
 

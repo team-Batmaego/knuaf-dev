@@ -19,6 +19,6 @@
 
 ## 프로젝트 지도
 - `app/` — Electron 앱(electron-vite, React 19, Zustand). `src/main`(인터프리터 선택·사이드카 브리지·IPC·설정), `src/renderer`(내 논문·자료·결과물·점검·설정), `sidecar/knuaf_sidecar`(stdlib 파이썬, JSON-lines).
-- `skills/knuaf-dev/` — 에이전트 스킬. `scripts/`(gg_core·CLI 스크립트), `references/`, `SKILL.md`.
+- `app/skill-source.json`·`app/skill-overlay/` — 고정 knuaf-doc 원본과 앱 전용 차이. `stage:skill`의 호환 게이트를 통과한 `app/resources/skill/` 하나를 동봉·설치한다. scripts 사본은 추적하지 않는다.
 - `tests/` — 루트 pytest(스킬·사이드카·문서 로직). `app/e2e/`·`app/*.spec.ts` — Playwright(electron, `out/` 빌드 산출물 대상).
 - `docs/` — 학생용 안내(md/html/pdf)·설치 안내. `pyproject.toml` — pytest·ruff 설정.

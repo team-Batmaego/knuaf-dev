@@ -1,5 +1,6 @@
 import { useShallow } from 'zustand/react/shallow'
 import { useProject } from '../store/project'
+import { usePrep } from '../store/prep'
 import { chosenProvider, displayState, useConnect } from '../store/connect'
 import { chatProvider, resolveChatMode } from '../store/chat'
 import { derive, nextAction, stageInputs, type StageAction, type StageDerived, type StageInputs } from '../../../shared/stage'
@@ -20,12 +21,13 @@ export interface Stage {
  * `hasProject`. 나머지는 `stageInputs` 가 사이드카 응답에서 옮긴다.
  */
 export function useStage(): Stage {
-  const { root, hasProject, status, depsReady, error, sections, artifacts, buildTree, projectLoad } = useProject(useShallow((s) => ({
-    root: s.root, hasProject: s.hasProject, status: s.status, depsReady: s.depsReady, error: s.error,
+  const { root, hasProject, status, sections, artifacts, buildTree, projectLoad } = useProject(useShallow((s) => ({
+    root: s.root, hasProject: s.hasProject, status: s.status,
     sections: s.sections, artifacts: s.artifacts, buildTree: s.buildTree, projectLoad: s.projectLoad
   })))
   const { selected, codex, claude } = useConnect(useShallow((s) => ({ selected: s.selected, codex: s.codex, claude: s.claude })))
   const settings = useProject((s) => s.settings)
+  const preparation = usePrep(s => root ? s.dependencies[root] : undefined)
 
   const provider = chosenProvider(selected, settings) ?? chatProvider(resolveChatMode(null, settings))
   const info = provider === 'codex' ? codex : claude
@@ -36,7 +38,7 @@ export function useStage(): Stage {
     root: !!root,
     // 확인하지 못한 것(`unknown`·`failed`)을 연결됨으로 꾸미지 않는다.
     connected: connState === 'connected',
-    depsFailed: error?.code === 'deps_ensure' || depsReady === false,
+    depsFailed: preparation?.phase === 'blocked',
     hasProject
   }
   const derived = derive(inputs)

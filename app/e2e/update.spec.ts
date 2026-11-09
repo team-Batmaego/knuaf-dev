@@ -72,6 +72,34 @@ function updater(store: SkillStore, f = fixture(), restartSidecar: () => Promise
   return { updates, requests }
 }
 
+test('missing or invalid S0 metadata never invents a bundled version or initializes an update store', () => {
+  const root = temporary(), bundled = join(root, 'bundle')
+  mkdirSync(bundled)
+  for (const text of [null, '{', '{"version":"invalid","api":1}', '{"version":"1.0.0","api":2}']) {
+    if (text !== null) writeFileSync(join(bundled, 'skill.json'), text)
+    expect(() => new SkillStore(root, bundled, '0.5.1', keys)).toThrow()
+    expect(existsSync(join(root, 'skill-store'))).toBe(false)
+  }
+  writeFileSync(join(bundled, 'skill.json'), '{"version":"1.0.2","api":1}')
+  const store = new SkillStore(root, bundled, '0.5.1', keys)
+  expect(() => store.publish(fixture('1.0.1').verified(), fixture('1.0.1').zip)).toThrow()
+  expect(store.state().active).toBeNull()
+  expect(store.resolveSkillSource()).toBe(bundled)
+})
+function channelUpdater(store: SkillStore, channel: () => unknown) {
+  const requests: string[] = []
+  const updates = new SkillUpdates(store, { config: config(), fetch: async url => {
+    requests.push(url)
+    return new Response(JSON.stringify(channel()))
+  }, restartSidecar: async () => {} })
+  return { updates, requests }
+}
+type SkillChannelFixture = { manifest: SkillManifest; signed: { manifest: string; sig: string } }
+
+function channelSkill(f: SkillChannelFixture) {
+  return { ...f.signed, version: f.manifest.version, api: f.manifest.api, minApp: f.manifest.minApp, url: f.manifest.url }
+}
+
 test('Ed25519 verifies exact bytes, rejects altered bytes, signature, another key and unsigned hint mismatch', () => {
   const f = fixture()
   const formatted = envelope(f.manifest, true)
@@ -112,6 +140,49 @@ test('unknown signed fields and unsupported app/API are rejected before download
     expect(requests).toEqual([CHANNEL_URL])
     expect(store.state().highest).toBeNull()
   }
+})
+
+test('removing the only skill channel entry returns idle and clears its candidate', async () => {
+  const { store } = setup(), f = fixture('1.0.1')
+  let channel: unknown = { schema: 1, skill: channelSkill(f) }
+  const { updates, requests } = channelUpdater(store, () => channel)
+  expect((await updates.check()).phase).toBe('available')
+  channel = { schema: 1 }
+  expect(await updates.check()).toMatchObject({ phase: 'idle', available: null })
+  await expect(updates.install()).rejects.toThrow(/먼저 업데이트/)
+  expect(requests).toEqual([CHANNEL_URL, CHANNEL_URL])
+})
+
+for (const [label, entry] of [
+  ['null', null],
+  ['empty object', {}],
+  ['empty string', ''],
+  ['malformed string', 'not-an-envelope'],
+  ['empty envelope', { manifest: '', sig: '' }]
+] as const) test(`present skill entry ${label} remains an error`, async () => {
+  const { store } = setup(), { updates } = channelUpdater(store, () => ({ schema: 1, skill: entry }))
+  expect((await updates.check()).phase).toBe('error')
+})
+
+test('a present skill entry with a bad signature remains an error', async () => {
+  const { store } = setup(), f = fixture('1.0.1')
+  const entry = { ...channelSkill(f), sig: Buffer.alloc(64).toString('base64') }
+  const { updates } = channelUpdater(store, () => ({ schema: 1, skill: entry }))
+  expect((await updates.check()).phase).toBe('error')
+})
+
+test('a skill entry signed by another key remains an error', async () => {
+  const { store } = setup(), f = fixture('1.0.1'), entry = channelSkill(f)
+  const other = generateKeyPairSync('ed25519')
+  const sig = sign(null, Buffer.from(entry.manifest, 'base64'), other.privateKey).toString('base64')
+  const { updates } = channelUpdater(store, () => ({ schema: 1, skill: { ...entry, sig } }))
+  expect((await updates.check()).phase).toBe('error')
+})
+
+test('a skill channel hint that differs from the signed version remains an error', async () => {
+  const { store } = setup(), f = fixture('1.0.1')
+  const { updates } = channelUpdater(store, () => ({ schema: 1, skill: { ...channelSkill(f), version: '1.0.2' } }))
+  expect((await updates.check()).phase).toBe('error')
 })
 
 for (const [label, transform] of [

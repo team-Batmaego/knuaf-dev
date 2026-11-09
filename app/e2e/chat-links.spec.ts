@@ -81,7 +81,7 @@ test('파일 단추: 원래 앱 열기 실패 시 폴더에서 보여 주고 쉬
 
 test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 않는다 (GUI-12)', async () => {
   const root = synthProject()
-  // 파일을 만들지 않는다 — A-02에 따라 결과물 시트와 안내를 연다.
+  // 파일을 만들지 않는다 — missing link notice opens the expanded Files list.
   seedChat(root, '검토본을 만들었어요. [검토전_본문.md](build/검토전_본문.md) 에서 볼 수 있어요.')
 
   const { electronApp, page } = await launch()
@@ -95,9 +95,12 @@ test('도우미 답변의 파일 링크가 마크다운 원문으로 보이지 �
     const link = page.getByRole('button', { name: '검토전_본문.md' })
     await expect(link, '파일 이름이 누를 수 있는 것이 아니다').toBeVisible()
     await link.click()
-    await expect(page.getByRole('heading', { name: '결과물' })).toBeVisible({ timeout: 30_000 })
-    await expect(page.getByText('"검토전_본문.md"을 찾지 못했어요.', { exact: true })).toBeVisible()
-    await expect(page.getByText('아래는 이 논문에서 만든 다른 파일이에요.', { exact: true })).toBeVisible()
+    const pop = page.locator('.paper-head .popover')
+    await expect(pop).toBeVisible({ timeout: 30_000 })
+    const notice = pop.getByRole('status')
+    await expect(notice).toBeVisible()
+    await expect(notice).toContainText('"검토전_본문.md"을 찾지 못했어요.')
+    await expect(notice).toContainText('아래는 이 논문에서 만든 다른 파일이에요.')
   } finally {
     await electronApp.close()
   }

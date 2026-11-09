@@ -52,16 +52,17 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
       const el = host.current
       if (!el) return
       const box = el.getBoundingClientRect()
-      const above = box.top - 12
-      const below = window.innerHeight - box.bottom - 12
+      const top = (document.querySelector('.titlebar')?.getBoundingClientRect().bottom ?? 0) + 8
+      const above = Math.max(0, box.top - top - 6)
+      const below = Math.max(0, window.innerHeight - box.bottom - 18)
       const next = placement === 'down' && below >= 560 ? 'down' : above > below ? 'up' : 'down'
       setDirection(next)
-      el.style.setProperty('--model-pop-height', `${Math.max(120, next === 'up' ? above : below)}px`)
+      el.style.setProperty('--model-pop-height', `${next === 'up' ? above : below}px`)
       const width = Math.min(400, window.innerWidth - 48)
       el.style.setProperty('--model-pop-shift', `${Math.min(0, window.innerWidth - 12 - box.left - width)}px`)
     }
     position()
-    const first = host.current?.querySelector<HTMLButtonElement>('.model-option') ?? host.current?.querySelector<HTMLButtonElement>('.popover button')
+    const first = host.current?.querySelector<HTMLButtonElement>('.popover button')
     first?.focus()
     window.addEventListener('resize', position)
     return () => window.removeEventListener('resize', position)
