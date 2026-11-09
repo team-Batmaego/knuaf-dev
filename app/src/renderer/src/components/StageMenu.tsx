@@ -92,6 +92,7 @@ export function StageMenu() {
         )}
         {block && (
           <>
+            <div className="pop-scroll">
             {headMeta && <div className="pop-head-sub caption">{headMeta}</div>}
             {block.steps.map((step) => (
               <PopRow
@@ -128,6 +129,8 @@ export function StageMenu() {
                 </div>
               </>
             )}
+            </div>
+            {/* 제출 전 점검은 스크롤 밖에 고정 — 작은 창(720px 이하)·긴 목록에서도 늘 보인다(N-I07, Roh [중요 3]). */}
             <PopRow
               icon={<Icon name="check" size={16} />}
               onClick={() => { setOpen(false); openSheet('checkup') }}

@@ -282,20 +282,41 @@ export type PickResult =
 function isStoredProgress(v: unknown): v is StoredProgress {
   if (typeof v !== 'object' || v === null) return false
   const o = v as Record<string, unknown>
-  if (typeof o.messageId !== 'string' || typeof o.provider !== 'string' || typeof o.at !== 'string') return false
+  if (typeof o.messageId !== 'string' || o.messageId === '') return false
+  if (o.provider !== 'codex' && o.provider !== 'claude') return false
+  if (typeof o.at !== 'string' || Number.isNaN(Date.parse(o.at))) return false
   if (typeof o.block !== 'object' || o.block === null) return false
   const b = o.block as Record<string, unknown>
-  if (typeof b.n !== 'number' || !Array.isArray(b.steps) || b.steps.length !== 7) return false
-  if (!Array.isArray(b.flags) || typeof b.reviewPending !== 'boolean') return false
+  if (typeof b.n !== 'number' || !Number.isInteger(b.n) || b.n < 1 || b.n > 7) return false
+  if (!Array.isArray(b.steps) || b.steps.length !== 7) return false
+  if (!Array.isArray(b.flags)) return false
+  // flags 원소는 전부 글자여야 한다 — 객체가 들어가면 StageMenu 렌더에서 React 예외.
+  if (!b.flags.every((f) => typeof f === 'string')) return false
+  if (typeof b.reviewPending !== 'boolean') return false
   if (typeof b.after !== 'string' && b.after !== null) return false
+  // n 1..7 빠짐없이 한 번씩, 오름차순으로 와야 한다.
+  const seen = new Set<number>()
   for (const s of b.steps as unknown[]) {
     if (typeof s !== 'object' || s === null) return false
     const step = s as Record<string, unknown>
-    if (typeof step.n !== 'number' || step.n < 1 || step.n > 7) return false
+    if (typeof step.n !== 'number' || !Number.isInteger(step.n) || step.n < 1 || step.n > 7) return false
+    if (seen.has(step.n)) return false
+    seen.add(step.n)
     if (step.state !== 'done' && step.state !== 'now' && step.state !== 'todo') return false
     if (step.note !== undefined && typeof step.note !== 'string') return false
     if (step.uncertain !== undefined && typeof step.uncertain !== 'boolean') return false
   }
+  for (let i = 0; i < 7; i++) {
+    const step = (b.steps as Record<string, unknown>[])[i]
+    if (step.n !== i + 1) return false
+  }
+  // ▶ 하나 이상이거나 모두 ✓, n은 ▶ 중 최대(모두 ✓이면 7)여야 한다.
+  const states = (b.steps as { state: string }[]).map((s) => s.state)
+  const nowList = states.map((s, i) => (s === 'now' ? i + 1 : 0)).filter((x) => x > 0)
+  const allDone = states.every((s) => s === 'done')
+  if (nowList.length === 0 && !allDone) return false
+  const expectedN = nowList.length ? nowList[nowList.length - 1] : 7
+  if (b.n !== expectedN) return false
   return true
 }
 

@@ -176,3 +176,46 @@ test('U10 좁은 창 1,024 / 900 — 단추가 [대화 | 내 논문]과 겹치�
     await electronApp.close()
   }
 })
+
+test('U8-small 작은 창(높이 720) — [제출 전 점검]이 펼침 안에 늘 보인다', async () => {
+  const dir = scratch()
+  const root = synthProject()
+  seedReal(root)
+  const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
+  try {
+    await openProject(page, root, splitReady)
+    // 창 높이 720 — 팝오버 최대 높이와 겹친 긴 목록에서 진입점이 잘리지 않는지 본다.
+    await electronApp.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0]
+      const b = win.getBounds()
+      win.setBounds({ ...b, height: 720 })
+    })
+    await page.waitForTimeout(600)
+    await titlebar(page).click()
+    const pop = page.locator('.titlebar .popover')
+    await expect(pop).toBeVisible()
+    const check = pop.getByRole('button', { name: '제출 전 점검' })
+    await expect(check, '제출 전 점검이 펼침 안에 없다').toBeVisible()
+    const popBox = await pop.boundingBox()
+    const checkBox = await check.boundingBox()
+    expect(popBox).not.toBeNull()
+    expect(checkBox).not.toBeNull()
+    expect(
+      checkBox!.y + checkBox!.height,
+      '제출 전 점검이 팝오버 아래쪽에 잘렸다',
+    ).toBeLessThanOrEqual(popBox!.y + popBox!.height + 2)
+    // 목록 영역이 스크롤된다 — pop-scroll 존재 + overflow-y auto
+    const scrollable = await pop.locator('.pop-scroll').evaluate((el) => {
+      const cs = getComputedStyle(el)
+      return cs.overflowY === 'auto' || cs.overflowY === 'scroll'
+    })
+    expect(scrollable, '목록 영역이 스크롤되지 않는다').toBe(true)
+    await shot(page, 'u8-small')
+    await check.click()
+    const over = page.locator('.paperpane .sheetover')
+    await expect(over).toBeVisible({ timeout: 30_000 })
+    await expect(over.getByRole('heading')).toContainText('제출 전 점검')
+  } finally {
+    await electronApp.close()
+  }
+})

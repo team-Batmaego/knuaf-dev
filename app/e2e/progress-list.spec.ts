@@ -308,3 +308,30 @@ test('S6 동률 — (가) id·provider 같음 → 대화 값 / (나) provider만
   const diffId = pickProgress(pickAt(2, at, 'other', 'claude'), pickAt(4, at, 'cl4', 'claude') as StoredProgress, '/papers/a', '/papers/a')
   expect(diffId.kind).toBe('stored')
 })
+
+// Roh [중요 2] — 손상된 저장값이 검증을 통과해 렌더에서 예외를 내면 안 된다.
+// flags에 객체, 표시 단계 99, 중복 n, 역순 n, n 부재, 깨진 at 등 — 하나라도 어긋나면 null(버리고 시작 전).
+test('S7 손상된 저장값 5종 — 전부 버리고 null(시작 전)', () => {
+  const good = pickAt(2, '2026-11-09T14:00:00Z', 'good', 'claude')
+  expect(parseStoredProgress(JSON.stringify(good))).not.toBeNull()
+
+  const flagObj = JSON.parse(JSON.stringify(good)) as Record<string, unknown>
+  ;(flagObj.block as Record<string, unknown>).flags = [{ text: 'x' }]
+  expect(parseStoredProgress(JSON.stringify(flagObj))).toBeNull()
+
+  const n99 = JSON.parse(JSON.stringify(good)) as Record<string, unknown>
+  ;(n99.block as Record<string, unknown>).n = 99
+  expect(parseStoredProgress(JSON.stringify(n99))).toBeNull()
+
+  const dup = JSON.parse(JSON.stringify(good)) as Record<string, unknown>
+  ;((dup.block as Record<string, unknown>).steps as Record<string, unknown>[])[1].n = 1
+  expect(parseStoredProgress(JSON.stringify(dup))).toBeNull()
+
+  const reverse = JSON.parse(JSON.stringify(good)) as Record<string, unknown>
+  ;(reverse.block as Record<string, unknown>).steps = ((reverse.block as Record<string, unknown>).steps as unknown[]).reverse()
+  expect(parseStoredProgress(JSON.stringify(reverse))).toBeNull()
+
+  const badAt = JSON.parse(JSON.stringify(good)) as Record<string, unknown>
+  badAt.at = 'not-a-date'
+  expect(parseStoredProgress(JSON.stringify(badAt))).toBeNull()
+})

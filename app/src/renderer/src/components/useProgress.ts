@@ -59,6 +59,9 @@ export function useProgress(): UseProgressResult {
   }
 
   const result = pickProgress(conv, stored, snap?.root ?? null, root)
+  // 선택한 답의 변경을 감지한다 — messageId가 바뀌면 그 답이 최신 진행값이다.
+  // (Roh [중요 1] — effect deps가 바뀌지 않으면 1→2→4단계에서 저장값이 1단계에 남았다.)
+  const convKey = conv ? `${conv.messageId}|${conv.at}|${provider}` : null
 
   useEffect(() => {
     // 깨진 저장값은 지운다.
@@ -79,9 +82,9 @@ export function useProgress(): UseProgressResult {
         /* 무시 — 제목줄은 그대로 보인다 */
       }
     }
-    // snapshot·root·provider만 본다 — 저장값 글자까지 보면 effect가 되먹는다.
+    // snapshot.messageId/at은 convKey로, root/provider는 직접 본다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, snap?.root, provider, result.kind])
+  }, [root, snap?.root, provider, result.kind, convKey])
 
   if (result.kind === 'none') return { pick: null }
   return { pick: result.pick }
