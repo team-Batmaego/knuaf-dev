@@ -2,6 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { winSpawn, killTree } from '../win'
 
+/** killTree의 시그니처 — 시험 주입을 위한 이름이다. */
+type KillFn = (child: { pid?: number; kill: (signal?: NodeJS.Signals) => boolean }, signal?: NodeJS.Signals) => void
+
 /** stdio JSON-RPC. stderr stays out of the student transcript and credentials never enter logs. */
 export class JsonRpcProcess {
   private child: ChildProcessWithoutNullStreams
@@ -13,7 +16,10 @@ export class JsonRpcProcess {
   onNotification: (method: string, params: any) => void = () => {}
   onRequest: (id: number | string, method: string, params: any) => void = () => {}
   onClose: () => void = () => {}
-  constructor(binary: string, args: string[], cwd: string, env: NodeJS.ProcessEnv) {
+  /** killTree 주입 — 시험이 kill 실패·exit 미발생을 결정적으로 만들 때만 쓴다. 기본값은 종전 그대로. */
+  private readonly killFn: KillFn
+  constructor(binary: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, opts: { killFn?: KillFn } = {}) {
+    this.killFn = opts.killFn ?? killTree
     // 윈도우에서 npm 이 깐 codex 는 `.cmd` 다 — Node 가 직접 띄우지 못하므로 cmd.exe 로 감싼다
     // (맥·리눅스와 `.exe` 는 그대로 — winSpawn 이 빈 옵션을 돌려준다).
     const spec = winSpawn(binary, args)
@@ -48,7 +54,20 @@ export class JsonRpcProcess {
     this.child.stdin.destroy()
     this.child.stdout.destroy()
     this.child.stderr.destroy()
+    // stdio destroy는 자식 핸들(widget) 참조까지 끊지 못한다. 부모가 종료할 수 있게 힌들만 해제한다.
+    // unref는 종료되지 않은 자식을 죽이지 않으므로, 고아로 남을 수 있다는 기록을 남긴다.
+    this.detach()
     this.onClose()
+  }
+  /** 살아 있는 자식 핸들을 이벤트루프에서 떼어 부모(Electron main)가 종료할 수 있게 한다. 자식은 죽이지 않는다. */
+  private detach() {
+    const pid = this.child.pid
+    const alive = this.child.exitCode === null && this.child.signalCode === null
+    if (alive && pid) {
+      try { this.child.kill('SIGKILL') } catch { /* 이미 죽음 */ }
+      console.error(`[transport] 자식이 종료되지 않아 핸들을 떠났습니다 pid=${pid} (고아일 수 있음)`)
+    }
+    try { this.child.unref() } catch { /* 이미 해제됨 */ }
   }
   send(value: unknown) {
     if (this.closed) throw new Error('AI 연결이 종료됐어요.')
@@ -67,13 +86,13 @@ export class JsonRpcProcess {
     await new Promise<void>(resolve => {
       // 죽는 것('exit')만 기다린다. 'close'는 파이프 점유자 때문에 안 올 수 있다.
       const done = () => { clearTimeout(t1); clearTimeout(t2); resolve() }
-      const t1 = setTimeout(() => killTree(this.child, 'SIGKILL'), 3000)
+      const t1 = setTimeout(() => this.killFn(this.child, 'SIGKILL'), 3000)
       // 'exit'가 안 와도 finish로 닫는다 — pending 45s 타이머가 메인을 살리지 않게.
       const t2 = setTimeout(() => { this.finish(); done() }, 3500)
       this.child.once('exit', done)
       // 윈도우에서 `cmd.exe` 로 감싼 자식은 **트리째** 끝낸다 — cmd.exe 만 죽이면 손자
       // (실제 codex·claude/node)가 고아로 남는다(윈도우 CI 4차). 맥은 종전 그대로다.
-      killTree(this.child, 'SIGTERM')
+      this.killFn(this.child, 'SIGTERM')
     })
   }
 }

@@ -109,3 +109,38 @@ test('stop 은 exit가 늦어도 6초 안에 닫히고 대기 요청은 거절�
     void rpc.stop().catch(() => {})
   }
 })
+
+/**
+ * killTree 실패로 'exit'가 끝내 오지 않는 결정적 반례(RT 2회차 중요 1).
+ * killFn을 바꿔 끼워 t2 경로를 플랫폼과 무관하게 밟는다. 수정 전(t2 resolve만 있고
+ * finish 없음)에는 closed·pending 거절·onClose가 모두 일어나지 않아 이 시험이 실패한다.
+ * 시험이 끝난 뒤 worker(부모)가 정상 종료되면 자식 핸들이 더 이상 부모를 붙잡지 않는다는 뜻이다.
+ */
+test('kill이 exit를 못 만들면 t2가 닫고 pending을 거절하며 onClose를 한 번만 부른다 (RT2)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kd-transport-nokill-'))
+  const pidFile = join(dir, 'tool.pid')
+  const runner = join(dir, 'runner.mjs')
+  writeFileSync(runner, `import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TOOL_PID_FILE, String(process.pid))\nsetInterval(() => {}, 1000)\n`, 'utf-8')
+  writeCliShim(dir, 'fake',
+    `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(runner)}`,
+    `"${process.execPath}" "${runner}"`)
+  const binary = join(dir, process.platform === 'win32' ? 'fake.cmd' : 'fake')
+  let onCloseCalls = 0
+  const rpc = new JsonRpcProcess(binary, [], dir, { ...process.env, TOOL_PID_FILE: pidFile }, { killFn: () => {} })
+  rpc.onClose = () => { onCloseCalls++ }
+  try {
+    expect(await until(() => existsSync(pidFile)), '가짜 도구가 뜨지 않았다').toBe(true)
+    // 응답 없이 매달린 요청 — t2가 clear해야 worker 타이머(45s)가 끝나지 않는다.
+    const pending = rpc.request('account/read', {})
+    const rejection = expect(pending).rejects.toThrow('AI 연결이 종료됐어요')
+    const start = Date.now()
+    await rpc.stop()
+    expect(Date.now() - start).toBeLessThan(6_000)
+    expect(rpc.closed).toBe(true)
+    expect(onCloseCalls).toBe(1)
+    await rejection
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf-8')), 'SIGKILL') } catch { /* 이미 죽었거나 없음 */ }
+    void rpc.stop().catch(() => {})
+  }
+})
