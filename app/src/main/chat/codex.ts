@@ -616,10 +616,21 @@ export function codexSandboxPolicy(cwd: string): {
   return { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
 }
 
-/** 담당 스레드를 여는 값 — 시험도 같은 함수를 써서 요청 모양이 갈라지지 않게 한다. */
+/**
+ * 담당 스레드를 여는 값 — 시험도 같은 함수를 써서 요청 모양이 갈라지지 않게 한다.
+ *
+ * `approvalsReviewer: 'user'` 를 **명시**한다. 스키마(`v2/ApprovalsReviewer.ts`, 0.167.0):
+ * `"user" | "auto_review" | "guardian_subagent"` 이고 주석은 "Configures who approval requests
+ * are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval
+ * prompts, and ARC escalations. Defaults to `user`." 다. 즉 생략하면 **사용자 설정을 상속**해
+ * `auto_review`/`guardian_subagent` 가 샌드박스 탈출·네트워크 승격을 따로 심사할 수 있다.
+ * 담당에는 묻는 학생이 없고 앱이 승인 요청을 전부 거절하므로, 심사자도 앱 쪽(사용자 자리)으로
+ * 고정해 승격 경로를 만들지 않는다(검토 차단 2).
+ */
 export function codexThreadParams(request: RelayRequest, model: string) {
   return {
     cwd: request.cwd, approvalPolicy: 'on-request' as const, sandbox: request.isolation.codexSandbox,
+    approvalsReviewer: 'user' as const,
     model, developerInstructions: RELAY_DEVELOPER_INSTRUCTIONS
   }
 }
@@ -763,11 +774,24 @@ export class CodexRelayConnection implements JobConnection {
     const started = await rpc.request('thread/start', codexThreadParams(this.request, model))
     const threadId = started?.thread?.id
     if (typeof threadId !== 'string' || !threadId) throw new Error('Codex가 담당 스레드를 열지 못했어요.')
+    /**
+     * **보낸 값만 믿지 않는다** — 사용자 설정이 심사자를 바꿔 놓으면 서버가 다른 값을 돌려준다.
+     * 그 상태로 턴을 열면 승인 요청이 자동 심사 에이전트로 흘러 앱의 거절을 우회할 수 있다.
+     * 그래서 돌려받은 심사자를 대조하고, 다르면 턴을 열지 않는다(검토 차단 2).
+     */
+    if (started.approvalsReviewer !== 'user') {
+      throw new Error('Codex 담당 스레드의 승인 심사자가 앱이 정한 값과 달라요. 이 주문은 열지 않습니다.')
+    }
     this.thread = threadId
     // 순서 고정: 세션 id 가 먼저 와야 러너가 토큰 기록을 남긴다(jobs.ts `tokens`).
     events.session(threadId)
-    events.actualModel(typeof started.model === 'string' && started.model ? started.model : model,
-      typeof started.reasoningEffort === 'string' ? started.reasoningEffort : null)
+    /**
+     * 실제 노력 수준은 **주문이 보낸 값**이다. `started.reasoningEffort` 는 스레드 기본값이라
+     * 주문이 low 인데 서버 기본이 high 면 기록이 high 로 남는다(검토 중요 2). `turn/start.effort`
+     * 는 "this turn and subsequent turns" 에 적용되므로 이 턴의 실제 값은 `request.effort` 다.
+     * 모델은 서버가 돌려준 값을 그대로 쓴다(별칭→실제 id 해석은 서버 몫이다).
+     */
+    events.actualModel(typeof started.model === 'string' && started.model ? started.model : model, this.request.effort)
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {
@@ -813,8 +837,18 @@ export class CodexRelayConnection implements JobConnection {
     rpc.onRequest = (id, method) => {
       // 묻는 학생이 없다. 승인 계열은 전부 거절, 인터뷰형 요청은 빈 답, 나머지는 미지원.
       if (method === 'item/tool/requestUserInput') return rpc.send({ id, result: { answers: {} } })
-      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval'
-        || method === 'item/permissions/requestApproval') return rpc.send({ id, result: { decision: 'decline' } })
+      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+        return rpc.send({ id, result: { decision: 'decline' } })
+      }
+      /**
+       * 이 요청만 응답 모양이 다르다 — 스키마(`v2/PermissionsRequestApprovalResponse.ts`):
+       * `{permissions: {network, fileSystem}, scope: 'turn'|'session'}`. 승인 계열 공통 모양
+       * (`{decision:'decline'}`)을 보내면 서버 역직렬화가 실패해 턴이 중단될 수 있다(검토 중요 3).
+       * **빈 허용 목록 + `turn` 범위**가 "아무것도 더 주지 않는다"는 뜻이다.
+       */
+      if (method === 'item/permissions/requestApproval') {
+        return rpc.send({ id, result: { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
+      }
       if (method === 'applyPatchApproval' || method === 'execCommandApproval') return rpc.send({ id, result: { decision: 'decline' } })
       if (method === 'mcpServer/elicitation/request') return rpc.send({ id, result: { action: 'decline' } })
       return rpc.send({ id, error: { code: -32601, message: '담당 연결은 이 요청을 지원하지 않아요.' } })

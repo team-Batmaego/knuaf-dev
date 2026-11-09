@@ -1,14 +1,15 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import { claudeTokens } from './jobs/tokens'
+import { canonical as canonicalPath } from './jobs/isolation'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 import type { ChatModelInfo, ConnectionStatus } from '../../shared/chat'
 import type { ModelCatalogEntry } from '../../shared/lanes'
@@ -955,6 +956,57 @@ export function claudeExecutionAccount(options: AgentOptions, models: readonly M
 const RELAY_SYSTEM_APPEND = `${CLAUDE_SYSTEM_APPEND} 이 세션은 앱이 연 담당(relay)입니다. 결과는 주문서가 정한 출력 칸에만 쓰고, 그 밖의 파일은 만들지도 고치지도 마세요. 학생에게 직접 묻지 말고, 판단이 필요하면 주문서의 조건 칸에 적으세요.`
 
 /**
+ * 이 주문 전용 플러그인 폴더를 만든다 — `<root>/.knuaf-gui/relay-plugin/<jobId>`.
+ *
+ * 왜 앱이 직접 만드나: `settingSources: []`(SDK 격리 모드)는 `.claude/skills` 발견을 끊는다.
+ * 그래서 그 주문에 필요한 스킬만 담은 플러그인 폴더를 앱이 조립해 넘긴다.
+ *
+ * 주의: 이 쓰기는 **SDK 격리가 시작되기 전**에 앱 프로세스가 한다. 그래서 경로 판정을
+ * SDK 에 맡길 수 없고, 여기서 직접 확인한다(아래).
+ */
+export function prepareRelayPlugin(root: string, jobId: string, skill: string): string {
+  const base = join(root, '.knuaf-gui', 'relay-plugin')
+  assertWritableDir(base, root)
+  const dir = join(base, jobId)
+  assertWritableDir(dir, root)
+  const manifest = join(dir, '.claude-plugin')
+  assertWritableDir(manifest, root)
+  mkdirSync(manifest, { recursive: true })
+  writeFileSync(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }))
+  // 스킬 사본도 같은 판정을 지난 **안쪽** 경로에만 쓴다.
+  const target = join(dir, 'skills', 'knuaf-dev')
+  assertWritableDir(dirname(target), root)
+  cpSync(skill, target, { recursive: true })
+  return dir
+}
+
+/**
+ * 쓰기 전에 **한 번 더** 확인한다 — 앱이 만드는 폴더가 작업 폴더 안인가.
+ *
+ * 반례(검토 차단 1): `.knuaf-gui/relay-plugin` 이 작업 폴더 밖 디렉터리를 가리키는 심볼릭
+ * 링크면, 이 조립은 SDK 격리 **전에** 앱 프로세스가 하므로 격리가 막아 주지 못한다. 그래서
+ * ① 아직 없는 구간은 가장 가까운 존재 조상까지 실경로로 풀고(`canonical`),
+ * ② 이미 있는 경로는 심볼릭 링크 자체를 거절한다(`lstat`).
+ * 둘 중 하나라도 작업 폴더 밖을 가리키면 아무것도 쓰지 않고 던진다.
+ */
+function assertWritableDir(path: string, root: string): void {
+  const realRoot = realOrSelf(resolve(root))
+  // ② 존재하는 경로는 링크를 따라가지 않고 그 자체를 본다.
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new Error('담당 플러그인 폴더가 심볼릭 링크예요. 작업 폴더 안의 실제 폴더여야 해요.')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  // ① 없는 구간은 존재하는 조상의 실경로를 기준으로 판정한다.
+  const real = realOrSelf(canonicalPath(path))
+  const rel = relative(realRoot, real)
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error('담당 플러그인 폴더가 작업 폴더 밖을 가리켜요. 이 주문은 열지 않습니다.')
+  }
+}
+
+
+/**
  * 담당 연결 — 본대화와 **완전히 다른 옵션 객체**를 쓴다(발주 §④-a).
  *
  * 격리(설계 §3.3 ①②③):
@@ -970,6 +1022,13 @@ const RELAY_SYSTEM_APPEND = `${CLAUDE_SYSTEM_APPEND} 이 세션은 앱이 연 �
  */
 export class ClaudeRelayConnection implements JobConnection {
   readonly relayProtocol = 1 as const
+  /**
+   * ㉠(형님 확정) — Claude 는 턴 **밖에서** A 를 관측할 통로가 없다(실측 3건). 그래서
+   * `availability()` 는 `usage:'unknown'` 을 돌려주고, 러너는 이 선언이 있을 때만 그 unknown 을
+   * 통과시켜 첫 턴을 연다. 그 턴에서 첫 `rate_limit_event` 가 `limit` 면 **그 자리에서**
+   * `JobFailure('limit')` 로 닫고 결과를 넘기지 않는다(아래 `runJob`). 필드 이름은 a-gate 갈래
+   * `jobs/types.ts` 의 `gateInTurn` 과 같다. */
+  readonly gateInTurn = true
   private active?: Query
   private controller?: AbortController
   /** 이미 실행 중인 주문 — 같은 연결에 두 주문이 겹치면 관문·중지가 뒤엉킨다. */
@@ -1085,14 +1144,9 @@ export class ClaudeRelayConnection implements JobConnection {
     return text.replace(/^\s*\/knuaf-dev\b/, '/knuaf:knuaf-dev')
   }
 
-  /** 이 주문 전용 플러그인 폴더. 앱 사유 폴더 안이고, 주문마다 새로 만든다. */
+  /** 이 주문 전용 플러그인 폴더. */
   private pluginDir(): string {
-    const dir = join(this.options.root, '.knuaf-gui', 'relay-plugin', this.request.jobId)
-    const manifest = join(dir, '.claude-plugin')
-    mkdirSync(manifest, { recursive: true })
-    writeFileSync(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }))
-    cpSync(this.request.skill, join(dir, 'skills', 'knuaf-dev'), { recursive: true })
-    return dir
+    return prepareRelayPlugin(this.options.root, this.request.jobId, this.request.skill)
   }
 
   /**

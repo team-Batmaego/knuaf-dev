@@ -58,7 +58,9 @@ const handlers = {
       approvalPolicy: params?.approvalPolicy ?? 'on-request', approvalsReviewer: 'user',
       // 실물 0.167.0 은 문자열 sandbox 만 주면 이렇게 빈 writableRoots 로 답한다(실측).
       sandbox: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
-      reasoningEffort: 'high' }
+      // 사용자 설정이 심사자를 바꿔 놓은 경우를 흉내내는 스위치(차단 2 재현).
+      approvalsReviewer: process.env.KD_FAKE_THREAD_REVIEWER ?? 'user',
+      reasoningEffort: process.env.KD_FAKE_THREAD_EFFORT ?? 'high' }
   },
   'turn/start': (params) => {
     log({ method: 'turn/start', params })
@@ -68,7 +70,7 @@ const handlers = {
         tokenUsage: { total: { totalTokens: 30, inputTokens: 20, cachedInputTokens: 4, cacheWriteInputTokens: 1, outputTokens: 10, reasoningOutputTokens: 2 },
           last: { totalTokens: 15, inputTokens: 10, cachedInputTokens: 2, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 1 },
           modelContextWindow: 200000 } } })
-      for (const method of ['item/commandExecution/requestApproval', 'item/tool/requestUserInput', 'account/chatgptAuthTokens/refresh']) {
+      for (const method of ['item/commandExecution/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput', 'account/chatgptAuthTokens/refresh']) {
         const id = `srv-${++askSeq}`
         asked.set(id, method)
         send({ id, method, params: { threadId: params.threadId, turnId: 'turn-fake', reason: 'fake', command: 'echo hi' } })

@@ -66,6 +66,13 @@ export interface JobEvents extends AgentEvents {
 /** An ordinary AgentConnection is deliberately insufficient: engines must enforce the relay contract. */
 export interface JobConnection extends AgentConnection {
   relayProtocol: 1
+  /**
+   * 첫 턴 안에서 사용량 신호를 재판정할 수 있다는 연결 쪽 선언(㉠).
+   * `true`인 연결만 턴 전 `usage:'unknown'`을 통과시켜 첫 턴을 연다;
+   * 없거나 거짓이면 현행(unknown 차단) 그대로다. 엔진 구현은 배선 A 몫이라
+   * 여기서 선언만 받고, 가짜 연결로 시험한다.
+   */
+  gateInTurn?: boolean
   availability(): Promise<ExecutionAccount>
   runJob(text: string, events: JobEvents): Promise<void>
 }
