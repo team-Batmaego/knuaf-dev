@@ -428,9 +428,12 @@ function exeName(word: string): string {
 function parseShell(raw: string): string[][] | null {
   // 따옴표 안의 윈도우 경로 구분자(\)만 슬래시로 바꿔 읽는다.
   // 따옴표 안의 이스케이프(\\"·\\$·\\`)와 따옴표 밖의 `\`는 셸이 다르게 읽으므로 판정 불가다.
+  // 단, .py 로 끝나는 따옴표 토큰은 정규화를 생략한다 — FIXCHECK3는 역슬래시 표기 스킬 호출을
+  // 묻는다. 정규화하면 C:\...\gg.py 가 C:/.../gg.py 가 돼 스킬로 오인된다. 원본 \ 를 두면
+  // SKILL_PATH(/ 만 허용)가 거부해 묻는다. 비 .py 경로는 종전대로 정규화한다(W1③ 폴안 통과).
   const cmd = raw.replace(BENIGN_REDIR, ' ')
   if (SHELL_UNJUDGEABLE.test(cmd) || /\n/.test(cmd)) return null
-  const norm = cmd.replace(/"[^"]*"/g, (g) => g.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul}._\-/:\\])/gu, '/'))
+  const norm = cmd.replace(/"[^"]*"/g, (g) => g.endsWith('.py"') ? g : g.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul}._\-/:\\])/gu, '/'))
   const segs: string[][] = []
   let seg: string[] = []
   let word: string | null = null

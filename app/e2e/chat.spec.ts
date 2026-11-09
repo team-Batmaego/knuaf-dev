@@ -1048,6 +1048,13 @@ test('윈도우 드라이브 절대경로의 스킬 호출은 묻지 않고, 다
   ]) expect(autoAllow(root, 'Bash', { command: cmd }), cmd).toBe(false)
 })
 
+// 맥에서도 재현된다 — 상대경로의 따옴표 안 역슬래시는 정규화가 통하면 그대로 스킬로 오인돼
+// 자동 허용됐던(S1 WIN 교정 후 회귀). 역슬래시는 묻고 슬래시는 그대로다.
+test('역슬래시 표기의 스킬 호출은 묻는다 (S1 WIN2, 맥 재현)', () => {
+  expect(autoAllow(ROOT, 'Bash', { command: 'python3 ".claude\\skills\\knuaf-dev\\scripts\\gg.py" status' })).toBe(false)
+  expect(autoAllow(ROOT, 'Bash', { command: 'python3 ".claude/skills/knuaf-dev/scripts/gg.py" status' })).toBe(true)
+})
+
 /** 감싸는 명령은 뒤 낱말을 실행하므로, AI 가 아니어도 그 뒤의 판정을 빠져나가게 두지 않는다. */
 test('감싸는 명령 뒤의 실행 파일은 판정을 빠져나가지 못한다', () => {
   for (const cmd of [
