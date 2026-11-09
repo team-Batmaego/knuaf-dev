@@ -11,7 +11,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { launch, openProject, splitReady } from './helpers'
-import { CHAT } from '../src/renderer/src/copy'
+import { CHAT, QUESTION_FORM } from '../src/renderer/src/copy'
 import { fakeCodexEnv, questionProject, scratch, seedChat } from './fixtures/fake-codex'
 
 const SHOTS = process.env.KNUAF_FOLD_SHOTS_DIR
@@ -189,6 +189,42 @@ test('여러 칸 질문 카드는 원문의 번호 칸을 접고, 설명 문장�
     await expect(body).toContainText('[Q3] 작목과 자금 방향')
     await expect(body).toContainText('예: A 고설 수경 딸기')
     await shot(page, 'question-unfolded')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('자유롭게 답하기로 바꾸면 카드가 사라지므로 질문 원문도 다시 보인다', async () => {
+  const dir = scratch()
+  const root = questionProject()
+  seedChat(root, [{ id: 'a-q3', role: 'assistant', text: FORM, at: at(1) }])
+  const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
+  try {
+    await openProject(page, root, splitReady)
+    const form = page.locator('.qform')
+    await expect(form, '여러 칸 질문 카드가 없다').toBeVisible({ timeout: 30_000 })
+    const body = page.locator('.chat-msg.assistant')
+    // 카드가 보이는 동안은 접힌다(카드가 그 줄을 대신 보여 준다).
+    await expect(body.locator('.q-fold')).toBeVisible()
+    await expect(body).not.toContainText('[Q3] 작목과 자금 방향')
+
+    // '직접 입력' 을 누르면 카드는 숨고 입력칸이 뜬다 — 이제 원문이 유일한 질문 표시다.
+    await form.getByRole('button', { name: QUESTION_FORM.free }).click()
+    await expect(page.locator('.chat-composer textarea')).toBeVisible()
+    await expect(form, '카드가 숨지 않았다').toBeHidden()
+    await expect(body.locator('.q-fold'), '카드가 없는데 접힘 안내가 남았다').toHaveCount(0)
+    await expect(body, '질문 원문이 접힌 채 남았다').toContainText('[Q3] 작목과 자금 방향')
+    // 번호는 마크다운 목록 요소가 그린다 — 글자로는 칸 이름만 확인한다.
+    await expect(body.locator('.chat-md ol li')).toHaveCount(2)
+    await expect(body.locator('.chat-md ol li').nth(1)).toContainText('자금 방향 (아래 셋 중 하나)')
+    await expect(body).toContainText('예: A 고설 수경 딸기')
+    await shot(page, 'question-free')
+
+    // 돌아가면 카드가 다시 보이므로 접힘도 함께 돌아온다.
+    await page.getByRole('button', { name: QUESTION_FORM.back }).click()
+    await expect(form).toBeVisible()
+    await expect(body.locator('.q-fold')).toBeVisible()
+    await expect(body).not.toContainText('[Q3] 작목과 자금 방향')
   } finally {
     await electronApp.close()
   }
