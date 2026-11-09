@@ -452,7 +452,10 @@ export class CodexConnection implements AgentConnection {
   async stop() {
     this.stopped = true
     if (this.turn && this.thread && this.rpc && !this.rpc.closed) {
-      try { await this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }) } catch { /* process termination below */ }
+      // 종료 중에는 interrupt를 45s 전체 대기하지 않는다 — 짧은 예산 뒤에 kill로 넘어간다.
+      const { promise, reject } = Promise.withResolvers<void>()
+      const budget = setTimeout(() => reject(new Error('shutdown')), 3000)
+      try { await Promise.race([this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }), promise]) } catch { /* process termination below */ } finally { clearTimeout(budget) }
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
     this.fileChanges.clear(); this.pendingFileApprovals.clear()
