@@ -35,8 +35,11 @@ const HOWS = ['main', 'sub', 'relay']
 function isLaneEntry(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const entry = value as { company?: unknown; model?: unknown; effort?: unknown; how?: unknown }
+  // `LaneEntry.model` 은 `string | null` 이다(lanes.ts). `resolveLanes` 는 본대화가 맡는
+  // 차선·모델을 확인하지 못한 차선에 `model: null` 을 넣으므로, 여기서 거부하면 정당한
+  // 승인 배치가 통째로 저장되지 않아 이후 모든 주문이 승인 불일치로 거절된다.
   return typeof entry.company === 'string' && COMPANIES.includes(entry.company)
-    && typeof entry.model === 'string' && !!entry.model
+    && (entry.model === null || (typeof entry.model === 'string' && !!entry.model))
     && (entry.effort === null || typeof entry.effort === 'string')
     && typeof entry.how === 'string' && HOWS.includes(entry.how)
 }
@@ -136,7 +139,14 @@ export class JobStore {
     return this.state.consent[consentKey(company, accountId)] === true
   }
 
-  /** At-most-once: `done`·`uncertain`·이미 진행 중이면 false — 다시 전달하지 않는다. */
+  /**
+   * At-most-once: `done`·`uncertain`·이미 진행 중이면 false — 다시 전달하지 않는다.
+   *
+   * 러너는 자기 `delivered` 목록을 먼저 영속한 뒤(jobs.ts `deliver`) 이 claim 을 부른다.
+   * 그 두 쓰기 **사이**에 앱이 죽으면 이 기록이 없어 다음 실행이 '확인하지 못함'을
+   * 띄우지 않고 결과가 조용히 사라진다. 두 파일을 한 트랜잭션으로 묶을 수 없어 남는
+   * 창이며, 정상 종료·크래시 복구 경로는 이 claim 을 기준으로 동작한다.
+   */
   beginDelivery(rootJobId: string, root: string, ownerId: string): boolean {
     const existing = this.state.deliveries[rootJobId]
     if (existing) return false
