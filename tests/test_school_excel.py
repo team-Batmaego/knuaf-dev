@@ -13,6 +13,7 @@ def test_zero_byte_xlsx_output_is_reported_not_raised(project):
     p["outputs"]["out-broken"] = {
         "id": "out-broken", "revision": 1, "format": "xlsx", "path": "build/broken.xlsx",
         "target_refs": [], "input_fingerprint": "x", "file_hash": "x", "checks": [],
+        "workbook_profile": "school_17_sheet_v1",
     }
     issues = gg_school_excel.inspect_outputs(project, p)
     assert any(cid == "school_excel_17" for cid, _ in issues)
