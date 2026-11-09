@@ -572,13 +572,13 @@ test('셸 변수가 있으면 값을 모르므로 묻는다', () => {
   expect(autoAllow(ROOT, 'Bash', { command: 'echo "$(printf changed > /tmp/x)"' })).toBe(false)
   expect(autoAllow(ROOT, 'Bash', { command: 'echo "$(id)"' })).toBe(false)
   expect(autoAllow(ROOT, 'Bash', { command: 'echo "`id`"' })).toBe(false)
-  // 따옴표 안의 `{`·`}`만 글자로 본다(v0.6.2) — grep 수량자 오탐 교정.
-  // 주의: `.claude/skills/...` 아래 경로는 보호 경로라 `touchesProtected`로 카드로 간다
-  // (아래 '셸로 권한 파일을 쓰는 길도 묻는다'와 같은 선). 글이 아닌 경로는 여기로 표현한다.
-  expect(autoAllow(ROOT, 'Bash', { command: 'grep "hort_env_systems\\.[a-z_]\\{3,\\}" "sources/a.md"' })).toBe(true)
-  expect(autoAllow(ROOT, 'Bash', { command: "grep 'hort_env_systems\\.[a-z_]\\{3,\\}' 'sources/a.md'" })).toBe(true)
-  // 작은따옴표 안은 셸이 펼치지 않으므로 `$`·백틱도 글자다(실측).
-  expect(autoAllow(ROOT, 'Bash', { command: "echo '$HOME `id` {x}'" })).toBe(true)
+  // 따옴표 안의 `{`·`}`도 v0.6.1 기대(카드)로 둔다 — Roh 차단 1 처분(인용 상태 추적은 v0.6.3).
+  expect(autoAllow(ROOT, 'Bash', { command: 'grep "hort_env_systems\\.[a-z_]\\{3,\\}" "sources/a.md"' })).toBe(false)
+  expect(autoAllow(ROOT, 'Bash', { command: "grep 'hort_env_systems\\.[a-z_]\\{3,\\}' 'sources/a.md'" })).toBe(false)
+  expect(autoAllow(ROOT, 'Bash', { command: "echo '$HOME `id` {x}'" })).toBe(false)
+  // Roh 회귀: 큰따옴표 안의 작은따옴표는 셸에서 단순 문자라 그 안의 $()가 실행된다(카드).
+  expect(autoAllow(ROOT, 'Bash', { command: `echo "'$(touch .mcp.json)'"` })).toBe(false)
+  expect(autoAllow(ROOT, 'Bash', { command: `echo "'$(touch ../x)'"` })).toBe(false)
 })
 
 test('폴더 안이어도 스킬 스크립트가 아니면 실행하지 않는다', () => {

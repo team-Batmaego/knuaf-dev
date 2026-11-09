@@ -449,14 +449,7 @@ function parseShell(raw: string): string[][] | null {
   // 묻는다. 정규화하면 C:\...\gg.py 가 C:/.../gg.py 가 돼 스킬로 오인된다. 원본 \ 를 두면
   // SKILL_PATH(/ 만 허용)가 거부해 묻는다. 비 .py 경로는 종전대로 정규화한다(W1③ 폴안 통과).
   const cmd = raw.replace(BENIGN_REDIR, ' ')
-  // 따옴표 안의 `{`·`}`만 글자로 본다(v0.6.2 — `grep "a\{3,\}"` 수량자가 카드로 오탐).
-  // 쌍따옴표 안의 `$`·백틱은 셸이 펼쳐므로 그대로 판정 불가다 — `cat "$HOME/.ssh/id_rsa"`·
-  // `echo "$(…)"`·백틱 명령 치환을 자동 허용하면 안 된다. 작은따옴표 안은 셸이 펼치지 않으므로
-  // 거기서만 `$`·백틱까지 글자다(실측).
-  const singleOut = cmd.replace(/'[^']*'/g, "''")
-  const braceOut = singleOut.replace(/"[^"]*"/g, '""')
-  const unjudgeable = /[`<>()$~]/.test(singleOut) || /[{}]/.test(braceOut) || /\n/.test(cmd)
-  if (unjudgeable) return null
+  if (SHELL_UNJUDGEABLE.test(cmd) || /\n/.test(cmd)) return null
   const norm = cmd.replace(/"[^"]*"/g, (g) => g.endsWith('.py"') ? g : g.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul}._\-/:\\])/gu, '/'))
   const segs: string[][] = []
   let seg: string[] = []
