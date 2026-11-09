@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -23,7 +24,12 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = CREATE_NO_WINDOW
+    else:
+        # The ensure process can spawn pip; cancellation owns the whole child group.
+        kwargs["start_new_session"] = True
     started = time.monotonic()
+    if ctx.cancelled.is_set():
+        raise RpcError("cancelled", "request cancelled before script start")
     ctx.progress("start", argv=argv, cwd=str(cwd))
     proc = subprocess.Popen(
         argv,
@@ -40,6 +46,8 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
         **kwargs,
     )
     ctx.process = proc
+    if ctx.cancelled.is_set():
+        _kill(proc)
     out_buf, err_buf = [], []
 
     def pump(stream, buf, name):
@@ -73,17 +81,52 @@ def run_script(ctx, python, script_path, args, cwd, timeout: float, env_extra=No
 
 
 def _kill(proc):
-    try:
-        proc.terminate()
-        proc.wait(timeout=3)
-    except (subprocess.TimeoutExpired, OSError):
+    """Stop the owned script tree, not just the Python parent of a running pip."""
+    if sys.platform == "win32":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or r"C:\Windows"
+        killed = subprocess.run(
+            [os.path.join(system_root, "System32", "taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True, timeout=10,
+        )
+        if killed.returncode and proc.poll() is None:
+            raise RpcError("process_stop_failed", "script tree termination was not confirmed")
+    else:
         try:
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
-            else:
-                proc.kill()
-        except OSError:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
             pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError as error:
+            # macOS can reject signals when only zombies remain in the group.
+            if _group_has_live_processes(proc.pid):
+                raise RpcError("process_stop_failed", "script tree termination was not confirmed") from error
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired as error:
+        raise RpcError("process_stop_failed", "script exit was not confirmed") from error
+
+
+def _group_has_live_processes(pgid):
+    """A reaped leader is not proof that its TERM-resistant children exited."""
+    try:
+        snapshot = subprocess.run(
+            ["/bin/ps", "-axo", "pgid=,stat="],
+            capture_output=True, text=True, check=True, timeout=3,
+        )
+        for row in snapshot.stdout.splitlines():
+            group, state = row.split()
+            if int(group) == pgid and not state.startswith("Z"):
+                return True
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        raise RpcError("process_stop_failed", "script group exit could not be inspected") from error
+    return False
 
 
 def project_python(project: Path):

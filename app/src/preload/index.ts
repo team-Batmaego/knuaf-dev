@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
-import type { AppInfo, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
@@ -88,6 +88,11 @@ const api = {
   previewRead: (target: string): Promise<RpcResult<PreviewPayload>> => ipcRenderer.invoke('preview:read', target),
   /** Existence check inside the project root → { result: boolean }. */
   fileExists: (root: string, relPath: string): Promise<{ result: boolean } | { error: { code: string; message: string } }> => ipcRenderer.invoke('file:exists', root, relPath),
+  /** Persist the first-seen body for a section under the current project folder. */
+  review: {
+    ensureBaseline: (root: string, sectionId: string, draft: string): Promise<RpcResult<{ draft: string }>> =>
+      ipcRenderer.invoke('review:ensure-baseline', root, sectionId, draft)
+  },
   /** Copy a file inside the project root to a user-chosen location → { result: savedPath | null } | { error }. */
   fileSaveAs: (root: string, relPath: string) => ipcRenderer.invoke('file:save-as', root, relPath),
   windowInfo: () => ipcRenderer.invoke('window:info'),
@@ -122,7 +127,7 @@ const api = {
     },
     cancel: (): Promise<{ result: boolean }> => ipcRenderer.invoke('runtime:cancel')
   },
-  depsEnsure: async (root: string, onEvent?: EventHandler, clientId?: string) => {
+  depsEnsure: async (root: string, onEvent?: EventHandler, clientId?: string): Promise<RpcResult<Envelope>> => {
     const id = clientId ?? `c${++seq}`
     if (onEvent) handlers.set(id, onEvent)
     try { return await ipcRenderer.invoke('deps:ensure', root, id) } finally { handlers.delete(id) }

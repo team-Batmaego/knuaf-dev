@@ -12,6 +12,9 @@
  *   FAKE_CODEX_ASK    1이면 turn/start 뒤에 권한 요청을 보내고 턴을 끝내지 않는다
  *   FAKE_CODEX_ASK_COMMAND  권한 요청의 command (기본 `cat /etc/hosts`, 빈 값이면 필드 생략)
  *   FAKE_CODEX_ASK_REASON   권한 요청의 reason (기본 쉬운 이유 한 줄, 빈 값이면 필드 생략)
+ *   FAKE_CODEX_FILE_EVENTS  JSON 알림 배열 뒤 파일 변경 승인을 요청한다(스키마 기반 시험)
+ *   FAKE_CODEX_FILE_AFTER   승인 요청 뒤 보낼 JSON 알림 배열
+ *   FAKE_CODEX_COMMAND_EVENTS  턴을 끝내기 전에 보낼 JSON 알림 배열 — `commandExecution` 결과 시험용
  *   FAKE_CODEX_DELAY_MS     모든 요청 응답을 이만큼 늦춘다(기본 0) — 느린 기계 조건 재현용
  *   FAKE_CODEX_MODELS       `model/list` 가 돌려줄 모델 배열(JSON). 없으면 Sol·Terra·Astra·Luna 기본값
  *   FAKE_CODEX_TURN_LOG     `turn/start` 로 온 model·effort 를 한 줄씩 덧붙일 파일 — 시험이 읽는다
@@ -38,6 +41,10 @@ const ASK = process.env.FAKE_CODEX_ASK === '1'
 /** 권한 요청의 command·reason — 여러 줄 명령/이유만 있는 요청을 재현하려고 열어 둔다(QA2A-R1-02). */
 const ASK_COMMAND = process.env.FAKE_CODEX_ASK_COMMAND ?? 'cat /etc/hosts'
 const ASK_REASON = process.env.FAKE_CODEX_ASK_REASON ?? '논문 폴더 밖 파일을 읽으려고 해요'
+const FILE_EVENTS = process.env.FAKE_CODEX_FILE_EVENTS
+const FILE_AFTER = process.env.FAKE_CODEX_FILE_AFTER
+/** 턴이 끝나기 전에 보낼 알림 — 셸 명령 결과(`commandExecution`)의 출력을 시험한다. */
+const COMMAND_EVENTS = process.env.FAKE_CODEX_COMMAND_EVENTS
 /** 응답 지연(ms) — 느린 기계(CI) 조건을 만들기 위한 시험 전용 스위치. 기본 0(동작 불변). */
 const DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_DELAY_MS ?? 0) || 0)
 /** 턴을 끝내지 않는다 — "작업 중" 화면을 안정적으로 본다. `after-delta` 면 답 첫 조각(전달 확인)을 보낸 뒤 붙잡는다. */
@@ -56,6 +63,9 @@ const INIT_DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_INIT_DELAY_MS ??
 /** 기본값 조회(ephemeral thread)만 실패시키는 횟수 — 실패 뒤 재조회 경로를 시험한다. */
 let ephemeralFailures = Math.max(0, Number(process.env.FAKE_CODEX_EPHEMERAL_FAIL_TIMES ?? 0) || 0)
 let modelListFailures = Math.max(0, Number(process.env.FAKE_CODEX_MODELS_FAIL_TIMES ?? 0) || 0)
+const TURN_FAILURE = process.env.FAKE_CODEX_TURN_FAILURE ?? ''
+const LOGIN_COMPLETE = process.env.FAKE_CODEX_LOGIN_COMPLETE ?? ''
+const TURN_RELEASE = process.env.FAKE_CODEX_TURN_RELEASE ?? ''
 const MODELS = (() => {
   const raw = process.env.FAKE_CODEX_MODELS
   if (raw) { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : [] } catch { return [] } }
@@ -140,8 +150,20 @@ function handle(message) {
     case 'account/read':
       return out({ id, result: { account: loggedIn() ? { type: 'chatgpt' } : null } })
     case 'account/login/start':
-      if (STATE) writeFileSync(STATE, 'chatgpt\n')
-      return out({ id, result: { loginId: 'fake', authUrl: 'about:blank' } })
+      if (STATE && !LOGIN_COMPLETE) writeFileSync(STATE, 'chatgpt\n')
+      out({ id, result: { loginId: 'fake', authUrl: 'about:blank' } })
+      if (LOGIN_COMPLETE) {
+        const timer = setInterval(() => {
+          if (!existsSync(LOGIN_COMPLETE)) return
+          clearInterval(timer)
+          if (STATE) writeFileSync(STATE, 'chatgpt\n')
+          out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
+        }, 50)
+      } else if (process.env.FAKE_CODEX_LOGIN_EARLY === '1') {
+        out({ method: 'account/login/completed', params: { loginId: 'old-attempt', success: true } })
+        out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
+      } else out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
+      return
     case 'skills/list': {
       const cwd = (params.cwds ?? [])[0] ?? process.cwd()
       const skill = join(cwd, '.agents', 'skills', 'knuaf-dev', 'SKILL.md')
@@ -195,6 +217,31 @@ function handle(message) {
       const turnId = 'u-fake'
       out({ id, result: { turn: { id: turnId } } })
       out({ method: 'turn/started', params: { threadId, turn: { id: turnId } } })
+      if (TURN_FAILURE && (!LOGIN_COMPLETE || !existsSync(LOGIN_COMPLETE))) {
+        const message = TURN_FAILURE === 'refresh' ? 'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.'
+          : TURN_FAILURE === '401' ? 'HTTP 401 Unauthorized: authentication failed'
+            : TURN_FAILURE === '401-with-secret-marker' ? 'SYNTHETIC-SENSITIVE-MARKER'
+            : TURN_FAILURE === 'external-unauthorized' ? 'External research website returned HTTP 401 Unauthorized'
+              : TURN_FAILURE === 'refresh-network' ? 'Your access token could not be refreshed: network timeout'
+                : TURN_FAILURE === 'bare401' ? 'HTTP 401 Unauthorized: authentication failed'
+                  : TURN_FAILURE === 'external401' ? '401 from external research website'
+                    : TURN_FAILURE === 'rate' ? 'HTTP 429 rate limit exceeded' : 'Network error: ECONNRESET'
+        const fail = () => out({ method: 'turn/completed', params: { threadId, turn: {
+          id: turnId, status: 'failed', error: { message, ...(TURN_FAILURE.startsWith('401') ? { codexErrorInfo: 'unauthorized' } : {}) }
+        } } })
+        if (TURN_RELEASE) {
+          const timer = setInterval(() => { if (existsSync(TURN_RELEASE)) { clearInterval(timer); fail() } }, 50)
+        } else fail()
+        return
+      }
+      if (FILE_EVENTS !== undefined) {
+        for (const event of JSON.parse(FILE_EVENTS)) out(event)
+        out({ id: ++serverSeq, method: 'item/fileChange/requestApproval', params: {
+          threadId, turnId, itemId: 'file-1', startedAtMs: 1, reason: null, grantRoot: null
+        } })
+        if (FILE_AFTER) setTimeout(() => { for (const event of JSON.parse(FILE_AFTER)) out(event) }, 50)
+        return
+      }
       if (ASK) {
         // 허락 카드 장면 — 턴을 끝내지 않고 학생의 답을 기다린다.
         // 요청 id 는 최상위에 있어야 한다(줄 단위 JSON-RPC — 앱도 그렇게 읽는다).
@@ -204,6 +251,9 @@ function handle(message) {
           ...(ASK_REASON ? { reason: ASK_REASON } : {})
         } })
         return
+      }
+      if (COMMAND_EVENTS !== undefined) {
+        for (const event of JSON.parse(COMMAND_EVENTS)) out(event)
       }
       if (HOLD) return
       if (HOLD_AFTER_DELTA) {

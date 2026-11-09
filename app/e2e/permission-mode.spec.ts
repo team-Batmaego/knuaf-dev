@@ -5,6 +5,9 @@ import { launch } from './helpers'
 import { fakeCodexEnv, scratch, userDataWith } from './fixtures/fake-codex'
 
 async function openFromMenu(electronApp: ElectronApplication, root: string): Promise<void> {
+  // The titlebar appears before App's menu subscription is guaranteed to be mounted.
+  const page = await electronApp.firstWindow()
+  await page.waitForSelector('.project-sidebar', { state: 'visible', timeout: 30_000 })
   await electronApp.evaluate(({ dialog, BrowserWindow }, selected) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [selected], bookmarks: [] })) as typeof dialog.showOpenDialog
     BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-folder' })

@@ -2,8 +2,7 @@ import { expect, test } from '@playwright/test'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createContext, runInContext } from 'node:vm'
-import { createElement } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
+import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react'
 import { JsxEmit, ScriptTarget, transpileModule } from 'typescript'
 import { launch, navTo, openProject, settleWorkspace, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
@@ -92,7 +91,7 @@ test('UI-P03: 프로젝트 내부 절대경로 링크를 짧게 보여 주고 �
 })
 
 /** Exercise the production renderer with Windows paths without a Windows host. */
-function renderChatLinks(text: string, root: string, platform = 'win32'): string {
+function renderChatLinks(text: string, root: string, platform = 'win32'): ReactNode {
   const source = readFileSync('src/renderer/src/screens/Chat.tsx', 'utf-8')
   const start = source.indexOf('const INSIDE_PATH')
   const end = source.indexOf('\n/**', source.indexOf('function withLinks'))
@@ -102,9 +101,24 @@ function renderChatLinks(text: string, root: string, platform = 'win32'): string
     compilerOptions: { jsx: JsxEmit.React, target: ScriptTarget.ES2022 }
   }).outputText, sandbox)
   const helpers = sandbox as typeof sandbox & {
-    withLinks: (text: string, root: string | null, onGo: () => void) => Parameters<typeof renderToStaticMarkup>[0]
+    withLinks: (text: string, root: string | null, onGo: () => void) => ReactNode
   }
-  return renderToStaticMarkup(createElement('div', null, helpers.withLinks(text, root, () => {})))
+  return helpers.withLinks(text, root, () => {})
+}
+
+function isLinkButton(node: ReactNode): node is ReactElement<{ className?: string; title?: string; children?: ReactNode }> {
+  return isValidElement<{ className?: string; title?: string; children?: ReactNode }>(node) && node.type === 'button'
+}
+
+function expectLink(text: string, root: string, platform: string, label: string, title: string | undefined, suffix: string): void {
+  const parts = Children.toArray(renderChatLinks(text, root, platform))
+  const buttons = parts.filter(isLinkButton)
+  expect(buttons).toHaveLength(1)
+  const button = buttons[0]!
+  expect(button.props.className).toBe('lk')
+  expect(button.props.title).toBe(title)
+  expect(button.props.children).toBe(label)
+  expect(parts.filter((part) => part !== button).join('')).toBe(suffix)
 }
 
 test('UI-P03 B1-01: 경계가 불확실한 Windows 괄호 경로 네 건은 전부 원문 보존한다', () => {
@@ -117,7 +131,7 @@ test('UI-P03 B1-01: 경계가 불확실한 Windows 괄호 경로 네 건은 전�
   ]
   for (const target of targets) {
     const markdown = `[문서](${target})`
-    expect(renderChatLinks(markdown, root), target).toBe(`<div>${markdown}</div>`)
+    expect(renderChatLinks(markdown, root), target).toBe(markdown)
   }
 })
 
@@ -129,36 +143,21 @@ test('UI-P03 B1-01: 정상 Windows 링크는 파일명으로 줄이고 뒤의 �
     ['C:/Thesis/build/a.md', ''],
     [String.raw`C:\Thesis\build\a.md`, ' 입니다.']
   ]) {
-    expect(renderChatLinks(`[${target}](${target})${suffix}`, root), target + suffix)
-      .toBe(`<div><button class="lk" title="${target}">a.md</button>${suffix}</div>`)
+    expectLink(`[${target}](${target})${suffix}`, root, 'win32', 'a.md', target, suffix)
   }
 })
 
 test('UI-P03 B1-01: 명시적 괄호 경로·macOS·상대경로·외부 링크 계약을 유지한다', () => {
-  const cases = [
-    {
-      root: String.raw`C:\Thesis`, platform: 'win32',
-      text: String.raw`[C:\Thesis\(draft).md](<C:\Thesis\(draft).md>)입니다.`,
-      html: String.raw`<button class="lk" title="C:\Thesis\(draft).md">(draft).md</button>입니다.`
-    },
-    {
-      root: '/Users/student/Thesis', platform: 'darwin',
-      text: '[/Users/student/Thesis/draft (1).md](/Users/student/Thesis/draft (1).md).',
-      html: '<button class="lk" title="/Users/student/Thesis/draft (1).md">draft (1).md</button>.'
-    },
-    {
-      root: '/Users/student/Thesis', platform: 'darwin',
-      text: '[초안](build/draft (1).md).',
-      html: '<button class="lk">초안</button>.'
-    },
-    {
-      root: String.raw`C:\Thesis`, platform: 'win32',
-      text: '[build/a.md](build/a.md).',
-      html: '<button class="lk">build/a.md</button>.'
-    }
-  ]
-  for (const { root, platform, text, html } of cases)
-    expect(renderChatLinks(text, root, platform), text).toBe(`<div>${html}</div>`)
+  expectLink(
+    String.raw`[C:\Thesis\(draft).md](<C:\Thesis\(draft).md>)입니다.`,
+    String.raw`C:\Thesis`, 'win32', '(draft).md', String.raw`C:\Thesis\(draft).md`, '입니다.'
+  )
+  expectLink(
+    '[/Users/student/Thesis/draft (1).md](/Users/student/Thesis/draft (1).md).',
+    '/Users/student/Thesis', 'darwin', 'draft (1).md', '/Users/student/Thesis/draft (1).md', '.'
+  )
+  expectLink('[초안](build/draft (1).md).', '/Users/student/Thesis', 'darwin', '초안', undefined, '.')
+  expectLink('[build/a.md](build/a.md).', String.raw`C:\Thesis`, 'win32', 'build/a.md', undefined, '.')
 
   for (const text of [
     '[외부](C:/Thesis/build/../../outside/a.md)입니다.',
@@ -166,15 +165,16 @@ test('UI-P03 B1-01: 명시적 괄호 경로·macOS·상대경로·외부 링크 
     '[상위](../outside/a.md).',
     '[웹](https://example.invalid/a.md).'
   ])
-    expect(renderChatLinks(text, String.raw`C:\Thesis`), text).toBe(`<div>${text}</div>`)
+    expect(renderChatLinks(text, String.raw`C:\Thesis`), text).toBe(text)
 })
+
 
 test('UI-P04: 앱 정보에 빌드 날짜·커밋이 보이고 두 값을 함께 복사한다', async ({}, testInfo) => {
   const { electronApp, page } = await launch()
   try {
     await navTo(page, '설정')
+    await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     const card = page.locator('section.card').filter({ has: page.getByRole('heading', { name: '앱 정보' }) })
-    await card.scrollIntoViewIfNeeded()
     const line = card.locator('.app-build-info')
     await expect(line).toContainText(/빌드 \d{4}-\d{2}-\d{2} · 커밋 (?:[0-9a-f]{8}|unknown)/i)
     await page.evaluate(() => {

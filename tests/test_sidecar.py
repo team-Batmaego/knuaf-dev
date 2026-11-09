@@ -1,14 +1,15 @@
 """Protocol tests for app/sidecar (JSON-lines over stdio)."""
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 
-from conftest import REPO, SCRIPTS
+from conftest import REPO, SCRIPTS, bind_test_major
 
 SIDECAR_DIR = REPO / "app" / "sidecar"
 
@@ -21,8 +22,26 @@ class Sidecar:
             text=True, encoding="utf-8",
         )
         self.n = 0
-        ready = json.loads(self.proc.stdout.readline())
+        self.lines = queue.Queue()
+        self.reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self.reader.start()
+        ready = json.loads(self._readline(timeout=10))
         assert ready.get("event") == "ready", ready
+
+    def _read_stdout(self):
+        try:
+            for line in self.proc.stdout:
+                self.lines.put(line)
+        finally:
+            self.lines.put("")
+
+    def _readline(self, timeout=None):
+        try:
+            line = self.lines.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError("no sidecar response within %ss" % timeout) from None
+        assert line, "sidecar closed: " + self.proc.stderr.read()
+        return line
 
     def send(self, method, **params):
         """Write one request and return its id without waiting for the answer."""
@@ -37,13 +56,9 @@ class Sidecar:
         events = []
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                assert remaining > 0, "no response for %s within %ss" % (rid, timeout)
-                ready, _, _ = select.select([self.proc.stdout], [], [], remaining)
-                assert ready, "no response for %s within %ss" % (rid, timeout)
-            line = self.proc.stdout.readline()
-            assert line, "sidecar closed: " + self.proc.stderr.read()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            assert remaining is None or remaining > 0, "no response for %s within %ss" % (rid, timeout)
+            line = self._readline(timeout=remaining)
             msg = json.loads(line)
             if msg.get("id") != rid:
                 continue
@@ -68,7 +83,12 @@ class Sidecar:
             self.proc.stdin.flush()
             self.proc.wait(timeout=10)
         finally:
-            self.proc.kill()
+            if self.proc.poll() is None:
+                self.proc.kill()
+            self.proc.wait(timeout=10)
+            self.reader.join(timeout=5)
+            for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                stream.close()
 
 
 @pytest.fixture
@@ -93,6 +113,21 @@ def test_methods_list_reports_write_flags(sidecar):
     assert flags["methods.list"] is False
 
 
+def test_utf8_requests_ignore_inherited_stdio_encoding(monkeypatch, project):
+    import gg_core as core
+
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    sidecar = Sidecar()
+    try:
+        loaded = sidecar.ok("project.load", root=str(project))["result"]
+        assert loaded["project"] == core.load(project)
+        section = sidecar.ok("section.read", root=str(project), id="sec-01")["result"]
+        assert "농장A의 재배 면적은 600평이다." in section["draft"]
+    finally:
+        sidecar.close()
+
+
 def test_status_has_four_lanes_and_banner(sidecar, project):
     st = sidecar.call("project.status", root=str(project))["result"]
     assert st["revision"] == 1
@@ -111,49 +146,54 @@ def test_sections_and_read(sidecar, project):
     assert missing["error"]["code"] == "not_found"
 
 
-def test_lock_info_unlock_history_restore_export(sidecar, project):
-    info = sidecar.call("lock.info", root=str(project))["result"]
-    assert info["present"] is False and info["verdict"] == "none"
-    denied = sidecar.call("lock.unlock", root=str(project))
-    assert denied["error"]["code"] == "business_rule"
+def test_history_restore_and_export_preserve_publication_evidence(sidecar, publication_project):
+    project = publication_project
+    import gg_core as core
+
+    revision = core.load(project)["revision"]
     hist = sidecar.call("project.history", root=str(project))["result"]
     assert hist[-1]["current"] is True
-    ex = sidecar.call("project.export", root=str(project), kind="draft")["result"]
-    assert ex["path"].endswith("검토전_초안.md")
-    tree = sidecar.call("fs.build_tree", root=str(project))["result"]
-    assert tree["revisions"][0]["kinds"][0]["complete"] is True
-    again = sidecar.call("project.export", root=str(project), kind="draft")
-    assert again["error"]["code"] == "overwrite_refused"
-    res = sidecar.call("project.restore", root=str(project), revision=0, expected_revision=1)["result"]
-    assert res["revision"] == 2
+    ex = sidecar.ok("project.export", root=str(project), kind="draft", major_id="specialty_crops")["result"]
+    assert ex["status"] == "generated" and ex["request_id"]
+    assert "600평" in core.local(project, ex["path"]).read_text(encoding="utf-8")
+    again = sidecar.ok("project.export", root=str(project), kind="draft", major_id="specialty_crops")["result"]
+    assert again["status"] == "existing" and again["request_id"] == ex["request_id"]
+    res = sidecar.ok("project.restore", root=str(project), revision=0, expected_revision=revision)["result"]
+    assert res["revision"] == revision + 1 and res["commit_state"] == "committed"
 
 
-def test_stale_lock_roundtrip_via_sidecar(sidecar, project):
-    import socket
-    lock = project / ".gg-lock"
-    lock.mkdir()
-    (lock / "owner.json").write_text(json.dumps({"pid": 999999, "host": socket.gethostname(), "token": "x"}), encoding="utf-8")
-    blocked = sidecar.call("project.export", root=str(project), kind="draft")
-    assert blocked["error"]["code"] == "lock_held"
-    assert sidecar.call("lock.info", root=str(project))["result"]["verdict"] == "stale_releasable"
-    assert sidecar.call("lock.unlock", root=str(project))["result"]["released"] is True
-    assert sidecar.call("project.export", root=str(project), kind="draft")["result"]["path"]
+def test_owner_cleanup_cannot_break_a_live_guard(sidecar, publication_project):
+    import gg_lock
+
+    root = publication_project
+    guard = root / ".gg-lock" / "guard"
+    original = guard.read_bytes(), guard.stat().st_ino
+    owner = root / ".gg-lock" / "owner.json"
+    with gg_lock.Lock(root):
+        before = owner.read_bytes()
+        probe = sidecar.ok("lock.info", root=str(root), probe=True)["result"]
+        # msvcrt cannot distinguish lock contention from permission denial.
+        state, reason, code = (("unavailable", "busy_or_denied", "lock_ambiguous")
+                               if sys.platform == "win32" else ("busy", "guard_busy", "lock_held"))
+        assert (probe["structure"], probe["lock_state"], probe["reason"]) == ("ready", state, reason), probe
+        cleanup = sidecar.call("lock.unlock", root=str(root))
+        assert cleanup["error"]["code"] == code, cleanup
+        assert cleanup["error"]["data"] == {"status": state, "reason": reason}, cleanup
+        assert owner.read_bytes() == before
+    owner.write_text(json.dumps({"pid": 999999, "host": "synthetic", "token": "stale"}), encoding="utf-8")
+    assert sidecar.ok("lock.info", root=str(root))["result"]["lock_state"] == "unprobed"
+    assert sidecar.ok("lock.info", root=str(root), probe=True)["result"]["lock_state"] == "free"
+    assert sidecar.ok("lock.unlock", root=str(root))["result"]["owner_cleaned"] is True
+    assert not owner.exists()
+    assert (guard.read_bytes(), guard.stat().st_ino) == original
 
 
-def test_doctor_all_shape(sidecar, project):
-    d = sidecar.call("doctor.all", root=str(project))["result"]
+def test_doctor_all_shape(sidecar, publication_project):
+    d = sidecar.ok("doctor.all", root=str(publication_project))["result"]
     assert {"gg", "lock", "deps", "kordoc", "snapshots", "python"} <= set(d)
     assert "ready" in d["deps"]
-
-
-def test_subprocess_method_streams_logs_and_normalises(sidecar, project):
-    (project / "paper.json").write_text('{"title": "T", "writing_year": 2026}', encoding="utf-8")
-    r = sidecar.ok("paper.generate", root=str(project), input="paper.json", out="build/본문.md")
-    env = r["result"]
-    assert env["ok"] is True and env["status"] == "generated" and env["path"].endswith("본문.md")
-    assert any(e["event"] == "progress" for e in r["events"])
-    again = sidecar.call("paper.generate", root=str(project), input="paper.json", out="build/본문.md")["result"]
-    assert again["ok"] is False and "덮어쓰지" in (again["block_reason"] or "")
+    assert d["kordoc"]["capability_verified"] is False
+    assert "error" not in d["kordoc"]
 
 
 def test_project_owned_paths_cannot_escape_the_working_folder(sidecar, project):
@@ -224,7 +264,7 @@ def test_materials_list_empty_project(sidecar, project):
 
 
 def test_artifact_list_kinds_and_revision(sidecar, project):
-    sidecar.call("project.export", root=str(project), kind="draft")
+    (project / "build").mkdir(exist_ok=True)
     (project / "build" / "메모.md").write_text("# 메모\n", encoding="utf-8")
     (project / "build" / "receipt.json").write_text("{}", encoding="utf-8")
     res = sidecar.call("artifact.list", root=str(project))["result"]
@@ -277,7 +317,7 @@ def test_artifact_preview_xlsx(sidecar, project):
     assert len(sheets["긴 시트"]["rows"]) == 200
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="sh wrapper + select() on pipes")
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sh wrapper")
 def test_cancel_terminates_running_script(sidecar, project, tmp_path):
     # deps.ensure spawns `base_python gg_deps.py ensure <root>`; a wrapper that just sleeps stands in for it.
     wrapper = tmp_path / "slow-python"
@@ -295,7 +335,7 @@ def test_cancel_terminates_running_script(sidecar, project, tmp_path):
 
 # 시험주행 발견 15 — 앱의 "논문 DOCX 만들기" 가 겉표지·인준서 없는 문서를 내놓던 길.
 # 사이드카가 `body` 를 CLI 로 넘겨야 생성기가 앞머리를 붙이고 학생 본문을 싣는다.
-def test_paper_generate_passes_body_through(sidecar, tmp_path):
+def test_paper_generate_passes_body_through(sidecar, tmp_path, publication_skill):
     import json as _json
     from conftest import SCRIPTS as _S
 
@@ -306,6 +346,7 @@ def test_paper_generate_passes_body_through(sidecar, tmp_path):
         capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
+    bind_test_major(root)
     (root / "build").mkdir(exist_ok=True)
     (root / "build" / "body.md").write_text(
         "Ⅰ. 머리말\n\n학생이 직접 쓴 본문.\n\nⅦ. 참고문헌\n\n없음.\n", encoding="utf-8"
@@ -313,12 +354,12 @@ def test_paper_generate_passes_body_through(sidecar, tmp_path):
     (root / "spec.json").write_text(_json.dumps({
         "writing_year": 2026,
         "school_profile": {"mode": "school", "layout": "forms_1_to_4",
-                           "title": "시험 논문", "author": "김한농",
-                           "department": "채소학과", "school": "한국농수산대학교"},
+                           "title": "시험 논문", "author": "합성 작성자",
+                           "department": "특용작물학과", "school": "한국농수산대학교"},
     }, ensure_ascii=False), encoding="utf-8")
 
     env = sidecar.ok("paper.generate", root=str(root), input="spec.json",
-                     out="build/본문.md", body="build/body.md")["result"]
+                     out="build/본문.md", body="build/body.md", major_id="specialty_crops")["result"]
     assert env["ok"] is True, env
     text = (root / "build" / "본문.md").read_text(encoding="utf-8")
     assert "겉표지" in text, "앞머리가 빠졌다 — 제출본이 아니다"

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useProject } from '../store/project'
-import { hasBodyOf, useLayout } from './useLayout'
+import { hasPaneOf, useLayout } from './useLayout'
 import { WIDE_MIN } from '../../../shared/layout'
+import { PaneHandle } from './PaneHandle'
+import { useChat } from '../store/chat'
+import { zoneOf } from '../../../shared/zone'
+import { foldedQuestionTarget } from './paperNavigation'
 
 /** 전이 시간(`--spring-dur`)과 같게 둔다 — 다 끝난 뒤 클래스를 내린다. */
 const ENTER_MS = 500
@@ -23,7 +27,22 @@ export function Workspace({ chat, paper }: { chat: ReactNode; paper: ReactNode }
   const sections = useProject((s) => s.sections)
   const paneView = useProject((s) => s.paneView)
   const setWindowWidth = useProject((s) => s.setWindowWidth)
-  const hasBody = hasBodyOf(sections)
+  const paneHold = useProject((s) => s.paneHold)
+  const hasBody = hasPaneOf(sections, paneHold)
+  const snapshot = useChat((s) => s.snapshot)
+  const connection = useChat((s) => s.status)
+  const projectStatus = useProject((s) => s.status)
+  const setFoldNotice = useProject((s) => s.setFoldNotice)
+  const lastQuestion = useRef<string | null>(null)
+  useEffect(() => {
+    const zone = zoneOf(snapshot, connection, projectStatus)
+    const target = foldedQuestionTarget(zone, sections, root, layout.kind === 'folded', lastQuestion.current)
+    if (target.sectionId) {
+      setFoldNotice()
+      useProject.getState().focusSection(target.sectionId)
+    }
+    lastQuestion.current = target.key
+  }, [root, sections, snapshot, connection, projectStatus, setFoldNotice, layout.kind])
   const [entering, setEntering] = useState(false)
   /** 직전에 본 상태(폴더 + 본문 유무). 첫 판정은 전이 없이 기준만 세운다. */
   const prev = useRef<{ root: string | null; body: boolean } | null>(null)
@@ -55,10 +74,11 @@ export function Workspace({ chat, paper }: { chat: ReactNode; paper: ReactNode }
 
   return (
     <div className={`workspace${split ? ' split' : ' solo'}${entering ? ' entering' : ''}`}
-      style={split ? { ['--chat-w' as string]: `${layout.chatWidth}px` } : undefined}
+      style={split ? { ['--chat-w' as string]: `${layout.chatWidth}px`, position: 'relative' } : { position: 'relative' }}
       data-wide={WIDE_MIN}>
       {showChat && <div className="chat-pane">{chat}</div>}
-      {showPaper && paper}
+      {showPaper && <div id="paperpane" style={{ position: 'relative', display: 'flex', flex: 1, minWidth: 0 }}>{split && <PaneHandle folded={false} />}{paper}</div>}
+      {layout.kind === 'folded' && <PaneHandle folded />}
     </div>
   )
 }

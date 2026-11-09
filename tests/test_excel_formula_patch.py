@@ -10,6 +10,7 @@ import json
 import pytest
 
 import gg_excel_formula_patch as fp
+from conftest import bound_test_context
 
 openpyxl = pytest.importorskip("openpyxl")
 
@@ -63,8 +64,10 @@ def run(tmp_path, source, patches, sha=None, out_name="고친 사본.xlsx"):
 
 
 def run_cli(tmp_path, source, patches, out="고친 사본.xlsx", receipt="영수증.json"):
+    bound_test_context(tmp_path)
     return fp.cli(["--source", str(source), "--map", str(write_map(tmp_path, source, patches)),
-                   "--out", str(tmp_path / out), "--receipt", str(tmp_path / receipt)])
+                   "--out", str(tmp_path / out), "--receipt", str(tmp_path / receipt),
+                   "--project", str(tmp_path), "--major", "specialty_crops"])
 
 
 # --- the happy path -----------------------------------------------------------

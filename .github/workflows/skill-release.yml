@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: skill-release
+  group: channel-update
   cancel-in-progress: false
 
 jobs:
@@ -36,16 +36,15 @@ jobs:
           node-version: 22
       - name: Enforce immutable action references
         run: node app/scripts/tests/check-skill-workflow.mjs
-      - name: Wait for the preceding channel PR
-        id: pending
+      - name: Refuse concurrent channel proposals
+        id: channel-state
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          count=$(gh pr list --head skill-channel-update --state open --json number --jq 'length')
-          echo "pending=$count" >> "$GITHUB_OUTPUT"
+        run: node app/scripts/check-channel-update-state.mjs
       - name: Resolve public release and compare source commit plus overlay hash
         id: plan
-        if: steps.pending.outputs.pending == '0'
+        if: steps.channel-state.outputs.skip != 'true'
+
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -91,7 +90,15 @@ jobs:
             return 0
           })
           const parts = versions.at(-1)?.split('.')
-          const version = parts ? `${parts[0]}.${parts[1]}.${BigInt(parts[2])+1n}` : '1.0.0'
+          const nextVersion = parts ? `${parts[0]}.${parts[1]}.${BigInt(parts[2])+1n}` : '1.0.0'
+          const reserved = JSON.parse(readFileSync('app/package.json')).skillVersion
+          if (!VERSION.test(reserved)) throw new Error('Invalid reserved stage version')
+          const compare = (a, b) => {
+            const aa = a.split('.').map(BigInt), bb = b.split('.').map(BigInt)
+            for (let i = 0; i < 3; i++) if (aa[i] !== bb[i]) return aa[i] > bb[i] ? 1 : -1
+            return 0
+          }
+          const version = compare(reserved, nextVersion) > 0 ? reserved : nextVersion
           mkdirSync('app/resources/skill-release', {recursive:true})
           writeFileSync('app/resources/skill-release/source.json', jsonBytes(source))
           execFileSync('git', ['clone', '--quiet', '--depth', '1', '--branch', source.tag, 'https://github.com/starceas/knuaf-doc.git', 'app/resources/skill-upstream'], {stdio:'inherit'})
@@ -159,7 +166,7 @@ jobs:
         env:
           PYTHON: python
         run: node --test app/scripts/tests/skill-security.test.mjs
-      - name: Consumer contracts and composed-skill basic tests
+      - name: Consumer contracts, internal tests and retained upstream protections
         id: compatibility
         env:
           VERSION: ${{ needs.compose.outputs.version }}
@@ -246,7 +253,11 @@ jobs:
             app/skill-source.json
           commit-message: 'release: propose signed skill ${{ needs.compose.outputs.version }}'
           title: '규칙집 ${{ needs.compose.outputs.version }} 채널 반영'
-          body: '공개 자산·호환 시험·서명 완료. 기존 4조건 및 독립검토 후 오모냥 머지. 자동 머지하지 않습니다.'
+          body: |
+            공개 자산·호환 시험·서명 완료. 기존 4조건 및 독립검토 후 오모냥 머지. 자동 머지하지 않습니다.
+            - [ ] updates/channel.json에서 skill 항목 외에는 main과 같다.
+            - [ ] app 항목은 main과 같다.
+            - [ ] 채널 PR은 merge commit으로 머지합니다(squash/rebase 금지). 갈래 커밋이 main에 포함되어야 다음 채널 실행이 가능합니다.
       # First real run: required branch-protection check names must match dispatch job names,
       # and all results must attach to this PR's HEAD commit. Do not infer this from dispatch acceptance.
       # If either does not match, 오모냥 reopens the PR to trigger pull_request CI instead.

@@ -3,7 +3,8 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch, openProject, paperReady, splitReady, synthProject } from './helpers'
 import { fakeCodexEnv, scratch, seedChat } from './fixtures/fake-codex'
-import { CHAT, TITLEBAR } from '../src/renderer/src/copy'
+import { PAPER_PANE_COPY } from '../src/renderer/src/copy-paper'
+import { CHAT } from '../src/renderer/src/copy'
 
 async function composerInsideWindow(page: Page): Promise<void> {
   const textarea = page.getByRole('textbox', { name: CHAT.placeholder })
@@ -43,10 +44,10 @@ test('QA-05: 본문·표와 긴 대화를 재열어도 두 칸 입력칸이 창 
     await expect(page.locator('.paperpane table')).toBeVisible()
     await expect(page.locator('.chat-msg.user')).toContainText('저장된 긴 사용자 답변')
     await composerInsideWindow(page)
-    await page.getByRole('button', { name: TITLEBAR.paperClose }).click()
+    await page.getByRole('button', { name: PAPER_PANE_COPY.collapse }).click()
     await expect(page.locator('.workspace.solo')).toBeVisible()
     await composerInsideWindow(page)
-    await page.getByRole('tab', { name: TITLEBAR.segPaper, exact: true }).click()
+    await page.getByRole('button', { name: PAPER_PANE_COPY.expand }).click()
     await splitReady(page)
     await composerInsideWindow(page)
     const textarea = page.getByRole('textbox', { name: CHAT.placeholder })

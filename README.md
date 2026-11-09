@@ -2,7 +2,7 @@
 
 <img src="app/build/icon.png" width="128" alt="">
 
-# KNUAF-Dev · 창업논문 작성 도우미
+# 창업논문 도우미
 
 **한국농수산대학교 창업논문·영농계획서를 학교 공식 작성지침에 맞춰 쓰고 검토하는 도구입니다.**
 
@@ -47,7 +47,7 @@ AI 도우미가 질문을 던지며 함께 쓰고, 앱은 그동안 무엇이 �
 
 ![점검 화면](docs/images/02-checkup.png)
 
-만든 파일은 결과물 화면에 모입니다.
+만든 파일은 결과물 화면에 모입니다. `build/` 아래의 MD·DOCX·XLSX·PDF와 정본 `project.json`의 `outputs`에 등록된 파일을 표시합니다. 논문 폴더 바로 아래 Word도 `build_docx.py`가 만든 동반 `.manifest.json`의 생성 기록과 파일 해시가 일치하면 표시합니다. 기존 원고·참고자료는 루트에 있다는 이유만으로 만든 파일에 포함하지 않습니다. 파일 목록을 열거나 도우미 실행이 완료·중단·오류로 끝날 때 다시 읽으며, 추가 주기 폴링은 하지 않습니다.
 
 ![결과물 화면](docs/images/04b-artifacts-made.png)
 
@@ -73,20 +73,22 @@ Python·라이브러리 설치는 앱이 알아서 합니다. 따로 준비할 �
 
 앱 없이 Codex CLI나 Claude Code에 스킬로 붙여 쓸 수도 있습니다. **Python 3.10 이상이 필요합니다** — macOS 기본 `python3`(3.9)로는 첫 명령에서 안내와 함께 종료됩니다.
 
-- **Claude Code**: 이 저장소를 플러그인 마켓플레이스로 추가하거나, `skills/knuaf-dev` 을 `~/.claude/skills/knuaf-dev` 로 복사합니다.
-- **Codex**: 저장소를 플러그인으로 등록하면 `.codex-plugin/plugin.json` 이 같은 스킬을 노출합니다.
+원본 독립 스킬은 [knuaf-doc](https://github.com/starceas/knuaf-doc)에서 제공합니다. 이 저장소에는 별도의 구판 스크립트 사본을 두지 않습니다.
 
-실행 의존성은 `skills/knuaf-dev/scripts/requirements-runtime.txt` 에 있습니다 (`openpyxl`, `python-docx`, `pypdf`). Windows에서 네이티브 Office 자동화를 쓰려면 `pywin32` 가 추가로 필요합니다.
+앱 전용 `knuaf-dev`를 쓰려면 먼저 아래 개발 절차의 `stage:skill`을 통과해야 합니다.
+그 결과인 `app/resources/skill/`을 Claude Code의 스킬 폴더로 복사하거나, 생성된 묶음이 있는 **로컬 저장소**를 플러그인으로 등록합니다. Claude·Codex 플러그인 모두 같은 생성 경로를 사용합니다. 원격 저장소 등록만으로 묶음이 생기지는 않습니다.
+
+실행 의존성은 생성된 `app/resources/skill/scripts/requirements-runtime.txt`에 있습니다 (`openpyxl`, `python-docx`, `pypdf`). Windows 네이티브 Office에는 `pywin32`도 필요합니다.
 
 ## 플랫폼
 
-핵심 로직(사실 관리·지침 검사·DOCX/XLSX 생성)은 순수 Python이고 macOS·Linux에서 검증했습니다. 잠금과 가져오기의 Windows 경로는 이식을 마쳤고 해당 분기를 강제로 켜는 테스트가 모든 OS에서 돕니다.
+핵심 로직은 knuaf-doc 원본에서 공급합니다. 앱은 명시 전공·출력 보호·잠금 계약을 약화하지 않고 호출합니다. 기존 학생 프로젝트의 legacy 잠금은 자동 삭제하거나 새로 init하지 않습니다.
 
 마지막 단계인 "네이티브 Office로 실제 재계산·페이지 렌더까지 확인"만 플랫폼을 탑니다.
 
 | 플랫폼 | 구현 | 실사용 검증 |
 |---|---|---|
-| macOS | AppleScript(osascript) | 완료 — 실제 Word/Excel로 반복 검증 |
+| macOS | 격리된 native Office 변환 | 기존 앱 판의 실측은 있으나 새 compose 묶음의 native 변환은 미검증 |
 | Windows | COM 자동화(pywin32) | **아직 없음.** 코드와 정적 검사만 있습니다 |
 
 Windows에서 써보시고 문제를 만나면 이슈로 알려주세요.
@@ -95,9 +97,16 @@ Windows에서 써보시고 문제를 만나면 이슈로 알려주세요.
 
 ```bash
 python3.13 -m venv .venv-dev
-.venv-dev/bin/pip install pytest pytest-timeout -r skills/knuaf-dev/scripts/requirements-runtime.txt
-.venv-dev/bin/python -m pytest
+pnpm -C app install --frozen-lockfile --offline
+.venv-dev/bin/pip install pytest pytest-timeout -r "$(node app/scripts/fetch-skill.mjs --requirements)"
+node app/scripts/test-with-skill.mjs --offline --python .venv-dev/bin/python
 ```
+`stage:skill`은 `app/skill-source.json`의 정확한 commit/tag만 사용하고 최종 compose bytes로 소비자·원본 내부 시험·이관한 보호별 원본 루트 시험을 실행합니다. 실패하면 이전 동봉 묶음을 보존하고 build도 중단합니다. 현재 고정은 v0.4.2(`60311c1…`)입니다. pin을 바꾸면 시험 제외나 원본 정책 수정 없이 같은 전체 게이트를 다시 통과해야 합니다.
+
+개인 `.harness.conf`는 추적하지 않습니다. 기존 `HARNESS_TEST=.venv-dev/bin/python -m pytest`도 추적된 `tests/conftest.py`의 세션 시작에서 고정 pin을 오프라인으로 준비합니다. 준비가 성공해야 시험 수집으로 넘어가며 실패는 명시적인 비0 종료입니다. 개인 훅·공유 하네스 설정을 바꾸지 않아도 같은 트리의 새 사본에 적용됩니다. CI는 `test-with-skill.mjs`로 같은 stage를 먼저 실행하고 pin별 캐시를 복원합니다. 준비된 런타임을 명시한 내부 시험은 재귀 준비를 하지 않습니다.
+캐시는 `app/resources/skill-upstreams/<commit>/`입니다. 오프라인 의존성 경로 확인은 `node app/scripts/fetch-skill.mjs --offline --requirements`로 합니다. `KNUAF_SKILL_UPSTREAM`에는 고정 commit/tag와 일치하는 로컬 checkout을 지정할 수 있습니다. HEAD/tag·수정/추가/무시 파일뿐 아니라 고정 commit의 blob ID와 실제 파일 바이트를 직접 대조하므로 index의 숨김 플래그로 시험 변조를 감출 수 없습니다. 검증 시 읽은 바이트를 격리 사본으로 만들어 compose·호환 시험이 같은 입력을 사용합니다. 새 clone은 `core.autocrlf=false`, `core.eol=lf`로 준비하며 캐시 안에서 시험을 직접 실행하지 않습니다.
+pytest 옵션은 `--` 뒤에 전달합니다: `node app/scripts/test-with-skill.mjs --offline --python .venv-dev/bin/python -- -q`. 6ba5b6c 등의 로컬 compose 검증만 하려면 `KNUAF_TEST_SCRIPTS_DIR=/절대/묶음/scripts .venv-dev/bin/python -m pytest`를 별도로 사용합니다. 이 검증 경로는 고정 pin 준비·정식 동봉의 우회 경로가 아닙니다.
+
 
 앱은 [app/README.md](app/README.md) 를 보세요. CI는 ubuntu/macos/windows × Python 3.10/3.13 에서 같은 테스트를 돌립니다.
 

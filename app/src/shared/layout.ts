@@ -23,8 +23,8 @@ export const WIDE_MIN = CHAT_MIN + PAPER_MIN
 export type Layout =
   /** 아직 쓴 글이 없다 — 가운데 한 칸. 빈 종이로 진척을 연출하지 않는다. */
   | { kind: 'solo' }
-  /** 넓은데 학생이 종이를 닫았다 — 한 칸 + 제목줄 [대화 | 내 논문]. 다시 저절로 열지 않는다. */
-  | { kind: 'solo-with-toggle' }
+  /** 넓은 창에서 학생이 종이를 접었다. */
+  | { kind: 'folded' }
   /** 두 칸: 대화(460~540) | 내 논문(나머지). */
   | { kind: 'split'; chatWidth: number }
   /** 좁은 창 — 한 칸 + 제목줄 [대화 | 내 논문]. */
@@ -40,15 +40,15 @@ export function chatWidthOf(width: number): number {
 
 /**
  * 지금 배치. `width` 는 창 **내부** 폭(렌더러가 재는 값)이다.
- * `hasBody` 는 등록된 절 중 본문이 있는 것이 하나라도 있는지(`project.sections`).
+ * `pane`은 등록된 장이 있거나 학생이 문서·목록을 연 상태다.
  */
-export function layoutOf({ hasBody, width, closed }: { hasBody: boolean; width: number; closed: boolean }): Layout {
-  if (!hasBody) return { kind: 'solo' }
+export function layoutOf({ pane, width, closed }: { pane: boolean; width: number; closed: boolean }): Layout {
+  if (!pane) return { kind: 'solo' }
   if (width < WIDE_MIN) return { kind: 'switch' }
-  return closed ? { kind: 'solo-with-toggle' } : { kind: 'split', chatWidth: chatWidthOf(width) }
+  return closed ? { kind: 'folded' } : { kind: 'split', chatWidth: chatWidthOf(width) }
 }
 
-/** 제목줄의 [대화 | 내 논문] 바꾸기가 쓰는 값 — `switch`·`solo-with-toggle` 에서 종이로 간다. */
+/** 제목줄 바꾸기는 좁은 창에서만 쓴다. */
 export function showsToggle(layout: Layout): boolean {
-  return layout.kind === 'switch' || layout.kind === 'solo-with-toggle'
+  return layout.kind === 'switch'
 }

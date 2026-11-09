@@ -28,7 +28,7 @@ wb.save(${JSON.stringify(path)})
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
 }
 
-test('결과물 화면: 목록, xlsx 표, pdf 페이지, docx 안내', async () => {
+test('파일 팝오버: 목록에서 xlsx 표, pdf 페이지, docx 안내를 연다', async () => {
   const root = synthProject()
   mkdirSync(join(root, 'build'), { recursive: true })
   makeXlsx(join(root, 'build', '재무.xlsx'))
@@ -38,27 +38,30 @@ test('결과물 화면: 목록, xlsx 표, pdf 페이지, docx 안내', async () 
   await openProject(page, root)
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
   await navTo(page, '결과물')
-  await page.waitForSelector('[data-screen="artifacts"]', { timeout: 30_000 })
+  const pop = page.locator('.paper-head .popover')
+  await expect(pop).toBeVisible()
 
-  // all three files are listed with kind badges
+  // all three files are listed in the expanded list
   for (const n of ['재무.xlsx', '안내.pdf', '빈.docx']) {
-    await expect(page.locator('.artifact-list .item', { hasText: n })).toBeVisible()
+    await expect(pop.getByRole('button', { name: new RegExp(n.replace('.', '\\.')) })).toBeVisible()
   }
 
   // pdf renders on canvas with a page counter
-  await page.click('.artifact-list .item:has-text("안내.pdf")')
+  await pop.getByRole('button', { name: /안내\.pdf/ }).click()
   await page.waitForSelector('.preview-canvas canvas', { timeout: 30_000 })
   await expect(page.getByText(/\d+\/\d+ 페이지/)).toBeVisible()
 
   // xlsx renders as a table; the long sheet is truncated and formulas are flagged
-  await page.click('.artifact-list .item:has-text("재무.xlsx")')
+  await navTo(page, '결과물')
+  await page.locator('.paper-head .popover').getByRole('button', { name: /재무\.xlsx/ }).click()
   await page.waitForSelector('table.preview-table', { timeout: 30_000 })
   await expect(page.locator('text=실제 Excel 재계산이 아직 안 됐어요')).toBeVisible()
   await page.click('button[role="tab"]:has-text("긴 시트")')
   await expect(page.getByText(/파일이 길어서 앞부분만 보여 줘요/)).toBeVisible()
 
   // Empty DOCX stays empty; the shared toolbar offers explicit external open/reveal.
-  await page.click('.artifact-list .item:has-text("빈.docx")')
+  await navTo(page, '결과물')
+  await page.locator('.paper-head .popover').getByRole('button', { name: /빈\.docx/ }).click()
   await expect(page.getByText('비어 있는 파일이에요')).toBeVisible()
   await expect(page.getByRole('button', { name: '원래 앱으로 열기' })).toBeVisible()
 

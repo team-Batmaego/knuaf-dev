@@ -33,10 +33,15 @@ if (args[0] === 'auth' && args[1] === 'status') {
         const text = failure === 'authentication_failed'
           ? 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.'
           : failure === 'rate_limit' ? 'API Error: 429 rate limit exceeded' : 'Network error: ECONNRESET'
-        send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: 'fake-session', message: {
-          content: [{ type: 'text', text }]
-        } })
-        send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [text], session_id: 'fake-session' })
+        const fail = () => {
+          send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: 'fake-session', message: {
+            content: [{ type: 'text', text }]
+          } })
+          send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [text], session_id: 'fake-session' })
+        }
+        if (process.env.W1_QUERY_RELEASE) {
+          const timer = setInterval(() => { if (existsSync(process.env.W1_QUERY_RELEASE)) { clearInterval(timer); fail() } }, 20)
+        } else fail()
         return
       }
       send({ type: 'assistant', uuid: 'answer', session_id: 'fake-session', message: {

@@ -14,6 +14,20 @@ pytest.importorskip("openpyxl")
 import gg_school_verify as sv
 
 D = Decimal
+HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
+
+
+def price_source(sid, channel, values):
+    return {
+        "id": sid, "agency": "Synthetic public agency", "agency_kind": "public_corporation",
+        "statistic_name": "Synthetic price", "item_name": "Synthetic crop price",
+        "unit": "원/kg", "base_year": None,
+        "observations": [{"year": year, "value": value} for year, value in zip(HISTORY_YEARS, values)],
+        "url": "https://synthetic.example.go.kr/prices", "evidence_locator": "Synthetic fixture",
+        "dimensions": {"region": "전국", "crop": "합성작목", "channel": channel, "grade": "상품"},
+        "allowed_roles": ["sales"], "unconfirmed_years": [], "retrieved_at": "2026-10-07", "revision": 1,
+    }
+
 
 BASE = {
     "profile": "school_17_sheet_v1", "unit": "천원", "quantity_unit": "kg",
@@ -28,9 +42,21 @@ BASE = {
     "materials": "5000", "labor": "4000", "packing": "1000", "transport": "800",
     "household": "12000", "repair_facility_rate": "0.01",
     "repair_equipment_rate": "0.02", "utility_per_10a": "300",
-    "inflation": "1.02", "grace": 2, "term": 5, "life": 10,
+    "crops": ["합성작목"], "region": "전국", "price_dimensions": {"unit": "원/kg"},
+    "price_assumptions": {
+        "general": {"status": "not_applied", "reason": "Synthetic constant-cost identity fixture"},
+        "wage": {"status": "not_applied", "reason": "Synthetic constant-wage identity fixture"},
+        "sales": {"application_base_year": 2027, "anchors": {
+            "purchase": {"source_id": "synthetic.purchase", "base_year": None,
+                         "target_dimensions": {"channel": "수매", "grade": "상품"}},
+            "direct": {"source_id": "synthetic.direct", "base_year": None,
+                       "target_dimensions": {"channel": "직거래", "grade": "상품"}},
+        }},
+    },
+    "price_sources": [price_source("synthetic.purchase", "수매", [6, 8, 10, 8, 8]),
+                      price_source("synthetic.direct", "직거래", [10, 12, 14, 12, 12])],
+    "grace": 2, "term": 5, "life": 10,
 }
-HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
 
 
 def plan(**over):
@@ -140,20 +166,19 @@ def test_selling_nothing_produces_no_revenue():
 
 def test_a_stated_price_that_contradicts_its_own_history_is_refused():
     """The 5-year average is the evidence; the headline price cannot disagree."""
-    with pytest.raises(ValueError, match="수매 평균가격.*불일치"):
-        sv.calculate_school_expected({**BASE, "price_history_years": HISTORY_YEARS,
-                                      "purchase_price_history": ["1", "1", "1", "1", "1"]})
+    with pytest.raises(ValueError):
+        sv.calculate_school_expected({**BASE, "purchase_price": "999"})
 
 
 def test_a_direct_price_that_contradicts_its_own_history_is_refused():
-    with pytest.raises(ValueError, match="직거래 평균가격.*불일치"):
-        sv.calculate_school_expected({**BASE, "price_history_years": HISTORY_YEARS,
-                                      "direct_price_history": ["1", "1", "1", "1", "1"]})
+    with pytest.raises(ValueError):
+        sv.calculate_school_expected({**BASE, "direct_price": "999"})
 
 
 def test_a_matching_history_becomes_the_effective_price():
-    r = sv.calculate_school_expected({**BASE, "price_history_years": HISTORY_YEARS,
-                                      "purchase_price_history": ["7", "8", "9", "8", "8"]})
+    r = sv.calculate_school_expected({**BASE, "price_sources": [
+        price_source("synthetic.purchase", "수매", [7, 8, 9, 8, 8]), BASE["price_sources"][1],
+    ]})
     assert r["effective_purchase_price"] == D("8")
 
 

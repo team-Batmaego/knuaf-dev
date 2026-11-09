@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from './Icon'
 import { PopHead, Popover, PopRow } from './Popover'
-import { FilesPopover, MakeFeedbackLine, MakeRunningLine } from './FilesPopover'
-import { MaterialsPopover } from './MaterialsPopover'
+import { MakeFeedbackLine, MakeRunningLine } from './FilesPopover'
+import { MaterialsList } from './MaterialsList'
+import { ArtifactsList } from './ArtifactsList'
 import { useProject } from '../store/project'
 import { useChat } from '../store/chat'
 import { rpc } from '../rpc'
 import { renderMarkdown } from '../markdown'
-import { useMake } from './useMake'
+import { useMake, type MakeKind } from './useMake'
 import { useStage } from './useStage'
 import { newBlockIndexes, splitBlocks } from '../../../shared/paper'
 import { fileStateOf, isReviewExport } from '../../../shared/files'
@@ -16,9 +17,11 @@ import { hasChange } from '../../../shared/diff'
 import { baselineKey, quoteOf, useReview } from '../store/review'
 import { ReviewSelectBar } from './ReviewSelectBar'
 import { ReviewDiffBlocks } from './ReviewDiff'
-import { PAPER, REVIEW, TITLEBAR } from '../copy'
+import { MATERIALS, PAPER, REVIEW, fileStatusText } from '../copy'
 import type { SectionRow } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
+import { joinPath } from '../paths'
+import { questionSection } from './paperNavigation'
 
 /** 절 하나의 본문. `hash` 는 정본이 말하는 본문 지문이다. */
 type Doc = { title: string; draft: string; hash: string }
@@ -40,16 +43,6 @@ function stateWord(status: string): string {
   return PAPER.stateDone
 }
 
-/**
- * 질문 원문에 적힌 장(`Ⅲ장`)에 해당하는 절. 로마 숫자를 제목 앞머리에서 먼저 찾고,
- * 없으면 등록 순서로 본다 — **등록되지 않은 장은 짐작하지 않는다**(R4 원칙).
- */
-function sectionForChapter(sections: SectionRow[], hint: string): SectionRow | null {
-  const roman = hint.replace(/장\s*$/, '')
-  const n = 'ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ'.indexOf(roman) + 1
-  if (n <= 0) return null
-  return sections.find((s) => s.title.trim().startsWith(roman)) ?? sections.find((s) => s.order === n) ?? null
-}
 
 /**
  * 내 논문 칸 — 저장된 논문을 종이 그대로 보여 준다 (DESIGN §2, 시안 ④~⑦⑩⑭).
@@ -62,14 +55,22 @@ function sectionForChapter(sections: SectionRow[], hint: string): SectionRow | n
  * `load()` 하나뿐이다).
  */
 export function PaperPane({ overlay }: { overlay?: ReactNode }) {
-  const { root, sections, revision, focusedSection, focusSection, setPaperClosed, setPaneView } = useProject(useShallow((s) => ({
+  const { root, sections, revision, focusedSection, focusSection, requestQuote, listIntent, consumeListIntent } = useProject(useShallow((s) => ({
     root: s.root, sections: s.sections, revision: s.status?.revision ?? s.peek?.revision ?? null,
-    focusedSection: s.focusedSection, focusSection: s.focusSection, setPaperClosed: s.setPaperClosed, setPaneView: s.setPaneView
+    focusedSection: s.focusedSection, focusSection: s.focusSection, requestQuote: s.requestQuote, listIntent: s.listIntent, consumeListIntent: s.consumeListIntent
   })))
   const { snapshot, status } = useChat(useShallow((s) => ({ snapshot: s.snapshot, status: s.status })))
   const pStatus = useProject((s) => s.status)
   const projectLoad = useProject((s) => s.projectLoad)
   const openSheet = useProject((s) => s.openSheet)
+  const materials = useProject((s) => s.materials)
+  const artifacts = useProject((s) => s.artifacts)
+  const artifactsError = useProject((s) => s.artifactsError)
+  const hasProject = useProject((s) => s.hasProject)
+  const previewNotice = useProject((s) => s.previewNotice)
+  const openPreview = useProject((s) => s.openPreview)
+  const loadLists = useProject((s) => s.loadLists)
+  const insertPath = useChat((s) => s.insertPath)
   const make = useMake()
   const { derived, action } = useStage()
   const [docs, setDocs] = useState<Record<string, Doc>>({})
@@ -77,6 +78,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const [toc, setToc] = useState(false)
   /** 파일 팝오버 — 실행 결과를 어디에 그릴지 정하려고 여기서 소유한다(검토 P3-R1-01). */
   const [filesOpen, setFilesOpen] = useState(false)
+  const [materialsOpen, setMaterialsOpen] = useState(false)
   /**
    * 절마다 **직전에 본 본문**. 메모리에만 둔다 — 저장하지 않는다. 그래서 앱을 켠 직후
    * 첫 읽기에는 비교할 것이 없고, 아무것도 칠하지 않는다.
@@ -97,13 +99,13 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
    * 쓰지 않는다 — 앱을 다시 켜면 초기화된다.
    */
   const baseline = useReview((s) => s.baseline)
-  const noteBaseline = useReview((s) => s.noteBaseline)
+  const noteSeen = useReview((s) => s.noteSeen)
   const showDiff = useReview((s) => s.showDiff)
   const toggleDiff = useReview((s) => s.toggleDiff)
   const setQuote = useReview((s) => s.setQuote)
   const card = zoneOf(snapshot, status, pStatus)
   /** 행동 막대는 아래 칸이 **입력칸**일 때만 — 질문·허락 카드가 그 자리를 차지한다(발주 §③). */
-  const canQuote = card.kind === 'composer'
+  const canQuote = card.kind !== 'permission' && card.kind !== 'disconnected'
 
   const load = useCallback(async () => {
     if (!root || !sections) { setDocs({}); return }
@@ -121,9 +123,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     for (const r of rows) {
       const sec = sections.find((s) => s.id === r.id)
       if (!sec) continue
-      // 기준 본문은 **처음 본 순간에만** 박는다 — 이후 저장은 모두 이 기준과 견준다.
-      const key = baselineKey(root, r.id)
-      if (!useReview.getState().baseline[key]) noteBaseline(key, { title: r.title, draft: r.draft, hash: sec.draft_hash })
+      void noteSeen(root, r.id, { title: r.title, draft: r.draft, hash: sec.draft_hash }).catch(() => {})
       const before = prevDocs.current[r.id]
       // 지문이 같으면 다시 그리지 않는다 — 같은 글이고 칠할 것도 없다.
       if (before && before.hash === sec.draft_hash) continue
@@ -147,13 +147,16 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
       timers.current.forEach(clearTimeout)
       timers.current = [setTimeout(() => setFresh({}), FRESH_MS)]
     }
-  }, [root, sections, noteBaseline])
+  }, [root, sections, noteSeen])
 
   // 폴더가 바뀌면 직전 본문을 들고 가지 않는다 — 다른 논문에 칠할 것은 없다.
   // 비교 기준(store)은 논문별 키라 건드리지 않는다 — 같은 논문을 다시 열면 이어진다.
   useEffect(() => { prevDocs.current = {}; setDocs({}); setFresh({}); setSel(null); return () => { timers.current.forEach(clearTimeout); timers.current = [] } }, [root])
   // 기록이 오르면 다시 읽는다(사이드바 차례와 같은 기준, IMPL-PLAN §4-2).
   useEffect(() => { void load() }, [load, revision])
+  useEffect(() => {
+    if ((listIntent || filesOpen) && root) void loadLists()
+  }, [listIntent, filesOpen, root, loadLists])
 
   // 대화 이벤트 줄의 "종이에서 보기" — 그 장으로 간다.
   useEffect(() => {
@@ -229,6 +232,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const section = live ? (sections ?? []).find((x) => x.id === live.sectionId) ?? null : null
     if (!live || !section || !root) { setSel(null); return }
     setQuote(quoteOf(root, live.text, section.id, section.title))
+    requestQuote()
     setSel(null)
     window.getSelection()?.removeAllRanges()
   }
@@ -243,9 +247,10 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   }
 
   if (!root) return null
-  const slotSection = card.kind === 'question' && card.card.chapterHint
-    ? sectionForChapter(sections ?? [], card.card.chapterHint)?.id ?? null
+  const materialItem = (path: string | null | undefined) => path
+    ? { path: joinPath(root, path), name: path.split(/[\\/]/).pop() ?? path }
     : null
+  const slotSection = questionSection(card, sections)?.id ?? null
   const writing = sections?.find((s) => s.status === 'drafting') ?? null
   /** 바뀐 절이 하나라도 있어야 "고친 부분 보기"가 켜진다(발주 §③). */
   const changed = (sections ?? []).some((s) => {
@@ -255,12 +260,12 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   })
 
   return (
-    <section className="paperpane" aria-label={PAPER.paneLabel} ref={pane}>
+    <section className="paperpane" aria-label={PAPER.paneLabel} ref={pane} style={{ flex: 1, minHeight: 0 }}>
       <div className="paper-head">
         <div className="pop-host">
           <button className="chap" aria-expanded={toc} onClick={() => setToc(!toc)}>
-            <span className="n">{writing ? writing.title : PAPER.empty}</span>
-            {writing && <span className="w">{stateWord(writing.status)}</span>}
+            <span className="n">{writing?.title ?? sections?.[0]?.title ?? PAPER.empty}</span>
+            {(writing || sections?.length) && <span className="w">{writing ? stateWord(writing.status) : PAPER.stateEmpty}</span>}
             <Icon name="chevronDown" size={14} />
           </button>
           <Popover open={toc} onClose={() => setToc(false)} label={PAPER.tocTitle} width={300}>
@@ -282,20 +287,28 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
             <Icon name="check" size={14} />{REVIEW.diffToggle}
           </button>
         )}
-        <MaterialsPopover />
-        <FilesPopover make={make} open={filesOpen} onOpenChange={setFilesOpen} />
+        <MaterialsList open={materialsOpen} onOpenChange={setMaterialsOpen} listIntent={listIntent} consumeListIntent={consumeListIntent}
+          count={materials?.files.length ?? 0}
+          current={[{ label: MATERIALS.manuscriptLabel, file: materialItem(materials?.current_manuscript.path) }, { label: MATERIALS.financeLabel, file: materialItem(materials?.current_finance.path) }]}
+          references={(materials?.files ?? []).filter((file) => file.role === 'reference').map((file) => materialItem(file.path)!)}
+          onOpenFile={openPreview} onAttach={(path) => { insertPath(path); useProject.getState().setPaneView('chat') }}
+          onAddMaterial={() => { void window.knuaf.pickFile({ title: MATERIALS.attach }).then((path) => { if (path) { insertPath(path); useProject.getState().setPaneView('chat') } }) }} />
+        <ArtifactsList open={filesOpen} onOpenChange={setFilesOpen} listIntent={listIntent} consumeListIntent={consumeListIntent}
+          items={(artifacts ?? []).map((file) => ({ name: file.name, path: joinPath(root, file.path), status: fileStatusText(file.path, projectLoad) }))}
+          actions={make.rows.map((row) => ({ id: row.kind, label: row.label, description: row.body, disabled: !row.enabled || make.making !== null,
+            feedback: make.making === row.kind ? <MakeRunningLine make={make} fb={make.feedbackKind === row.kind ? make.feedback : null} compact /> : make.feedbackKind === row.kind && make.feedback ? <MakeFeedbackLine fb={make.feedback} compact submission={row.kind === 'submission_candidate'} gate={pStatus?.gate} /> : undefined }))}
+          blocked={make.blocked} hasProject={hasProject} stale={derived.stale} notice={previewNotice} error={artifactsError} loading={artifacts === null && !artifactsError}
+          onOpenFile={openPreview} onMake={(id) => void make.run(id as MakeKind)} onRetry={() => void loadLists()} onReveal={() => void window.knuaf.folderOpen('project')} />
         {/* 권하는 단추 **하나** — "지금"이 고른 행동이다(1·2단계는 없다: 대화가 이끈다).
             만들기 자체는 "파일" 팝오버에서 언제든 되지만, 화면에 권하는 것은 이 하나뿐이다. */}
         {action && (
-          <button className="primary" title={action.hint}
+          <button className="primary" data-focus-key="head-action" title={action.hint}
             onClick={() => {
               if (action.stage === 3) void make.run('review')
               else if (action.stage === 4) void make.run('docx')
               else openSheet('checkup')
             }}>{action.label}</button>
         )}
-        {/* 좁은 창에서는 표시 여부가 `paneView` 가 정한다 — 둘 다 되돌려야 실제로 대화로 간다. */}
-        <button className="lnk" onClick={() => { setPaperClosed(true); setPaneView('chat') }} title={TITLEBAR.paperClose} aria-label={TITLEBAR.paperClose}><Icon name="x" size={12} /></button>
       </div>
 
       {/* 팝오버를 닫아도 결과를 잃지 않는다 — 권하는 단추로 만들었거나 팝오버를 닫았으면

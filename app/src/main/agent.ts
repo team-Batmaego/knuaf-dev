@@ -8,8 +8,8 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { accessSync, chmodSync, constants, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
-import { APP_NAME_SHORT } from '../shared/name'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { APP_NAME } from '../shared/name'
 import { pathKeyOf } from './chat/contracts'
 import { renameWithRetry, writeFileAtomic } from './safeWrite'
 import { resolveSkillSource } from './update/source'
@@ -231,10 +231,15 @@ export function probeVersion(path: string): Promise<string | null> {
 
 // ---------------------------------------------------------------- 3. skill source + version
 
-/** Checkout: `<appRoot>/../skills/knuaf-dev`; packaged: `<resourcesPath>/skill` (see scripts/stage-skill.mjs). */
+/** Development overrides select the whole bundle, not just the sidecar scripts. */
 export function skillSource(appRoot: string, isPackaged: boolean, resourcesPath: string): string {
-  return resolveSkillSource(isPackaged ? join(resourcesPath, 'skill') : join(appRoot, '..', 'skills', 'knuaf-dev'))
+  const bundled = isPackaged ? join(resourcesPath, 'skill')
+    : process.env.KNUAF_SCRIPTS_DIR ? dirname(resolve(process.env.KNUAF_SCRIPTS_DIR))
+      : join(appRoot, 'resources', 'skill')
+  return resolveSkillSource(bundled)
 }
+
+const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json']
 
 /** Walk `abs`, collecting "rel/path:sha256(content)" for the files installSkill copies. */
 function skillFingerprint(abs: string, rel: string, out: string[]): void {
@@ -265,6 +270,10 @@ export function skillVersion(source: string): string {
   h.update(existsSync(skillMd) ? readFileSync(skillMd) : Buffer.alloc(0))
   const entries: string[] = []
   for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries)
+  for (const name of SKILL_METADATA) {
+    const file = join(source, name)
+    if (existsSync(file)) entries.push(`${name}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`)
+  }
   entries.sort()
   for (const e of entries) h.update('\n' + e)
   return h.digest('hex').slice(0, 12)
@@ -349,8 +358,11 @@ export function retireSupersededSkills(target: string): string[] {
   return moved
 }
 
-/** Copy SKILL.md + references/ + scripts/ + assets/ into `target`, leaving a version marker. */
+/** Copy the bundle payload and root metadata; GUI ownership lives outside it. */
 export function installSkill(source: string, target: string, version: string): InstallResult {
+  // A missing build bundle must never retire a student's working installed copy.
+  const skillMd = join(source, 'SKILL.md')
+  if (!existsSync(skillMd)) throw new Error('스킬 원본에 SKILL.md가 없음: ' + source)
   retireSupersededSkills(target)
   const project = dirname(dirname(dirname(target)))
   const markerDir = join(project, '.knuaf-gui')
@@ -375,12 +387,14 @@ export function installSkill(source: string, target: string, version: string): I
   }
 
   mkdirSync(target, { recursive: true })
-  const skillMd = join(source, 'SKILL.md')
-  if (!existsSync(skillMd)) throw new Error('스킬 원본에 SKILL.md가 없음: ' + source)
   cpSync(skillMd, join(target, 'SKILL.md'))
   for (const dir of ['references', 'scripts', 'assets']) {
     const from = join(source, dir)
     if (existsSync(from)) cpSync(from, join(target, dir), { recursive: true, filter: copyFilter })
+  }
+  for (const name of SKILL_METADATA) {
+    const from = join(source, name)
+    if (existsSync(from)) cpSync(from, join(target, name))
   }
   writeFileSync(join(target, VERSION_FILE), version + '\n', 'utf-8')
 
@@ -412,9 +426,7 @@ export function codexSkillConfigOverride(home: string | undefined): string | nul
   return `skills.config=[${paths.map((p) => `{path="${esc(p)}",enabled=false}`).join(',')}]`
 }
 
-// 터미널 한 줄이라 여기서는 ASCII 짧은 이름을 쓴다 — 긴 이름을 넣으면 "도우미가 AI
-// 도우미를 엽니다" 가 되어 같은 말이 두 번 나온다.
-export const BANNER = `${APP_NAME_SHORT} 가 AI 도우미를 엽니다. 이 창을 닫으면 도우미도 종료돼요.`
+export const BANNER = `${APP_NAME}가 AI 도우미를 엽니다. 이 창을 닫으면 도우미도 종료돼요.`
 
 /** Directories an agent process needs ahead of PATH: project venv, bundled runtime, user installs. */
 export function agentBinDirs(o: Pick<LaunchScriptOptions, 'venvBin' | 'bundledBin'>): string[] {
@@ -572,10 +584,14 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
 
 // ---------------------------------------------------------------- 7. launch
 
+export function workFolderInstructions(root: string): string {
+  return `작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 논문 작업 파일은 여기서 바로 다루세요. 논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요. 스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(.venv, sources/extracts 등)는 그대로 두어도 됩니다.`
+}
+
 export function firstPromptFor(revision: number | null, root?: string): string {
   const base = revision === null || revision < 1 ? '시작하기' : '이어서 하기'
-  // 루트를 명시해 모델이 하위 폴더(knuaf-work 등)를 추측해 만들지 않게 한다.
-  return root ? `${base}\n\n작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 하위 폴더를 새로 만들지 말고 여기서 바로 작업해 주세요.` : base
+  // 작업 루트를 고정하고, 스킬 스크립트가 정해진 자리에 만드는 폴더는 허용한다.
+  return root ? `${base}\n\n${workFolderInstructions(root)}` : base
 }
 
 export async function launch(o: LaunchOptions, deps: LaunchDeps = {}): Promise<LaunchResult> {

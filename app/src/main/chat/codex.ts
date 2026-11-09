@@ -2,10 +2,14 @@ import { MODEL_SELECTION_COPY } from '../../shared/copy'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
-import { codexSkillConfigOverride } from '../agent'
+import { applyRejection, recordRejection } from './rejectLog'
+import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
-import type { ChatModelInfo } from '../../shared/chat'
+import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
+
+/** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
+export class CodexAuthenticationError extends Error {}
 
 /** 존재하면 realpath, 아니면 입력 그대로. 경로 비교는 반드시 이것을 거친다. */
 export function realOrSelf(p: string): string {
@@ -27,12 +31,42 @@ export function serverArgsFor(env: NodeJS.ProcessEnv): string[] {
   if (env.KNUAF_CODEX_EFFORT) args.push('-c', `model_reasoning_effort=${env.KNUAF_CODEX_EFFORT}`)
   return [...args, 'app-server']
 }
+const FILE_CHANGE_UNAVAILABLE = '변경 내용을 확인하지 못했어요. 거절한 뒤 도우미에게 어떤 파일을 어떻게 바꾸는지 물어봐 주세요.'
+
+/** 다른 턴의 같은 itemId와 섞이지 않도록 서버가 보내는 세 식별자를 함께 쓴다. */
+function fileChangeKey(thread: unknown, turn: unknown, item: unknown): string | undefined {
+  return typeof thread === 'string' && typeof turn === 'string' && typeof item === 'string'
+    ? JSON.stringify([thread, turn, item]) : undefined
+}
+
+function readFileChanges(value: unknown): PermissionFileChange[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const changes: PermissionFileChange[] = []
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || typeof raw.path !== 'string' || !raw.path) return undefined
+    const kind = typeof raw.kind === 'string' ? raw.kind : raw.kind?.type
+    const type = kind === 'add' || kind === 'delete' || kind === 'update' ? kind : 'unknown'
+    changes.push({ path: raw.path, kind: type === 'update'
+      ? { type, move_path: typeof raw.kind?.move_path === 'string' ? raw.kind.move_path : null }
+      : { type }, diff: typeof raw.diff === 'string' ? raw.diff : null })
+  }
+  return changes
+}
+
+function filePermission(id: string, reason: unknown, changes?: PermissionFileChange[]): PermissionRequest {
+  const detail = typeof reason === 'string' && reason.trim() ? reason : ''
+  return { id, title: '파일 변경 확인', detail: changes ? detail : [detail, FILE_CHANGE_UNAVAILABLE].filter(Boolean).join('\n\n'),
+    ...(changes ? { fileChanges: changes } : {}) }
+}
 
 export class CodexConnection implements AgentConnection {
   private rpc?: JsonRpcProcess
   private events?: AgentEvents
   private serverVersion: string | null = null
   private thread?: string
+  private loginPending = false
+  private loginConfirmed = false
+  private earlyLogin?: { id: string; success: boolean }
   private turn?: string
   /**
    * 이 연결이 **이 대화에** model/effort 덮어쓰기를 보낸 적이 있는가.
@@ -52,6 +86,8 @@ export class CodexConnection implements AgentConnection {
   private waiter?: { resolve: () => void; reject: (error: Error) => void }
   private approvals = new Map<string, number | string>()
   private messages = new Map<string, string>()
+  private fileChanges = new Map<string, PermissionFileChange[]>()
+  private pendingFileApprovals = new Map<string, { key: string; reason: unknown }>()
   /**
    * 최신 CLI 는 평문 `app-server`; 실패하면 옛 `--listen stdio://` 로 한 번 재시도한다.
    * 앞의 `-c` 는 전역 knuaf-dev 스킬 사본을 끄는 config 오버라이드 — ~/.codex/skills 등에
@@ -87,7 +123,29 @@ export class CodexConnection implements AgentConnection {
     // 구버전에는 필요했으므로 평문을 먼저 쓰고 실패하면 옛 인자로 한 번 더 시도한다.
     const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.serverArgs, this.options.root, this.options.env)
     rpc.onNotification = (method, p) => {
+      if (method === 'account/login/completed' && this.loginPending && typeof p?.loginId === 'string') {
+        if (!this.loginInfo) this.earlyLogin = { id: p.loginId, success: p.success === true }
+        else if (p.loginId === this.loginInfo.id) {
+          this.loginPending = false
+          this.loginConfirmed = p.success === true
+        }
+      }
       if (p?.threadId && p.threadId !== this.thread) return
+      if (method === 'item/started' && p.item?.type === 'fileChange') {
+        this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
+      } else if (method === 'item/fileChange/patchUpdated') {
+        this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.itemId), p.changes)
+      } else if (method === 'item/completed' && p.item?.type === 'fileChange') {
+        const key = fileChangeKey(p.threadId, p.turnId, p.item.id)
+        this.rememberFileChanges(key, undefined)
+      } else if (method === 'item/completed' && p.item?.type === 'commandExecution') {
+        // 정본 등록 거절은 도우미의 셸 출력으로만 돌아오고 지금까지 어디에도 남지 않았다
+        // (윈도우 W-08). 출력에서 거절 결과를 찾아 한 줄 남긴다 — 학생 화면은 그대로다.
+        const record = applyRejection({
+          provider: 'codex', command: p.item.command, output: p.item.aggregatedOutput, exitCode: p.item.exitCode
+        })
+        if (record) recordRejection(join(this.options.root, '.knuaf-gui', 'apply-reject.log'), record)
+      }
       if (method === 'item/agentMessage/delta') {
         const text = (this.messages.get(p.itemId) ?? '') + p.delta
         this.messages.set(p.itemId, text); this.events?.message(p.itemId, text)
@@ -95,19 +153,25 @@ export class CodexConnection implements AgentConnection {
         this.events?.message(p.item.id, p.item.text)
       } else if (method === 'turn/started') this.turn = p.turn.id
       else if (method === 'turn/completed') {
+        this.fileChanges.clear(); this.pendingFileApprovals.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') w?.resolve()
+        else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
         else w?.reject(new Error(p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
       }
     }
     rpc.onRequest = (id, method, p) => {
-      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+      if (method === 'item/commandExecution/requestApproval') {
         this.approvals.set(String(id), id)
-        // 이유(reason)와 명령(command)을 **둘 다** 남긴다 — 예전 `p.command ?? p.reason` 은 명령이
-        // 있으면 이유를 버려, 화면이 "무엇을 왜 허락하는지"를 말할 수 없었다(검토 QA N-I05).
-        // 권한 정책·승인 동작은 그대로고, 학생에게 보여 줄 문자열만 넓힌다.
+        // 명령과 이유를 모두 보존한다. 명령 카드의 기존 표시와 승인 동작은 그대로다.
         const detail = [p.command, p.reason].filter((v: unknown): v is string => typeof v === 'string' && v.trim() !== '').join('\n\n')
-        this.events?.permission({ id: String(id), title: method.includes('commandExecution') ? '명령 실행 확인' : '파일 변경 확인', detail: detail || JSON.stringify(p) })
+        this.events?.permission({ id: String(id), title: '명령 실행 확인', detail: detail || JSON.stringify(p) })
+      } else if (method === 'item/fileChange/requestApproval') {
+        const requestId = String(id)
+        this.approvals.set(requestId, id)
+        const key = fileChangeKey(p?.threadId, p?.turnId, p?.itemId)
+        if (key) this.pendingFileApprovals.set(requestId, { key, reason: p.reason })
+        this.events?.permission(filePermission(requestId, p?.reason, key ? this.fileChanges.get(key) : undefined))
       } else if (method === 'item/tool/requestUserInput') {
         // The unmodified interview contract requires chat text, not tool popups.
         rpc.send({ id, result: { answers: {} } })
@@ -116,7 +180,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.5.1' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.0' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
@@ -137,11 +201,19 @@ export class CodexConnection implements AgentConnection {
     rpc.send({ method: 'initialized', params: {} })
     return rpc
   }
+  private rememberFileChanges(key: string | undefined, raw: unknown): void {
+    if (!key) return
+    const changes = readFileChanges(raw)
+    if (changes) this.fileChanges.set(key, changes)
+    else this.fileChanges.delete(key)
+    for (const [id, pending] of this.pendingFileApprovals) {
+      if (pending.key === key) this.events?.permission(filePermission(id, pending.reason, changes))
+    }
+  }
   async status() {
     const rpc = await this.connect()
     const r = await rpc.request('account/read', { refreshToken: false })
-    const connected = r.account?.type === 'chatgpt'
-    // 정상(연결됨)일 때는 조용해야 한다 — detail은 미연결 설명에만 쓴다.
+    const connected = !this.loginPending && r.account?.type === 'chatgpt' && (!this.loginInfo || this.loginConfirmed)
     return { installed: true, connected, version: this.serverVersion, probe: 'ok' as const, detail: connected ? '' : 'ChatGPT 로그인이 필요해요. API 계정으로 자동 전환하지 않아요.' }
   }
   /**
@@ -193,8 +265,20 @@ export class CodexConnection implements AgentConnection {
     return out
   }
   async login() {
-    const r = await (await this.connect()).request('account/login/start', { type: 'chatgpt' })
+    this.loginPending = true
+    this.loginConfirmed = false
+    this.loginInfo = undefined
+    this.earlyLogin = undefined
+    let r: { loginId?: unknown; authUrl?: unknown }
+    try { r = await (await this.connect()).request('account/login/start', { type: 'chatgpt' }) }
+    catch (error) { this.loginPending = false; throw error }
     this.loginInfo = { id: typeof r.loginId === 'string' ? r.loginId : '', url: typeof r.authUrl === 'string' ? r.authUrl : '' }
+    const early = this.earlyLogin as { id: string; success: boolean } | undefined
+    if (early?.id === this.loginInfo.id) {
+      this.loginPending = false
+      this.loginConfirmed = early.success
+    }
+    this.earlyLogin = undefined
     // 브라우저를 못 열었다고 로그인 자체를 실패로 만들지 않는다. 서버 쪽 로그인은 이미
     // 시작됐고, 학생에게는 "브라우저 다시 열기"가 있다. 여기서 던지면 화면이 '확인 실패'가
     // 되어 방금 시작한 로그인을 취소한 것처럼 보인다(실제로 그 문구가 떴다 —
@@ -217,6 +301,8 @@ export class CodexConnection implements AgentConnection {
     const rpc = this.rpc
     const loginId = this.loginInfo?.id
     this.loginInfo = undefined
+    this.loginPending = false
+    this.loginConfirmed = false
     if (rpc && !rpc.closed && loginId) {
       try { await rpc.request('account/login/cancel', { loginId }) } catch { /* 옛 CLI: 메서드가 없으면 프로세스를 닫아 취소한다 */ }
     }
@@ -247,8 +333,8 @@ export class CodexConnection implements AgentConnection {
     // history at all (e.g. snapshot file lost while the server thread survived).
     if (replayHistory) for (const turn of r.thread.turns ?? []) for (const item of turn.items ?? []) if (item.type === 'agentMessage') events.message(item.id, item.text)
     this.messages.clear()
-    // 첫 턴에는 작업 루트를 명시한다 — 모델이 하위 폴더(knuaf-work 등)를 추측하지 않게.
-    const prompt = sessionId ? text : `${text}\n\n작업 폴더: ${this.options.root}\n이 폴더 자체가 논문 작업 폴더예요. 하위 폴더를 새로 만들지 말고 여기서 바로 작업해 주세요.`
+    // 첫 턴에는 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
+    const prompt = sessionId ? text : `${text}\n\n${workFolderInstructions(this.options.root)}`
     /**
      * 학생이 고른 모델·생각 깊이. `turn/start` 의 model/effort 는 **이 턴과 그 뒤 턴에**
      * 적용되므로(turnStartParams: "this turn and subsequent turns") 같은 대화의 맥락이
@@ -359,6 +445,9 @@ export class CodexConnection implements AgentConnection {
     const request = this.approvals.get(id)
     if (request === undefined) throw new Error('이미 종료된 권한 요청이에요.')
     this.rpc?.send({ id: request, result: { decision: allow ? 'accept' : 'decline' } }); this.approvals.delete(id)
+    const pending = this.pendingFileApprovals.get(id)
+    if (pending) this.fileChanges.delete(pending.key)
+    this.pendingFileApprovals.delete(id)
   }
   async stop() {
     this.stopped = true
@@ -366,5 +455,6 @@ export class CodexConnection implements AgentConnection {
       try { await this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }) } catch { /* process termination below */ }
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
+    this.fileChanges.clear(); this.pendingFileApprovals.clear()
   }
 }

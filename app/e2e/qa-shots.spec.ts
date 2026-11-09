@@ -39,7 +39,7 @@ for (const scheme of ['light', 'dark'] as const) {
       console.log('captured', file, statSync(file).size, 'bytes')
     }
 
-    // --- 입력칸 · 경고 상자(결과물 시트의 독립검토 고지) ---
+    // --- 입력칸 · 파일 팝오버의 독립검토 고지 ---
     const { electronApp, page } = await launch({ colorScheme: scheme, env })
     try {
       await page.setViewportSize({ width: 1280, height: 800 })
@@ -51,7 +51,9 @@ for (const scheme of ['light', 'dark'] as const) {
       await page.waitForSelector('[data-screen="checkup"]', { timeout: 30_000 })
       await shot(page, '02-checkup')
       await navTo(page, '결과물')
-      await expect(page.locator('.feedback.warning').first()).toBeVisible({ timeout: 20_000 })
+      const reviewRow = page.locator('.paper-head .popover [data-make="review"]')
+      await reviewRow.getByRole('button').click()
+      await expect(reviewRow.locator('.make-fb.warning')).toBeVisible({ timeout: 20_000 })
       await shot(page, '03-artifacts-warning')
       await navTo(page, '설정')
       await shot(page, '04-settings')

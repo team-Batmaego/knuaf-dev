@@ -79,9 +79,9 @@ test('종이를 닫으면 다시 저절로 열리지 않는다', async () => {
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-  await page.getByRole('button', { name: '내 논문 닫기' }).click()
+  await page.getByRole('button', { name: '내 논문 접기' }).click()
   await expect(page.locator('.paperpane')).toHaveCount(0)
-  await expect(page.locator('.tbar-seg')).toBeVisible()
+  await expect(page.getByRole('button', { name: '내 논문 펴기' })).toBeVisible()
 
   // 기록이 올라도 닫아 둔 것은 닫힌 채다(설계 §4-2).
   addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 농장 소개', body: '새벽빛 농원은 해 뜨기 전에 딴다.', expected: 1 })
@@ -89,7 +89,7 @@ test('종이를 닫으면 다시 저절로 열리지 않는다', async () => {
   await expect(page.locator('.paperpane')).toHaveCount(0)
 
   // 다시 여는 것은 학생의 선택이다 — 설정에 남는다.
-  await page.locator('.tbar-seg').getByRole('tab', { name: '내 논문' }).click()
+  await page.getByRole('button', { name: /내 논문 펴기/ }).click()
   await expect(page.locator('.paperpane')).toBeVisible()
   await electronApp.close()
 })
@@ -161,6 +161,30 @@ test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하
   await expect(page.locator('.paper-head button.primary')).toHaveText('검토본 만들기', { timeout: 20_000 })
   await expect(page.locator('.titlebar .tbtn.now')).toContainText('검토본')
   await electronApp.close()
+})
+
+test('재무 게이트 기록이 없으면 본문이 있어도 2단계에 머물고 대기 질문 1로 센다', async () => {
+  // 원본 계약: 재무 지원 전공에 본문 절이 있는데 finance.gate.state 기록이 없으면
+  // `project.status`가 finance_gate를 needs_user로 내고 점검은 error다. 그래서 본문이
+  // review_ready여도 검토본 단계로 넘어가지 않는다(서버 판정, 앱 규칙 아님).
+  const dir = scratch()
+  const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
+  const root = synthProject({ financeGate: false })
+  const { electronApp, page } = await launch({ env })
+  try {
+    await openProject(page, root)
+    await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
+    markSectionReady(root)
+    // 감시 한 주기(2초)가 지나도 단계는 2다 — 권하는 단추가 생기지 않는다.
+    await page.waitForTimeout(3_500)
+    await expect(page.locator('.titlebar .tbtn.now')).toContainText('인터뷰')
+    await expect(page.locator('.paper-head button.primary')).toHaveCount(0)
+    await page.locator('.titlebar .tbtn.now').click()
+    await expect(page.locator('.titlebar .popover .pop-row').nth(1)).toContainText('질문 1개')
+    await page.keyboard.press('Escape')
+  } finally {
+    await electronApp.close()
+  }
 })
 
 test('팝오버 — 만든 파일과 만들기 네 줄이 종이 머리에서 열린다', async () => {
@@ -238,7 +262,7 @@ test('모델 칩에서 두 AI의 연결 상태를 확인한다', async () => {
   await electronApp.close()
 })
 
-test('자료 팝오버 — 보기 전용: 현재 작성물 + 자료 전체 보기 (설계자 답 Q3)', async () => {
+test('자료 팝오버 — 현재 작성물과 자료 첨부 진입점', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()
   await openProject(page, root)
@@ -250,9 +274,8 @@ test('자료 팝오버 — 보기 전용: 현재 작성물 + 자료 전체 보�
   await expect(pop).toContainText('현재 작성물')
   await expect(pop).toContainText('현재 원고')
   await expect(pop).toContainText('재무 파일')
-  await expect(pop.getByRole('button', { name: '자료 전체 보기' })).toBeVisible()
-  // 자료 넣기(파일 고르기)는 여기 없다 — 입력칸과 자료 시트가 맡는다.
-  await expect(pop.getByRole('button', { name: '파일 고르기…' })).toHaveCount(0)
+  await expect(pop.getByRole('button', { name: '자료 전체 보기' })).toHaveCount(0)
+  await expect(pop.getByRole('button', { name: '파일 고르기…' })).toBeVisible()
   await electronApp.close()
 })
 
@@ -263,21 +286,21 @@ test('대화 이벤트의 "종이에서 보기"는 닫아 둔 종이를 실제�
     await openProject(page, root)
     await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-    await page.getByRole('button', { name: '내 논문 닫기' }).click()
+    await page.getByRole('button', { name: '내 논문 접기' }).click()
     await expect(page.locator('.paperpane')).toHaveCount(0)
 
     // 절 본문이 바뀌면 대화에 이벤트 줄이 뜬다 — 그 "종이에서 보기"는 학생이 누른 명시적 이동이다.
     rewriteSection(root, { body: '고친 본문이다.', expected: 1 })
     const ev = page.locator('.chat-event')
     await expect(ev, '이벤트 줄이 없다').toBeVisible({ timeout: 30_000 })
-    await ev.getByRole('button', { name: '종이에서 보기' }).click()
+    await ev.getByRole('button', { name: /고친 부분 보기|종이에서 보기/ }).click()
     await expect(page.locator('.paperpane'), '종이에서 보기를 눌렀는데 종이가 안 열렸다').toBeVisible()
   } finally {
     await electronApp.close()
   }
 })
 
-test('좁은 창의 "내 논문 닫기"는 대화로 돌아간다 (P3-R1-04 B)', async () => {
+test('좁은 창의 제목줄 바꾸기는 대화로 돌아간다 (P3-R1-04 B)', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()
   try {
@@ -288,7 +311,7 @@ test('좁은 창의 "내 논문 닫기"는 대화로 돌아간다 (P3-R1-04 B)',
     await seg.getByRole('tab', { name: '내 논문' }).click()
     await expect(page.locator('.paperpane')).toBeVisible()
 
-    await page.getByRole('button', { name: '내 논문 닫기' }).click()
+    await seg.getByRole('tab', { name: '대화' }).click()
     await expect(page.locator('.paperpane'), '닫기를 눌렀는데 종이가 남아 있다').toHaveCount(0)
     await expect(seg.getByRole('tab', { name: '대화' })).toHaveAttribute('aria-selected', 'true')
   } finally {

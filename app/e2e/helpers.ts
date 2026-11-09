@@ -1,5 +1,5 @@
-import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -7,15 +7,29 @@ import { DEFAULT_WINDOW } from '../src/shared/window'
 
 export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
-export const scripts = join(repo, 'skills', 'knuaf-dev', 'scripts')
+export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
+let dependencySeed: string | undefined
+
+/** Install once per worker, then copy real directories; every project still passes the app's doctor. */
+function seedDependencies(root: string): void {
+  if (existsSync(join(root, '.venv'))) return
+  if (!dependencySeed) {
+    const seed = mkdtempSync(join(tmpdir(), 'kd-deps-'))
+    const installed = spawnSync(python, ['-X', 'utf8', join(scripts, 'gg_deps.py'), 'ensure', seed], { encoding: 'utf8' })
+    if (installed.status !== 0) throw new Error(installed.error ? `${(installed.error as NodeJS.ErrnoException).code ?? 'spawn error'}: ${installed.error.message}` : installed.stdout + installed.stderr)
+    dependencySeed = join(seed, '.venv')
+  }
+  cpSync(dependencySeed, join(root, '.venv'), { recursive: true, dereference: true })
+}
+
 /** init-only project (revision 0) or a project with a source, a section and a fact (revision 1). */
-export function synthProject(opts: { withContent?: boolean } = { withContent: true }): string {
+export function synthProject(opts: { withContent?: boolean; financeGate?: boolean } = { withContent: true }): string {
   const root = mkdtempSync(join(tmpdir(), 'kd-e2e-'))
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'init', root], { encoding: 'utf-8' })
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
-  if (!opts.withContent) return root
+  if (opts.withContent === false) return root
   mkdirSync(join(root, 'sections'), { recursive: true }); mkdirSync(join(root, 'sources'), { recursive: true })
   writeFileSync(join(root, 'sources', 'answers.md'), '# 원답변\n\n재배 면적: 600평\n', 'utf-8')
   writeFileSync(join(root, 'sections', '01.md'), '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n농장A의 재배 면적은 600평이다. 정읍 일대 기후를 고려해 작목을 선택했다.\n<!-- gg:draft:end -->\n', 'utf-8')
@@ -23,30 +37,77 @@ export function synthProject(opts: { withContent?: boolean } = { withContent: tr
   writeFileSync(change, JSON.stringify({ request_id: 'e2e:1', ops: [
     { collection: 'sources', value: { id: 'src-answers', path: 'sources/answers.md', claims: {} } },
     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } },
-    { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } }
+    { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } },
+    ...syntheticMajor(root),
+    ...(opts.financeGate === false ? [] : syntheticFinanceGate(root))
   ] }), 'utf-8')
   const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
   if (a.status !== 0) throw new Error(a.stdout + a.stderr)
   return root
 }
 
+/** A test selection with claim-backed evidence, not a production default. */
+function syntheticMajor(root: string): { collection: string; value: Record<string, unknown> }[] {
+  if (!existsSync(join(scripts, 'gg_major_contract.py'))) throw new Error('Incompatible bundle: run stage:skill')
+  const result = spawnSync(python, ['-B', '-c', [
+    'import sys; sys.path.insert(0, sys.argv[1])',
+    'import gg_major_contract as mc',
+    'print(mc.default_registry().resolve("specialty_crops").module_version)'
+  ].join('\n'), scripts], { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(result.stderr)
+  writeFileSync(join(root, 'sources', 'major.txt'), 'Synthetic explicit selection\n')
+  const fact = {
+    id: 'major', field_id: 'common.major_id', kind: 'reported_fact', value: 'specialty_crops',
+    unit: '', value_type: 'text', period: null, scope: 'project', answer_state: 'provided',
+    verification: 'claim_supported', module_version: result.stdout.trim(),
+    source_refs: [{ id: 'major-source', revision: 1, locator: 'L1', claim_id: 'major' }]
+  }
+  const { field_id, kind, value, unit, period, scope, answer_state } = fact
+  return [
+    { collection: 'sources', value: { id: 'major-source', path: 'sources/major.txt', claim_review: 'synthetic-review',
+      claims: { major: { field_id, kind, value, unit, period, scope, answer_state } } } },
+    { collection: 'facts', value: fact }
+  ]
+}
+
+/**
+ * v0.3.x 원본 계약의 본문 전 재무 게이트 기록. 지원 전공 + 본문 절이면 게이트 기록이
+ * 없을 때 `project.status`가 `finance_gate`를 `needs_user`로 내 2단계에 머문다.
+ * 합성 시험은 재무 수치를 다루지 않으므로 원본이 허용하는 `not_computable`(사유 포함)을
+ * claim-backed 사실로 남겨 게이트를 통과시킨다 — 앱 판정 규칙은 바꾸지 않는다.
+ */
+function syntheticFinanceGate(root: string): { collection: string; value: Record<string, unknown> }[] {
+  writeFileSync(join(root, 'sources', 'finance-gate.txt'), 'Synthetic finance inputs unavailable\n')
+  const fact = {
+    id: 'finance-gate', field_id: 'finance.gate.state', kind: 'reported_fact',
+    value: 'not_computable', unit: '', value_type: 'text', period: null, scope: 'project',
+    answer_state: 'provided', verification: 'claim_supported',
+    reason: '합성 시험: 재무 입력 없음',
+    source_refs: [{ id: 'finance-gate-source', revision: 1, locator: 'L1', claim_id: 'state' }]
+  }
+  const { field_id, kind, value, unit, period, scope, answer_state } = fact
+  return [
+    { collection: 'sources', value: { id: 'finance-gate-source', path: 'sources/finance-gate.txt', claim_review: 'synthetic-review',
+      claims: { state: { field_id, kind, value, unit, period, scope, answer_state } } } },
+    { collection: 'facts', value: fact }
+  ]
+}
+
 export function plantStaleLock(root: string): void {
-  mkdirSync(join(root, '.gg-lock'))
+  mkdirSync(join(root, '.gg-lock'), { recursive: true })
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 
-export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
+export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; splash?: 'keep'; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'kd-userdata-'))
   /**
-   * 여는 화면은 켤 때마다 화면을 덮고 2.6초를 쓴다. 대부분의 테스트는 그것을 보려는 게
-   * 아니라 그 뒤의 화면을 보려는 것이므로 기본적으로 꺼 둔다(`intro: true` 면 켠다).
+   * Every app launch shows its startup splash. Ordinary E2E tests send Escape after the overlay
+   * is visible and wait for it to disappear; splash-specific tests pass `splash: 'keep'` to
+   * observe the natural startup. This option belongs only to the test helper, not shipped code.
    *
-   * `onboarded_at` 도 같이 적는다. 첫 실행 화면(AI 연결 → 논문 폴더)이 생기면서, 이 표시가
-   * 없는 폴더에서는 앱이 온보딩을 띄운다 — 그러면 기존 스펙 28개가 전부 폴더 화면 대신
-   * 온보딩을 보게 된다. 첫 실행 자체를 보는 스펙은 `onboarded: false` 로 끈다.
-   *
-   * 스펙이 직접 써 둔 settings.json 은 **덮지 않고 이어 쓴다** — 그 안의 값(옛 helper_mode 등)이
-   * 시험 대상이기 때문이다.
+   * `intro` retains its legacy show_intro fixture behavior; it does not control the startup splash.
+   * `onboarded_at` is set as well. Without it the first-run connect/folder screens replace the
+   * workspace, so tests of first-run behavior opt out with `onboarded: false`.
    */
   const settingsFile = join(userData, 'settings.json')
   mkdirSync(userData, { recursive: true })
@@ -61,7 +122,11 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   else if (!preset.first_project_permission_asked_at) preset.first_project_permission_asked_at = new Date().toISOString()
   writeFileSync(settingsFile, JSON.stringify(preset), 'utf-8')
   // A shell that exports ELECTRON_RUN_AS_NODE would make the app run as plain Node (require('electron') yields the binary path).
-  const env = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }
+  const env: NodeJS.ProcessEnv = { ...process.env, KNUAF_PYTHON: python, KNUAF_SCRIPTS_DIR: scripts, KNUAF_USER_DATA: userData, ...opts.env }
+  // Retained even when aggregate diagnosis never answers; no project data is recorded.
+  const doctorTrace = test.info().outputPath(`doctor-${Date.now()}.jsonl`)
+  mkdirSync(join(doctorTrace, '..'), { recursive: true })
+  env.KNUAF_E2E_DOCTOR_TRACE = doctorTrace
   delete env.ELECTRON_RUN_AS_NODE
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).
@@ -81,6 +146,14 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
   // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
   await page.waitForSelector(opts.waitFor ?? '.titlebar')
+  const splash = page.locator('.splash')
+  if (opts.splash !== 'keep') {
+    await splash.waitFor({ state: 'visible', timeout: 30_000 })
+    // The skip key listener is attached before the first animation frame marks this node.
+    await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
+    await page.keyboard.press('Escape')
+    await splash.waitFor({ state: 'detached' })
+  }
   return { electronApp, page }
 }
 
@@ -199,45 +272,60 @@ export async function paperReady(page: Page, text?: string): Promise<void> {
 }
 
 /**
- * Open a project by pasting its path (the native picker cannot be driven). The only path
- * input lives in 설정 > 고급 — the folder-less 내 논문 screen deliberately has none.
+ * Open a project by entering its path through Settings > Folder > Advanced.
+ * The path input is hidden until the Folder section is selected and its disclosure is expanded.
  *
- * v5 에서 설정은 **제목줄의 ⚙** 가 연다(왼쪽 사이드바가 없다). 폴더가 열리면 앱이 시트를
- * 닫고 작업 공간으로 돌아온다(store/project.ts open → closeSheet).
- *
- * `ready` 는 **호출자가 실제로 쓸 요소**(종이에서 고를 문단 = `paperReady`, 최종 두 칸 배치 =
- * `splitReady`)가 준비됐음을 확인하는 함수다. 배치 안정 확인은 그 **뒤에** 한다 — 그 전에
- * 보면 아직 오지 않은 절 목록이 배치를 바꾸는데도 "정착"으로 받아들인다(MACR3-R1-02).
- * 준비 조건을 주지 않으면 배치가 지금 조용한지만 본다.
+ * `ready` waits for the element the caller will use before workspace layout settles. The
+ * project section list can still change the layout after the initial open.
+ * Ordinary scenarios get an independent .venv and wait for renderer-proven readiness.
+ * Preparation race/failure scenarios opt out explicitly; they own their pending response.
  */
-export async function openProject(page: Page, root: string, ready?: (p: Page) => Promise<unknown>): Promise<void> {
+export async function openProject(page: Page, root: string, ready?: (p: Page) => Promise<unknown>, opts: { preparation?: 'pending' } = {}): Promise<void> {
+  if (opts.preparation !== 'pending') seedDependencies(root)
   await page.getByRole('button', { name: '설정' }).first().click()
   await page.waitForSelector('dialog[open]', { timeout: 30_000 })
-  const disclosure = page.locator('details:has(input[aria-label="폴더 경로"])')
+  await page.locator('dialog[open] nav').getByRole('button', { name: '폴더', exact: true }).click()
+  const disclosure = page.locator('dialog[open] details:has(input[aria-label="폴더 경로"])')
   await expect(disclosure).toHaveCount(1)
-  await disclosure.first().evaluate((d) => { (d as HTMLDetailsElement).open = true })
-  await page.fill('input[aria-label="폴더 경로"]', root)
-  await page.click('button:has-text("경로로 열기")')
-  // 열렸다 — 시트가 닫히고 대화 칸이 남는다.
+  await expect(disclosure).toBeVisible()
+  await disclosure.evaluate((d) => { (d as HTMLDetailsElement).open = true })
+  const pathInput = page.getByRole('textbox', { name: '폴더 경로' })
+  await expect(pathInput).toBeVisible()
+  await pathInput.fill(root)
+  await disclosure.getByRole('button', { name: '경로로 열기', exact: true }).click()
+  // 폴더 열기가 시작됐다 — 시트가 닫히고 대화 칸이 남는다.
   await page.waitForSelector(CHAT_READY, { timeout: 30_000 })
-  await page.waitForSelector('dialog[open]', { state: 'detached', timeout: 30_000 }).catch(() => {})
+  await page.waitForSelector('dialog[open]', { state: 'detached', timeout: 30_000 })
+  if (opts.preparation !== 'pending') await projectPrepared(page)
   // 호출자가 쓸 요소가 준비된 뒤에, 배치가 멈춘 것을 확인하고 돌려준다.
   if (ready) await ready(page)
   await settleWorkspace(page)
 }
 
+/** Observe the renderer's preparation state, not a direct IPC install result. */
+export async function projectPrepared(page: Page): Promise<void> {
+  await navTo(page, '설정')
+  await openPreset(page, 'fix:deps')
+  const preparation = page.locator('dialog[open] details[data-preset="fix:deps"]')
+  await expect(preparation.locator('.card-head')).toContainText('준비됨', { timeout: 30_000 })
+  await closeSheet(page)
+  await expect(page.locator('.chat-zone .zline.wait')).toHaveCount(0, { timeout: 30_000 })
+}
+
 /**
- * v5 의 다섯 목적지로 간다. 이름은 v4 사이드바와 같게 두어 11개 spec 이 그대로 부르게 했다
- * (책임자 의견 ② — 한 곳에서 흡수한다):
- *   · '내 논문' — 시트를 닫는다(대화는 언제나 깔려 있다)
- *   · '설정' — 제목줄 ⚙
- *   · '자료' — 종이 머리 "자료 N" 팝오버 → 자료 전체 보기
- *   · '결과물' — 종이 머리 "파일 N" 팝오버 → 결과물 전체 보기
- *   · '점검' — 제목줄 "지금 ▾" → 전체 과정 → 제출 점검·마무리
+ * Navigate to the shared workspace surfaces. '자료' and '결과물' open their paper-header lists;
+ * the removed full-screen list views are not navigation destinations.
+ *
+ * '내 논문' selects the paper tab when a file preview is open; '설정' opens its modal and
+ * '점검' opens the paper overlay from the titlebar menu.
  */
 export async function navTo(page: Page, label: string): Promise<void> {
   await closeSheet(page)
-  if (label === '내 논문') return
+  if (label === '내 논문') {
+    const paperTab = page.getByRole('tab', { name: '내 논문' })
+    if (await paperTab.isVisible()) await paperTab.click()
+    return
+  }
   if (label === '설정') {
     await page.getByRole('button', { name: '설정' }).first().click()
     return
@@ -248,11 +336,14 @@ export async function navTo(page: Page, label: string): Promise<void> {
     return
   }
   if (label === '자료' || label === '결과물') {
+    const paper = page.locator('.paper-head')
     const paperTab = page.getByRole('tab', { name: '내 논문' })
-    if (!(await page.locator('.paper-head').isVisible()) && await paperTab.isVisible()) await paperTab.click()
-    const head = label === '자료' ? /자료/ : /파일/
-    await page.locator('.paper-head').getByRole('button', { name: head }).first().click()
-    await page.locator('.paper-head .popover').getByRole('button', { name: label === '자료' ? '자료 전체 보기' : '결과물 전체 보기' }).click()
+    if (!(await paper.isVisible()) && await paperTab.isVisible()) await paperTab.click()
+    const trigger = label === '자료' ? 'head-materials' : 'head-files'
+    const button = paper.locator(`[data-focus-key="${trigger}"]`)
+    const popover = button.locator('..').locator('.popover')
+    if (!(await popover.isVisible()) || await button.getAttribute('aria-expanded') !== 'true') await button.click()
+    await expect(popover).toBeVisible()
     return
   }
   throw new Error(`모르는 목적지: ${label}`)
@@ -260,9 +351,19 @@ export async function navTo(page: Page, label: string): Promise<void> {
 
 
 
-/** Open a 설정 disclosure by its deep-link preset (tools:export, fix:lock, folder:path…). */
+/** Open a Settings disclosure by its deep-link preset (`tools:export`, `fix:lock`, `folder:path`…). */
 export async function openPreset(page: Page, preset: string): Promise<void> {
-  await page.locator(`details[data-preset="${preset}"]`).evaluate((d) => { (d as HTMLDetailsElement).open = true })
+  const family = preset.slice(0, preset.indexOf(':'))
+  const section = family === 'tools' ? '고급 도구'
+    : family === 'fix' ? '문제 해결'
+      : family === 'folder' ? '폴더'
+        : family === 'python' ? 'Python 실행기'
+          : family === 'info' ? '앱 정보'
+            : null
+  if (section) await page.locator('dialog[open] nav').getByRole('button', { name: section, exact: true }).click()
+  const disclosure = page.locator(`dialog[open] details[data-preset="${preset}"]`)
+  await expect(disclosure).toBeVisible()
+  await disclosure.evaluate((d) => { (d as HTMLDetailsElement).open = true })
 }
 
 
