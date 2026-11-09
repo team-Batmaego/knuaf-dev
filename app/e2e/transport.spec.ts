@@ -4,9 +4,10 @@
 // cmd.exe 이고 실제 도구는 **손자**다 — stop() 이 cmd.exe 만 죽이면 도구가 고아로 남는다
 // (윈도우 CI 4차: 잡 정리에서 `Terminate orphan process: node`). 이 시험이 그 반례를 고정한다.
 import { expect, test } from '@playwright/test'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { JsonRpcProcess } from '../src/main/chat/transport'
 import { taskkillPath } from '../src/main/win'
 import { writeCliShim } from './fixtures/fake-codex'
@@ -143,4 +144,56 @@ test('kill이 exit를 못 만들면 t2가 닫고 pending을 거절하며 onClose
     try { process.kill(Number(readFileSync(pidFile, 'utf-8')), 'SIGKILL') } catch { /* 이미 죽었거나 없음 */ }
     void rpc.stop().catch(() => {})
   }
+})
+
+/**
+ * 자식을 정말 살려 둔 채로 부모가 스스로 끝나는지 본다(RT 3회차 중요 1).
+ * 같은 프로세스에서는 직접 SIGKILL이 자식을 죽이므로 unref를 지워도 통과한다.
+ * 그래서 부모를 별도 프로세스로 띄운다: ChildProcess.prototype.kill을 no-op으로 바꾸고
+ * killFn도 no-op으로 하면 자식은 stop 뒤에도 산다. 이때 부모가 끝나는 유일한 길은
+ * detach의 child.unref()뿐이므로, unref를 지운 변이에서는 부모가 남았다가 timeout으로 실패한다.
+ */
+test('자식이 살아 있어도 unref 덕에 부모가 스스로 끝난다 (RT3)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kd-transport-parent-'))
+  const pidFile = join(dir, 'tool.pid')
+  const runner = join(dir, 'runner.mjs')
+  writeFileSync(runner, `import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.TOOL_PID_FILE, String(process.pid))\nsetInterval(() => {}, 1000)\n`, 'utf-8')
+  // transport.ts·win.ts를 상대 import 없이 평평히 복사한다 — 실제 수정 중인 코드를 그대로 밟는다.
+  const srcDir = resolve(__dirname, '..', 'src', 'main')
+  const transportSrc = readFileSync(join(srcDir, 'chat', 'transport.ts'), 'utf-8')
+  const winSrc = readFileSync(join(srcDir, 'win.ts'), 'utf-8')
+  writeFileSync(join(dir, 'transport.ts'), transportSrc.replace("from '../win'", "from './win.ts'"), 'utf-8')
+  writeFileSync(join(dir, 'win.ts'), winSrc, 'utf-8')
+  const parent = join(dir, 'parent.mjs')
+  writeFileSync(parent, [
+    `import { JsonRpcProcess } from './transport.ts'`,
+    `import { writeFileSync } from 'node:fs'`,
+    `import { join } from 'node:path'`,
+    `import cp from 'node:child_process'`,
+    `// killTree와 detach의 직접 kill을 함께 막아 자식은 살아 남게 한다 — exit는 안 온다.`,
+    `cp.ChildProcess.prototype.kill = function () { return false }`,
+    `const WIN = process.platform === 'win32'`,
+    `const runner = join(process.cwd(), 'runner.mjs')`,
+    `const binary = join(process.cwd(), WIN ? 'fake.cmd' : 'fake')`,
+    `if (WIN) writeFileSync(binary, '@echo off\\r\\n"${process.execPath}" "' + runner + '"\\r\\n', 'utf-8')`,
+    `else writeFileSync(binary, '#!/bin/sh\\nexec ' + JSON.stringify(process.execPath) + ' ' + JSON.stringify(runner) + '\\n', { mode: 0o755 })`,
+    `const rpc = new JsonRpcProcess(binary, [], process.cwd(), { ...process.env, TOOL_PID_FILE: join(process.cwd(), 'tool.pid') }, { killFn: () => {} })`,
+    `rpc.request('account/read', {}).catch(e => console.log('parent: pending rejected'))`,
+    `await rpc.stop()`,
+    `console.log('parent: stop returned closed=' + rpc.closed)`,
+    // 부모는 이제 아무것도 남기지 않는다 — unref가 있으면 바로 exit, 없으면 자식 핸들이 붙잡는다.
+    ``
+  ].join('\n'), 'utf-8')
+  writeFileSync(join(dir, 'runner-ready-check.tmp'), 'x', 'utf-8')
+  let verdict = ''
+  try {
+    const r = spawnSync(process.execPath, ['--experimental-strip-types', parent], { cwd: dir, timeout: 12_000, encoding: 'utf8' })
+    verdict = `status=${r.status} signal=${r.signal} error=${r.error?.message ?? ''} timedOut=${(r.error as NodeJS.ErrnoException)?.code === 'ETIMEDOUT'}\nstdout=${r.stdout}\nstderr=${r.stderr}`
+    expect((r.error as NodeJS.ErrnoException)?.code, '부모가 N초 안에 끝나지 않았다 — unref가 없다면 남는다\n' + verdict).not.toBe('ETIMEDOUT')
+    expect(r.status, '부모가 비정상 종료했다\n' + verdict).toBe(0)
+    expect(String(r.stdout), '부모 로그에 stop 완료가 있어야 한다\n' + verdict).toContain('stop returned')
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf-8').trim()), 'SIGKILL') } catch { /* 이미 죽었거나 없음 */ }
+  }
+  expect(verdict, '부모 프로세스가 스스로 끝났는가').not.toContain('timedOut=true')
 })
