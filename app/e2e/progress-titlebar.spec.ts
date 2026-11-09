@@ -98,6 +98,15 @@ test('U8 펼침 — "그 뒤" 실제 문구와 [제출 전 점검]이 점검 창
     await titlebar(page).click()
     const pop = page.locator('.titlebar .popover')
     await expect(pop).toBeVisible()
+    // 접기 단추(가운데 원형 ›)가 펼친 목록 위에 겹치지 않는다 — z-order 회귀(T1 u8-open).
+    // 목록이 단추보다 위에 오면 "7. 워드 검토본" 줄을 가리지 않는다.
+    await expect(pop).toContainText('7. 워드 검토본')
+    const popZ = await pop.evaluate((el) => getComputedStyle(el).zIndex)
+    const handleZ = await page.evaluate(() => {
+      const h = document.querySelector('button[aria-controls="paperpane"]')
+      return h ? getComputedStyle(h).zIndex : null
+    })
+    expect(Number(popZ), '팝오버 z-index가 접기 단추보다 낮다').toBeGreaterThan(Number(handleZ ?? 0))
     await expect(pop).toContainText('한글 마무리(글꼴·여백·쪽번호)·교수 승인 — 학생 몫')
     await expect(pop).toContainText('답 기준')
     await expect(pop).toContainText('독립 내용검토 전')
