@@ -78,3 +78,34 @@ test('taskkill 경로는 SystemRoot → windir → C:\\Windows 순 (W1 ①)', ()
   // 끝 구분자가 있어도 두 번 붙지 않는다.
   expect(taskkillPath({ SystemRoot: 'G:\\Windows\\' })).toBe('G:\\Windows\\System32\\taskkill.exe')
 })
+
+/**
+ * 종료는 상한 안에 끝나고 대기 중인 요청은 거절이 되어야 한다. 'exit'가 늦게 와도
+ * pending 45s 타이머가 메인을 붙잡고 있지 않게 — 윈도우에서 kill이 'exit'를 못 만들면
+ * 이 계약이 e2e close hang(codex-relogin teardown)으로 번진다. 타임아웃 경로까지 끝나는지 본다.
+ */
+test('stop 은 exit가 늦어도 6초 안에 닫히고 대기 요청은 거절한다 (RT)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kd-transport-stop-'))
+  const pidFile = join(dir, 'tool.pid')
+  const runner = join(dir, 'runner.mjs')
+  // SIGTERM을 오래 붙잡는 도구: stop의 kill이 바로 'exit'로 번지지 않는 경우.
+  writeFileSync(runner, `import { writeFileSync } from 'node:fs'\nprocess.on('SIGTERM', () => {})\nwriteFileSync(process.env.TOOL_PID_FILE, String(process.pid))\nsetInterval(() => {}, 1000)\n`, 'utf-8')
+  writeCliShim(dir, 'fake',
+    `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(runner)}`,
+    `"${process.execPath}" "${runner}"`)
+  const binary = join(dir, process.platform === 'win32' ? 'fake.cmd' : 'fake')
+  const rpc = new JsonRpcProcess(binary, [], dir, { ...process.env, TOOL_PID_FILE: pidFile })
+  try {
+    expect(await until(() => existsSync(pidFile)), '가짜 도구가 뜨지 않았다').toBe(true)
+    // 응답 없이 매달린 요청 — stop이 이 45s 타이머를 clear해야 worker가 끝나지 않는다.
+    const pending = rpc.request('account/read', {})
+    const rejection = expect(pending).rejects.toThrow()
+    const start = Date.now()
+    await rpc.stop()
+    expect(Date.now() - start).toBeLessThan(6_000)
+    expect(rpc.closed).toBe(true)
+    await rejection
+  } finally {
+    void rpc.stop().catch(() => {})
+  }
+})

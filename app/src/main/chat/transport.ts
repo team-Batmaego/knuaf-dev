@@ -43,7 +43,12 @@ export class JsonRpcProcess {
     if (this.closed) return
     this.closed = true
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('AI 연결이 종료됐어요. 전송 중이던 답변은 자동으로 다시 보내지 않아요.')) }
-    this.pending.clear(); this.onClose()
+    this.pending.clear()
+    // 대기 타이머가 메인을 최대 45s까지 살리지 않게 stdio를 끊고 완료를 알린다.
+    this.child.stdin.destroy()
+    this.child.stdout.destroy()
+    this.child.stderr.destroy()
+    this.onClose()
   }
   send(value: unknown) {
     if (this.closed) throw new Error('AI 연결이 종료됐어요.')
@@ -63,7 +68,8 @@ export class JsonRpcProcess {
       // 죽는 것('exit')만 기다린다. 'close'는 파이프 점유자 때문에 안 올 수 있다.
       const done = () => { clearTimeout(t1); clearTimeout(t2); resolve() }
       const t1 = setTimeout(() => killTree(this.child, 'SIGKILL'), 3000)
-      const t2 = setTimeout(done, 3500)
+      // 'exit'가 안 와도 finish로 닫는다 — pending 45s 타이머가 메인을 살리지 않게.
+      const t2 = setTimeout(() => { this.finish(); done() }, 3500)
       this.child.once('exit', done)
       // 윈도우에서 `cmd.exe` 로 감싼 자식은 **트리째** 끝낸다 — cmd.exe 만 죽이면 손자
       // (실제 codex·claude/node)가 고아로 남는다(윈도우 CI 4차). 맥은 종전 그대로다.
