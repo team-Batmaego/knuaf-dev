@@ -4,8 +4,7 @@
  * IMPL-T1 §3-4 U. `seedChat`(`fixtures/fake-codex.ts`)으로 대화 기록을 심는다.
  * 제목줄은 `useProgress`가 고른 값을 그린다(localStorage `knuaf.progress.v1:<root>`).
  *
- * Chat.tsx 본문 감추기 배선은 v0.6.2 워커 소유로 아직 풀리지 않아, U1·U9의
- * "대화에 덩어리 글자 없음" 단언은 **풀린 뒤** 붙인다. 그 전까지는 제목줄 값만 단언한다.
+ * Chat 배선 후 U1·U9의 본문 단언을 활성화했다 — 제목줄은 `useProgress`가 고른 값을 그린다.
  */
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
@@ -60,7 +59,15 @@ test('U1 실기록 모양 — 제목줄 "2/7 계획 인터뷰"', async () => {
     await expect(button.locator('.ticks i.d')).toHaveCount(1)
     await expect(button.locator('.ticks i.n')).toHaveCount(1)
     await expect(button).toHaveAttribute('aria-label', /7단계 중 2단계/)
-    // Chat 배선 풀리기 전: 대화에 덩어리 글자가 그대로 보인다 — 단언하지 않는다(풀리면 이 자리에서 단언).
+    // Chat 배선 후: 대화 본문에 진행 목록 글자가 없다 — 제목줄에만 보인다.
+    const thread = page.locator('.chat-thread')
+    await expect(thread, '대화 본문에 진행 목록 글자가 남았다').not.toContainText('창업논문 진행 목록')
+    await expect(thread, '대화 본문에 단계 줄이 남았다').not.toContainText('1 자료·전공 확인')
+    // `다음 작업`·`지금 확인할 것` 줄은 구간 밖이라 남는다.
+    await expect(thread).toContainText('다음 작업')
+    await expect(thread).toContainText('지금 확인할 것')
+    // 앞 안내·뒤 설명 문장도 남는다.
+    await expect(thread).toContainText('창업논문 도우미')
     await shot(page, 'u1-closed')
   } finally {
     await electronApp.close()
