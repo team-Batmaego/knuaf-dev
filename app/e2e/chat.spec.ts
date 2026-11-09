@@ -568,6 +568,17 @@ test('셸 변수가 있으면 값을 모르므로 묻는다', () => {
     'ls $HOME',
     'python3 gg.py doctor --out $TMPDIR/x'
   ]) expect(autoAllow(ROOT, 'Bash', { command: cmd })).toBe(false)
+  // ROH ⑤ 되돌림 금지: 쌍따옴표 안의 `$`·백틱·명령 치환은 카드다.
+  expect(autoAllow(ROOT, 'Bash', { command: 'echo "$(printf changed > /tmp/x)"' })).toBe(false)
+  expect(autoAllow(ROOT, 'Bash', { command: 'echo "$(id)"' })).toBe(false)
+  expect(autoAllow(ROOT, 'Bash', { command: 'echo "`id`"' })).toBe(false)
+  // 따옴표 안의 `{`·`}`만 글자로 본다(v0.6.2) — grep 수량자 오탐 교정.
+  // 주의: `.claude/skills/...` 아래 경로는 보호 경로라 `touchesProtected`로 카드로 간다
+  // (아래 '셸로 권한 파일을 쓰는 길도 묻는다'와 같은 선). 글이 아닌 경로는 여기로 표현한다.
+  expect(autoAllow(ROOT, 'Bash', { command: 'grep "hort_env_systems\\.[a-z_]\\{3,\\}" "sources/a.md"' })).toBe(true)
+  expect(autoAllow(ROOT, 'Bash', { command: "grep 'hort_env_systems\\.[a-z_]\\{3,\\}' 'sources/a.md'" })).toBe(true)
+  // 작은따옴표 안은 셸이 펼치지 않으므로 `$`·백틱도 글자다(실측).
+  expect(autoAllow(ROOT, 'Bash', { command: "echo '$HOME `id` {x}'" })).toBe(true)
 })
 
 test('폴더 안이어도 스킬 스크립트가 아니면 실행하지 않는다', () => {
@@ -719,8 +730,13 @@ test('권한 파일 카드는 무엇을 바꾸는지 말한다', () => {
   expect(d.detail).toContain('.claude/settings.local.json')
   const sh = describeTool('Bash', { command: 'tee .claude/settings.local.json' }, ROOT)
   expect(sh.title).toBe('도우미의 권한을 바꾸는 파일이에요')
-  // 논문 쓰기는 종전 문구 그대로 — 이 변경이 카드 문구를 흔들지 않는다.
-  expect(describeTool('Write', { file_path: `${ROOT}/sections/02.md` }, ROOT).title).toBe('도우미가 "Write" 도구를 쓰려고 해요')
+  // 논문 쓰기는 쉬운 말로 번역해 말한다(v0.6.2) — 내부 도구 이름이 그대로 보이지 않는다.
+  expect(describeTool('Write', { file_path: `${ROOT}/sections/02.md` }, ROOT).title).toBe('도우미가 "파일 쓰기"을/를 쓰려고 해요')
+  expect(describeTool('Edit', { file_path: `${ROOT}/sections/02.md` }, ROOT).title).toBe('도우미가 "파일 고치기"을/를 쓰려고 해요')
+  expect(describeTool('Read', { file_path: `${ROOT}/sections/02.md` }, ROOT).title).toBe('도우미가 "파일 읽기"을/를 쓰려고 해요')
+  expect(describeTool('WebSearch', { query: 'x' }, ROOT).title).toBe('도우미가 "인터넷 검색"을/를 쓰려고 해요')
+  expect(describeTool('WebFetch', { url: 'https://x' }, ROOT).title).toBe('도우미가 "웹 페이지 읽기"을/를 쓰려고 해요')
+  expect(describeTool('Bash', { command: 'echo hi' }, ROOT).title).not.toContain('Write')
 })
 
 test('폴더에 이미 있는 권한 설정을 찾아낸다', () => {
@@ -807,8 +823,10 @@ test('폴더 밖 윈도우 경로를 읽는 셸은 자동 허용하지 않는다
   expect(autoAllow(ROOT, 'Bash', { command: `cat "${ROOT}\\sources\\a.md"` })).toBe(true)
 })
 
-test('모르는 도구는 묻는다', () => {
-  expect(autoAllow(ROOT, 'WebFetch', { url: 'https://x' })).toBe(false)
+test('모르는 도구는 묻는다 — 단, 웹 조회는 허락 없이 허용한다 (형님 결정 2026-11-09)', () => {
+  expect(autoAllow(ROOT, 'WebSearch', { query: 'x' })).toBe(true)
+  expect(autoAllow(ROOT, 'WebFetch', { url: 'https://x' })).toBe(true)
+  expect(autoAllow(ROOT, 'SomeOtherTool', { x: 1 })).toBe(false)
 })
 
 test('한글 마무리 항목도 이름으로 불린다', () => {

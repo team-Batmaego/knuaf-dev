@@ -323,6 +323,23 @@ const BENIGN_REDIR = /\s*(?:2>&1|&?>\s*\/dev\/null|2>\s*\/dev\/null)/g
  */
 const SHELL_UNJUDGEABLE = /[`<>(){}$~]/
 /**
+ * 카드에 보이는 도구 이름의 쉬운 말(v0.6.2). 내부 도구명이 그대로 보이지 않게 한다.
+ * 여기 없는 도구는 `도우미가 도구 이름을 쓰려고 해요` 형태로 번역을 못 한 채 보인다.
+ */
+const TOOL_LABELS: Record<string, string> = {
+  WebSearch: '인터넷 검색',
+  WebFetch: '웹 페이지 읽기',
+  Write: '파일 쓰기',
+  Edit: '파일 고치기',
+  MultiEdit: '파일 고치기',
+  NotebookEdit: '노트 고치기',
+  Read: '파일 읽기',
+  Glob: '파일 찾기',
+  Grep: '파일에서 글자 찾기',
+  LS: '폴더 안 목록',
+}
+
+/**
  * 폴더 안에 머무르지 않는 도구들. 경로 인자가 전부 폴더 안이어도 **폴더 밖 효과**를 낸다 —
  * 네트워크로 내보내거나, 다른 앱을 몰거나, 권한·설치를 건드린다.
  *
@@ -432,7 +449,14 @@ function parseShell(raw: string): string[][] | null {
   // 묻는다. 정규화하면 C:\...\gg.py 가 C:/.../gg.py 가 돼 스킬로 오인된다. 원본 \ 를 두면
   // SKILL_PATH(/ 만 허용)가 거부해 묻는다. 비 .py 경로는 종전대로 정규화한다(W1③ 폴안 통과).
   const cmd = raw.replace(BENIGN_REDIR, ' ')
-  if (SHELL_UNJUDGEABLE.test(cmd) || /\n/.test(cmd)) return null
+  // 따옴표 안의 `{`·`}`만 글자로 본다(v0.6.2 — `grep "a\{3,\}"` 수량자가 카드로 오탐).
+  // 쌍따옴표 안의 `$`·백틱은 셸이 펼쳐므로 그대로 판정 불가다 — `cat "$HOME/.ssh/id_rsa"`·
+  // `echo "$(…)"`·백틱 명령 치환을 자동 허용하면 안 된다. 작은따옴표 안은 셸이 펼치지 않으므로
+  // 거기서만 `$`·백틱까지 글자다(실측).
+  const singleOut = cmd.replace(/'[^']*'/g, "''")
+  const braceOut = singleOut.replace(/"[^"]*"/g, '""')
+  const unjudgeable = /[`<>()$~]/.test(singleOut) || /[{}]/.test(braceOut) || /\n/.test(cmd)
+  if (unjudgeable) return null
   const norm = cmd.replace(/"[^"]*"/g, (g) => g.endsWith('.py"') ? g : g.replace(/\\(?=[A-Za-z0-9\p{Script=Hangul}._\-/:\\])/gu, '/'))
   const segs: string[][] = []
   let seg: string[] = []
@@ -643,7 +667,8 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
     if (first('interp')) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${cmd}\n\n프로그램 안에 무엇이 있는지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
     return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${cmd}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
   }
-  return { title: `도우미가 "${name}" 도구를 쓰려고 해요`, detail: JSON.stringify(input, null, 2) }
+  const label = TOOL_LABELS[name] ?? '도구'
+  return { title: `도우미가 "${label}"을/를 쓰려고 해요`, detail: JSON.stringify(input, null, 2) }
 }
 
 /** 도구 입력에서 경로 인자 하나를 꺼낸다. 입력은 모델이 보낸 것이라 타입을 믿지 않는다. */
@@ -670,6 +695,9 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
     if (segs?.some((t) => touchesProtected(root, t))) return false
     return isSkillCommand(root, input)
   }
+  // 형님 결정(2026-11-09): 앱 AI의 웹 조회는 학생 허락 없이 허용한다.
+  // 그 밖 모르는 도구는 계속 카드로 둔다.
+  if (name === 'WebSearch' || name === 'WebFetch') return true
   return false
 }
 
@@ -806,7 +834,7 @@ export class ClaudeConnection implements AgentConnection {
       // canUseTool **앞에** 적용돼 카드·폴더 경계를 통째로 끄는 통로였다(REPRO-SEC P2·P6·P15).
       // `project` 는 남긴다 — 스킬·CLAUDE.md 발견이 이 소스에 걸려 있다. 그 대신 쓰기는
       // autoAllow 가 막고, 이미 있는 project 설정은 inspectAgentSettings 가 학생에게 알린다.
-      env: this.options.env, settingSources: ['project'],
+      env: this.options.env, settingSources: ['project'], strictMcpConfig: true,
       resume: sessionId, abortController: this.controller, permissionMode: 'default',
       // 모델·추론 강도 핀. 미설정이면 CLI 기본값을 그대로 쓴다 — 학생 설정을 덮지 않는다.
       // (live 스펙이 sonnet 으로 비용을 낮추는 데도 같은 통로를 쓴다.)
