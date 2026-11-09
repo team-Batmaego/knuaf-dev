@@ -54,9 +54,9 @@ for (const scheme of ['light', 'dark'] as const) {
     await shoot(page, `make-feedback-1280-${scheme}`)
     await page.keyboard.press('Escape')
 
-    // 점검은 정식 진입점(제목줄 "지금 ▾" → 전체 과정 → 제출 점검·마무리)으로 연다.
-    await page.locator('.titlebar .tbtn.now').click()
-    await page.locator('.titlebar .popover').getByRole('button', { name: /제출 점검·마무리/ }).click()
+    // 점검은 정식 진입점(제목줄 진행 ▾ → [제출 전 점검], IMPL-T1 T1)으로 연다.
+    await page.locator('.titlebar .tbtn.stg').click()
+    await page.locator('.titlebar .popover').getByRole('button', { name: '제출 전 점검' }).click()
     await shoot(page, `checkup-sheet-1280-${scheme}`)
     await electronApp.close()
   })

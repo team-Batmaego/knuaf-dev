@@ -1,55 +1,141 @@
 import { useState } from 'react'
 import { Icon } from './Icon'
-import { PopHead, Popover, PopRow } from './Popover'
+import { PopHead, Popover, PopRow, PopSep } from './Popover'
 import { useProject } from '../store/project'
-import { useStage } from './useStage'
-import { STAGES, TITLEBAR } from '../copy'
+import { STEP_NAMES } from '../../../shared/progress-list'
+import { PROGRESS } from '../copy'
+import { useProgress } from './useProgress'
 
 /**
- * 제목줄 가운데 "지금 · 인터뷰·장 쓰기 ▾" (DESIGN §2, 시안 ⑬).
+ * 제목줄 가운데 — T1: `[눈금 7칸] {n}/7 {이름} ▾` (시안 progress-r4, IMPL-T1 §3-1).
  *
- * **"지금"은 한 곳뿐이다**: 닫혀 있을 때는 이 단추가, 열려 있으면 목록의 한 줄이 말한다
- * (검토 R1-02). 열려 있는 동안 단추 글자는 "전체 과정"으로 바뀐다.
+ * 도우미 답 안의 "창업논문 진행 목록" 덩어리를 `useProgress`가 고른 값을 그린다.
+ * 앱 5단계(`useStage`·`shared/stage`) 의존을 제거했다 — 학생에게 보이는 단계는
+ * 스킬 7단계 하나다. `shared/stage`·`useStage` 자체는 그대로 둔다(다른 곳에서 쓴다).
  *
- * 단계마다 사실 한 줄은 `useStage()`(3-A 의 `derive`)가 준 것만 쓴다 — 없는 개수를 짓지
- * 않는다. 5단계 줄은 **점검으로 들어가는 정식 진입점**이다(설계자 답 Q6) — 그래서 누를 수 있다.
- * 2단계는 권하는 행동이 없으므로(대화가 이끈다) 줄만 보여 준다.
+ * 펼침 머리: "창업논문 진행 · 7단계 중 n단계 · {시각} 답 기준 · 독립 내용검토 전".
+ * 7줄(✓▶○ + 메모, "확인 필요"), ⚑ 줄(글 그대로), "그 뒤" 줄은 파싱한 실제 문구
+ * + [제출 전 점검]. 시작 전이면 빈칸 + 안내 + [제출 전 점검].
+ *
+ * 눈금은 면색만 쓴다 — 왼쪽 색선·알약·1px 초과 border 금지(frontend.md).
  */
+
+function formatBasis(at: string): string {
+  const d = new Date(at)
+  if (Number.isNaN(d.getTime())) return at
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const h24 = d.getHours()
+  const pm = h24 >= 12
+  const h = pm ? h24 - 12 || 12 : h24 || 12
+  const m = d.getMinutes()
+  if (sameDay) return pm ? PROGRESS.timeToday(h, m) : PROGRESS.timeTodayAm(h, m)
+  return PROGRESS.timeOther(d.getMonth() + 1, d.getDate(), h, m, pm)
+}
+
 export function StageMenu() {
   const [open, setOpen] = useState(false)
   const openSheet = useProject((s) => s.openSheet)
-  const status = useProject((s) => s.status)
-  const { inputs, derived } = useStage()
-  const now = derived.now
-  const finish = status?.user_finish_pending.length ?? 0
+  const { pick } = useProgress()
 
-  const facts: string[] = [
-    STAGES.fact.ready(inputs.connected, inputs.hasProject),
-    STAGES.fact.write(derived.questions, derived.sectionsAllReady),
-    STAGES.fact.review(derived.reviewExport),
-    STAGES.fact.output(derived.stale, derived.hasDocx),
-    STAGES.fact.finish(finish)
-  ]
+  const block = pick?.block ?? null
+  const n = block ? block.n : 0
+  const name = block && n >= 1 ? STEP_NAMES[n - 1] : PROGRESS.started
+  const allDone = block ? block.steps.every((s) => s.state === 'done') : false
+  const label = block
+    ? allDone
+      ? `7/7 ${STEP_NAMES[6]} · ${PROGRESS.allDone}`
+      : `${n}/7 ${name}`
+    : PROGRESS.started
+  const ariaLabel = block
+    ? allDone
+      ? PROGRESS.readAloud(7, STEP_NAMES[6])
+      : PROGRESS.readAloud(n, name)
+    : PROGRESS.started
+
+  const basis = pick ? formatBasis(pick.at) : null
+  const headMeta = block
+    ? `${PROGRESS.ofSteps(n)}${block.reviewPending ? ` · ${PROGRESS.reviewPending}` : ''}${basis ? ` · ${PROGRESS.basis(basis)}` : ''}`
+    : null
 
   return (
     <div className="pop-host">
-      <button className="tbtn now" aria-expanded={open} title={open ? TITLEBAR.nowClose : TITLEBAR.nowOpen}
-        onClick={() => setOpen(!open)}>
-        {open ? TITLEBAR.nowTitle : <><span className="lbl">{TITLEBAR.nowLabel}</span>{STAGES.names[now - 1]}</>}
+      <button
+        className="tbtn stg"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        title={open ? PROGRESS.buttonLabelClose : PROGRESS.buttonLabelOpen}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="ticks" aria-hidden="true">
+          {STEP_NAMES.map((_, i) => {
+            const st = block?.steps[i]?.state
+            return <i key={i} className={st === 'done' ? 'd' : st === 'now' ? 'n' : ''} />
+          })}
+        </span>
+        <b>{label}</b>
         <Icon name="chevronDown" size={14} />
       </button>
-      <Popover open={open} onClose={() => setOpen(false)} align="center" width={400} label={TITLEBAR.nowTitle}>
-        <PopHead>{STAGES.head}</PopHead>
-        {STAGES.names.map((name, i) => {
-          const n = i + 1
-          return (
-            <PopRow key={name} icon={<span className="rn">{n}</span>} current={n === now}
-              onClick={n === 5 ? () => { setOpen(false); openSheet('checkup') } : undefined}
-              meta={n === now ? <span className="now-w">{TITLEBAR.nowLabel}</span> : undefined}>
-              <span className="c"><b>{name}</b><small>{facts[i]}</small></span>
+      <Popover open={open} onClose={() => setOpen(false)} align="center" width={400} label={PROGRESS.head}>
+        <PopHead>{PROGRESS.head}</PopHead>
+        {!block && (
+          <>
+            <div className="pop-empty caption">{PROGRESS.empty}</div>
+            <PopSep />
+            <PopRow
+              icon={<Icon name="check" size={16} />}
+              onClick={() => { setOpen(false); openSheet('checkup') }}
+            >
+              {PROGRESS.check}
             </PopRow>
-          )
-        })}
+          </>
+        )}
+        {block && (
+          <>
+            {headMeta && <div className="pop-head-sub caption">{headMeta}</div>}
+            {block.steps.map((step) => (
+              <PopRow
+                key={step.n}
+                icon={
+                  step.state === 'done'
+                    ? <span className="ic done" aria-hidden="true"><Icon name="check" size={11} /></span>
+                    : step.state === 'now'
+                      ? <span className="ic now" aria-hidden="true" />
+                      : <span className="ic todo" aria-hidden="true" />
+                }
+                current={step.state === 'now'}
+              >
+                <span className="c">
+                  <b>{`${step.n}. ${STEP_NAMES[step.n - 1]}`}</b>
+                  {step.note && (
+                    <small>
+                      {step.uncertain ? `${step.note} · ${PROGRESS.uncertain}` : step.note}
+                    </small>
+                  )}
+                </span>
+              </PopRow>
+            ))}
+            {block.flags.map((flag) => (
+              <PopRow key={flag} icon={<span className="ic flag" aria-hidden="true"><Icon name="warn" size={12} /></span>}>
+                <span className="c">{flag}</span>
+              </PopRow>
+            ))}
+            {block.after !== null && (
+              <>
+                <PopSep />
+                <div className="pop-after caption">
+                  <span>{`${PROGRESS.afterHead} · ${block.after}`}</span>
+                </div>
+              </>
+            )}
+            <PopRow
+              icon={<Icon name="check" size={16} />}
+              onClick={() => { setOpen(false); openSheet('checkup') }}
+            >
+              {PROGRESS.check}
+            </PopRow>
+          </>
+        )}
       </Popover>
     </div>
   )
