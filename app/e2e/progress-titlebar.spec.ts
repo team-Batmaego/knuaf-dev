@@ -77,16 +77,20 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     await expect(titlebar(page), '공급자 전환 뒤 진행이 되돌아갔다').toContainText('4/7')
     await expect(titlebar(page)).toContainText('본문 Ⅰ~Ⅵ 초안')
 
-    // 저장값도 4단계 (localStorage)
-    const storedN = await page.evaluate((r) => {
+    // 저장값도 4단계 (localStorage) — 시각까지 20:02로 갱신됐어야 한다
+    const stored = await page.evaluate((r) => {
       try {
         const raw = window.localStorage.getItem(`knuaf.progress.v1:${r}`)
-        return raw ? JSON.parse(raw).block.n : null
+        if (!raw) return null
+        const p = JSON.parse(raw)
+        return { n: p.block.n, at: p.at, id: p.messageId }
       } catch { return null }
     }, root)
-    expect(storedN).toBe(4)
+    expect(stored?.n).toBe(4)
 
     // 앱 재시작 — 같은 userData(localStorage 유지)로 다시 켜면 제목줄이 여전히 4/7
+    // provider_choice는 ChatGPT로 바뀐 채로 재시작한다 — Codex 2단계(옛날)가 대화값이라
+    // 저장값(4단계)이 더 늦다는 것을 보여준다.
     await electronApp.close()
     const second = await launch({ env, userData })
     try {
@@ -99,6 +103,71 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     }
   } finally {
     try { await electronApp.close() } catch { /* 이미 닫혔다 */ }
+  }
+})
+
+// Roh fix2 [중요]: 같은 진행 내용의 새 답(새 id, 20:02)이 와도 저장 시각이 갱신돼야 한다.
+// 20:00 4단계 → 20:02 같은 내용 새 답 → Codex 20:01 2단계로 전환 → 여전히 4/7.
+test('U-newreply 같은 내용 새 답(새 id·20:02) — 저장 시각 갱신, Codex 20:01 전환에도 4/7', async () => {
+  const dir = scratch()
+  const bin = join(dir, 'bin')
+  const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
+  writeFakeClaude(bin)
+  const root = synthProject()
+  const STEP4_TEXT = [
+    '**창업논문 진행 목록** · 7단계 중 4단계 진행 중 · 독립 내용검토 전 (논문은 아직 완성 전)',
+    '✓ 1–3단계 끝남 — 전공·계획·근거',
+    '▶ 4 본문 Ⅰ~Ⅵ 초안 — Ⅰ·Ⅱ장 끝, 이번에 Ⅲ장',
+    '○ 5–7단계 남음',
+    '그 뒤: 한글 마무리(글꼴·여백·쪽번호)·교수 승인 — 학생 몫',
+    '',
+    '- **다음 작업**: Ⅲ장을 이어갑니다.',
+    '- **지금 확인할 것**: 아래 Q3 두 가지.',
+  ].join('\n')
+  const atOldClaude = new Date('2026-11-10T20:00:00Z').toISOString()
+  const atNewClaude = new Date('2026-11-10T20:02:00Z').toISOString()
+  const atCodexOld = new Date('2026-11-10T20:01:00Z').toISOString()
+  mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
+  writeFileSync(join(root, '.knuaf-gui', 'chat-claude.json'), JSON.stringify({
+    root, provider: 'claude', state: 'idle',
+    messages: [
+      { id: 'u0', role: 'user', text: '시작하기', at: atOldClaude, delivery: 'sent' },
+      { id: 'm-claude-2000', role: 'assistant', text: STEP4_TEXT, at: atOldClaude },
+      { id: 'u1', role: 'user', text: '이어서', at: atNewClaude, delivery: 'sent' },
+      { id: 'm-claude-2002', role: 'assistant', text: STEP4_TEXT, at: atNewClaude },
+    ],
+  }), 'utf-8')
+  writeFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), JSON.stringify({
+    root, provider: 'codex', state: 'idle',
+    messages: [
+      { id: 'u0', role: 'user', text: '시작하기', at: atOldClaude, delivery: 'sent' },
+      { id: 'm-codex-2001', role: 'assistant', text: REAL_STEP4_CODEX_OLD, at: atCodexOld },
+    ],
+  }), 'utf-8')
+  const userData = userDataWith(dir, { helper_mode: 'claude-chat', provider_choice: { provider: 'claude', at: new Date().toISOString() } })
+  const { electronApp, page } = await launch({ env, userData })
+  try {
+    await openProject(page, root, splitReady)
+    await expect(titlebar(page)).toContainText('4/7')
+    const stored = await page.evaluate((r) => {
+      try {
+        const raw = window.localStorage.getItem(`knuaf.progress.v1:${r}`)
+        if (!raw) return null
+        const p = JSON.parse(raw)
+        return { n: p.block.n, at: p.at, id: p.messageId }
+      } catch { return null }
+    }, root)
+    expect(stored?.n).toBe(4)
+    expect(stored?.at).toBe(atNewClaude)
+    expect(stored?.id).toBe('m-claude-2002')
+
+    await page.getByTitle('이 논문의 도우미').click()
+    await page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+    await expect(titlebar(page), '같은 내용 새 답 후 Codex 20:01 전환에 진행이 후퇴했다').toContainText('4/7')
+    await expect(titlebar(page)).toContainText('본문 Ⅰ~Ⅵ 초안')
+  } finally {
+    await electronApp.close()
   }
 })
 

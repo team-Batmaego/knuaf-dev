@@ -60,10 +60,11 @@ export function useProgress(): UseProgressResult {
   }
 
   const result = pickProgress(conv, stored, snap?.root ?? null, root)
-  // 저장 여부는 고른 진행값 자체(단계 상태 서명)로 판단한다 — 답 id·at이 아니라.
-  // (Roh [중요 1] — 같은 messageId로 text만 갱신되는 스트리밍(1단계 덩어리 뒤
-  //  4단계 덩어리가 붙음)에서는 id·at이 안 바뀌어 저장이 안 됐다.)
+  // 저장 여부는 고른 진행값 자체(단계 상태 서명)와 선택된 답의 ID·시각을 **합쳐** 판단한다.
+  // (Roh fix2 [중요] — valueSig 단독은 "같은 진행 내용의 새 답(새 id·20:02)"에서 저장 시각이
+  //  머물러(Codex 20:01) 후퇴했다. id·at 단독은 "같은 id 텍스트 갱신 1→4"에서 저장이 안 됐다.)
   const valueSig = progressSignature(result.kind === 'none' ? null : result.pick)
+  const convKey = conv ? `${conv.messageId}|${conv.at}|${provider}` : null
 
   useEffect(() => {
     // 깨진 저장값은 지운다.
@@ -84,9 +85,9 @@ export function useProgress(): UseProgressResult {
         /* 무시 — 제목줄은 그대로 보인다 */
       }
     }
-    // snapshot.messageId/at은 valueSig로 — 고른 진행값이 바뀌면 한 번 더 저장한다.
+    // valueSig(진행값 자체) + convKey(id·at·provider) — 둘 다 deps다. 한쪽이라도 바뀌면 심각해진다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, snap?.root, provider, result.kind, valueSig])
+  }, [root, snap?.root, provider, result.kind, valueSig, convKey])
 
   if (result.kind === 'none') return { pick: null }
   return { pick: result.pick }
