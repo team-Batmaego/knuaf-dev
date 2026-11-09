@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, cpSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
@@ -968,16 +968,87 @@ export function prepareRelayPlugin(root: string, jobId: string, skill: string): 
   const base = join(root, '.knuaf-gui', 'relay-plugin')
   assertWritableDir(base, root)
   const dir = join(base, jobId)
-  assertWritableDir(dir, root)
-  const manifest = join(dir, '.claude-plugin')
-  assertWritableDir(manifest, root)
-  mkdirSync(manifest, { recursive: true })
-  writeFileSync(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }))
-  // 스킬 사본도 같은 판정을 지난 **안쪽** 경로에만 쓴다.
-  const target = join(dir, 'skills', 'knuaf-dev')
+  /**
+   * **기존 폴더를 재사용하지 않는다.** 폴더 안에 남아 있는 링크(`plugin.json` 이 작업 폴더
+   * 밖 파일을 가리키는 경우 등)를 물려받지 않으려면, 이 주문 폴더를 통째로 새로 만든다.
+   * `rename` 은 대상이 링크여도 링크 자체를 교체하므로 바깥 파일을 건드리지 않는다.
+   */
+  const staging = join(base, `.staging-${randomUUID()}`)
+  assertWritableDir(staging, root)
+  mkdirSync(staging, { recursive: true })
+  try {
+    const manifest = join(staging, '.claude-plugin')
+    mkdirSync(manifest, { recursive: true })
+    // 파일 하나도 링크를 따라가지 않고 쓴다(임시 파일 + rename).
+    writeFileNoFollow(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }), root)
+    cpSync(skill, join(staging, 'skills', 'knuaf-dev'), { recursive: true })
+    // 다 만든 뒤에 한 번에 바꾼다 — 기존 `dir` 이 링크여도 링크 자체가 교체된다.
+    assertWritableDir(base, root)
+    replaceDirectory(staging, dir, root)
+    return dir
+  } catch (error) {
+    removeQuietly(staging)
+    throw error
+  }
+}
+
+/**
+ * 링크를 따라가지 않는 파일 쓰기 — 같은 폴더의 임시 파일에 쓰고 `rename` 으로 바꾼다.
+ *
+ * 왜 필요한가(2회차 검토 차단 1): `writeFileSync(path, …)` 는 `path` 가 심볼릭 링크면 **링크를
+ * 따라가** 목적 파일을 덮어쓴다. 그러면 앱이 SDK 격리 전에 작업 폴더 밖 파일을 고칠 수 있다.
+ * `rename(temp, path)` 는 대상이 링크여도 **링크 자체를 교체**하고 링크를 따라가지 않는다.
+ * 임시 파일은 `wx`(배타 생성)로 열어 "미리 만들어 둔 링크"도 따라가지 않게 한다.
+ */
+function writeFileNoFollow(path: string, data: string, root: string): void {
+  const temp = join(dirname(path), `.write-${randomUUID()}.tmp`)
+  assertWritableDir(dirname(temp), root)
+  let descriptor: number | undefined
+  try {
+    descriptor = openSync(temp, 'wx', 0o600)
+    writeFileSync(descriptor, data)
+    closeSync(descriptor); descriptor = undefined
+    renameSync(temp, path)
+  } finally {
+    if (descriptor !== undefined) { try { closeSync(descriptor) } catch { /* 이미 닫힘 */ } }
+    try { if (lstatSync(temp)) removeQuietly(temp) } catch { /* 이미 옮겨짐 */ }
+  }
+  // 결과가 링크면 안 된다 — rename 이 링크를 교체했어야 한다.
+  if (lstatSync(path).isSymbolicLink()) throw new Error('담당 플러그인 파일이 링크로 바뀌었어요.')
+}
+
+/**
+ * 준비한 폴더를 목적지로 바꾼다.
+ *
+ * - 목적지가 없으면 `rename`.
+ * - 목적지가 **링크**면 링크를 지우고 `rename`(링크를 따라가지 않는다).
+ * - 목적지가 실제 폴더면 내용을 비우고 `rename` — Windows 에서 폴더 위 rename 이 막히므로
+ *   옛 폴더를 안쪽 이름으로 물린 뒤 지운다.
+ */
+function replaceDirectory(staging: string, target: string, root: string): void {
   assertWritableDir(dirname(target), root)
-  cpSync(skill, target, { recursive: true })
-  return dir
+  let existing: ReturnType<typeof lstatSync> | undefined
+  try { existing = lstatSync(target) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  if (existing?.isSymbolicLink()) {
+    // 링크 자체만 지운다 — 따라가지 않는다.
+    unlinkSync(target)
+    renameSync(staging, target)
+    return
+  }
+  if (existing) {
+    const retired = join(dirname(target), `.retired-${randomUUID()}`)
+    renameSync(target, retired)
+    try { renameSync(staging, target) } finally { removeQuietly(retired) }
+    return
+  }
+  renameSync(staging, target)
+}
+
+/** 정리용 — 실패해도 원래 오류를 덮지 않는다. */
+function removeQuietly(path: string): void {
+  try { rmSync(path, { recursive: true, force: true }) } catch { /* 남겨도 다음 주문이 새 폴더를 쓴다 */ }
 }
 
 /**

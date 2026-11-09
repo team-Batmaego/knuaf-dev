@@ -3,7 +3,7 @@
 // 원칙: 지적마다 **먼저 재현**하고, 고친 뒤 같은 시험이 통과함을 본다. 실행으로 재현할 수 없는
 // 것(차단 2)은 스키마 근거 + 보낸 옵션 고정으로 잠근다. 실제 AI 호출 0회.
 import { expect, test } from '@playwright/test'
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ClaudeRelayConnection, claudeExecutionAccount, prepareRelayPlugin } from '../src/main/chat/claude'
@@ -74,6 +74,78 @@ test('[차단 1] 링크가 없으면 플러그인 폴더를 작업 폴더 안에
   expect(realpathSync(dir).startsWith(realpathSync(root))).toBe(true)
   expect(existsSync(join(dir, '.claude-plugin', 'plugin.json'))).toBe(true)
   expect(existsSync(join(dir, 'skills', 'knuaf-dev', 'SKILL.md'))).toBe(true)
+})
+
+/**
+ * [차단 1 · 2회차] **파일 자체**가 링크인 경우까지 막는다.
+ *
+ * 반례(2회차 검토): 상위 폴더 검사만으로는 부족하다. `.claude-plugin/plugin.json` **파일**이
+ * 작업 폴더 밖 파일을 가리키는 링크면 `writeFileSync` 가 그 링크를 따라가 바깥 파일을 덮어쓴다.
+ * 같은 방식으로 쓰는 SKILL.md·스킬 폴더도 같다.
+ *
+ * 처방: 링크를 따라가지 않는 쓰기 — 임시 폴더에 다 쓰고 `rename` 으로 통째로 바꾼다.
+ * `rename` 은 대상이 링크여도 **링크 자체**를 교체하며 링크를 따라가지 않는다.
+ */
+test('[차단 1·2회차] plugin.json 파일이 링크면 작업 폴더 밖 파일을 덮어쓰지 않는다', () => {
+  const { root, skill } = fixtureRoot('file-link-manifest')
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-file-')))
+  const victim = join(outside, 'victim.json')
+  writeFileSync(victim, 'ORIGINAL')
+  const dir = join(root, '.knuaf-gui', 'relay-plugin', 'j1', '.claude-plugin')
+  mkdirSync(dir, { recursive: true })
+  symlinkSync(victim, join(dir, 'plugin.json'))
+  // 성공하든 거절하든 **바깥 파일은 그대로**여야 한다. 이 앱은 주문 폴더를 통째로 새로 만들고
+  // rename 으로 교체하므로 성공 쪽이 정상이다(링크는 따라가지 않고 링크 자체가 사라진다).
+  prepareRelayPlugin(root, 'j1', skill)
+  expect(readFileSync(victim, 'utf8')).toBe('ORIGINAL')
+  expect(lstatSync(join(dir, 'plugin.json')).isSymbolicLink()).toBe(false)
+})
+
+test('[차단 1·2회차] 스킬 폴더나 SKILL.md 가 링크면 그 링크를 따라 쓰지 않는다', () => {
+  const { root, skill } = fixtureRoot('file-link-skill')
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-skill-')))
+  writeFileSync(join(outside, 'SKILL.md'), 'ORIGINAL')
+  const skillsDir = join(root, '.knuaf-gui', 'relay-plugin', 'j1', 'skills')
+  mkdirSync(skillsDir, { recursive: true })
+  // 스킬 폴더 자체를 바깥으로 링크.
+  symlinkSync(outside, join(skillsDir, 'knuaf-dev'))
+  prepareRelayPlugin(root, 'j1', skill)
+  // 바깥 폴더는 그대로이고, 안쪽 스킬 사본은 링크가 아닌 실제 폴더다.
+  expect(readFileSync(join(outside, 'SKILL.md'), 'utf8')).toBe('ORIGINAL')
+  expect(readdirSync(outside)).toEqual(['SKILL.md'])
+  expect(lstatSync(join(skillsDir, 'knuaf-dev')).isSymbolicLink()).toBe(false)
+})
+
+test('[차단 1·2회차] 이미 있는 plugin.json 링크도 결과적으로 링크가 아닌 실제 파일이 된다', () => {
+  const { root, skill } = fixtureRoot('file-link-replace')
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-replace-')))
+  const victim = join(outside, 'victim.json')
+  writeFileSync(victim, 'ORIGINAL')
+  const dir = join(root, '.knuaf-gui', 'relay-plugin', 'j1', '.claude-plugin')
+  mkdirSync(dir, { recursive: true })
+  symlinkSync(victim, join(dir, 'plugin.json'))
+  // 고침 뒤에는 링크가 실제 파일로 **교체**되고 바깥은 그대로다.
+  let failed = false
+  try { prepareRelayPlugin(root, 'j1', skill) } catch { failed = true }
+  expect(readFileSync(victim, 'utf8')).toBe('ORIGINAL')
+  if (!failed) {
+    const saved = lstatSync(join(dir, 'plugin.json'))
+    expect(saved.isSymbolicLink()).toBe(false)
+    expect(JSON.parse(readFileSync(join(dir, 'plugin.json'), 'utf8')).name).toBe('knuaf')
+  }
+})
+
+/** 같은 주문을 두 번 조립해도 안전하고(기존 폴더 교체) 임시 폴더가 남지 않는다. */
+test('[차단 1·2회차] 같은 주문을 다시 조립해도 임시 폴더가 남지 않는다', () => {
+  const { root, skill } = fixtureRoot('relay-rebuild')
+  const first = prepareRelayPlugin(root, 'j1', skill)
+  const second = prepareRelayPlugin(root, 'j1', skill)
+  expect(second).toBe(first)
+  expect(JSON.parse(readFileSync(join(second, '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('knuaf')
+  expect(readFileSync(join(second, 'skills', 'knuaf-dev', 'SKILL.md'), 'utf8')).toContain('FIX-SPEC')
+  // 작업 폴더 안 임시·물림 폴더가 남지 않았어야 한다.
+  const base = join(root, '.knuaf-gui', 'relay-plugin')
+  expect(readdirSync(base).filter(name => name.startsWith('.staging-') || name.startsWith('.retired-'))).toEqual([])
 })
 
 /**
