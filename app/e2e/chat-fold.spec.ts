@@ -111,3 +111,38 @@ test('긴 답은 줄 경계에서 자르고, 줄이 너무 길면 한도에서 �
   expect(cutAtLine('가'.repeat(300), 200)).toHaveLength(200)
   expect(cutAtLine('짧음', 200)).toBe('짧음')
 })
+
+test('한도가 표 한가운데에 걸리면 완전한 행 끝에서 자른다 — 잘린 행을 그리지 않는다', () => {
+  const para = '농가 소득 자료입니다. '.repeat(40)
+  const table = [
+    '| 후보 | 소득 | 초기투자 |',
+    '| --- | ---: | --- |',
+    ...Array.from({ length: 90 }, (_, i) => `| 후보${i} | ${2000 - i * 10}만 원 | 큼 |`)
+  ].join('\n')
+  const text = [para, '', '### 후보 표', '', table, '', para].join('\n')
+  const tableAt = text.indexOf('| 후보')
+  expect(tableAt, '표가 한도 앞에서 시작하지 않으면 시험이 의미 없다').toBeLessThan(2000)
+  expect(tableAt + table.length, '표가 한도를 넘지 않으면 시험이 의미 없다').toBeGreaterThan(2000)
+
+  const cut = cutAtLine(text, 2000)
+  expect(cut.length).toBeLessThanOrEqual(2000)
+  expect(text.startsWith(cut)).toBe(true)
+  // 표 머리 줄·구분 줄이 살아 있고, 마지막 줄이 완전한 행이다 — 반쯤 잘린 행이 없다.
+  expect(cut).toContain('| 후보 | 소득 | 초기투자 |')
+  expect(cut).toContain('| --- | ---: | --- |')
+  expect(cut.split('\n').at(-1)).toMatch(/^\| 후보\d+ \| \d+만 원 \| 큼 \|$/)
+})
+
+test('표가 한도 뒤에 있으면 문단 경계에서 자르고, 한 줄이 길면 한도에서 자른다', () => {
+  const para = '문장입니다. '.repeat(30)
+  // 표가 한도보다 뒤 — 빈 줄에서 끊으므로 표는 조각으로 남지 않는다.
+  const text = [para, '', para, '', '| a | b |', '| --- | --- |', '| 1 | 2 |'].join('\n')
+  const cut = cutAtLine(text, 300)
+  expect(cut.length).toBeLessThanOrEqual(300)
+  expect(cut.trimEnd()).not.toContain('|')
+  // 펜스 안쪽은 자를 자리가 아니고, 한 줄이 한도보다 길면 한도에서 자른다(내용은 "더 보기"로).
+  const fence = ['앞 문단입니다.', '', '```py', ...Array.from({ length: 400 }, (_, i) => `print(${i})`), '```'].join('\n')
+  const fenced = cutAtLine(fence, 1000)
+  expect(fenced.length).toBeLessThanOrEqual(1000)
+  expect(fenced).toContain('```py')
+})

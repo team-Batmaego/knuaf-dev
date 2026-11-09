@@ -13,11 +13,17 @@ import type Token from 'markdown-it/lib/token.mjs'
  * - `breaks: true` — 답변의 줄바꿈을 그대로 살린다(지금 `.prose` 의 `pre-wrap` 과 같은 뜻).
  * - 이미지는 alt 글자만 — 앱이 원격 주소를 부르면 PRIVACY_NOTE 가 사실이 아니게 된다.
  *
- * 파일 링크는 `Chat.tsx` 의 `withLinks` 와 같은 규칙을 이 파일 안에 다시 둔다(그 파일은 다른
- * 워커 소유라 손대지 않는다). 누르면 `onFile(상대경로)` 이고, 화면 이동 표식은
- * `data-focus-key="chat-link:<messageId>:<relative>"` 로 같다.
+ * 파일 링크는 예전 `Chat.tsx` 의 `withLinks` 와 같은 규칙을 이 파일 안에 둔다. 누르면
+ * `onFile(상대경로)` 이고, 화면 이동 표식은 `data-focus-key="chat-link:<messageId>:<relative>"` 로 같다.
+ *
+ * 파서의 `link`·`escape` 규칙은 끈다. 둘 다 켜 두면 윈도우 경로의 `\` 를 마크다운 이스케이프로
+ * 먹어 `[문서](C:\Thesis\(draft).md)` 가 `[문서](C:\Thesis(draft).md)` 로 바뀐다 — 형님 윈도우
+ * 실기 경로가 화면에서 깨지고, 폴더 밖·모호한 경로를 **원문 그대로** 남긴다는 UI-P03 계약도 깨진다.
+ * 그래서 `[라벨](대상)` 은 글자 토큰으로 남기고 아래 `markdownLinks` 가 해석한다(예전과 같은 규칙):
+ * 프로젝트 안 경로만 파일 단추, `http(s)` 는 글자 + 주소, 나머지는 원문 그대로.
  */
 const md = new MarkdownIt({ html: false, linkify: false, breaks: true, typographer: false })
+md.disable(['link', 'escape'])
 
 /** 프로젝트 안 상대경로처럼 생긴 것만. 주소(http:)·절대경로·.. 는 제외한다. */
 const INSIDE_PATH = /^(?![/\\]|[a-zA-Z][a-zA-Z0-9+.-]*:)(?!.*(?:^|[/\\])\.\.(?:[/\\]|$)).+$/
@@ -117,35 +123,70 @@ function basename(relative: string): string {
   return relative.split('/').at(-1) || relative
 }
 
-/** 링크 하나 → 파일 단추(프로젝트 안 경로) 또는 `null`(그 밖). */
-function fileLinkNode(link: ParsedLink, ctx: Context, key: string): ReactNode {
+/**
+ * 글 토큰 안의 `[라벨](대상)` 하나 → 화면 요소.
+ * - 프로젝트 안 경로: 파일 단추(파일 이름), `onFile` 이 없으면 글자.
+ * - `http(s)`: 앵커를 만들지 않고 `글 주소` 로 남긴다(앱에 밖으로 여는 통로가 없다, GUI-12).
+ * - 그 밖(폴더 밖·`..`·`javascript:` 등): `null` — 원문 그대로 둔다(감추지도, 누르게 하지도 않는다).
+ */
+function linkTextNode(link: ParsedLink, ctx: Context, key: string): ReactNode {
   const relative = relativeProjectPath(link.target, ctx.root)
-  if (relative === null) return null
-  const base = basename(relative)
-  const label = isAbsolutePath(link.label) ? base : (link.label || base || relative)
-  if (!ctx.onFile) return label
-  return createElement('button', {
-    key,
-    className: 'lk',
-    'data-focus-key': `chat-link:${ctx.messageId}:${relative}`,
-    title: isAbsolutePath(link.target) ? decoded(link.target) : undefined,
-    onClick: () => ctx.onFile?.(relative)
-  }, label)
+  if (relative !== null) {
+    const base = basename(relative)
+    const label = isAbsolutePath(link.label) ? base : (link.label || base || relative)
+    if (!ctx.onFile) return label
+    return createElement('button', {
+      key,
+      className: 'lk',
+      'data-focus-key': `chat-link:${ctx.messageId}:${relative}`,
+      title: isAbsolutePath(link.target) ? decoded(link.target) : undefined,
+      onClick: () => ctx.onFile?.(relative)
+    }, label)
+  }
+  const target = decoded(link.target)
+  if (!/^https?:\/\//i.test(target)) return null
+  const url = createElement('span', { key: `${key}-url`, className: 'chat-md-url' }, target)
+  if (!link.label || link.label === target) return url
+  return createElement(Fragment, { key }, link.label, ' ', url)
 }
 
-/** 마크다운 파서가 놓친 파일 링크(경로에 빈칸이 있는 보통 괄호 형태)를 글자 토큰에서 줍는다. */
+/**
+ * `**굵게**` 한 쌍 — 줄바꿈을 넘지 않는다.
+ *
+ * 마크다운 규칙만으로는 `**A(고설 수경 딸기)**입니다` 가 굵어지지 않는다(닫는 `**` 앞 글자가 `)` 라
+ * CommonMark 가 강조를 닫지 않는다). 형님 실기 답변에 이 모양이 흔해(괄호 설명 뒤 조사) 예전
+ * `withBold` 가 잡던 자리를 여기서도 잡는다. 파서가 이미 굵게 만든 글에는 `**` 가 없으므로 겹치지 않는다.
+ */
+const BOLD = /\*\*([^*\n]+?)\*\*/g
+
+/** 파서가 남긴 `**굵게**` 를 굵은 글씨로 — 짝이 없는 별표는 글자로 둔다(감추지 않는다). */
+function pushBold(out: ReactNode[], text: string): void {
+  let last = 0
+  let any = false
+  for (const m of text.matchAll(BOLD)) {
+    any = true
+    if (m.index > last) out.push(text.slice(last, m.index))
+    out.push(createElement('strong', { key: `b${m.index}` }, m[1]))
+    last = m.index + m[0].length
+  }
+  if (!any) out.push(text)
+  else if (last < text.length) out.push(text.slice(last))
+}
+
+/** 글 토큰 하나를 링크·굵게·글자로 나눠 그린다. 해석하지 않는 링크는 원문 그대로 남는다. */
 function pushText(out: ReactNode[], text: string, ctx: Context): void {
   if (!text) return
   const links = markdownLinks(text)
-  if (!links.length) { out.push(text); return }
+  if (!links.length) { pushBold(out, text); return }
   let last = 0
   for (const link of links) {
-    const node = fileLinkNode(link, ctx, nextKey(ctx, 'f'))
+    const node = linkTextNode(link, ctx, nextKey(ctx, 'f'))
     if (node === null) continue
-    out.push(text.slice(last, link.start), node)
+    pushBold(out, text.slice(last, link.start))
+    out.push(node)
     last = link.end
   }
-  out.push(text.slice(last))
+  pushBold(out, text.slice(last))
 }
 
 /** 열린 토큰과 짝이 맞는 닫는 토큰의 위치. truncate 된 원문이면 끝까지를 안쪽으로 본다. */
@@ -161,45 +202,6 @@ function groupEnd(tokens: Token[], i: number): number {
     }
   }
   return tokens.length - 1
-}
-
-function textOf(tokens: Token[]): string {
-  let out = ''
-  for (const token of tokens) {
-    if (token.type === 'text' || token.type === 'code_inline' || token.type === 'image') out += token.content
-    else if (token.children) out += textOf(token.children)
-  }
-  return out
-}
-
-/**
- * 링크 하나를 그린다.
- * - 프로젝트 안 파일: 누를 수 있는 단추(파일 이름).
- * - http/https: 앱에 외부 브라우저 통로가 아직 없어 앵커를 만들지 않는다. 주소는 **지우지 않고**
- *   `글 (주소)` 로 남긴다 — 학생이 무엇을 눌렀어야 하는지 볼 수 있어야 한다(GUI-12).
- * - 그 밖(javascript: 등): 링크 없이 글자만.
- */
-function linkNode(token: Token, inner: Token[], ctx: Context, key: string): ReactNode {
-  const href = token.attrGet('href') ?? ''
-  const target = decoded(href)
-  const relative = relativeProjectPath(href, ctx.root)
-  if (relative !== null) {
-    const labelText = textOf(inner)
-    const base = basename(relative)
-    const label = isAbsolutePath(labelText) ? base : (labelText || base || relative)
-    if (!ctx.onFile) return createElement(Fragment, { key }, ...renderInline(inner, ctx))
-    return createElement('button', {
-      key,
-      className: 'lk',
-      'data-focus-key': `chat-link:${ctx.messageId}:${relative}`,
-      title: isAbsolutePath(target) ? target : undefined,
-      onClick: () => ctx.onFile?.(relative)
-    }, label)
-  }
-  const nodes = renderInline(inner, ctx)
-  if (/^https?:\/\//i.test(target) && textOf(inner) !== target)
-    nodes.push(' ', createElement('span', { key: `${key}-url`, className: 'chat-md-url' }, target))
-  return createElement(Fragment, { key }, ...nodes)
 }
 
 function renderInline(tokens: Token[], ctx: Context): ReactNode[] {
@@ -218,12 +220,6 @@ function renderInline(tokens: Token[], ctx: Context): ReactNode[] {
         const end = groupEnd(tokens, i)
         const tag = token.type === 'strong_open' ? 'strong' : token.type === 'em_open' ? 'em' : 'del'
         out.push(createElement(tag, { key: `e${i}` }, ...renderInline(tokens.slice(i + 1, end), ctx)))
-        i = end
-        break
-      }
-      case 'link_open': {
-        const end = groupEnd(tokens, i)
-        out.push(linkNode(token, tokens.slice(i + 1, end), ctx, `l${i}`))
         i = end
         break
       }

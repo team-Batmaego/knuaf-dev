@@ -13,11 +13,11 @@ import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createElement, Fragment } from 'react'
+import { createElement } from 'react'
+import { ChatMarkdown } from '../src/renderer/src/components/ChatMarkdown'
 import { useChat } from '../src/renderer/src/store/chat'
 import { usePrep, waitKind } from '../src/renderer/src/store/prep'
 import { rpc, RpcFailure } from '../src/renderer/src/rpc'
-import { withBold } from '../src/renderer/src/inline'
 import { APP_DIRS, forgetHidden, hideAppDirs } from '../src/main/hidden'
 import type { ChatSnapshot, ConnectionStatus } from '../src/shared/chat'
 
@@ -140,21 +140,19 @@ test('① 다른 폴더가 준비 중이면 기다리지 않는다', async () =>
 })
 
 
-const html = (text: string): string => renderToStaticMarkup(createElement(Fragment, null, withBold(text, (part) => part)))
-const html2 = (text: string, rest: (p: string) => string): string => renderToStaticMarkup(createElement(Fragment, null, withBold(text, rest)))
+/** 화면과 같은 부품으로 그린다 — `**굵게**` 는 이제 마크다운 부품이 맡는다(`inline.ts` 는 지웠다). */
+const painted = (text: string, root: string | null = '/p/Thesis'): string =>
+  renderToStaticMarkup(createElement(ChatMarkdown, { text, root, messageId: 'a1', onFile: () => {} }))
 
 test('③ 도우미 답변의 **굵게** 는 별표 없이 굵은 글씨로 보인다', () => {
-  expect(html('먼저 **전공**을 정해요')).toBe('먼저 <strong>전공</strong>을 정해요')
-  expect(html('**[Q2-1] 기본 계획**\n1) 전공')).toBe('<strong>[Q2-1] 기본 계획</strong>\n1) 전공')
-  // 짝이 없는 별표는 감추지 않는다. 줄을 넘는 짝도 굵게 만들지 않는다.
-  expect(html('2 ** 3 = 8')).toBe('2 ** 3 = 8')
-  expect(html('**앞\n뒤**')).toBe('**앞\n뒤**')
-  // 굵게 밖의 글은 원래 그리던 함수가 그린다(파일 링크 등).
-  const marked = renderToStaticMarkup(createElement(Fragment, null, withBold('**제목** 본문', (p) => p ? createElement('i', null, p) : p)))
-  expect(marked).toBe('<strong><i>제목</i></strong><i> 본문</i>')
-  // 굵은 글 안의 파일 링크도 같은 함수가 그린다 — 링크가 글자로 남지 않는다(검토 WINFB-R1-02).
-  const link = (p: string) => p.replace(/\[([^\]]+)\]\([^)]+\)/g, '<$1>')
-  expect(html2('결과: [일반](a.docx) 및 **[굵은](b.docx)**', link)).toBe('결과: &lt;일반&gt; 및 <strong>&lt;굵은&gt;</strong>')
+  expect(painted('먼저 **전공**을 정해요')).toContain('먼저 <strong>전공</strong>을 정해요')
+  expect(painted('**[Q2-1] 기본 계획**\n1) 전공')).toContain('<strong>[Q2-1] 기본 계획</strong>')
+  // 짝이 없는 별표는 감추지 않는다.
+  expect(painted('2 ** 3 = 8')).toContain('2 ** 3 = 8')
+  // 굵은 글 안의 파일 링크도 파일 단추로 그려진다 — 링크가 글자로 남지 않는다(검토 WINFB-R1-02).
+  const html = painted('결과: [일반](build/a.docx) 및 **[굵은](build/b.docx)**')
+  expect(html).toContain('data-focus-key="chat-link:a1:build/a.docx"')
+  expect(html).toMatch(/<strong>\s*<button[^>]*data-focus-key="chat-link:a1:build\/b\.docx"[^>]*>굵은<\/button>\s*<\/strong>/)
 })
 
 function appFolder(): string {

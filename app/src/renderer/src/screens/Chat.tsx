@@ -4,8 +4,8 @@ import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/
 import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
-import { withBold } from '../inline'
 import { cutAtLine, formFold as formFoldOf, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { ChatMarkdown } from '../components/ChatMarkdown'
 import { ProgressFold } from '../components/ProgressFold'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
 import { ComposerModelChip } from '../components/ComposerModelChip'
@@ -52,118 +52,6 @@ export function applyReportIntent(intent: DraftIntent, projectRoot: string | nul
   if (disconnected) return 'disconnected'
   useChat.getState().setDraft(reportDraft(useChat.getState().draft, intent.title))
   return 'ready'
-}
-
-/** 프로젝트 안 상대경로처럼 생긴 것만. 주소(http:)·절대경로·.. 는 제외한다. */
-const INSIDE_PATH = /^(?![/\\]|[a-zA-Z][a-zA-Z0-9+.-]*:)(?!.*(?:^|[/\\])\.\.(?:[/\\]|$)).+$/
-
-interface ParsedLink { start: number; end: number; label: string; target: string }
-
-/** 대괄호 링크 하나를 읽는다. `<...>` 경로의 공백·괄호와 보통 괄호 안 경로를 받아들인다. */
-function parseLinkAt(text: string, start: number): ParsedLink | null {
-  const labelEnd = text.indexOf(']', start + 1)
-  if (labelEnd < 0 || text.slice(start, labelEnd).includes('\n') || text[labelEnd + 1] !== '(') return null
-  let i = labelEnd + 2
-  let target = ''
-  if (text[i] === '<') {
-    const targetStart = ++i
-    while (i < text.length && text[i] !== '>' && text[i] !== '\n') i++
-    if (text[i] !== '>') return null
-    target = text.slice(targetStart, i++)
-    while (i < text.length && /\s/.test(text[i]) && text[i] !== '\n') i++
-    if (text[i] !== ')') return null
-  } else {
-    const targetStart = i
-    // Windows plain targets end at the first `)`. An opening `(` or trailing
-    // separator makes that boundary ambiguous: preserve the source, or use `<...>`.
-    // Text after an unambiguous closing delimiter belongs to the surrounding prose.
-    const windowsAbsolute = /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(text.slice(i))
-    let depth = 0
-    let escaped = false
-    while (i < text.length && text[i] !== '\n') {
-      const ch = text[i]
-      if (escaped) { escaped = false; i++; continue }
-      if (windowsAbsolute && (ch === '(' || (ch === ')' && text[i - 1] === '\\'))) return null
-      if (ch === '\\' && !windowsAbsolute) { escaped = true; i++; continue }
-      if (ch === '(') { depth++; i++; continue }
-      if (ch === ')') {
-        if (depth === 0) break
-        depth--; i++; continue
-      }
-      i++
-    }
-    if (text[i] !== ')') return null
-    target = text.slice(targetStart, i)
-  }
-  return { start, end: i + 1, label: text.slice(start + 1, labelEnd), target }
-}
-
-function markdownLinks(text: string): ParsedLink[] {
-  const links: ParsedLink[] = []
-  let cursor = 0
-  while (cursor < text.length) {
-    const start = text.indexOf('[', cursor)
-    if (start < 0) break
-    const link = parseLinkAt(text, start)
-    if (link) { links.push(link); cursor = link.end }
-    else cursor = start + 1
-  }
-  return links
-}
-
-function isAbsolutePath(path: string): boolean {
-  return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|[/\\])/.test(path)
-}
-
-/** 프로젝트 안 절대경로만 상대경로로 바꾼다. 밖으로 빠지는 `..` 경로는 그대로 둔다. */
-function relativeProjectPath(target: string, root: string | null): string | null {
-  let decoded = target
-  try { decoded = decodeURIComponent(target) } catch { /* 원문 경로를 그대로 비교한다 */ }
-  if (!isAbsolutePath(decoded)) return INSIDE_PATH.test(decoded) ? decoded : null
-  if (!root) return null
-  const rootPath = root.replace(/\\/g, '/').replace(/\/+$/, '')
-  const targetPath = decoded.replace(/\\/g, '/')
-  const insensitive = window.knuaf.platform === 'win32'
-  const compare = (value: string): string => insensitive ? value.toLocaleLowerCase('en-US') : value
-  const rootKey = compare(rootPath)
-  const targetKey = compare(targetPath)
-  if (targetKey === rootKey) return '.'
-  if (!targetKey.startsWith(`${rootKey}/`)) return null
-  const relative = targetPath.slice(rootPath.length + 1)
-  const parts: string[] = []
-  for (const segment of relative.split('/')) {
-    if (!segment || segment === '.') continue
-    if (segment === '..') {
-      if (parts.length === 0) return null
-      parts.pop()
-    } else parts.push(segment)
-  }
-  return parts.join('/') || null
-}
-
-/**
- * 도우미 답변의 파일 링크를 누를 수 있게 만든다 — 마크다운 원문이 그대로 보이고
- * 접근성 역할도 일반 텍스트였다(GUI 감사 GUI-12).
- *
- * 경로는 "파일 얘기구나"를 판단하는 데만 쓰고, 누르면 메인이 경로를 다시 확인한 뒤 연다 —
- * 문서 형식이면 연결 프로그램으로, 아니면 탐색기/Finder 에서 그 파일을 선택해 보여 준다.
- * 없거나 폴더 밖이면 결과물 시트로 간다 — 무엇을 눌렀는지 알 수 있는 곳으로. 안쪽
- * 상대경로가 아닌 링크는 원문 그대로 둔다.
- */
-function withLinks(text: string, root: string | null, messageId: string, onFile: (relative: string) => void): ReactNode {
-  const out: ReactNode[] = []
-  let last = 0
-  for (const link of markdownLinks(text)) {
-    const relative = relativeProjectPath(link.target, root)
-    if (relative === null) continue
-    out.push(text.slice(last, link.start))
-    const label = isAbsolutePath(link.label) ? (relative.split('/').at(-1) || relative) : (link.label || relative.split('/').at(-1) || relative)
-    out.push(<button key={link.start} data-focus-key={`chat-link:${messageId}:${relative}`} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
-    last = link.end
-  }
-  if (!out.length) return text
-  out.push(text.slice(last))
-  return out
 }
 
 /**
@@ -214,7 +102,7 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
-      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, m.id, onFileLink) : part) : quoted ? <>
+      <div className="prose">{m.role === 'assistant' ? <ChatMarkdown text={shown} root={projectRoot} messageId={m.id} onFile={onFileLink} /> : quoted ? <>
         <span className="msg-quote" style={{ display: 'block', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: '1px 0 6px', padding: '6px 10px', background: 'color-mix(in srgb, var(--panel) 70%, transparent)', borderRadius: 10 }}>
           <b style={{ display: 'block', fontWeight: 500, fontSize: 11.5, color: 'var(--faint)' }}>{REVIEW.quoteLead(quoted[2])}</b>
           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{quoted[1]}</span>

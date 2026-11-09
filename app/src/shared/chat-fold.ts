@@ -129,12 +129,41 @@ export function stripLines(text: string, spans: readonly FoldSpan[]): string {
 }
 
 /**
- * 긴 답을 자를 자리 — 2,000자 한도가 표·목록 한가운데를 가르지 않게 **줄 경계**에서 자른다.
- * 줄 경계가 너무 앞(한도의 60% 미만)이면 그냥 한도에서 자른다(한 줄이 통째로 긴 경우).
+ * 긴 답을 자를 자리 — 2,000자 한도가 표·문단 한가운데를 가르지 않게 **블록 경계**에서 자른다.
+ *
+ * 후보는 셋이다: ① 빈 줄(문단 사이) ② 표 밖 줄 끝 ③ **표의 완전한 행 끝**. 그중 한도에 가장 가까운
+ * 것을 쓴다. ③ 이 필요한 이유: 한도가 표 한가운데에 걸리면 ①②는 표 **앞**에 있어 답의 대부분을
+ * 잃는데, 행 끝에서 자르면 머리 줄·구분 줄이 살아 표가 온전히 그려지고 나머지는 "더 보기"에 있다.
+ * 후보가 모두 한도의 60%보다 앞이면(블록 하나가 통째로 길다) 한도에서 자른다.
  */
 export function cutAtLine(text: string, limit: number): string {
   if (text.length <= limit) return text
-  const head = text.slice(0, limit)
-  const at = head.lastIndexOf('\n')
-  return at >= Math.floor(limit * 0.6) ? head.slice(0, at) : head
+  const floor = Math.floor(limit * 0.6)
+  const rows = text.split('\n')
+  let fence: string | null = null
+  let pos = 0
+  let blank = -1
+  let line = -1
+  let rowEnd = -1
+  for (const [i, row] of rows.entries()) {
+    const next = pos + row.length
+    const marker = /^\s*(`{3,}|~{3,})/.exec(row)?.[1]
+    const fenced = fence !== null
+    if (marker) {
+      if (fence === null) fence = marker[0]
+      else if (marker[0] === fence) fence = null
+    }
+    const inFence = fenced || fence !== null
+    const tableRow = !inFence && /^\s*\|/.test(row)
+    if (pos > limit) break
+    if (next <= limit) {
+      if (tableRow) rowEnd = next
+      else if (inFence) { /* 펜스 안쪽은 자를 자리가 아니다 */ }
+      else if (!row.trim()) blank = pos
+      else line = next
+    }
+    pos = next + (i < rows.length - 1 ? 1 : 0)
+  }
+  const at = Math.max(blank, line, rowEnd)
+  return text.slice(0, at >= floor ? at : limit)
 }

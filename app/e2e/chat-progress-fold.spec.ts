@@ -128,6 +128,15 @@ test('긴 답(표·###·2,000자 넘김)에서도 질문 카드와 겹치는 [Q3
     // 2,000자 넘는 답이면 "더 보기"가 걸려 있어야 한다 — 예전 실패는 그 잘린 본문 쪽에서 났다.
     const more = body.getByRole('button', { name: /자 더 보기$/ })
     await expect(more, '"더 보기"가 없으면 2,000자 조건이 아니다').toBeVisible()
+    // ② 마크다운: `###`·표·`**굵게**` 가 날 글자가 아니라 요소로 그려진다. 잘린 본문에서도
+    // 표는 온전한 행까지만 남고(머리 줄·구분 줄이 살아 있다) 조각난 파이프가 글자로 새지 않는다.
+    const md = body.locator('.chat-md')
+    await expect(md.locator('table'), '표가 요소로 그려지지 않았다').toHaveCount(1)
+    await expect(md.locator('table th').first()).toHaveText('후보')
+    await expect(md.locator('table tr').nth(1).locator('td').first()).toHaveText('딸기(고설 수경)')
+    await expect(md.locator('h3').first()).toHaveText('먼저 확인할 점: 자기자본 1억으로는 온실 신축이 어렵습니다')
+    const raw = await md.innerText()
+    for (const mark of ['###', '| ---', '**', '](']) expect(raw, `${mark} 가 글자로 남았다`).not.toContain(mark)
     await shot(page, 'long-question-closed')
 
     await more.click()
@@ -135,6 +144,14 @@ test('긴 답(표·###·2,000자 넘김)에서도 질문 카드와 겹치는 [Q3
     await expect(body).toContainText('자금 방향 (융자)')
     await expect(body).toContainText('내재해형 연동 하우스 설치비')
     await expect(body).not.toContainText('[Q3] 작목과 자금 방향')
+    // 펼친 뒤에도 표는 하나의 완전한 표다 — 잘린 행이 이어 붙지 않는다.
+    const rows = await md.locator('table tr').count()
+    expect(rows, '펼친 표의 행 수가 모자란다').toBeGreaterThan(1)
+    await expect(md.locator('h3')).toHaveText([
+      '먼저 확인할 점: 자기자본 1억으로는 온실 신축이 어렵습니다',
+      '작목 후보 (전공 범위 = 시설원예)',
+      '자금 방향 (융자)'
+    ])
     await shot(page, 'long-question-open')
 
     // "여기에 펼치기"를 누르면 카드 몫까지 포함해 원문 전부가 돌아온다.

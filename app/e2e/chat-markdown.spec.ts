@@ -66,8 +66,14 @@ test('번호 목록은 시작 번호를 지킨다', () => {
 test('굵게는 짝이 맞을 때만 굵고, 짝이 없으면 별표가 글자로 남는다', () => {
   expect(painted('먼저 **전공**을 정해요')).toContain('먼저 <strong>전공</strong>을 정해요')
   expect(painted('2 ** 3 = 8')).toContain('2 ** 3 = 8')
-  // 마크다운 강조는 줄바꿈을 넘는다(withBold 는 넘지 않았다). 표준 표기 쪽을 따른다.
   expect(painted('**앞\n뒤**')).toContain('<strong>앞<br/>뒤</strong>')
+  // 마크다운 규칙이 닫지 못하는 모양 — 닫는 `**` 앞이 `)`. 실기 답변에 흔하다
+  // (“추천은 **A(고설 수경 딸기)**입니다”). 예전 `withBold` 가 잡던 자리를 부품이 이어받는다.
+  expect(painted('추천은 **A(고설 수경 딸기)**입니다.')).toContain('추천은 <strong>A(고설 수경 딸기)</strong>입니다.')
+  expect(painted('**굵은** 글과 [링크](build/a.md) 사이', { onFile: () => {} }))
+    .toContain('<strong>굵은</strong> 글과 ')
+  // 짝이 없는 별표 하나는 감추지 않는다.
+  expect(painted('별표 ** 하나')).toContain('별표 ** 하나')
 })
 
 test('프로젝트 안 상대경로는 누를 수 있는 파일 단추다', () => {
