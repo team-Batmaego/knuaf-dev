@@ -1,6 +1,6 @@
 import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY, MODEL_SELECTION_COPY } from '../../shared/copy'
 import { randomUUID } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
@@ -8,6 +8,11 @@ import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
 import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
 import { chatConnectionKey } from './jobs/key'
+import { JobRunner, type JobConnection, type JobResult, type JobSpec, type RelayRequest } from './jobs'
+import { JobStore } from './jobs/store'
+import { canonical } from './jobs/isolation'
+import type { ConversationOwner, ExecutionAccount } from './jobs/types'
+import type { LanePlan } from '../../shared/lanes'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
@@ -86,6 +91,20 @@ export class ChatService {
    * 디스크에 남기지 않는다 — 앱이 다시 뜨면 기다리던 쪽은 이미 죽어 있다.
    */
   private waiting = new Map<string, PermissionRequest[]>()
+  // ---------------------------------------------------------------- 담당(relay) 배선
+  //
+  // 앱당 하나의 `JobRunner` 를 이 서비스가 소유한다(ipc.ts 는 이음매를 넘기지 않는다).
+  // 승인·동의는 `<userData>/jobs/` 앱 저장소만 근거다 — 논문 폴더의 `lanes.json` 은 사본일 뿐이다.
+  private jobStoreInstance: JobStore | null = null
+  private jobRunner: JobRunner | null = null
+  /** 주문을 처음 본 폴더 — 종료·업데이트 때 `runner.stop` 대상. */
+  private jobRoots = new Set<string>()
+  /** 설치본이 읽는 스킬 폴더 — `RelayRequest.skill` 은 폴더다(엔진이 `SKILL.md` 를 붙인다). */
+  private jobSkill: { path: string; schema: number; contractVersion: string } | null = null
+  /** 업데이트 준비 구간 — 새 전달 차례를 열지 않는다(closeForUpdate 는 되돌릴 수 있다). */
+  private jobsClosing = false
+  /** 주문 수집 직렬화 — 러너의 `skill()` 이 폴더 인자를 받지 않는 계약 때문이다. */
+  private collectChain: Promise<void> = Promise.resolve()
   constructor(private opts: {
     skillSource: () => string; userData: string; env?: NodeJS.ProcessEnv
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
@@ -116,6 +135,21 @@ export class ChatService {
     storeModelChoice?: (provider: Provider, choice: ModelChoice | null) => void
     /** Test seam: 대화 기록·초안을 쓰는 파일시스템(e2e/safe-write.spec.ts 가 실패를 주입한다). */
     fs?: SafeWriteFs
+    /**
+     * 담당(relay) 연결 — 본대화 연결과 **다른** 통로다(설계 §3.3 ④). 없으면 주문 수집이
+     * 꺼진다. 가짜 기본값을 만들지 않는다: `AgentConnection` 에는 계정·usage 통로가 없어
+     * 배선 A가 공급해야 한다.
+     */
+    jobConnectionFactory?: (request: RelayRequest) => JobConnection
+    /** 담당 회사의 구독·한도 상태. 계정이 없으면 `null`. */
+    jobAccount?: (company: Provider) => Promise<ExecutionAccount | null>
+    /** 셸 격리를 실제로 걸 수 있는가(배선 A의 플랫폼 확인값). 모르면 false. */
+    jobShellSandboxAvailable?: boolean
+    /**
+     * 대화 전환·중단 때 열린 제안을 버리는 통로(`ConversationHandoff.invalidate`).
+     * 실제 인스턴스는 ipc.ts가 쥐고 있어 이 단위에서는 연결할 수 없다 — 통합 몫.
+     */
+    invalidateHandoff?: (root: string) => void | Promise<void>
   }) {}
   private get writeFs(): SafeWriteFs { return this.opts.fs ?? { writeFileSync, renameSync, unlinkSync, readFileSync: (p) => readFileSync(p, 'utf8') } }
   /** PATH 앞자리에 둘 인터프리터 bin 경로 — 프로젝트 .venv 가 번들보다 우선한다. */
@@ -224,7 +258,32 @@ export class ChatService {
       } else s = { root, provider, state: 'idle', messages: [] }
       this.snapshots.set(key, s)
     }
+    this.surfaceUncertain(root, s)
     return structuredClone(s)
+  }
+  /**
+   * 전달 claim 뒤에 앱이 죽은 담당 결과를 **한 번** 드러낸다. 다시 보내지 않는다 —
+   * 화면은 이 시스템 줄로 "확인 안 됨"을 알게 된다(시험 계획 B ①-2).
+   */
+  private surfaceUncertain(root: string, s: ChatSnapshot): void {
+    if (!this.opts.jobConnectionFactory || !this.opts.jobAccount) return
+    let pending: { rootJobId: string; at: string }[]
+    try { pending = this.store().undelivered(root) } catch (error) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'store', error: error instanceof Error ? error.message : String(error) }))
+      return
+    }
+    if (!pending.length) return
+    for (const item of pending) {
+      s.messages.push({
+        id: randomUUID(), role: 'system',
+        text: '자료 담당 작업은 끝났는데 결과를 대화에 넣었는지 확인하지 못했어요. 다시 보내지 않았어요 — 작업 파일(`.knuaf-gui/jobs`)을 확인해 주세요.',
+        at: new Date().toISOString()
+      })
+      try { this.store().markNotified(item.rootJobId) } catch (error) {
+        console.error('[knuaf] jobs', JSON.stringify({ type: 'store', error: error instanceof Error ? error.message : String(error) }))
+      }
+    }
+    this.publish(s)
   }
   busy(root: string) { try { return this.owners.has(realpathSync(root)) } catch { return false } }
   acquire(root: string): () => void {
@@ -455,7 +514,11 @@ export class ChatService {
       this.publish(s)
       const run = this.execute(s, connection, text, requestId).finally(release)
       this.runs.set(this.key(root, provider), run)
-      void run.finally(() => this.runs.delete(this.key(root, provider)))
+      void run.finally(() => {
+        this.runs.delete(this.key(root, provider))
+        // 본대화 차례가 끝난 뒤에만 주문을 줍는다(설계 §3.3). 전달 차례는 deliverJob 이 스스로 준다.
+        void this.collectJobs(s)
+      })
       return structuredClone(s)
     } catch (e) { release(); throw e }
   }
@@ -548,27 +611,291 @@ export class ChatService {
     if (!s.permission) s.state = 'running'
     this.publish(s)
   }
-  async stop(root: string, provider: Provider) {
+  // ---------------------------------------------------------------- 담당(relay) 배선
+
+  private store(): JobStore {
+    if (!this.jobStoreInstance) this.jobStoreInstance = new JobStore(join(this.opts.userData, 'jobs'))
+    return this.jobStoreInstance
+  }
+  /**
+   * 승인 배치·과금 동의는 **앱 저장소에만** 쓴다. 논문 폴더의 사본은 근거가 아니다.
+   * 철회는 다음 실행부터 즉시 반영된다(러너가 매 검사마다 이 저장소를 읽는다).
+   */
+  approvePlan(root: string, plan: LanePlan): void { this.store().approve(root, plan) }
+  revokePlan(root: string): void { this.store().revokePlan(root) }
+  setConsent(company: Provider, accountId: string, on: boolean): void { this.store().setConsent(company, accountId, on) }
+  /** 앱당 하나의 `JobRunner`. 이음매가 없으면 담당 기능 자체가 꺼진다(가짜 기본값 금지). */
+  private runnerFor(): JobRunner | undefined {
+    if (!this.opts.jobConnectionFactory || !this.opts.jobAccount) return undefined
+    if (this.jobRunner) return this.jobRunner
+    const store = this.store()
+    this.jobRunner = new JobRunner({
+      stateDir: join(this.opts.userData, 'jobs'),
+      approvedPlan: root => store.approvedPlan(root),
+      // 동의는 앱 저장소가 정본이다 — 엔진이 준 계정 값 위에 앱의 동의만 얹는다.
+      account: async company => {
+        const account = await this.opts.jobAccount!(company)
+        return account ? { ...account, consented: store.consented(company, account.accountId) } : null
+      },
+      skill: () => {
+        if (!this.jobSkill) throw new Error('설치된 스킬에서 주문 판 선언을 찾지 못했어요.')
+        return this.jobSkill
+      },
+      supportedSchemas: [1],
+      connectionFactory: request => this.opts.jobConnectionFactory!(request),
+      deliver: (owner, result) => this.deliverJob(owner, result),
+      stopMain: owner => this.stopMainFor(owner),
+      diagnostic: record => console.error('[knuaf] jobs', JSON.stringify(record)),
+      shellSandboxAvailable: this.opts.jobShellSandboxAvailable ?? false
+    })
+    return this.jobRunner
+  }
+  /**
+   * 설치본의 `delegation.json` — 앱이 실제로 고른 스킬의 선언만 근거로 삼는다.
+   * 설치기는 이 파일을 복사하지 않으므로(agent.ts 의 SKILL_METADATA) 설치본에 없으면
+   * **지금 설치본과 같은 판임을 확인한** 묶음 원본에서 읽는다. 어느 쪽도 아니면 `null`.
+   * 형식이 다르거나 심링크면 `null`(수집 skip) — 임의 기본값을 만들지 않는다.
+   */
+  private declaration(root: string, provider: Provider): { path: string; schema: number; contractVersion: string } | null {
+    const dir = this.skillDir(root, provider)
+    const installed = this.readDeclarationFile(join(dir, 'delegation.json'))
+    if (installed !== undefined) return installed && { ...installed, path: dir }
+    if (!existsSync(join(dir, 'SKILL.md'))) return null
+    const source = this.opts.skillSource()
+    try { if (skillState(dir, skillVersion(source)) !== 'installed') return null } catch { return null }
+    const bundled = this.readDeclarationFile(join(source, 'delegation.json'))
+    return bundled ? { ...bundled, path: dir } : null
+  }
+  private readDeclarationFile(file: string): { schema: number; contractVersion: string } | null | undefined {
+    let text: string
+    try {
+      const stat = lstatSync(file)
+      if (!stat.isFile() || stat.isSymbolicLink()) return null
+      text = readFileSync(file, 'utf8')
+    } catch { return undefined }
+    let value: unknown
+    try { value = JSON.parse(text) } catch { return null }
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+    const record = value as Record<string, unknown>
+    if (Object.keys(record).sort().join(',') !== 'contractVersion,jobSchema,laneRequestSchema') return null
+    const { jobSchema, laneRequestSchema, contractVersion } = record
+    if (!Number.isSafeInteger(jobSchema) || (jobSchema as number) < 1) return null
+    if (!Number.isSafeInteger(laneRequestSchema) || (laneRequestSchema as number) < 1) return null
+    if (typeof contractVersion !== 'string' || !contractVersion) return null
+    return { schema: jobSchema as number, contractVersion }
+  }
+  /**
+   * 수집은 한 번에 하나 — 러너의 `skill()` 이 폴더 인자를 받지 않으므로(계약 고정)
+   * 두 폴더가 동시에 수집하면 엔진에 남의 스킬 폴더 경로가 넘어갈 수 있다.
+   */
+  private collectJobs(s: ChatSnapshot): Promise<void> {
+    const next = this.collectChain.then(() => this.collectNow(s))
+    this.collectChain = next.catch(error => console.error('[knuaf] jobs', JSON.stringify({ type: 'collect', error: error instanceof Error ? error.message : String(error) })))
+    return this.collectChain
+  }
+  private async collectNow(s: ChatSnapshot): Promise<void> {
+    if (this.shuttingDown || this.jobsClosing) return
+    if (!this.opts.jobConnectionFactory || !this.opts.jobAccount) return
+    if (!s.sessionId) return
+    const declaration = this.declaration(s.root, s.provider)
+    if (!declaration) return
+    const runner = this.runnerFor()
+    if (!runner) return
+    const root = canonical(s.root)
+    this.jobRoots.add(root)
+    this.jobSkill = declaration
+    let names: string[]
+    try { names = readdirSync(join(s.root, '.knuaf-gui', 'jobs')) } catch { return }
+    const owner: ConversationOwner = { id: `${s.provider}\0${root}`, sessionId: s.sessionId, company: s.provider }
+    const known = new Set(runner.records().map(record => record.spec.id))
+    let queued = false
+    for (const name of names.sort()) {
+      if (!name.endsWith('.json')) continue
+      const id = name.slice(0, -'.json'.length)
+      if (!/^[a-zA-Z0-9_-]+$/.test(id) || known.has(id)) continue
+      const file = join(s.root, '.knuaf-gui', 'jobs', name)
+      try {
+        const stat = lstatSync(file)
+        if (!stat.isFile() || stat.isSymbolicLink()) continue
+        const value: unknown = JSON.parse(readFileSync(file, 'utf8'))
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
+        const raw = value as Record<string, unknown>
+        if (['status', 'contentHash', 'rootJobId', 'outputRefs', 'spec'].some(key => key in raw)) continue
+        if ('parent' in raw || 'cause' in raw) continue
+        if (raw.schema !== declaration.schema || raw.contractVersion !== declaration.contractVersion) continue
+        if (raw.id !== id) continue
+        // 모양은 JobRunner.validate 가 깊이 검사한다 — 여기서는 타입 경계만 넘긴다.
+        runner.enqueue(s.root, raw as unknown as JobSpec, owner, s.sessionId)
+        known.add(id)
+        queued = true
+      } catch (error) {
+        console.error('[knuaf] jobs', JSON.stringify({ type: 'collect-skip', id, error: error instanceof Error ? error.message : String(error) }))
+      }
+    }
+    if (queued) await runner.runQueued()
+  }
+  /** `owner.id` = `<provider>\0<canonical root>` — 재시작 뒤에도 메모리 지도에 기대지 않는다. */
+  private ownerOf(owner: ConversationOwner): { root: string; provider: Provider } | null {
+    const split = owner.id.indexOf('\0')
+    if (split < 0) return null
+    const provider = owner.id.slice(0, split)
+    const root = owner.id.slice(split + 1)
+    if (provider !== 'codex' && provider !== 'claude') return null
+    if (!root) return null
+    return { root, provider }
+  }
+  /**
+   * 담당 결과를 소유 대화의 **새 차례**로 넣는다. `rootJobId` 당 한 번:
+   * 저장소 claim(`beginDelivery`)이 먼저 영속되고, claim 뒤 전달 전에 죽으면 다시 보내지 않는다.
+   */
+  private async deliverJob(owner: ConversationOwner, result: JobResult): Promise<void> {
+    const parsed = this.ownerOf(owner)
+    if (!parsed) return
+    const { root, provider } = parsed
+    const store = this.store()
+    if (this.shuttingDown || this.jobsClosing) { store.markUncertain(result.rootJobId, root, owner.id); return }
+    if (!store.beginDelivery(result.rootJobId, root, owner.id)) return
+    let release: (() => void) | null = null
+    let s: ChatSnapshot
+    try {
+      // 본대화 차례가 돌고 있으면 끝날 때까지 기다린다 — 그 대화의 결과이므로 순서가 맞다.
+      // (기다리는 동안에도 claim 은 이미 영속됐다: 이 창에서 죽으면 다시 보내지 않는다.)
+      await this.runs.get(this.key(root, provider))?.catch(() => {})
+      // 학생이 방금 보낸 말이 아직 도는 중이면 그 차례가 끝나기를 기다린다 — 바쁘다는
+      // 이유로 '확인 못 함'을 만들지 않는다(전달을 시도조차 하지 않은 것과 다르다).
+      const deadline = Date.now() + 30_000
+      while (this.busy(root)) {
+        if (this.shuttingDown || this.jobsClosing || Date.now() > deadline) {
+          store.markUncertain(result.rootJobId, root, owner.id); return
+        }
+        const { promise, resolve } = Promise.withResolvers<void>()
+        setTimeout(resolve, 50)
+        await promise
+      }
+      release = this.acquire(root)
+      // `snapshot()` 는 복제본을 돌려준다 — 살아 있는 기록은 지도 쪽만 고칠 수 있다.
+      this.snapshot(root, provider)
+      s = this.snapshots.get(this.key(root, provider))!
+      const connection = this.connection(root, provider)
+      const text = deliveryText(result, root)
+      s.state = 'running'; s.error = undefined; s.authRequired = undefined
+      s.messages.push({ id: randomUUID(), role: 'system', text, at: new Date().toISOString() })
+      this.publish(s)
+      await this.deliveryTurn(s, connection, text, owner.sessionId)
+      if (s.state === 'running') s.state = 'idle'
+      this.publish(s)
+    } catch (error) {
+      // 전달을 시작하지 못했거나 대화를 열 수 없다 — 다시 보내지 않고 드러낸다.
+      store.markUncertain(result.rootJobId, root, owner.id)
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'deliver-failed', rootJobId: result.rootJobId, error: error instanceof Error ? error.message : String(error) }))
+      return
+    } finally {
+      release?.()
+    }
+    try { store.finishDelivery(result.rootJobId) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'delivery-record', error: error instanceof Error ? error.message : String(error) })) }
+  }
+  private async deliveryTurn(s: ChatSnapshot, connection: AgentConnection, text: string, sessionId: string): Promise<void> {
+    const key = this.key(s.root, s.provider)
+    try {
+      await connection.run(text, sessionId, {
+        session: id => { if (id) s.sessionId = id; this.publish(s) },
+        skill: () => { s.skillLoaded = true; this.publish(s) },
+        message: (id, content) => {
+          const old = s.messages.find(m => m.id === id)
+          if (old) old.text = content
+          else s.messages.push({ id, role: 'assistant', text: content, at: new Date().toISOString() })
+          this.publish(s)
+        },
+        note: content => {
+          s.messages.push({ id: randomUUID(), role: 'system', text: content, at: new Date().toISOString() })
+          this.publish(s)
+        },
+        permission: permission => {
+          if (s.permission?.id === permission.id) s.permission = permission
+          else {
+            const q = this.waiting.get(key) ?? []
+            const existing = q.findIndex(p => p.id === permission.id)
+            if (existing >= 0) q[existing] = permission
+            else q.push(permission)
+            this.waiting.set(key, q)
+            this.showNextPermission(s, key)
+          }
+          this.publish(s)
+        }
+      })
+    } catch (error) {
+      if (s.state !== 'stopped') {
+        s.state = 'error'
+        s.error = error instanceof Error ? error.message : '담당 결과를 대화로 넣지 못했어요.'
+      }
+    } finally { s.permission = undefined; this.waiting.delete(key); this.publish(s) }
+  }
+  /** 열린 제안·진행 담당을 버린다 — 실제 인스턴스 연결은 C/통합 몫. */
+  private async invalidate(root: string): Promise<void> {
+    try { await this.opts.invalidateHandoff?.(root) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'invalidate', error: error instanceof Error ? error.message : String(error) })) }
+  }
+  /** `JobRunner.stop` 의 `stopMain` — 본대화만 멈춘다(러너 재진입 없음). */
+  private async stopMainFor(owner: ConversationOwner): Promise<void> {
+    const parsed = this.ownerOf(owner)
+    if (parsed) await this.stopMain(parsed.root, parsed.provider)
+  }
+  /** 열린 제안을 버리고 담당·본대화를 멈춘다. */
+  async switchOwner(root: string, owner: ConversationOwner): Promise<void> {
+    this.jobRoots.add(canonical(root))
+    try { await this.jobRunner?.switchOwner(root, owner) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'switch-owner', error: error instanceof Error ? error.message : String(error) })) }
+    await this.invalidate(root)
+  }
+  /** 본대화만 멈춘다. `JobRunner.stop` 이 이 자리를 부르므로 러너로 되돌아가지 않는다. */
+  private async stopMain(root: string, provider: Provider) {
     const key = this.key(root, provider), s = this.snapshots.get(key)
     if (s && this.runs.has(key)) { s.state = 'stopped'; s.error = undefined; this.publish(s) }
     // 멈춘 연결은 버린다 — 다음 send/status 가 새 연결을 열어야 '다시 확인'이 살아난다.
     await this.connections.get(key)?.stop(); this.connections.delete(key)
     await this.runs.get(key)
   }
+  /** 학생이 중단: 진행 담당·열린 제안·본대화를 함께 멈춘다(설계 §3.5). */
+  async stop(root: string, provider: Provider) {
+    this.jobRoots.add(canonical(root))
+    try { await this.jobRunner?.stop(root) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: error instanceof Error ? error.message : String(error) })) }
+    await this.stopMain(root, provider)
+    await this.invalidate(root)
+  }
+  /** 수명 정리 — 러너를 쓰지 않았어도 부르는 자리는 같다. */
+  private async stopJobs(): Promise<void> {
+    this.jobsClosing = true
+    const roots = new Set<string>(this.jobRoots)
+    try { for (const record of this.jobRunner?.records() ?? []) roots.add(record.root) } catch { /* 상태를 못 읽으면 아는 것만 멈춘다 */ }
+    await Promise.allSettled([...roots].map(async root => {
+      try { await this.jobRunner?.stop(root) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: error instanceof Error ? error.message : String(error) })) }
+      await this.invalidate(root)
+    }))
+  }
+
   /** Reversible handoff teardown: never sets shuttingDown; dead connection objects are not reused. */
   async closeForUpdate(confirmStopped: () => Promise<void>): Promise<void> {
-    for (const connection of [...this.connections.values(), ...this.globals.values()]) this.closingConnections.add(connection)
-    this.connections.clear()
-    this.globals.clear()
-    this.reauthenticating.clear()
-    const results = await Promise.allSettled([...this.closingConnections].map(connection => connection.stop()))
-    await confirmStopped()
-    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
-    if (failed) throw failed.reason
-    this.closingConnections.clear()
+    // 연결을 끊기 전에 담당·제안을 먼저 멈춘다 — 끊은 뒤에는 멈출 대상이 사라진다(설계 §3.5).
+    await this.stopJobs()
+    let failed: PromiseRejectedResult | undefined
+    try {
+      for (const connection of [...this.connections.values(), ...this.globals.values()]) this.closingConnections.add(connection)
+      this.connections.clear()
+      this.globals.clear()
+      this.reauthenticating.clear()
+      const results = await Promise.allSettled([...this.closingConnections].map(connection => connection.stop()))
+      await confirmStopped()
+      failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failed) throw failed.reason
+      this.closingConnections.clear()
+    } catch (error) {
+      // 업데이트가 실패하면 앱은 계속 산다 — 수집을 영구히 꺼 두지 않는다.
+      this.jobsClosing = false
+      throw error
+    }
   }
   async close() {
     this.beginShutdown()
+    // 러너를 먼저 멈춘다 — 진행 담당 연결이 본대화 연결 정리 뒤에 남지 않게.
+    await this.stopJobs()
     const connections = new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])
     const results = await Promise.allSettled([...connections].map(connection => connection.stop()))
     await Promise.all(this.runs.values())
@@ -578,6 +905,27 @@ export class ChatService {
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
   }
+}
+
+const COMPANY_LABEL: Record<Provider, string> = { claude: 'Claude', codex: 'ChatGPT' }
+const EFFORT_LABEL: Record<string, string> = { low: '낮음', medium: '보통', high: '높음', max: '최대' }
+
+/**
+ * 돌려주기 문구(DESIGN §3.3). 앱은 파일을 **복사하지 않는다** — 메인이 정본을 쓴다.
+ * 출력은 논문 폴더 기준 상대 경로(`jobs/<id>/out/…`)로만 보여 준다.
+ */
+function deliveryText(result: JobResult, root: string): string {
+  const company = COMPANY_LABEL[result.company]
+  const effort = result.effort ? EFFORT_LABEL[result.effort] ?? result.effort : '기본'
+  const head = `자료 담당(${company}·${result.model}·${effort}) 작업 ${result.status === 'completed' ? '끝' : `결과: ${result.status}`}`
+  const outputs = result.outputs.map(path => {
+    const rel = relative(join(root, '.knuaf-gui'), path).split(sep).join('/')
+    return rel.startsWith('..') ? basename(path) : rel
+  })
+  const tail = result.status === 'completed' && outputs.length
+    ? ` — 출력 ${outputs.map(name => `\`${name}\``).join(', ')}`
+    : ''
+  return `${head}${tail}. 담당 메모와 출력 파일을 확인한 뒤, 정본 반영은 스킬 규칙대로 직접 해 주세요.`
 }
 
 /** Personal validation never writes the user's original thesis or the source backup. */
