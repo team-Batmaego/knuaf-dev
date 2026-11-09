@@ -19,8 +19,8 @@ export interface ChatModelInfo {
 }
 /**
  * 모델 목록 통로의 응답.
- * `supported:false` 는 그 공급자에 아직 이 통로가 없다는 뜻이다(이번 판의 Claude) —
- * 화면은 추천·목록을 띄우지 않고 지금처럼 기본값으로 둔다.
+ * `supported:false` 는 그 공급자에 아직 이 통로가 없다는 뜻이다 — 화면은 추천·목록을
+ * 띄우지 않고 지금처럼 기본값으로 둔다.
  */
 export interface ChatModels {
   provider: Provider
