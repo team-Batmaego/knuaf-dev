@@ -184,25 +184,32 @@ test('담당 연결은 본대화 동작을 거절하고 러너 계약만 받는�
   }
 })
 
-test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', { timeout: 180_000 }, async () => {
+type ClaudeRate = 'allowed' | 'rejected' | 'overage'
+
+/**
+ * 실물 Claude CLI 담당 연결 시험대 — 동봉 CLI + 127.0.0.1 가짜 Messages API.
+ * `writes` 만큼 Write 도구를 시키고, 그 뒤 마무리 글을 낸다. `rate` 로 응답 헤더의 한도 상태를 정한다.
+ */
+async function claudeRelayFixture(opts: { escapes: boolean; rate: ClaudeRate }) {
   const cli = bundledCli()
-  if (!cli) test.skip(true, '동봉 Claude CLI 가 없어 건너뜁니다')
-  const { root, out, skill } = fixtureRoot('claude-run')
+  if (!cli) return null
+  const { root, out, skill } = fixtureRoot(`claude-${opts.rate}`)
   const messages: string[] = []
   let turn = 0
+  // 한도 상태는 **응답 헤더**로만 온다 — 앱이 추론하지 않고 엔진이 관측한 사건을 옮기는지 본다.
   const rateHeaders = {
-    'anthropic-ratelimit-unified-status': 'allowed',
+    'anthropic-ratelimit-unified-status': opts.rate === 'rejected' ? 'rejected' : 'allowed',
     'anthropic-ratelimit-unified-representative-claim': 'five_hour',
-    'anthropic-ratelimit-unified-5h-status': 'allowed',
-    'anthropic-ratelimit-unified-5h-utilization': '0.2',
+    'anthropic-ratelimit-unified-5h-status': opts.rate === 'rejected' ? 'rejected' : 'allowed',
+    'anthropic-ratelimit-unified-5h-utilization': opts.rate === 'rejected' ? '1.0' : '0.2',
     'anthropic-ratelimit-unified-5h-reset': String(Math.floor(Date.now() / 1000) + 3600),
     'anthropic-ratelimit-unified-overage-status': 'allowed',
-    'anthropic-ratelimit-unified-overage-in-use': 'false'
+    'anthropic-ratelimit-unified-overage-in-use': opts.rate === 'overage' ? 'true' : 'false'
   }
-  // 두 턴: ① out/result.md 쓰기(허용) ② out 밖 쓰기(거절) 뒤 마무리 글.
-  const tools = [
-    JSON.stringify({ file_path: join(out, 'result.md'), content: 'relay result' }),
-    JSON.stringify({ file_path: join(root, 'escaped.md'), content: 'must not exist' })
+  // ① 출력 칸 안 쓰기, ② (옵션) 같은 도구로 출력 칸 밖 쓰기 시도.
+  const writes = [
+    { file_path: join(out, 'result.md'), content: 'relay result' },
+    ...(opts.escapes ? [{ file_path: join(root, 'escaped.md'), content: 'must not exist' }] : [])
   ]
   const fake = await startServer((req, res, body) => {
     messages.push(`${req.method} ${req.url}`)
@@ -217,12 +224,11 @@ test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', {
     try { parsed = JSON.parse(body) } catch { /* 빈 본문 */ }
     res.writeHead(200, { 'content-type': 'text/event-stream', ...rateHeaders })
     const sse = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-    const usage = turn === 0 ? { input_tokens: 21, output_tokens: 4 } : { input_tokens: 34, output_tokens: 5 }
     sse('message_start', { type: 'message_start', message: { id: `m${turn}`, type: 'message', role: 'assistant', model: 'claude-sonnet-5',
-      content: [], stop_reason: null, stop_sequence: null, usage } })
-    if (turn < tools.length) {
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 21 + turn, output_tokens: 4 } } })
+    if (turn < writes.length) {
       sse('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: `toolu_${turn}`, name: 'Write', input: {} } })
-      sse('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: tools[turn] } })
+      sse('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(writes[turn]) } })
       sse('content_block_stop', { type: 'content_block_stop', index: 0 })
       sse('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 2 } })
     } else {
@@ -249,14 +255,20 @@ test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', {
   })
   const connection = new ClaudeRelayConnection(options, request(root, out, skill))
   const log = recorder()
+  return { root, out, skill, connection, log, messages, close: () => fake.close() }
+}
+
+test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', { timeout: 180_000 }, async () => {
+  const harness = await claudeRelayFixture({ rate: 'allowed', escapes: true })
+  if (!harness) test.skip(true, '동봉 Claude CLI 가 없어 건너뜁니다')
+  const { root, out, connection, log, messages, close } = harness
   try {
     const account = await connection.availability()
     // A 는 턴 밖에서 관측할 수 없다 — 지어내지 않고 모름으로 둔다(설계 §3.5 '시운전 확인거리').
     expect(account.usage).toBe('unknown')
     expect(account.consented).toBe(false)
     expect(account.account.company).toBe('claude')
-    const models = account.account.models ?? []
-    expect(models.map(m => m.model)).toContain('sonnet')
+    expect((account.account.models ?? []).map(m => m.model)).toContain('sonnet')
 
     await connection.runJob('/knuaf-dev 담당 모드: 주문서', log.events)
     expect(log.of('skill')).toEqual([true])
@@ -271,14 +283,25 @@ test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', {
     const actual = log.of('actualModel') as [string, string | null][]
     expect(actual.length).toBe(1)
     expect(actual[0][0]).toContain('sonnet')
-    // 격리의 결과 — 출력 칸 안은 쓰였고 밖은 만들어지지 않았다.
     expect(readFileSync(join(out, 'result.md'), 'utf8')).toBe('relay result')
     expect(existsSync(join(root, 'escaped.md'))).toBe(false)
-    // 하위 담당 도구는 이 세션에 실리지 않는다.
     expect(messages.some(m => m.startsWith('POST /v1/messages'))).toBe(true)
   } finally {
-    await connection.stop(); await fake.close()
+    await connection.stop(); await close()
   }
+})
+
+test('실물 Claude CLI 담당: 진행 중 한도가 깨지면 그 자리에서 멈춘다', { timeout: 180_000 }, async () => {
+  // 응답 헤더가 rejected 면 엔진은 첫 rate_limit_event 에서 limit 으로 닫아야 한다(설계 §3.5 규칙 3).
+  const harness = await claudeRelayFixture({ rate: 'rejected', escapes: false })
+  if (!harness) test.skip(true, '동봉 Claude CLI 가 없어 건너뜁니다')
+  const { connection, log, close } = harness
+  try {
+    await expect(connection.runJob('/knuaf-dev 담당 모드: 주문서', log.events)).rejects.toMatchObject({ status: 'limit' })
+    expect(log.of('availability')).toContain('limit')
+    // 한도로 닫혔으면 토큰·결과를 넘기지 않는다.
+    expect(log.of('tokens')).toEqual([])
+  } finally { await connection.stop(); await close() }
 })
 
 test('Codex 담당 연결: 격리 정책과 거절을 실제 파라미터로 보낸다', { timeout: 120_000 }, async () => {
