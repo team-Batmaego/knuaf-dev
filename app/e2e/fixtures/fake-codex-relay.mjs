@@ -19,6 +19,19 @@ const send = (value) => process.stdout.write(JSON.stringify(value) + '\n')
 let askSeq = 0
 const asked = new Map()
 
+/**
+ * 학생 설정 흉내 — 사용자 MCP 두 개, 플러그인 하나(그 플러그인이 MCP 하나를 딸고 온다).
+ * 이름은 실기기 이름과 겹치지 않게 지은 가짜다. `config/read` 는 **이름만** 돌려준다.
+ */
+const USER_SERVERS = ['user-mcp', 'other-mcp']
+const USER_PLUGINS = ['plug@mkt']
+const PLUGIN_SERVERS = ['plug-mcp']
+/** 마지막 `thread/start` 가 받은 config — `mcpServerStatus/list` 가 이 값으로 상태를 만든다. */
+let threadConfig = null
+
+/** 실물과 같은 규칙: 이름별 `enabled:false` 만 듣는다. 전체 끄기 키·빈 테이블은 무시된다(실측). */
+const disabledBy = (table, name) => table?.[name]?.enabled === false
+
 const handlers = {
   initialize: (params) => {
     log({ method: 'initialize', params, cwd: process.cwd() })
@@ -45,6 +58,21 @@ const handlers = {
     ], nextCursor: null }
   },
   'skills/extraRoots/set': (params) => { log({ method: 'skills/extraRoots/set', params }); return {} },
+  'config/read': (params) => {
+    log({ method: 'config/read', params })
+    // 설정을 읽지 못하는 경우(옛 판·권한 오류)를 흉내내는 스위치 — 앱은 담당 스레드를 열지 않는다.
+    if (process.env.KD_FAKE_CONFIG_ERROR === '1') throw new Error('config unavailable')
+    return {
+      config: {
+        model: 'gpt-5-codex',
+        mcp_servers: Object.fromEntries(USER_SERVERS.map(name => [name, { command: '/fake/bin', args: [] }])),
+        plugins: Object.fromEntries(USER_PLUGINS.map(id => [id, { enabled: true }])),
+        // Apps 설정은 실기기에서 null 로 온다 — 값이 없어도 제한은 걸려야 한다.
+        apps: null
+      },
+      origins: {}, layers: []
+    }
+  },
   'skills/list': (params) => {
     log({ method: 'skills/list', params })
     const cwd = Array.isArray(params?.cwds) && params.cwds[0] ? params.cwds[0] : process.cwd()
@@ -53,6 +81,7 @@ const handlers = {
   },
   'thread/start': (params) => {
     log({ method: 'thread/start', params, spawnCwd: process.cwd(), spawnCwdReal: real(process.cwd()) })
+    threadConfig = params?.config ?? null
     return { thread: { id: 'thread-fake', turns: [], ephemeral: false }, model: params?.model ?? 'gpt-5-codex', modelProvider: 'openai',
       serviceTier: null, disabledPluginIds: [], cwd: real(params?.cwd ?? process.cwd()), instructionSources: [],
       approvalPolicy: params?.approvalPolicy ?? 'on-request', approvalsReviewer: 'user',
@@ -61,6 +90,35 @@ const handlers = {
       // 사용자 설정이 심사자를 바꿔 놓은 경우를 흉내내는 스위치(차단 2 재현).
       approvalsReviewer: process.env.KD_FAKE_THREAD_REVIEWER ?? 'user',
       reasoningEffort: process.env.KD_FAKE_THREAD_EFFORT ?? 'high' }
+  },
+  /** 설치 목록 — 설정 표에 없는 원격 플러그인도 여기 있어 합집합이 필요하다(실측 17 vs 26). */
+  'plugin/installed': (params) => {
+    log({ method: 'plugin/installed', params })
+    return { marketplaces: [{
+      name: 'mkt', path: '/fake/mkt',
+      plugins: [
+        { id: 'plug@mkt', name: 'plug', source: { type: 'local', path: '/fake/mkt/plug' } },
+        { id: 'remote-apps@remote', name: 'remote-apps', source: { type: 'remote' } }
+      ]
+    }] }
+  },
+  /**
+   * 실물과 같은 판정: `thread/start.config` 의 이름별 `enabled:false` 가 있으면 `disabled`,
+   * 없으면 `connected`. 이 응답이 **제한을 빼면 실패하는 시험**의 근거다 — 앱이 보낸 제한이
+   * 사라지면 여기가 `connected` 를 돌려주고 연결이 턴을 열지 않는다.
+   */
+  'mcpServerStatus/list': (params) => {
+    log({ method: 'mcpServerStatus/list', params })
+    const table = threadConfig?.mcp_servers
+    const plugOff = (threadConfig?.plugins ?? {}) && USER_PLUGINS.every(id => disabledBy(threadConfig.plugins, id))
+    const servers = [...USER_SERVERS, ...(plugOff ? [] : PLUGIN_SERVERS)]
+    // 사용자 설정이 제한을 이기는 경우(옛 판이 키를 무시하는 경우)를 흉내내는 스위치.
+    const ignores = process.env.KD_FAKE_IGNORE_LOCKS === '1'
+    return { data: servers.map(name => ({
+      name, pluginId: null, authStatus: 'unsupported', serverCapabilities: null, serverInfo: null,
+      tools: {}, resources: [], resourceTemplates: [],
+      runtimeStatus: !ignores && disabledBy(table, name) ? 'disabled' : 'connected'
+    })), nextCursor: null }
   },
   'turn/start': (params) => {
     log({ method: 'turn/start', params })

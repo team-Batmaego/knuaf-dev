@@ -637,13 +637,67 @@ export function codexSandboxPolicy(cwd: string): {
  * `auto_review`/`guardian_subagent` 가 샌드박스 탈출·네트워크 승격을 따로 심사할 수 있다.
  * 담당에는 묻는 학생이 없고 앱이 승인 요청을 전부 거절하므로, 심사자도 앱 쪽(사용자 자리)으로
  * 고정해 승격 경로를 만들지 않는다(검토 차단 2).
+ *
+ * `lockdown` 은 담당에서만 싣는다 — 학생의 MCP·플러그인·Apps 를 담당 스레드에서 끄는 값이고
+ * 본대화의 `open()`/`serverArgsFor` 는 같은 값을 쓰지 않는다(발주 C3). 시험은 이 값을 그대로 고정한다.
  */
-export function codexThreadParams(request: RelayRequest, model: string) {
+export function codexThreadParams(request: RelayRequest, model: string, lockdown?: RelayLockdown) {
   return {
     cwd: request.cwd, approvalPolicy: 'on-request' as const, sandbox: request.isolation.codexSandbox,
     approvalsReviewer: 'user' as const,
-    model, developerInstructions: RELAY_DEVELOPER_INSTRUCTIONS
+    model, developerInstructions: RELAY_DEVELOPER_INSTRUCTIONS,
+    // 담당 전용 자리 — 본대화(`serverArgsFor`, `CodexConnection`)는 이 값을 쓰지 않는다.
+    ...(lockdown ? { config: lockdown } : {})
   }
+}
+
+/** RPC 응답은 `unknown` 이다 — 객체가 아니면 빈 표로 본다(필드 하나 읽으려고 캐스팅하지 않는다). */
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+}
+
+/** 이름 → `{enabled:false}` 표. 빈 이름은 codex 가 거절하므로 거른다. */
+function disabledTable(table: unknown): Record<string, { enabled: false }> {
+  return Object.fromEntries(Object.keys(asRecord(table)).filter(name => name !== '')
+    .map(name => [name, { enabled: false as const }]))
+}
+
+/**
+ * 담당 스레드에서 학생의 MCP 서버·플러그인·Apps 를 끄는 값(`thread/start.config`).
+ *
+ * 실측(PATH codex 0.167.0, 합성 HOME): `-c mcp_servers={}`·`-c mcp.enabled=false`·
+ * `-c orchestrator.mcp.enabled=false` 는 **안 듣는다**(미끼 서버가 그대로 기동). 듣는 것은
+ * 이름별 `enabled=false` 뿐이고, `-c` 는 본대화와 공유(`serverArgsFor`)라 여기 쓴다.
+ *  · `mcp_servers.<이름>.enabled=false` → 그 서버는 기동조차 않는다(표식 파일 0회).
+ *  · `plugins.<id>.enabled=false` → 그 플러그인이 딸고 오는 MCP 가 사라진다.
+ *  · `features.apps=false` → 계정 커넥터(Apps)가 `app/list` 에서 0개, `codex_apps` 도구 0개.
+ * 이름을 **모두 열거**해야 한다(전체 끄기 키 없음). 이름은 `config/read` 의 `mcp_servers`/
+ * `plugins` 키와 `plugin/installed` 의 설치 id 합집합에서 받는다 — 추측 금지, 그리고 둘 다
+ * MCP 를 기동하지 않는다(실측: 미끼 표식 파일 0회).
+ *
+ * 실측 함정 셋: ① `config.mcp_servers` 에 **없는** 이름을 넣으면 `invalid transport` 로
+ * `thread/start` 가 실패한다(플러그인 MCP 이름을 여기 넣으면 안 된다). ② `-c` 로
+ * `plugins."id@mkt"` 처럼 따옴표를 쓰면 새 키가 생길 뿐 원래 키는 안 꺼진다.
+ * ③ 설정의 `plugins` 는 설치 목록보다 작다(17 vs 26) — 원격 Apps 플러그인(`gmail@…` 등)이
+ * 설정 표에 없어도 설치되어 있으므로 합집합이 필요하다(없는 id 를 넣어도 무해 — 실측).
+ */
+export interface RelayLockdown {
+  features: { apps: false }
+  mcp_servers: Record<string, { enabled: false }>
+  plugins: Record<string, { enabled: false }>
+}
+
+export function codexRelayLockdown(config: unknown, installed?: unknown): RelayLockdown {
+  const settings = asRecord(config)
+  // `plugin/installed` → `{ marketplaces: [{ plugins: [{ id }] }] }`.
+  const marketplaces = asRecord(installed).marketplaces
+  const installedIds = (Array.isArray(marketplaces) ? marketplaces : []).flatMap(market => {
+    const plugins = asRecord(market).plugins
+    return (Array.isArray(plugins) ? plugins : []).map(plugin => asRecord(plugin).id)
+  })
+  const plugins = disabledTable(settings.plugins)
+  for (const id of installedIds) if (typeof id === 'string' && id !== '') plugins[id] = { enabled: false }
+  return { features: { apps: false }, mcp_servers: disabledTable(settings.mcp_servers), plugins }
 }
 
 /** 담당 세션의 개발자 지침 — 본대화와 달리 "묻지 말고 출력 칸에만 쓰라"가 핵심이다. */
@@ -782,7 +836,20 @@ export class CodexRelayConnection implements JobConnection {
     })
     if (!found) throw new Error('Codex가 knuaf-dev 스킬을 찾지 못했어요.')
     events.skill()
-    const started = await rpc.request('thread/start', codexThreadParams(this.request, model))
+    /**
+     * 학생 설정에서 **이름만** 받아 담당 전용 제한을 만든다. `config/read` 는 MCP 를 기동하지
+     * 않으므로 여기서 먼저 불러도 부작용이 없다(실측).
+     *
+     * 플러그인은 `config.plugins` 만으로 부족하다 — 실측 0.167.0: 설정 17개 vs 설치 26개,
+     * 원격 Apps 플러그인(`gmail@…` 등)은 설정 표에 없어도 설치되어 있다. 그래서 설치 목록과
+     * 합집합을 쓴다(없는 id 를 넣어도 `thread/start` 는 정상 — 실측). 설치 목록 조회가 실패해도
+     * 주문을 닫지는 않는다: 아래 `assertIsolated` 가 살아 있는 서버를 실제로 잡는다.
+     */
+    const userConfig = await rpc.request('config/read', { cwd: this.request.cwd, includeLayers: false })
+      .catch(() => { throw new Error('학생 설정을 읽지 못해 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.') })
+    const installed = await rpc.request('plugin/installed', {}).catch(() => null)
+    const lockdown = codexRelayLockdown(userConfig?.config, installed)
+    const started = await rpc.request('thread/start', codexThreadParams(this.request, model, lockdown))
     const threadId = started?.thread?.id
     if (typeof threadId !== 'string' || !threadId) throw new Error('Codex가 담당 스레드를 열지 못했어요.')
     /**
@@ -793,6 +860,7 @@ export class CodexRelayConnection implements JobConnection {
     if (started.approvalsReviewer !== 'user') {
       throw new Error('Codex 담당 스레드의 승인 심사자가 앱이 정한 값과 달라요. 이 주문은 열지 않습니다.')
     }
+    await this.assertIsolated(rpc, threadId)
     this.thread = threadId
     // 순서 고정: 세션 id 가 먼저 와야 러너가 토큰 기록을 남긴다(jobs.ts `tokens`).
     events.session(threadId)
@@ -816,6 +884,37 @@ export class CodexRelayConnection implements JobConnection {
         if (typeof r?.turn?.id === 'string') this.turn = r.turn.id
       }).catch(error => { this.waiter = undefined; reject(error) })
     })
+  }
+
+  /**
+   * 보낸 제한이 실제로 걸렸는지 **서버에 물어** 확인한다. `thread/start` 가 성공했다고 믿지 않는다
+   * — 옛 판이 키를 무시하거나 사용자 설정이 나중에 이기면 도구가 그대로 살아 있다.
+   *
+   * 판정은 **`disabled` 만 통과**다. `mcpServerStatus` 의 다른 값(`connected`, `starting`,
+   * `authenticationRequired`, `failed`, `cancelled`, `notStarted`, `null`)은 모두 "우리 설정이
+   * 안 먹었다"는 뜻이라 턴을 열지 않는다 — 서버를 하나라도 놓치면 학생 도구가 담당에 붙는다
+   * (실측 0.167.0 실제 설정: 제한 없이는 17개 항목 중 13 connected·2 disabled·2 failed,
+   * 제한을 걸면 13개 항목 전부 disabled).
+   */
+  private async assertIsolated(rpc: JsonRpcProcess, threadId: string): Promise<void> {
+    const live: string[] = []
+    let cursor: string | null = null
+    for (let page = 0; page < 5; page++) {
+      const r = await rpc.request('mcpServerStatus/list',
+        cursor ? { threadId, cursor, detail: 'toolsAndAuthOnly' } : { threadId, detail: 'toolsAndAuthOnly' })
+      for (const raw of Array.isArray(r?.data) ? r.data : []) {
+        const entry = asRecord(raw)
+        if (entry.runtimeStatus !== 'disabled') {
+          const name = typeof entry.name === 'string' && entry.name ? entry.name : '(이름 없음)'
+          live.push(`${name}=${String(entry.runtimeStatus)}`)
+        }
+      }
+      cursor = typeof r?.nextCursor === 'string' && r.nextCursor ? r.nextCursor : null
+      if (!cursor) break
+    }
+    if (live.length > 0) {
+      throw new Error(`Codex 담당 스레드에서 MCP 서버가 꺼지지 않았어요(${live.join(', ')}). 이 주문은 열지 않습니다.`)
+    }
   }
 
   async stop(): Promise<void> {

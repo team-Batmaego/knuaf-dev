@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path'
 import {
   ClaudeRelayConnection, claudeExecutionAccount, claudeSubscriptionTier, claudeUsageState
 } from '../src/main/chat/claude'
-import { CodexRelayConnection, codexExecutionAccount, codexSandboxPolicy, codexThreadParams, codexUsageState } from '../src/main/chat/codex'
+import { CodexRelayConnection, codexExecutionAccount, codexRelayLockdown, codexSandboxPolicy, codexThreadParams, codexUsageState } from '../src/main/chat/codex'
 import { JsonRpcProcess } from '../src/main/chat/transport'
 import { relayIsolation } from '../src/main/chat/jobs/isolation'
 import { claudeTokens, codexTokens, tokenRecord } from '../src/main/chat/jobs/tokens'
@@ -360,6 +360,20 @@ test('Codex 담당 연결: 격리 정책과 거절을 실제 파라미터로 보
   expect(thread.params.approvalPolicy).toBe('on-request')
   expect(thread.params.sandbox).toBe('workspace-write')
   expect(thread.params.model).toBe('gpt-5-codex')
+  /**
+   * 담당은 학생 설정의 MCP·플러그인·Apps를 물려받지 않는다(발주 C3). 이름은 `config/read` 가
+   * 준 것만 쓰고, 전체 끄기 키가 없다는 사실은 위 실측 주석 참조.
+   */
+  const lockdown = thread.params.config
+  expect(lockdown.features).toEqual({ apps: false })
+  expect(lockdown.mcp_servers).toEqual({ 'user-mcp': { enabled: false }, 'other-mcp': { enabled: false } })
+  // 설정 표(1개)뿐 아니라 **설치 목록**(2개)도 꺼야 한다 — 원격 Apps 플러그인은 설정에 없다.
+  expect(lockdown.plugins).toEqual({ 'plug@mkt': { enabled: false }, 'remote-apps@remote': { enabled: false } })
+  // 이름은 요청 문맥(cwd)으로 읽는다 — 프로젝트 층이 섞이지 않게 `includeLayers:false`.
+  const configRead = entries.find(e => e.method === 'config/read')
+  expect(configRead.params).toEqual({ cwd: out, includeLayers: false })
+  // 걸린 뒤 서버에 확인한다 — 스레드 문맥의 상태 목록에 살아 있는 서버가 없어야 통과한다.
+  expect(entries.some(e => e.method === 'mcpServerStatus/list' && e.params?.threadId === 'thread-fake')).toBe(true)
   // ② 턴마다 샌드박스 정책을 싣는다 — 이것이 없으면 실물에서 밖 쓰기가 통과했다.
   expect(turn.params.sandboxPolicy).toEqual({ type: 'workspaceWrite', writableRoots: [out],
     networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true })
@@ -375,6 +389,97 @@ test('Codex 담당 연결: 격리 정책과 거절을 실제 파라미터로 보
   expect(responses.some(r => r.method === 'item/commandExecution/requestApproval' && r.result?.decision === 'decline')).toBe(true)
   expect(responses.some(r => r.method === 'item/tool/requestUserInput' && r.result?.answers && Object.keys(r.result.answers).length === 0)).toBe(true)
   expect(responses.some(r => r.method === 'account/chatgptAuthTokens/refresh' && r.error?.code === -32601)).toBe(true)
+})
+
+test('Codex 담당 연결: 제한이 안 걸리면 턴을 열지 않는다', { timeout: 120_000 }, async () => {
+  // 실물에서는 `thread/start.config` 를 무시하는 옛 판이나 사용자 설정이 이기는 경우가 이 모양이다.
+  // 앱은 보낸 값이 아니라 **서버가 돌려준 상태**로 판정하고, 살아 있는 도구가 있으면 턴을 열지 않는다.
+  const { root, out, skill } = fixtureRoot('codex-lock-ignored')
+  const logFile = join(root, 'app-server.log')
+  writeFileSync(logFile, '')
+  const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
+  const wrapper = join(root, 'codex-wrapper.sh')
+  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const connection = new CodexRelayConnection(
+    agentOptions(wrapper, root, skill, {
+      KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill),
+      KD_FAKE_ALLOWED: 'true', KD_FAKE_IGNORE_LOCKS: '1'
+    }),
+    request(root, out, skill, { company: 'codex', model: 'gpt-5-codex', effort: 'high' }))
+  try {
+    await expect(connection.runJob('담당 모드: 주문서', recorder().events))
+      .rejects.toThrow(/MCP 서버가 꺼지지 않았어요/)
+  } finally { await connection.stop() }
+  const entries = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  // 스레드는 열렸지만(제한을 싣고) 턴은 열리지 않는다 — 모델 호출 0회.
+  expect(entries.some(e => e.method === 'thread/start')).toBe(true)
+  expect(entries.some(e => e.method === 'turn/start')).toBe(false)
+})
+
+test('Codex 담당 연결: 설정을 읽지 못하면 스레드조차 열지 않는다', { timeout: 120_000 }, async () => {
+  // 이름을 모르면 제한을 걸 수 없고, 아무 이름이나 넣으면 `thread/start` 가 실패한다(실측).
+  // 그래서 조용히 넘어가지 않고 주문을 닫는다.
+  const { root, out, skill } = fixtureRoot('codex-no-config')
+  const logFile = join(root, 'app-server.log')
+  writeFileSync(logFile, '')
+  const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
+  const wrapper = join(root, 'codex-wrapper.sh')
+  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const connection = new CodexRelayConnection(
+    agentOptions(wrapper, root, skill, {
+      KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill),
+      KD_FAKE_ALLOWED: 'true', KD_FAKE_CONFIG_ERROR: '1'
+    }),
+    request(root, out, skill, { company: 'codex', model: 'gpt-5-codex', effort: 'high' }))
+  try {
+    await expect(connection.runJob('담당 모드: 주문서', recorder().events))
+      .rejects.toThrow(/학생 설정을 읽지 못해/)
+  } finally { await connection.stop() }
+  const entries = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  expect(entries.some(e => e.method === 'config/read')).toBe(true)
+  expect(entries.some(e => e.method === 'thread/start')).toBe(false)
+  expect(entries.some(e => e.method === 'turn/start')).toBe(false)
+})
+
+test('실물 Codex app-server: 제한을 건 담당 스레드는 사용자 MCP 를 기동조차 않는다', { timeout: 180_000 }, async () => {
+  const binary = systemCodex()
+  if (!binary) test.skip(true, 'PATH 에 codex 가 없어 건너뜁니다')
+  const { root, out, skill } = fixtureRoot('codex-real-lock')
+  /**
+   * 미끼 MCP — 자기가 뜨면 표식 파일에 한 줄 쓴다. **모델 턴은 열지 않는다**: 이 시험이 보는
+   * 것은 "학생 설정 서버가 담당 스레드에서 프로세스로 뜨는가" 하나다.
+   */
+  const codexHome = join(root, 'codex-home'); mkdirSync(codexHome)
+  const marker = join(root, 'decoy-started.log')
+  writeFileSync(join(codexHome, 'config.toml'), `
+[mcp_servers.decoy]
+command = "/bin/sh"
+args = ["-c", "echo started >> '${marker}'"]
+`)
+  const home = join(root, 'h'); mkdirSync(home)
+  const env = { ...process.env, CODEX_HOME: codexHome, HOME: home }
+  const rpc = new JsonRpcProcess(binary, ['app-server'], out, env)
+  const relayRequest = request(root, out, skill, { company: 'codex', model: 'gpt-5-codex', effort: 'high' })
+  try {
+    await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.0' }, capabilities: { experimentalApi: true } })
+    rpc.send({ method: 'initialized', params: {} })
+    const userConfig = await rpc.request('config/read', { cwd: out, includeLayers: false })
+    const installed = await rpc.request('plugin/installed', {}).catch(() => null)
+    expect(Object.keys(userConfig.config.mcp_servers)).toContain('decoy')
+    const lockdown = codexRelayLockdown(userConfig.config, installed)
+    expect(lockdown.mcp_servers.decoy).toEqual({ enabled: false })
+    const started = await rpc.request('thread/start', codexThreadParams(relayRequest, 'gpt-5-codex', lockdown))
+    const status = await rpc.request('mcpServerStatus/list', { threadId: started.thread.id, detail: 'toolsAndAuthOnly' })
+    const entry = status.data.find((s: { name: string }) => s.name === 'decoy')
+    expect(entry.runtimeStatus).toBe('disabled')
+    // 앱이 판정에 쓰는 것과 같은 규칙 — 살아 있는 서버가 하나도 없어야 통과한다.
+    expect(status.data.every((s: { runtimeStatus: string }) => s.runtimeStatus === 'disabled')).toBe(true)
+    // 프로세스로 뜨지 않았다: 표식 파일이 없거나 비어 있다(기동 자체가 0회).
+    const { promise: settled, resolve: settle } = Promise.withResolvers<void>()
+    setTimeout(settle, 2_000)
+    await settled
+    expect(existsSync(marker) ? readFileSync(marker, 'utf8').trim() : '').toBe('')
+  } finally { await rpc.stop() }
 })
 
 test('실물 Codex app-server: 턴 샌드박스가 출력 칸 밖 쓰기를 막는다', { timeout: 180_000 }, async () => {
