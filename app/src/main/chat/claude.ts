@@ -1553,6 +1553,11 @@ export class ClaudeRelayConnection implements JobConnection {
       env: this.options.env,
       // ① 설정 출처 없음 — 학생·프로젝트 settings.json 과 CLAUDE.md 를 읽지 않는다.
       settingSources: [...isolation.settingSources] as ('user' | 'project' | 'local')[],
+      // 설정 파일을 안 읽는 것만으로는 부족하다. `strictMcpConfig` 가 없으면 CLI 가 학생 계정·환경에
+      // 연동된 MCP 서버를 담당 세션에 끌어올 수 있다 — 담당은 본대화보다 느슨하면 안 된다(덧붙임 1).
+      // 담당이 쓰는 도구는 관문(`relayIsolation.preToolUse`)의 허용 목록뿐이라 MCP 도구는 어차피
+      // 거절되므로 이 제한과 부딪치는 정당한 MCP 는 없다.
+      strictMcpConfig: true,
       abortController: controller,
       permissionMode: 'default' as const,
       // ③ 셸은 OS 샌드박스에 가두고, 샌드박스를 못 걸면 세션을 열지 않는다.

@@ -217,6 +217,22 @@ test('[차단 1·3회차] SDK 에 넘기는 plugins 경로는 앱 자리다', as
 })
 
 /**
+ * 덧붙임 1 — 담당 연결은 본대화와 같은 MCP 제한을 진다.
+ *
+ * 본대화 `queryOptions` 는 v0.6.2 부터 `strictMcpConfig: true` 를 준다. 담당은 `settingSources: []`
+ * 만으로 막았는데, 그것은 설정 파일만 막을 뿐 학생 계정·환경에 연동된 MCP 서버를 끌어오는 통로를
+ * 막지 못한다(검토자 진술). 두 연결의 값이 갈라지지 않도록 실제 조립 옵션으로 잠근다.
+ */
+test('[덧붙임 1] relay 옵션은 strictMcpConfig 로 MCP 설정을 막는다', () => {
+  const { root, out, skill } = fixtureRoot('strict-mcp')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay6-')))
+  const options = new ClaudeRelayConnection(agentOptions('/fake/claude', root, skill), relayRequest(root, out, skill), appDir).debugQueryOptions()
+  expect(options.strictMcpConfig).toBe(true)
+  // 설정 출처도 그대로 비어 있어야 한다 — 둘은 같은 관문의 두 겹이다.
+  expect(options.settingSources).toEqual([])
+})
+
+/**
  * [차단 2] `thread/start` 에 심사자를 명시한다.
  *
  * 스키마 근거(`/tmp/opencode/codex-schema/v2/ApprovalsReviewer.ts`, 0.167.0):
