@@ -23,7 +23,16 @@ interface Approval {
   company: string; model: string; effort: string | null; accountId: string; contentHash: string
 }
 const now = () => new Date().toISOString()
-const fingerprint = (account: ExecutionAccount) => sha256(JSON.stringify(account))
+/**
+ * 계정 지문 — **앱과 엔진이 함께 아는 값**만 센다.
+ *
+ * 동의(`consented`)는 앱 저장소가 정본이고 엔진은 그 값을 모른다(설계 §3.5 규칙 1). 엔진
+ * `availability()` 는 `consented:false` 를 돌려주므로 전체 객체를 그대로 지문에 넣으면 앱이
+ * 동의한 주문도 매번 `rejected` 가 된다(검토 중요 1: runJob 0회). 그래서 지문에서 `consented`
+ * 를 빼고, 동의는 앱 값으로만 판정한다(`accountFailure`).
+ */
+const fingerprint = (account: ExecutionAccount) =>
+  sha256(JSON.stringify([account.accountId, account.connected, account.usage, account.account]))
 
 /** A single app-owned runner; no engine imports, polling, automatic retries, or hidden model changes. */
 export class JobRunner {
@@ -197,7 +206,13 @@ export class JobRunner {
       if (!status.connected) { this.update(record, status.probe === 'failed' ? 'unknown' : 'auth'); return }
       const live = await connection.availability()
       if (current.stopped) return
-      const liveFailure = this.accountFailure(live, true, connection.gateInTurn === true)
+      /**
+       * 두 번째 판정은 **엔진이 관측한 값**만 본다 — 동의는 위에서 앱 값으로 이미 끝냈다.
+       * 엔진은 동의를 모르므로(`availability()` 의 `consented:false`) 여기서 다시 동의를
+       * 검사하면 앱이 승인한 주문도 닫힌다(배선 A 검토 중요 1). 동의의 소유 경계는 앱 저장소다.
+       * ㉠(형님 결정 ts 1794242990): `unknown` 은 연결이 `gateInTurn` 을 선언했을 때만 첫 턴 안 확인으로 넘긴다.
+       */
+      const liveFailure = this.accountFailure(live, false, connection.gateInTurn === true)
       if (liveFailure) { this.update(record, liveFailure); return }
       if (fingerprint(live) !== fingerprint(account)) { this.update(record, 'rejected'); return }
       // Restore the app-authorized specification immediately before the engine reads its job file.
