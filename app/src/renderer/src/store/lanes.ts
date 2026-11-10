@@ -196,6 +196,8 @@ export function laneActions() {
     discard: (root: string, jobId: string) => ask(({ jobs }) => jobs.discard(root, jobId)),
     redeliver: (root: string, jobId: string) => ask(({ jobs }) => jobs.redeliver(root, jobId)),
     authLater: (root: string, jobId: string) => ask(({ jobs }) => jobs.authLater(root, jobId)),
+    archives: (root: string) => ask(({ lanes }) => lanes.archives(root)),
+    archive: (root: string, archiveId: string) => ask(({ lanes }) => lanes.archive(root, archiveId)),
     pickReview: (root: string, company: Provider, model: string) =>
       ask(({ lanes }) => lanes.pickReview(root, company, model)),
     setConsent: (company: Provider, accountId: string, on: boolean) =>
