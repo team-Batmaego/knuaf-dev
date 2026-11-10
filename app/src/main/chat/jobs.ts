@@ -424,6 +424,46 @@ export class JobRunner {
     spec.id = newJobId; delete spec.parent; delete spec.cause
     return this.enqueue(previous.root, spec, previous.owner, previous.authorSessionId)
   }
+  /**
+   * §2-1 [이 담당 멈추기] — 그 주문 하나만(Q2). 본대화도, 같은 폴더의 다른 주문도 건드리지
+   * 않는다. 세대(`generations`)도 올리지 않는다: 세대는 소유자·대화 단위 사건이라 여기서
+   * 올리면 진행 중인 다른 전달·제안이 조용히 무효가 된다.
+   */
+  async stopJob(jobId: string): Promise<JobRecord> {
+    const record = this.job(jobId)
+    for (const proposal of this.state.proposals) {
+      if (proposal.parentJobId === jobId && proposal.state === 'open') proposal.state = 'discarded'
+    }
+    // 결과가 아직 대화로 가지 않았다면 가지 않게 한다(`deliver` 의 첫 검사).
+    if (!this.state.delivered.includes(record.rootJobId)) this.state.delivered.push(record.rootJobId)
+    if (['queued', 'running', 'limit'].includes(record.status)) this.update(record, 'stopped')
+    else this.persist()
+    const active = this.active?.record.spec.id === jobId ? this.active : null
+    if (active) active.stopped = true
+    await active?.connection?.stop()
+    return structuredClone(record)
+  }
+  /**
+   * §2-1 앱 재시작 줄 [버리기] — 다시 맡기지 않고 접는다. `JobStatus` 에 `discarded` 가 없어
+   * (계약 고정) `stopped` 로 닫고, 화면 줄은 앱 저장소의 닫은 줄 목록이 감춘다.
+   */
+  discard(jobId: string): JobRecord {
+    const record = this.job(jobId)
+    if (record.status !== 'interrupted') throw new Error('Job cannot be discarded')
+    if (!this.state.delivered.includes(record.rootJobId)) this.state.delivered.push(record.rootJobId)
+    this.update(record, 'stopped')
+    return structuredClone(record)
+  }
+  /**
+   * §2-1 인증 [나중에] — 인증으로 멈춘 주문만 받는다. 그 주문은 `auth` 미실행 결과로 도우미에게
+   * 넘어간다. `execute` 가 이미 넘겼으면(at-most-once) 아무 일도 하지 않는다.
+   */
+  async authLater(jobId: string): Promise<JobRecord> {
+    const record = this.job(jobId)
+    if (record.status !== 'auth') throw new Error('Job is not waiting for authentication')
+    if (!this.state.delivered.includes(record.rootJobId)) await this.deliver(record)
+    return structuredClone(record)
+  }
   async stop(root: string): Promise<void> {
     root = canonical(root)
     this.generations.set(root, (this.generations.get(root) ?? 0) + 1)

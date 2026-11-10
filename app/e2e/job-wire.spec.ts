@@ -9,7 +9,7 @@ import { canonical, sha256 } from '../src/main/chat/jobs/isolation'
 import type { AgentConnection } from '../src/main/chat/contracts'
 import type { ConversationOwner, ExecutionAccount, JobConnection, JobEvents, RelayRequest } from '../src/main/chat/jobs/types'
 import type { Provider } from '../src/shared/chat'
-import { planFromRow, resolveLanes } from '../src/shared/lanes'
+import { planFromRow, resolveLanes, type LaneRowId } from '../src/shared/lanes'
 
 async function until(check: () => boolean, timeout = 20_000): Promise<void> {
   const deadline = Date.now() + timeout
@@ -29,8 +29,8 @@ function fakeSkill(): string {
 type Order = Record<string, unknown> & { id: string }
 
 /** `gg.py delegate` 가 쓰는 모양 그대로 — 앱 manifest 키(status/contentHash/…)는 넣지 않는다. */
-function order(root: string, id: string, lane: 'research' | 'review' | 'writing' = 'research'): Order {
-  const entry = planFromRow('both-high')[lane]!
+function order(root: string, id: string, lane: 'research' | 'review' | 'writing' = 'research', row: LaneRowId = 'both-high'): Order {
+  const entry = planFromRow(row)[lane]!
   const spec: Record<string, unknown> = {
     schema: 1, id, lane, task: 'Read the project and write the result',
     inputs: [{ sourceId: 'project', path: join(root, 'project.json'), hash: sha256(readFileSync(join(root, 'project.json'))), section: 'one' }],

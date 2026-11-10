@@ -8,8 +8,8 @@ import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
 import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
 import { chatConnectionKey } from './jobs/key'
-import { JobRunner, type JobConnection, type JobResult, type JobSpec, type RelayRequest } from './jobs'
-import { JobStore } from './jobs/store'
+import { JobRunner, type JobConnection, type JobRecord, type JobResult, type JobSpec, type RelayRequest } from './jobs'
+import { JobStore, type ConsentRecord } from './jobs/store'
 import { canonical } from './jobs/isolation'
 import type { ConversationOwner, ExecutionAccount } from './jobs/types'
 import type { LanePlan } from '../../shared/lanes'
@@ -775,7 +775,71 @@ export class ChatService {
    */
   approvePlan(root: string, plan: LanePlan): void { this.store().approve(root, plan) }
   revokePlan(root: string): void { this.store().revokePlan(root) }
-  setConsent(company: Provider, accountId: string, on: boolean): void { this.store().setConsent(company, accountId, on) }
+  /**
+   * 동의를 거두면 그 회사 계정으로 맡긴 **대기·진행** 주문을 그 자리에서 멈춘다(계약
+   * `lanes:set-consent`). 저장은 동기(옛 호출자·시험 그대로)이고, 멈추기는 러너의 비동기
+   * 경로라 기다리지 않고 넘긴다 — 저장이 늦어지면 그 사이 주문이 시작될 수 있다.
+   */
+  setConsent(company: Provider, accountId: string, on: boolean): ConsentRecord {
+    const record = this.store().setConsent(company, accountId, on)
+    if (!on) {
+      for (const job of this.jobRunner?.records() ?? []) {
+        if (job.spec.company !== company) continue
+        // 아직 계정을 고정하지 않은 대기 주문은 이 회사 하나뿐이라 그대로 멈춘다.
+        if (job.accountId !== undefined && job.accountId !== accountId) continue
+        if (!['queued', 'running', 'limit'].includes(job.status)) continue
+        void this.jobRunner!.stopJob(job.spec.id).catch(error => console.error('[knuaf] jobs',
+          JSON.stringify({ type: 'stop-job', jobId: job.spec.id, error: error instanceof Error ? error.message : String(error) })))
+      }
+    }
+    return record
+  }
+  /** §2-1 [이 담당 멈추기] — 그 주문 하나만. 본대화·다른 주문은 그대로다(Q2). */
+  async stopJob(root: string, jobId: string): Promise<JobRecord> {
+    return this.companyJob(root, jobId).stopJob(jobId)
+  }
+  /** §2-1 앱 재시작 줄 [버리기] — `interrupted` 주문만. */
+  discardJob(root: string, jobId: string): JobRecord {
+    const runner = this.companyJob(root, jobId)
+    return runner.discard(jobId)
+  }
+  /** §2-1 인증 [나중에] — 그 주문은 `auth` 미실행으로 도우미에게 넘어간다. */
+  async authLater(root: string, jobId: string): Promise<void> {
+    const runner = this.companyJob(root, jobId)
+    const record = runner.records().find(job => job.spec.id === jobId)!
+    // 두 번 눌러도 기록 줄은 하나다 — 이미 남긴 줄은 다시 쓰지 않는다.
+    const recorded = this.store().events(root)
+      .some(event => event.kind === 'not-run' && event.jobId === jobId && event.reason === 'auth')
+    await runner.authLater(jobId)
+    if (recorded) return
+    this.store().addEvent(root, { id: randomUUID(), at: new Date().toISOString(), kind: 'not-run',
+      jobId, lane: record.spec.lane, reason: 'auth', task: record.spec.task })
+  }
+  /**
+   * §2-1·§8-2 [다시 넘기기] — `failed` 로 닫힌 전달만, 학생이 누를 때 한 번. 러너의 전달
+   * 원장(`delivered[]`)은 건드리지 않는다: 결과는 이미 러너 쪽에서 한 번 넘긴 것으로 확정됐고
+   * 여기서 다시 여는 것은 **앱 쪽 claim** 하나뿐이다(Q3).
+   */
+  async redeliver(root: string, jobId: string): Promise<void> {
+    const runner = this.runnerFor()
+    if (!runner) throw new Error('작업 분담이 꺼져 있어요.')
+    const canonicalRoot = canonical(root)
+    const record = runner.records().find(job => job.rootJobId === jobId || job.spec.id === jobId)
+    if (!record || record.root !== canonicalRoot) throw new Error('Unknown job')
+    if (!this.store().redeliverAllowed(record.rootJobId)) throw new Error('Delivery cannot be retried')
+    const result: JobResult = { rootJobId: record.rootJobId, jobId: record.spec.id, status: record.status,
+      outputs: record.status === 'completed' ? record.outputs : [], company: record.spec.company,
+      model: record.spec.model, effort: record.spec.effort }
+    await this.deliverResult(structuredClone(record.owner), result)
+  }
+  /** 이 폴더의 주문일 때만 그 주문을 만질 수 있다 — 화면이 보낸 폴더 값을 믿지 않는다. */
+  private companyJob(root: string, jobId: string): JobRunner {
+    const runner = this.runnerFor()
+    if (!runner) throw new Error('작업 분담이 꺼져 있어요.')
+    const record = runner.records().find(job => job.spec.id === jobId)
+    if (!record || record.root !== canonical(root)) throw new Error('Unknown job')
+    return runner
+  }
   /** 앱당 하나의 `JobRunner`. 이음매가 없으면 담당 기능 자체가 꺼진다(가짜 기본값 금지). */
   private runnerFor(): JobRunner | undefined {
     if (!this.opts.jobConnectionFactory || !this.opts.jobAccount) return undefined
