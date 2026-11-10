@@ -933,3 +933,66 @@ test('폴더 화면 상태 조회도 늦은 옛 응답이 새 관찰을 덮지 �
     ;(globalThis as { window?: unknown }).window = realWindow
   }
 })
+
+test('Codex 폴더 감시 중 Claude 로 전환해도 두 정상 조회가 모두 반영된다 (RT3-FIX2 차단)', async () => {
+  // 검토 재현: 폴더 화면의 Codex 로그인 감시가 돌고, 그 사이 **전역** 조회 A 가 시작되고,
+  // 실제 폴더 감시의 조회 B 가 시작된 뒤 `useChat.load(..., 'claude')` 로 공급자를 바꾼다.
+  // A·B 가 모두 `connected:true` 로 정착했는데도
+  //   - 공용 세대(A 는 B 때문에 버려짐) + B 는 `provider !== codex` 로 적용 전 반환
+  // → 둘 다 유실돼 Codex 가 '로그인 필요'로 남았다(앞 판 3c058b4 에서는 connected).
+  // 지금은 세대가 (공급자, 화면 범위)별이라 전역 A 는 자기 범위의 마지막 조회로서 쓰인다.
+  const clock = manualClock()
+  const realWindow = (globalThis as { window?: unknown }).window
+  const pendingGlobal = Promise.withResolvers<unknown>()
+  const pendingFolder = Promise.withResolvers<unknown>()
+  const connected = { result: { installed: true, connected: true, version: null, detail: '', probe: 'ok' } }
+  let globalCalls = 0, folderCalls = 0
+  ;(globalThis as { window?: unknown }).window = {
+    knuaf: {
+      connect: {
+        // 전역 조회 — 첫 호출만 보류한다(로그인 감시 tick 은 이후 호출).
+        status: () => { const n = ++globalCalls; return n === 1 ? pendingGlobal.promise : Promise.resolve(connected) },
+        login: async () => ({ result: true }),
+        cancel: async () => ({ result: true }),
+        reopen: async () => ({ result: true })
+      },
+      chat: {
+        // 폴더 조회 — 첫 호출만 보류한다.
+        status: () => { const n = ++folderCalls; return n === 1 ? pendingFolder.promise : Promise.resolve(connected) },
+        login: async () => ({ result: true }),
+        snapshot: async () => ({ result: { root: '/fake/paper', provider: 'codex', state: 'idle', messages: [] } }),
+        draft: async () => ({ result: '' })
+      }
+    }
+  }
+  const chatBefore = useChat.getState()
+  try {
+    useConnect.getState().stopPolling()
+    useChat.setState({ root: '/fake/paper', provider: 'codex', visit: 0, busy: false, snapshot: null, status: null, connState: 'checking' })
+
+    // ① 폴더 화면의 Codex 로그인 감시 시작(실제 store 경로).
+    const folderLogin = useChat.getState().login()
+    await clock.flush()   // 가짜 시계라 `setTimeout(0)` 대기 대신 flush 를 쓴다
+    // ② 전역 조회 A 시작(계정 행 '다시 확인' 과 같은 경로).
+    const globalRead = useConnect.getState().refresh('codex')
+    // ③ 실제 3초 폴더 감시의 조회 B 시작.
+    clock.fireIntervals(); await clock.flush()
+    expect(folderCalls, '폴더 감시가 조회하지 않았다').toBe(1)
+    // ④ 공급자를 Claude 로 바꾼다 — 폴더 화면이 Codex 조회를 더는 쓰지 않는다.
+    await useChat.getState().load('/fake/paper', 'claude')
+
+    // 두 조회가 모두 정상 connected 로 정착한다.
+    pendingGlobal.resolve(connected)
+    pendingFolder.resolve(connected)
+    await globalRead
+    await clock.flush()
+
+    expect(useConnect.getState().codex.state, '정상 전역 응답이 버려져 Codex 가 로그인 필요로 남았다').toBe('connected')
+    folderLogin.catch(() => { /* 감시는 아래 stopPolling 으로 정리한다 */ })
+  } finally {
+    useConnect.getState().stopPolling()
+    useChat.setState(chatBefore, true)
+    clock.restore()
+    ;(globalThis as { window?: unknown }).window = realWindow
+  }
+})

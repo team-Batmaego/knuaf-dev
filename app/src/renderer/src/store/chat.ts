@@ -236,16 +236,17 @@ export const useChat = create<ChatState>((set, get) => ({
   refreshStatus: async () => {
     const { root, provider } = get()
     if (!root) return
-    // 폴더 화면의 상태 조회도 **가장 마지막 조회**만 반영한다 — 늦은 옛 응답이 방금 확인한
-    // '연결됨'을 되돌리면 같은 회귀다(검토 RT2-01 범위 확인).
-    const mine = beginStatusRead(provider)
+    // 폴더 화면의 상태 조회도 **같은 범위의 가장 마지막 조회**만 반영한다 — 늦은 옛 응답이
+    // 방금 확인한 '연결됨'을 되돌리면 같은 회귀다(검토 RT2-01). 범위는 `folder` 다: 전역 조회와
+    // 세대를 나눠야 이 조회가 전역 응답을 무효로 만들지 않는다(검토 RT3-FIX2 차단).
+    const mine = beginStatusRead(provider, 'folder')
     const st = await window.knuaf.chat.status(root, provider) as Reply<ConnectionStatus>
     if (get().provider !== provider) return
     const info = statusInfo(st)
     applyStatusRead(provider, mine, () => {
       // 확인 요청 자체가 실패했으면 직전에 본 상태를 그대로 두고 'unknown' 만 말한다.
       set({ status: info.status ?? get().status, statusFailed: info.statusFailed, connState: info.connState, error: messageOf(st) })
-    })
+    }, 'folder')
   },
   login: async () => {
     const { root, provider } = get()

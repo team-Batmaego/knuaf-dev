@@ -148,7 +148,8 @@ export function beginLoginAttempt(provider: Provider): number {
   attempts.set(provider, mine)
   // 새 시도는 **진행 중이던 상태 조회를 무효로** 만든다 — 늦게 도착한 옛 응답이 방금 성공한
   // 로그인을 '로그인 필요'로 되돌리지 않게(검토 RT2-01 재현 A·B).
-  nextStatusSeq(provider)
+  nextStatusSeq(provider, 'global')
+  nextStatusSeq(provider, 'folder')
   return mine
 }
 export function loginAttemptLive(provider: Provider, mine: number): boolean {
@@ -157,7 +158,8 @@ export function loginAttemptLive(provider: Provider, mine: number): boolean {
 /** 그 공급자의 진행 중 로그인 응답을 무효로 만든다(취소). */
 export function invalidateLoginAttempt(provider: Provider): void {
   attempts.set(provider, (attempts.get(provider) ?? 0) + 1)
-  nextStatusSeq(provider)
+  nextStatusSeq(provider, 'global')
+  nextStatusSeq(provider, 'folder')
 }
 
 /**
@@ -167,41 +169,56 @@ export function invalidateLoginAttempt(provider: Provider): void {
  * 끝난 뒤에야 `connected:false` 로 정착하면, 그 한 번의 쓰기가 방금 성공한 로그인을
  * '로그인 필요'로 되돌렸다. 감시는 이미 끝났으므로 아무도 다시 묻지 않는다.
  *
- * 계약은 "**가장 마지막에 시작한 조회의 응답만 쓴다**"다. 조회는 시작할 때 번호를 받고,
- * 쓸 때 그 번호가 (a) 지금까지 발급된 마지막 번호이고 (b) 이미 쓴 번호보다 크면 쓴다.
- * 그래서
- *  - B(새 조회)가 먼저 끝나 쓴 뒤 A(옛 조회)가 오면 → A 는 버려진다(성공이 유지된다).
- *  - B 가 끝나기 전에 A 만 오면 → A 도 버려진다(더 새 조회의 답을 기다린다 — 다음 tick 이 묻는다).
- *  - 로그인 시도 시작·취소는 번호를 올려 **그 전에 나간 조회**를 무효로 만든다.
+ * 계약은 "**같은 대상의 가장 마지막 조회만 쓴다**"다. 여기서 대상은
+ * **(공급자, 화면 범위)** 다 — 첫 화면·계정 행의 전역 조회(`global`)와 폴더 화면의 조회
+ * (`folder`)는 서로 다른 화면에 쓰므로 서로의 세대를 올리지 않는다.
+ *
+ * 검토 RT3-FIX2 차단: 세대 키가 공급자만이던 때에는 **폴더** 조회가 **전역** 조회의 세대를
+ * 올려 전역 응답을 버렸고, 폴더 조회 자신은 공급자 전환이라는 이유로 적용 전에 돌아가
+ * **두 정상 응답이 모두 유실**됐다(Codex 가 `connected` 인데도 `로그인 필요`로 남음).
+ * 화면 범위를 나누면 전역 응답은 자기 범위의 마지막 조회이므로 그대로 쓰이고, 같은 범위의
+ * 늦은 응답만 버려진다.
+ *
+ * 조회는 시작할 때 번호를 받고, 쓸 때 그 번호가 (a) 그 범위에서 마지막으로 발급된 번호이고
+ * (b) 이미 쓴 번호보다 크면 쓴다. 그래서
+ *  - B(같은 범위의 새 조회)가 먼저 끝나 쓴 뒤 A(같은 범위의 옛 조회)가 오면 → A 는 버려진다(성공이 유지된다).
+ *  - B 가 끝나기 전에 A 만 오면 → A 도 버려진다(그 범위의 더 새 답을 기다린다 — 다음 tick 이 묻는다).
+ *  - 로그인 시도 시작·취소는 번호를 올려 **그 전에 나간 조회**를 무효로 만든다(두 범위 모두).
  * 버려진 응답은 오류가 아니다: 화면은 직전 관찰을 그대로 두고, 다음 tick(3초)이 다시 묻는다.
  */
-const statusSeq = new Map<Provider, number>()
-const appliedStatus = new Map<Provider, number>()
+export type StatusScope = 'global' | 'folder'
+const statusSeq = new Map<string, number>()
+const appliedStatus = new Map<string, number>()
 
-function nextStatusSeq(provider: Provider): number {
-  const next = (statusSeq.get(provider) ?? 0) + 1
-  statusSeq.set(provider, next)
+const scopeKey = (provider: Provider, scope: StatusScope): string => `${provider}/${scope}`
+
+function nextStatusSeq(provider: Provider, scope: StatusScope): number {
+  const key = scopeKey(provider, scope)
+  const next = (statusSeq.get(key) ?? 0) + 1
+  statusSeq.set(key, next)
   return next
 }
-/** 이 응답을 써도 되는가 — 가장 마지막에 시작한 조회이고, 아직 아무것도 덮지 않았을 때만. */
-function statusStillFresh(provider: Provider, mine: number): boolean {
-  return mine === (statusSeq.get(provider) ?? 0) && mine > (appliedStatus.get(provider) ?? 0)
+/** 이 응답을 써도 되는가 — 그 범위에서 가장 마지막에 시작한 조회이고, 아직 아무것도 덮지 않았을 때만. */
+function statusStillFresh(provider: Provider, scope: StatusScope, mine: number): boolean {
+  const key = scopeKey(provider, scope)
+  return mine === (statusSeq.get(key) ?? 0) && mine > (appliedStatus.get(key) ?? 0)
 }
-function markStatusApplied(provider: Provider, mine: number): void {
-  if (mine > (appliedStatus.get(provider) ?? 0)) appliedStatus.set(provider, mine)
+function markStatusApplied(provider: Provider, scope: StatusScope, mine: number): void {
+  const key = scopeKey(provider, scope)
+  if (mine > (appliedStatus.get(key) ?? 0)) appliedStatus.set(key, mine)
 }
 
 /** 상태 조회 하나를 시작한다 — 돌려받은 표를 `applyStatusRead` 에 넘겨야 쓸 수 있다. */
-export function beginStatusRead(provider: Provider): number { return nextStatusSeq(provider) }
+export function beginStatusRead(provider: Provider, scope: StatusScope = 'global'): number { return nextStatusSeq(provider, scope) }
 
 /**
  * 이 조회 결과를 지금 화면에 반영할지 정하고, 반영한다. 반영했으면 true.
- * 첫 화면(`useConnect.refresh`)·폴더 화면(`useChat.refreshStatus`)이 **같은 표**를 쓴다 —
- * 두 화면의 늦은 응답이 서로를 덮는 것도 같은 규칙으로 막힌다.
+ * 첫 화면(`useConnect.refresh`)은 `global`, 폴더 화면(`useChat.refreshStatus`)은 `folder` 범위다 —
+ * 같은 범위 안에서만 늦은 응답이 버려진다.
  */
-export function applyStatusRead(provider: Provider, mine: number, apply: () => void): boolean {
-  if (!statusStillFresh(provider, mine)) return false
-  markStatusApplied(provider, mine)
+export function applyStatusRead(provider: Provider, mine: number, apply: () => void, scope: StatusScope = 'global'): boolean {
+  if (!statusStillFresh(provider, scope, mine)) return false
+  markStatusApplied(provider, scope, mine)
   apply()
   return true
 }
