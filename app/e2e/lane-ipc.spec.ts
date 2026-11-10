@@ -335,6 +335,24 @@ test('fix C1-15: a folder-less change never resets the viewed folder', async () 
   hub.dispose()
 })
 
+// [C1-15] 판정서 재현은 **실제 IPC 경로**였다: `setConsent` → `hub.touch(null)` → 구독 root A→null.
+// 핸들러를 거쳐 같은 일을 확인한다(push 의 root 가 A 그대로여야 한다).
+test('fix C1-15: granting consent through IPC keeps the pushed bundle on the viewed folder', async () => {
+  const f = fixture()
+  // 화면이 A 폴더를 열어 둔 상태(묶음 요청이 구독 폴더를 정한다).
+  resultOf(await f.ipc.call(LANES_INVOKE.snapshot, f.root) as LanesReply<unknown>)
+  expect(f.hub.root()).toBe(f.root)
+  f.sent.length = 0
+
+  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true) as LanesReply<unknown>)
+  await new Promise<void>(resolve => setTimeout(resolve, 80))
+  expect(f.hub.root()).toBe(f.root)
+  // 폴더 없는 요청이 밀어 보낸 묶음도 A 폴더의 것이다 — 전역 묶음이 아니다.
+  expect(f.sent.length).toBeGreaterThan(0)
+  expect(f.sent.every(entry => (entry.snapshot as { root: string | null }).root === f.root)).toBe(true)
+  f.hub.dispose()
+})
+
 // [C1-17] 조립이 느린 옛 폴더의 묶음은 새 폴더 뒤에 보내지 않는다.
 test('fix C1-17: a late bundle from the previous folder is not sent', async () => {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-hub2-')))

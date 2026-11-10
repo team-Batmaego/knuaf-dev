@@ -35,7 +35,12 @@ export interface LaneIpcChannel {
 
 export interface LaneHandlerDeps {
   ipc: LaneIpcChannel
-  hub: { snapshot(root: string | null): Promise<LanesSnapshot>; touch(root?: string | null): void }
+  hub: {
+    snapshot(root: string | null): Promise<LanesSnapshot>
+    /** 폴더를 고르지 않고 변경만 알린다([C1-15]). */
+    nudge(): void
+    touch(root?: string | null): void
+  }
   store: JobStore
   runner: JobRunner | null
   account: (company: Provider) => Promise<ExecutionAccount | null>
@@ -143,11 +148,25 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     return views
   }
 
-  /** 모든 요청의 공통 껍데기 — 오류를 `LanesReply` 로 접고, 바뀌었으면 묶음을 민다. */
+  /**
+   * 모든 요청의 공통 껍데기 — 오류를 `LanesReply` 로 접고, 바뀌었으면 묶음을 민다.
+   *
+   * [C1-15] **구독 폴더 선택과 변경 알림은 다른 일이다.** 예전에는 폴더 없는 요청(`setConsent`)이
+   * `hub.touch(null)` 을 불러 화면이 보던 폴더를 null 로 바꿨고, 그 뒤 묶음은 전역 묶음이 됐다.
+   * 이제 폴더가 있는 요청만 그 폴더를 고르고, 폴더 없는 요청은 **알림만** 보낸다(`nudge`).
+   * 경로도 `canonical` 로 맞춰 넘긴다 — 화면이 보낸 모양 그대로면 발행기가 발행 직전 대조에서
+   * 그 묶음을 버린다.
+   */
   const reply = async <T>(root: string | null, run: () => Promise<T> | T, touch = true): Promise<LanesReply<T>> => {
     try {
       const result = await run()
-      if (touch) deps.hub.touch(root)
+      if (touch) {
+        if (root) {
+          let folder = root
+          try { folder = canonical(root) } catch { /* 이미 해석된 값이면 그대로 */ }
+          deps.hub.touch(folder)
+        } else deps.hub.nudge()
+      }
       return { result }
     } catch (error) {
       diagnostic({ type: 'lanes-ipc', error: messageOf(error) })
