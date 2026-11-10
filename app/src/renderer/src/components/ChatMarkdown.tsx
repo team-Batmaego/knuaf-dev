@@ -1,5 +1,5 @@
 import { createElement, Fragment, type ReactNode } from 'react'
-import MarkdownIt from 'markdown-it'
+import { chatMd } from '../../../shared/chat-md'
 import type Token from 'markdown-it/lib/token.mjs'
 
 /**
@@ -22,8 +22,7 @@ import type Token from 'markdown-it/lib/token.mjs'
  * 그래서 `[라벨](대상)` 은 글자 토큰으로 남기고 아래 `markdownLinks` 가 해석한다(예전과 같은 규칙):
  * 프로젝트 안 경로만 파일 단추, `http(s)` 는 글자 + 주소, 나머지는 원문 그대로.
  */
-const md = new MarkdownIt({ html: false, linkify: false, breaks: true, typographer: false })
-md.disable(['link', 'escape'])
+const md = chatMd
 
 /** 프로젝트 안 상대경로처럼 생긴 것만. 주소(http:)·절대경로·.. 는 제외한다. */
 const INSIDE_PATH = /^(?![/\\]|[a-zA-Z][a-zA-Z0-9+.-]*:)(?!.*(?:^|[/\\])\.\.(?:[/\\]|$)).+$/
