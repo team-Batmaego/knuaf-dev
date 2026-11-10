@@ -358,3 +358,100 @@ test('[중요] 원시 JSON 폴백 카드도 비밀값을 가린다', () => {
   // 판정은 손대지 않았다: 이 도구는 자동 허용 대상이 아니다.
   expect(autoAllow(MAC, 'mcp__test__fetch', { url: 'https://example.invalid/' })).toBe(false)
 })
+
+/**
+ * 검토 FIX3 — 이름을 꾸민 헤더(`X-Api-Key`·`X-Auth-Token`)가 폴백 카드에 값을 그대로 남겼다.
+ *
+ * Roh 가 쓴 반례를 그대로 옮긴다. 이름 기준은 **완전 일치가 아니라 포함**이고, 이름이 없어도
+ * 값 모양이 무작위 문자열이면 가린다. 판정(`autoAllow`)은 한 글자도 바뀌지 않았다.
+ */
+const CANARY = 'REVIEW_ONLY_CANARY'
+
+test('[중요] 폴백 카드는 이름을 꾸민 인증 헤더도 가린다', () => {
+  // Roh 원문 반례 — 237b634 에서 값이 그대로 보였다.
+  const cases: [string, Record<string, unknown>][] = [
+    ['X-Api-Key', { headers: { 'X-Api-Key': CANARY } }],
+    ['X-Auth-Token', { headers: { 'X-Auth-Token': CANARY } }],
+    // 접두·접미가 더 붙은 꼴도 같은 자리다.
+    ['api-key-v2', { 'api-key-v2': CANARY }],
+    ['nested array', { headers: [{ 'X-Auth-Token': CANARY }] }]
+  ]
+  for (const [label, input] of cases) {
+    const before = JSON.stringify(input)
+    const d = describeTool('mcp__test__fetch', input, MAC)
+    expect(d.detail, label).not.toContain(CANARY)
+    expect(d.detail, label).toContain('***')
+    // 값만 가리고 키·구조는 남는다 — 학생이 무엇을 하려는지 읽어야 한다.
+    expect(() => JSON.parse(d.detail), label).not.toThrow()
+    expect(d.detail, label).toContain(label === 'nested array' ? 'X-Auth-Token' : label)
+    // 판정·입력 원본은 그대로다(표시 사본만 가린다).
+    expect(JSON.stringify(input), label).toBe(before)
+    expect(autoAllow(MAC, 'mcp__test__fetch', input), label).toBe(false)
+  }
+})
+
+test('[중요] 명령 글도 이름을 꾸민 헤더·이름=값·긴 플래그를 가린다', () => {
+  // Bash·PowerShell 양쪽에서 같은 자리가 가려져야 한다.
+  const cases: [string, string, string][] = [
+    ['Bash', MAC, `curl -H "X-Api-Key: ${CANARY}" https://example.invalid`],
+    ['Bash', MAC, `curl -H "X-Auth-Token: ${CANARY}" https://example.invalid`],
+    ['Bash', MAC, `curl "https://example.invalid/?api_key=${CANARY}"`],
+    ['Bash', MAC, `mytool --password ${CANARY} run`],
+    ['PowerShell', WIN, `Invoke-RestMethod https://example.invalid -Headers @{"X-Api-Key"="${CANARY}"}`],
+    ['PowerShell', WIN, `Invoke-WebRequest https://example.invalid -Headers @{"X-Auth-Token"="${CANARY}"}`],
+    ['PowerShell', WIN, `Invoke-WebRequest "https://example.invalid/?token=${CANARY}"`],
+    ['PowerShell', WIN, `Connect-Service -Password ${CANARY}`]
+  ]
+  for (const [tool, root, cmd] of cases) {
+    const d = describeTool(tool, { command: cmd }, root)
+    expect(d.detail, cmd).not.toContain(CANARY)
+    expect(d.detail, cmd).toContain('***')
+    expect(readable(d.detail), d.detail).toBe(true)
+    // 판정은 **원문**으로 한다 — 가린 사본으로 판정하면 조각이 달라진다. 같은 명령에서
+    // 비밀값만 평범한 값으로 바꾼 것과 판정이 같아야 한다(표시만 바뀌었다는 증거).
+    const plain = cmd.replaceAll(CANARY, 'plainvalue')
+    expect(autoAllow(root, tool, { command: cmd }), cmd)
+      .toBe(autoAllow(root, tool, { command: plain }))
+  }
+  // 네트워크로 나가는 명령은 종전대로 묻는다(가리기가 판정을 열지 않았다).
+  for (const cmd of cases.map((c) => c[2]).filter((c) => c.includes('example.invalid'))) {
+    expect(autoAllow(cmd.includes('Invoke') ? WIN : MAC, cmd.includes('Invoke') ? 'PowerShell' : 'Bash', { command: cmd }), cmd).toBe(false)
+  }
+})
+
+test('[중요] 이름이 없어도 값 모양이 무작위 문자열이면 가린다', () => {
+  // 이름에 key·token 같은 낱말이 하나도 없다 — 값 모양만으로 판단해야 한다.
+  const random = 'a8f3K9mQ2xR7tL4pZ6wN1bV5'
+  const prefixed = 'sk-liveAa00Bb11Cc22Dd33'
+  for (const value of [random, prefixed]) {
+    const d = describeTool('mcp__test__fetch', { blob: value }, MAC)
+    expect(d.detail, value).not.toContain(value)
+    expect(d.detail, value).toContain('***')
+    const cmd = `curl -d ${value} https://example.invalid`
+    const dc = describeTool('Bash', { command: cmd }, MAC)
+    expect(dc.detail, value).not.toContain(value)
+    expect(dc.detail, value).toContain('***')
+  }
+})
+
+test('[중요] 평범한 스킬 호출 카드는 그대로 읽힌다(오가림 없음)', () => {
+  // 값 모양 규칙이 경로·파일 이름·스킬 이름을 덮으면 카드가 무용해진다. 실제 스킬 호출로 확인한다.
+  const commands = [
+    `python3 ".claude/skills/knuaf-dev/scripts/gg_toc_check.py" input.docx --json out.json`,
+    `Get-ChildItem "${WIN}\\sources"`,
+    'cp manuscript-2026-11-10-final.docx out.docx',
+    'ls sections'
+  ]
+  for (const cmd of commands) {
+    const tool = cmd.startsWith('python3') || cmd.startsWith('Get-') ? 'PowerShell' : 'Bash'
+    const root = tool === 'PowerShell' ? WIN : MAC
+    const d = describeTool(tool, { command: cmd }, root)
+    expect(d.detail, cmd).not.toContain('***')
+    expect(d.detail, cmd).toContain(cmd.split('\n')[0].slice(0, 12))
+    expect(readable(d.detail), d.detail).toBe(true)
+  }
+  // 폴백도 마찬가지 — 평범한 경로·숫자는 남는다.
+  const d = describeTool('mcp__test__fetch', { path: 'sections/ch1.docx', count: 3, ok: true }, MAC)
+  expect(d.detail).not.toContain('***')
+  expect(d.detail).toContain('sections/ch1.docx')
+})

@@ -807,21 +807,87 @@ export function lostToolCalls(message: unknown): number {
   return n
 }
 
-/** 카드에서 값을 가려야 하는 **이름**. 텍스트 규칙과 JSON 폴백이 같은 목록을 쓴다. */
-const SECRET_NAME = /^(?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|clientsecret|secret|token|password|passwd|pwd|credential|authorization)$/i
+/**
+ * 카드에서 값을 가려야 하는 **이름**. 명령 글과 JSON 폴백이 **같은 낱말 목록**을 쓴다.
+ *
+ * 완전 일치(`^…$`)가 아니라 **포함**으로 본다 — 실제 헤더 이름은 비밀값 낱말을 꾸며서 온다.
+ * `X-Api-Key`·`X-Auth-Token`·`api-key-v2`·`*_token`·`*-secret`·`clientSecret` 이 모두 같은
+ * 자리다(검토 FIX3: 완전 일치가 `X-Api-Key` 를 놓쳐 폴백 카드에 값이 그대로 남았다).
+ * 구분자 `-`·`_`·`.` 는 무시하고 한 덩어리로 본다.
+ */
+const SECRET_WORDS = 'key|token|secret|password|passwd|credential'
+const SECRET_NAME_WORD = new RegExp(SECRET_WORDS, 'i')
+/** 이름 자리로 볼 글자 — 이 한 문자열이 명령 글·폴백·이름 판정의 **단일 출처**다. */
+const SECRET_NAME_SRC = `[A-Za-z0-9_.-]*(?:${SECRET_WORDS})[A-Za-z0-9_.-]*`
+/**
+ * `auth` 는 낱말 하나로 서거나 `authorization` 일 때만 본다. `author`(논문 저자)를
+ * 자격증명으로 오인해 가리면 카드가 쓸모없어진다 — 오가림도 결함이다.
+ */
+const SECRET_NAME_AUTH = /(?:^|[-_.])auth(?:$|[-_.])|authorization/i
+/** `pwd` 도 같은 이유로 낱말 단위다(`pwd` 만 쓰는 관례가 있다). */
+const SECRET_NAME_STANDALONE = /(?:^|[-_.])pwd(?:$|[-_.])/i
+
+/** 이 **이름**의 값은 통째로 가린다. 이름은 모델·헤더에서 오므로 타입을 믿지 않는다. */
+function isSecretName(name: string): boolean {
+  return SECRET_NAME_WORD.test(name) || SECRET_NAME_AUTH.test(name) || SECRET_NAME_STANDALONE.test(name)
+}
 
 /**
- * 원시 JSON 폴백 카드의 본문. `redactForCard` 를 **문자열 값마다** 적용하고, 이름이 비밀값
- * 자리인 키는 값 전체를 가린다(`api_key: …` 는 값만 봐서는 알아볼 수 없다).
+ * 이름이 비밀값이 아니어도 **값 모양**이 비밀값이면 가린다(검토 FIX3 ②).
+ *
+ * 영숫자가 섞인 20자 이상. 사람이 읽는 낱말·파일 이름과 갈리는 지점이 둘이다.
+ *   ① 한글이나 구분자 없이 영숫자 덩어리여야 한다 — `논문`, `gg_toc_check` 는 짧다.
+ *   ② **경로 조각이면 보지 않는다** — `…/2026-11-10-v063-ps-ask/wt` 같은 폴더 이름은
+ *      영숫자가 섞였지만 비밀값이 아니다. 앞뒤가 `/`·`\`·`.`·`:` 이면 경로로 본다.
+ *
+ * 이름을 꾸민 헤더나 임의 이름의 키가 이 규칙으로 걸린다. 값 모양만으로는 확실하지 않으므로
+ * 이름 규칙이 1차, 이것이 2차다.
+ */
+const SECRET_SHAPE = /(?<![A-Za-z0-9_./\\:-])[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_./\\:-])/g
+
+/**
+ * 값 모양이 무작위 문자열인가 — 영숫자가 **섞여야** 하고(`12345678901234567890` 은 아니다),
+ * 소문자 슬러그는 구분자로 낱말이 갈리면 사람이 붙인 이름으로 본다.
+ *
+ * 이 두 번째 조건이 오가림을 막는다: `manuscript-2026-11-10-final` 은 영숫자가 섞인 20자
+ * 이상이지만 **소문자 + 구분자** 꼴이라 파일 이름이다. 반대로 무작위 키는 대소문자가 섞이거나
+ * (`a8f3K9mQ…`), 소문자여도 구분자 없이 길게 이어진다(hex·base64).
+ */
+function looksSecretValue(token: string): boolean {
+  if (!/\d/.test(token) || !/[A-Za-z]/.test(token)) return false
+  return /[A-Z]/.test(token) || !/[-_]/.test(token)
+}
+
+/**
+ * 원시 JSON 폴백의 **이름 기준** 가리기.
+ *
+ * 값이 문자열이 아니어도(배열·객체) 이름이 비밀값이면 통째로 가린다 — 이름이 `X-Api-Key` 인데
+ * 값이 배열이면 값마다 보는 규칙은 놓친다. 이름·구조는 남기고 값만 바꾼다(JSON 이 깨지면
+ * 학생이 무엇을 하려는지 못 읽는다).
+ */
+function maskSecretValues(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(maskSecretValues)
+  const rec = asRecord(value)
+  if (!rec) return value
+  // 날짜·클래스 인스턴스는 키를 훑어 복사하면 뜻이 사라진다. 평범한 객체만 내려간다.
+  const proto = Object.getPrototypeOf(rec)
+  if (proto !== Object.prototype && proto !== null) return value
+  const out: Record<string, unknown> = Object.create(null)
+  for (const [k, v] of Object.entries(rec)) out[k] = isSecretName(k) ? '***' : maskSecretValues(v)
+  return out
+}
+
+/**
+ * 원시 JSON 폴백 카드의 본문. 이름이 비밀값인 키는 값 전체를 가리고(값의 타입과 무관),
+ * 남은 문자열 값마다 `redactForCard` 를 적용한다(`api_key: …` 는 값만 봐서는 알아볼 수 없다).
  *
  * JSON 문자열을 통째로 가리면 인용부호가 사라져 구조가 깨진다. 학생은 카드에서 "무엇을
  * 하려는지"를 읽어야 하므로 키·구조는 남기고 값만 가린다.
  */
 function redactedInputForCard(input: unknown): string {
-  return JSON.stringify(input, (k, v) => {
-    if (typeof v !== 'string') return v
-    return SECRET_NAME.test(k) ? '***' : redactForCard(v)
-  }, 2)
+  return JSON.stringify(maskSecretValues(input), (_k, v) => (
+    typeof v === 'string' ? redactForCard(v) : v
+  ), 2)
 }
 
 /**
@@ -846,10 +912,23 @@ function redactForCard(cmd: string): string {
     .replace(/(["']?\bauthorization["']?\s*[:=]\s*)(?:(?:bearer|basic|token|digest|negociate|ntlm)\s+)?(?:"[^"]*"|'[^']*'|\{[^}]*\}|[^\s,;)}]+)/gi, `$1${MASK}`)
     // 이름이 없어도 토큰 꼴이면 가린다(`Bearer <값>`·`Basic <값>`).
     .replace(/\b(bearer|basic)\s+(?!\*{3})[A-Za-z0-9._~+/=-]{6,}/gi, `$1 ${MASK}`)
-    // 이름=값 꼴. 값이 인용돼 있으면 인용째로 가린다.
-    .replace(/(["']?\b(?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|clientsecret|secret|token|password|passwd|pwd|credential)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\{[^}]*\}|[^\s,;)}]+)/gi, `$1${MASK}`)
+    // 이름=값 꼴. 이름은 **포함**으로 본다 — `X-Api-Key:`(헤더), `api_key=`, `*-Token:`,
+    // `*-Secret=` 이 모두 같은 자리다(검토 FIX3). 값이 인용돼 있으면 인용째로 가린다.
+    // 인용부호는 값 경계다 — `-H "X-Api-Key: 값"` 의 닫는 따옴표를 먹으면 카드가 깨진다.
+    .replace(
+      new RegExp(`(["']?\\b${SECRET_NAME_SRC}["']?\\s*[:=]\\s*)(?:"[^"]*"|'[^']*'|\\{[^}]*\\}|[^\\s,;)}"']+)`, 'gi'),
+      `$1${MASK}`
+    )
     // PowerShell 식 이름-값(`-Value x`·`-Password x`·`-Token x`). 값이 자격증명 자리다.
-    .replace(/(-(?:value|secret|password|passwd|token|apikey|api[_-]?key|credential|thumbprint)\b\s+)(?:"[^"]*"|'[^']*'|[^\s,;)}]+)/gi, `$1${MASK}`)
+    .replace(
+      new RegExp(`(-(?:${SECRET_WORDS}|value|apikey|thumbprint)\\b\\s+)(?:"[^"]*"|'[^']*'|[^\\s,;)}"']+)`, 'gi'),
+      `$1${MASK}`
+    )
+    // POSIX 긴 플래그(`--password x`·`--api-key x`·`--token=x`).
+    .replace(
+      new RegExp(`(--(?:${SECRET_WORDS}|apikey|thumbprint)[A-Za-z0-9_-]*\\s+)(?:"[^"]*"|'[^']*'|[^\\s,;)}"']+)`, 'gi'),
+      `$1${MASK}`
+    )
     // 널리 쓰이는 키 접두 — 이름 없이 값만 온다.
     .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}/g, MASK)
     .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{8,}/g, MASK)
@@ -859,6 +938,9 @@ function redactForCard(cmd: string): string {
     .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, MASK)
     // JWT — 머리(`eyJ…`)만 보고 판단한다.
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, MASK)
+    // 이름이 없어도 **값 모양**이 무작위 문자열이면 가린다(검토 FIX3 ②). 경로 조각은 제외한다 —
+    // 폴더 이름·파일 이름은 영숫자가 섞여도 비밀값이 아니다(`SECRET_SHAPE` 주석).
+    .replace(SECRET_SHAPE, (token) => (looksSecretValue(token) ? MASK : token))
 }
 
 /**
