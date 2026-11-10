@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { Sidecar } from './sidecar'
 import { registerIpc } from './ipc'
 import type { ChatService } from './chat/service'
+import { sweepRelayPlugins } from './chat/claude'
 import { APP_ROOT } from './python'
 import { cleanupRuntime } from './runtime'
 import { installMenu, type MenuAction } from './menu'
@@ -107,6 +108,11 @@ else {
   app.whenReady().then(() => {
     // 도장 없는(미완성) 런타임 폴더와 남은 임시 다운로드만 지운다 — 게시된 폴더는 건드리지 않는다.
     cleanupRuntime()
+    // 지난 실행이 남긴 담당 플러그인 사본을 치운다 — 앱이 만든 것만, 표식과 이름 규칙이 둘 다
+    // 맞을 때만(엔진 `sweepRelayPlugins`). 앱 전용 자리(userData)만 본다.
+    try { sweepRelayPlugins(join(app.getPath('userData'), 'relay')) } catch (error) {
+      console.error('[knuaf] relay-plugin sweep', error)
+    }
     if (isMac && !app.isPackaged && !hidden) {
       const iconPng = join(APP_ROOT, 'build', 'icon.png')
       if (existsSync(iconPng)) app.dock?.setIcon(nativeImage.createFromPath(iconPng))

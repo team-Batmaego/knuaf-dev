@@ -2,6 +2,11 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
+import {
+  JOBS_INVOKE, LANES_INVOKE, LANES_PUSH,
+  type ArchivedChat, type ArchivedChatSummary, type CardAction, type CardDecision, type ConsentRow,
+  type LaneCard, type LanesReply, type LanesSnapshot, type ReviewModelGroup
+} from '../shared/lanes-ipc'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -179,6 +184,49 @@ const api = {
     const listener = (_e: unknown, snapshot: ChatSnapshot) => fn(snapshot)
     ipcRenderer.on('chat:snapshot', listener)
     return () => ipcRenderer.removeListener('chat:snapshot', listener)
+  },
+  // ---------------------------------------------------------------------------------
+  // 작업 분담(배선 C) — 계약 `LanesApi`(14 + 구독 1)·`JobsApi`(8). 채널 이름은 계약에서만
+  // 가져온다(`lanes:`·`jobs:`). 화면은 계산하지 않는다: 상태는 `lanes:changed` 묶음으로 오고,
+  // 이 함수들은 요청·즉시 응답만 돌려준다.
+  // ---------------------------------------------------------------------------------
+  lanes: {
+    snapshot: (root: string | null): Promise<LanesReply<LanesSnapshot>> => ipcRenderer.invoke(LANES_INVOKE.snapshot, root),
+    onSnapshot: (fn: (snapshot: LanesSnapshot) => void): (() => void) => subscribe(LANES_PUSH.snapshot, fn),
+    decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<LanesReply<CardDecision>> =>
+      ipcRenderer.invoke(LANES_INVOKE.decideCard, root, cardId, baseVersion, action),
+    cardStatus: (root: string, cardId: string): Promise<LanesReply<CardDecision>> =>
+      ipcRenderer.invoke(LANES_INVOKE.cardStatus, root, cardId),
+    settingsCard: (root: string, kind: 'enable' | 'revert'): Promise<LanesReply<LaneCard>> =>
+      ipcRenderer.invoke(LANES_INVOKE.settingsCard, root, kind),
+    disable: (root: string): Promise<LanesReply<void>> => ipcRenderer.invoke(LANES_INVOKE.disable, root),
+    reviewModels: (root: string | null): Promise<LanesReply<ReviewModelGroup[]>> =>
+      ipcRenderer.invoke(LANES_INVOKE.reviewModels, root),
+    pickReview: (root: string, company: Provider, model: string): Promise<LanesReply<LaneCard>> =>
+      ipcRenderer.invoke(LANES_INVOKE.pickReview, root, company, model),
+    consents: (): Promise<LanesReply<ConsentRow[]>> => ipcRenderer.invoke(LANES_INVOKE.consents),
+    setConsent: (company: Provider, accountId: string, on: boolean): Promise<LanesReply<ConsentRow>> =>
+      ipcRenderer.invoke(LANES_INVOKE.setConsent, company, accountId, on),
+    dismiss: (root: string, lineId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(LANES_INVOKE.dismiss, root, lineId),
+    handoffContinue: (root: string, proposalId: string): Promise<LanesReply<void>> =>
+      ipcRenderer.invoke(LANES_INVOKE.handoffContinue, root, proposalId),
+    handoffLater: (root: string, proposalId: string): Promise<LanesReply<void>> =>
+      ipcRenderer.invoke(LANES_INVOKE.handoffLater, root, proposalId),
+    archives: (root: string): Promise<LanesReply<ArchivedChatSummary[]>> => ipcRenderer.invoke(LANES_INVOKE.archives, root),
+    archive: (root: string, archiveId: string): Promise<LanesReply<ArchivedChat>> =>
+      ipcRenderer.invoke(LANES_INVOKE.archive, root, archiveId)
+  },
+  jobs: {
+    stopOne: (root: string, jobId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(JOBS_INVOKE.stopOne, root, jobId),
+    continue: (root: string, proposalId: string): Promise<LanesReply<void>> =>
+      ipcRenderer.invoke(JOBS_INVOKE.continue, root, proposalId),
+    later: (root: string, proposalId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(JOBS_INVOKE.later, root, proposalId),
+    retry: (root: string, jobId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(JOBS_INVOKE.retry, root, jobId),
+    discard: (root: string, jobId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(JOBS_INVOKE.discard, root, jobId),
+    redeliver: (root: string, jobId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(JOBS_INVOKE.redeliver, root, jobId),
+    authLater: (root: string, jobId: string): Promise<LanesReply<void>> => ipcRenderer.invoke(JOBS_INVOKE.authLater, root, jobId),
+    deliveryText: (root: string, jobId: string): Promise<LanesReply<{ text: string | null }>> =>
+      ipcRenderer.invoke(JOBS_INVOKE.deliveryText, root, jobId)
   },
   openGuide: (): Promise<boolean> => ipcRenderer.invoke('guide:open'),
   appInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),

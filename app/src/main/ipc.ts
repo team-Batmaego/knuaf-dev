@@ -9,8 +9,16 @@ import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult
 import type { ModelChoice, Provider } from '../shared/chat'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
-import { agentApi, skillSource, type AgentCtx, type AgentKind } from './agent'
-import { ChatService } from './chat/service'
+import { agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
+import { ChatService, type HandoffSeam } from './chat/service'
+import { ClaudeRelayConnection } from './chat/claude'
+import { CodexRelayConnection } from './chat/codex'
+import { subscriptionEnv, type AgentOptions } from './chat/contracts'
+import { ConversationHandoff } from './chat/jobs/conversation'
+import { laneAccountProbe } from './lanes/accounts'
+import { registerLaneHandlers } from './lanes/handlers'
+import { LanesHub } from './lanes/hub'
+import { LANES_PUSH } from '../shared/lanes-ipc'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
 import { APP_NAME } from '../shared/name'
@@ -555,6 +563,52 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } }
   })
 
+  /**
+   * 담당(relay) 연결의 엔진 옵션 — 본대화 연결과 **같은 환경·실행 파일**을 쓰고, 스킬 경로만
+   * 주문서가 준 폴더다(엔진이 `SKILL.md` 를 붙인다). 격리 판정은 `request.isolation` 이 정본이다.
+   */
+  const relayOptions = (company: Provider, root: string): AgentOptions => {
+    const binary = findExecutable(company)
+    if (!binary) throw new Error(`${company === 'codex' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 설치 안내를 열어 주세요.`)
+    // 본대화와 같은 PATH 앞자리(프로젝트 .venv → 번들 CPython) — 담당이 도우미와 같은
+    // 인터프리터를 찾아야 스킬 스크립트가 같은 결과를 낸다.
+    const python = venvPython(currentRoot) ?? bundledPython()
+    return {
+      binary,
+      root,
+      skill: '',
+      env: subscriptionEnv(python ? [dirname(python)] : []),
+      openExternal: (url) => shell.openExternal(url)
+    }
+  }
+  // 계정 값은 엔진과 같은 생산자로 읽는다 — 추측값을 만들면 러너의 지문 대조에서 모든 주문이
+  // `rejected` 로 닫힌다. 모델 호출은 없다(초기화 왕복 한 번).
+  const probeAccount = laneAccountProbe({
+    appDir: join(app.getPath('userData'), 'relay'),
+    env: () => subscriptionEnv(),
+    openExternal: (url) => shell.openExternal(url),
+    binary: company => findExecutable(company)
+  })
+  /**
+   * §4 본대화 인계 — 앱이 쥔 `ConversationHandoff` 하나. 새 대화 열기·닫기는 `chat` 이 알고
+   * (그 폴더·회사의 대화 칸을 실제로 비우고 첫 차례를 보낸다), 묶음을 짓는 일은 인계 인스턴스가 한다.
+   */
+  const handoffSeam: HandoffSeam = new ConversationHandoff({
+    stateDir: join(app.getPath('userData'), 'handoff'),
+    // 앱이 만드는 묶음의 상한 — 넘치면 정해진 순서로 줄이고 `trimmed` 로 알린다.
+    maxBytes: 24_000,
+    account: company => probeAccount(company),
+    open: request => chat.openHandoff(request),
+    close: owner => chat.closeHandoff(owner),
+    prepareActivation: async (_old, _owner) => () => {},
+    beginTransition: root => chat.beginOwnerTransition(root),
+    audit: record => console.error('[knuaf] handoff', JSON.stringify(record)),
+    // 앱의 대화 정체성은 (폴더, 회사) 하나다 — 넘겨받는 대화 id 도 같은 규칙으로 짓는다.
+    mintId: (root, company) => `${company}\0${root}`
+  })
+  /** `lanes:changed` 송신기 — `chat` 이 선 뒤에 만든다(저장소·러너를 그때 읽는다). */
+  let lanesHub: LanesHub | null = null
+
   const chat = new ChatService({
     skillSource: () => skillSource(APP_ROOT, app.isPackaged, process.resourcesPath),
     userData: app.getPath('userData'),
@@ -590,7 +644,74 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     // 선택의 선후를 한 곳에서 지키기 위해서다(검토 MC1-03).
     storeModelChoice: (provider, choice) => {
       saveSettings({ chat_models: { ...(loadSettings().chat_models ?? {}), [provider]: choice } })
-    }
+    },
+    // ---- 배선 C: 담당(relay) 이음매 -------------------------------------------------
+    //
+    // 이 넷이 없으면 `runnerFor()` 가 `undefined` 라 담당이 **아예 돌지 않는다**(배선 B 가
+    // 남긴 구멍). 격리·격리 확인은 엔진(C3)이 하고, 여기서는 실제 연결만 고른다.
+    jobConnectionFactory: request => request.company === 'claude'
+      ? new ClaudeRelayConnection(
+        relayOptions(request.company, request.cwd), request, join(app.getPath('userData'), 'relay')
+      )
+      : new CodexRelayConnection(relayOptions(request.company, request.cwd), request),
+    // 앱 값과 엔진 `availability()` 의 지문이 같아야 주문이 열린다 — 계정은 엔진과 같은
+    // 생산자(`lanes/accounts.ts`)로 읽고, 동의만 앱 저장소 값으로 덮는다(service 가 한다).
+    jobAccount: company => probeAccount(company),
+    // 셸 격리는 OS 샌드박스를 실제로 걸 수 있는 플랫폼만 — 맥·리눅스. 윈도우는 아직 검증이
+    // 없으므로 Bash 를 빼는 쪽(보수적)이다(발주 §③ "실기기 검증 없음").
+    jobShellSandboxAvailable: process.platform !== 'win32',
+    invalidateHandoff: root => { lanesHub?.touch(root) },
+    handoff: handoffSeam
+  })
+  lanesHub = new LanesHub({
+    store: chat.lanesStore(),
+    // 러너 이음매가 없으면(담당 기능이 꺼져 있으면) 줄 집합도 비운다.
+    runner: chat.lanesRunner(),
+    // 본대화 회사 — 학생이 고른 대화 공급자. 고른 적이 없으면 설계 차선은 Claude 로 고정된다.
+    mainCompany: loadSettings().provider_choice?.provider ?? 'claude',
+    account: company => chat.laneAccount(company),
+    archives: root => chat.handoffArchives(root),
+    extraLines: root => chat.handoffLines(root)
+  }, snapshot => win()?.webContents.send(LANES_PUSH.snapshot, snapshot),
+  record => console.error('[knuaf] lanes', JSON.stringify(record)))
+  /**
+   * §3·§4·§5 화면 요청 22개 — 계약 채널 이름 그대로. 상태를 바꾼 요청은 끝나면 묶음을 다시 민다.
+   * 설계 회사 전환(`applyDesign`)은 앱의 **모델 칩**을 다시 쓴다(정본 §3.1 D2-03, DESIGN:502) —
+   * 칩이 실제로 바뀌었을 때만 `true` 를 돌려주므로 "바뀌지 않았는데 적용됨" 이 나오지 않는다.
+   */
+  registerLaneHandlers({
+    ipc: ipcMain,
+    hub: lanesHub,
+    store: chat.lanesStore(),
+    runner: chat.lanesRunner(),
+    account: company => chat.laneAccount(company),
+    mainCompany: loadSettings().provider_choice?.provider ?? 'claude',
+    applyDesign: async (root, design) => {
+      const before = loadSettings().chat_models?.[design.company] ?? null
+      if (!design.model) return false
+      await chat.setModel(root, design.company, { model: design.model, effort: design.effort })
+      const after = loadSettings().chat_models?.[design.company] ?? null
+      return Boolean(after && after.model === design.model)
+        && !(before && before.model === design.model && before.effort === design.effort)
+    },
+    setConsent: (company, accountId, on) => chat.setConsent(company, accountId, on),
+    handoff: {
+      continue: (root, proposalId) => chat.handoffContinue(root, proposalId),
+      later: (root, proposalId) => chat.handoffLater(root, proposalId),
+      archives: root => chat.handoffArchives(root),
+      archive: (root, archiveId) => chat.handoffArchive(root, archiveId)
+    },
+    jobs: {
+      stopOne: (root, jobId) => chat.stopJob(root, jobId),
+      continue: (root, proposalId) => chat.continueProposal(root, proposalId),
+      later: (root, proposalId) => chat.laterProposal(root, proposalId),
+      retry: (root, jobId) => chat.retryJob(root, jobId),
+      discard: (root, jobId) => chat.discardJob(root, jobId),
+      redeliver: (root, jobId) => chat.redeliver(root, jobId),
+      authLater: (root, jobId) => chat.authLater(root, jobId),
+      deliveryText: (root, jobId) => chat.deliveryTextOf(root, jobId)
+    },
+    diagnostic: record => console.error('[knuaf] lanes', JSON.stringify(record))
   })
   const windows = new WindowsUpdateRuntime(process.resourcesPath, process.execPath)
   const handoff = new AppHandoff({ chat, sidecar, windows })

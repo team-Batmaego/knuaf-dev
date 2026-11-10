@@ -16,6 +16,7 @@ import type { ConversationOwner, ExecutionAccount } from './jobs/types'
 import type {
   ConversationProposal, HandoffSource
 } from './jobs/conversation'
+import type { OwnerTransition } from './jobs/transition'
 import type { ArchivedChat, ArchivedChatSummary, LaneLine } from '../../shared/lanes-ipc'
 import { handoffLines } from '../lanes/handoff'
 import type { LaneEntry, LanePlan } from '../../shared/lanes'
@@ -843,6 +844,27 @@ export class ChatService {
   async stopJob(root: string, jobId: string): Promise<JobRecord> {
     return this.companyJob(root, jobId).stopJob(jobId)
   }
+  // ---------------------------------------------------------------- 배선 C 읽기 이음매
+  //
+  // `lanes/` 조립기는 상태를 **읽기만** 한다. 여기서 여는 것은 읽기 통로뿐이고, 상태를 바꾸는
+  // 판단은 여전히 이 서비스의 공개 메서드(승인·동의·전달·전환)로만 한다.
+
+  /** 앱 저장소(승인·카드·기록 줄·동의) — `LanesSnapshot` 조립기의 입력. */
+  lanesStore(): JobStore { return this.store() }
+  /** 러너 — 담당 이음매가 없으면 `null`(기능 자체가 꺼져 있다). */
+  lanesRunner(): JobRunner | null { return this.runnerFor() ?? null }
+  /** 본대화 인계의 소유자 이전 예약 — `ConversationHandoff.beginTransition` 이 쓴다. */
+  beginOwnerTransition(root: string): OwnerTransition {
+    const runner = this.runnerFor()
+    if (!runner) throw new Error('작업 분담이 꺼져 있어요.')
+    return runner.beginOwnerTransition(root)
+  }
+  /** 지금 담당 회사의 계정 — `consented` 는 앱 저장소 값으로 덮인다(엔진은 그 값을 모른다). */
+  async laneAccount(company: Provider): Promise<ExecutionAccount | null> {
+    const account = await this.opts.jobAccount?.(company)
+    if (!account) return null
+    return { ...account, consented: this.store().consented(company, account.accountId) }
+  }
   /** §2-1 앱 재시작 줄 [버리기] — `interrupted` 주문만. */
   discardJob(root: string, jobId: string): JobRecord {
     const runner = this.companyJob(root, jobId)
@@ -876,6 +898,36 @@ export class ChatService {
       outputs: record.status === 'completed' ? record.outputs : [], company: record.spec.company,
       model: record.spec.model, effort: record.spec.effort }
     await this.deliverResult(structuredClone(record.owner), result)
+  }
+  /** §4 한도 이어 하기 [이어서 하기] — 제안 하나를 실제로 이어 받는다(새 주문 id 는 러너가 만든다). */
+  async continueProposal(root: string, proposalId: string): Promise<void> {
+    const runner = this.runnerFor()
+    if (!runner) throw new Error('작업 분담이 꺼져 있어요.')
+    const proposal = runner.proposals().find(entry => entry.proposalId === proposalId)
+    const record = proposal ? runner.records().find(job => job.rootJobId === proposal.rootJobId) : null
+    if (!proposal || !record || record.root !== canonical(root)) throw new Error('Unknown proposal')
+    const started = await runner.continue(proposalId)
+    // 제안이 버려졌으면 러너가 스스로 새 줄(새 제안 또는 전달)을 만든다 — 여기서 덧붙이지 않는다.
+    if (started) void runner.runQueued(canonical(root))
+  }
+  /** §4 [나중에] — 제안을 접고 그 주문의 결과를 그대로 넘긴다(자동 재실행 없음). */
+  async laterProposal(root: string, proposalId: string): Promise<void> {
+    const runner = this.runnerFor()
+    if (!runner) throw new Error('작업 분담이 꺼져 있어요.')
+    const proposal = runner.proposals().find(entry => entry.proposalId === proposalId)
+    const record = proposal ? runner.records().find(job => job.rootJobId === proposal.rootJobId) : null
+    if (!proposal || !record || record.root !== canonical(root)) throw new Error('Unknown proposal')
+    await runner.later(proposalId)
+  }
+  /** §2-1 앱 재시작 줄 [다시 맡기기] — 같은 주문서로 **새 주문 번호**를 만든다. */
+  retryJob(root: string, jobId: string): JobRecord {
+    const runner = this.companyJob(root, jobId)
+    return runner.retry(jobId, randomUUID())
+  }
+  /** [Roh 중요 1] 전달문 원문 — 학생이 [자세히]를 눌렀을 때만. 없으면 `null`. */
+  deliveryTextOf(root: string, jobId: string): string | null {
+    this.companyJob(root, jobId)
+    return this.store().deliveryTextOf(jobId)
   }
   /** 이 폴더의 주문일 때만 그 주문을 만질 수 있다 — 화면이 보낸 폴더 값을 믿지 않는다. */
   private companyJob(root: string, jobId: string): JobRunner {
