@@ -12,6 +12,10 @@ import { QuestionCard } from '../components/QuestionCard'
 import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { ZoneLine, type ZoneTone } from '../components/ZoneLine'
+import { LaneZone } from '../components/LaneZone'
+import { useLanes, laneActions } from '../store/lanes'
+import { lineView, stopLabel, type LaneActionId } from '../laneLines'
+import type { LaneLine } from '../../../shared/lanes-ipc'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
 import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
@@ -318,6 +322,10 @@ export function Chat() {
   const consumeQuoteIntent = useProject((s) => s.consumeQuoteIntent)
   const setPaneTab = useProject((s) => s.setPaneTab)
   const revision = useProject((s) => s.status?.revision ?? s.peek?.revision ?? null)
+  const openSettings = useProject((s) => s.openSettings)
+  /** 작업 분담 — preload 이 아직 `lanes` 를 안 내보내면(배선 C1 몫) 조용히 꺼진 채로 둔다. */
+  const lanesSnapshot = useLanes((s) => s.snapshot)
+  const lanesUnavailable = useLanes((s) => s.unavailable)
   const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, insertPath, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, insertPath: s.insertPath, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
   /** 이 폴더의 준비(.venv) 중인가 — 그동안 보낸 글은 끝날 때까지 기다린다(store/prep.ts). */
   /** 이 폴더에서 기다리는 것 — 폴더 준비('prep')·저장·검사('write'). 그동안 보내기는 잠긴다. */
@@ -486,6 +494,69 @@ export function Chat() {
   // 스냅샷의 provider가 화면 provider와 다르면(설정·시작 버튼으로 모드 전환) 다시 불러온다 —
   // codex 대화가 claude 화면에 남는 식의 혼합은 없어야 한다.
   useEffect(() => { if (projectRoot && (projectRoot !== root || provider !== snapshot?.provider)) void load(projectRoot, provider) }, [projectRoot, root, snapshot?.provider, provider, load])
+  /**
+   * 작업 분담 구독 — 화면에 들어올 때 한 번 붙이고, 폴더가 바뀌면 그 폴더의 묶음을 다시 받는다.
+   * 구독 해제는 하지 않는다(`store/lanes` 가 `window` 리스너를 한 번만 걸고, 폴더 가드는 `load` 안에 있다).
+   */
+  useEffect(() => {
+    useLanes.getState().attach()
+    void useLanes.getState().load(projectRoot)
+  }, [projectRoot])
+  /** 이 폴더의 줄만 그린다 — 폴더를 옮기는 사이 남은 옛 묶음은 보이지 않는다. */
+  const laneLines = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.lines : []
+  const laneAnnouncement = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.announcement : null
+  /**
+   * 작업 분담 줄의 단추 — 화면은 요청만 보내고, 그리기는 main이 밀어 준 새 묶음이 한다(설계 §3-5).
+   * 같은 `continue`·`later` 글자가 줄 종류에 따라 다른 요청인 것은 계약이 나눠 둔 그대로다
+   * (담당 주문은 `jobs`, 본대화 넘기기는 `lanes`).
+   */
+  const laneAction = (action: LaneActionId, line: LaneLine): void => {
+    if (!projectRoot) return
+    const lanes = laneActions()
+    const handoff = line.kind === 'main-limit-offer' || line.kind === 'handoff-failed'
+    switch (action) {
+      case 'dismiss': void lanes.dismiss(projectRoot, line.id); break
+      case 'stop-one': if ('jobId' in line) void lanes.stopOne(projectRoot, line.jobId); break
+      case 'redeliver': if ('jobId' in line) void lanes.redeliver(projectRoot, line.jobId); break
+      case 'retry': if ('jobId' in line) void lanes.retry(projectRoot, line.jobId); break
+      case 'discard': if ('jobId' in line) void lanes.discard(projectRoot, line.jobId); break
+      case 'continue':
+        if (line.kind === 'main-limit-offer' || line.kind === 'handoff-failed') void lanes.handoffContinue(projectRoot, line.proposalId)
+        else if ('proposalId' in line) void lanes.continueJob(projectRoot, line.proposalId)
+        break
+      case 'later':
+        if (line.kind === 'main-limit-offer' || line.kind === 'handoff-failed') void lanes.handoffLater(projectRoot, line.proposalId)
+        else if ('proposalId' in line) void lanes.later(projectRoot, line.proposalId)
+        else if ('jobId' in line) void lanes.authLater(projectRoot, line.jobId)
+        break
+      case 'relogin': {
+        // 칩을 열어 그 회사의 로그인 줄로 초점을 옮긴다(설계 §2-1 [다시 로그인]).
+        const button = document.querySelector<HTMLButtonElement>('.chat-composer .composer-model-host > button.model')
+        if (button?.getAttribute('aria-expanded') !== 'true') button?.click()
+        button?.focus()
+        break
+      }
+      case 'report': void requestReport(lineView(line, Date.now()).title)
+        break
+      case 'show-card': if (line.kind === 'card-pending') showCard(line.cardId); break
+      case 'review-models': openSettings('lanes:review'); break
+      case 'enable-lanes': void lanes.settingsCard(projectRoot, 'enable'); break
+      case 'new-chat': {
+        // 그 회사 새 대화를 연다 — 기존 회사 바꾸기(AccountChooser)와 같은 길.
+        const next: Provider = line.kind === 'main-limit-offer' ? line.to.company : provider
+        void window.knuaf.setSettings({ helper_mode: next === 'claude' ? 'claude-chat' : 'codex-chat', provider_choice: { provider: next, at: new Date().toISOString() } })
+          .then(() => { useConnect.getState().select(next); return useProject.getState().loadSettings() })
+        break
+      }
+    }
+  }
+  /** [카드 보기] — 카드 제목으로 스크롤·초점(설계 §3-5). 보내지 않고 자리만 옮긴다. */
+  const showCard = (cardId: string): void => {
+    const el = document.getElementById(`lane-card-${cardId}`)
+    if (!el) return
+    el.scrollIntoView({ block: 'center' })
+    el.focus()
+  }
   /**
    * 예전에는 `.chat-log` 를 스크롤하려 했는데 그 요소에는 overflow 가 없다 — 실제로
    * 흐르는 것은 화면 전체(.main)여서 이 호출은 아무 일도 하지 않았다(시험주행 발견 5).
@@ -751,6 +822,10 @@ export function Chat() {
           <button type="button" className="to-bottom" title={CHAT.toBottom} aria-label={CHAT.toBottom} onClick={() => toBottom(true)}><Icon name="down" size={18} /></button>
         )}
         {/* 입력칸 위 한 줄 알림 — 기다림·경고·오류가 쓰는 한 자리(알림창 B안). */}
+        {/* 작업 분담 줄(설계 §2-1) — 기존 줄보다 위, 종류 1~5 순서. 낭독 전용 칸을 늘 안에 둔다. */}
+        {!lanesUnavailable && laneLines.length > 0 && (
+          <LaneZone lines={laneLines} announcement={laneAnnouncement} onAction={laneAction} onShowCard={showCard} />
+        )}
         {waiting && <ZoneLine tone="wait" title={waiting === 'prep' ? CHAT.preparingLine : CHAT.appBusyTitle}
           sub={waitingPrep ? CHAT.preparingQueued : waiting === 'write' ? CHAT.appBusyWaitSub : undefined} />}
         {preparation?.phase === 'blocked' && <ZoneLine tone="attn" title={preparationFailureTitle(preparation.error)}
