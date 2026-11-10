@@ -54,8 +54,8 @@ const POLL_MS = 3_000
 const POLL_LIMIT_MS = 180_000
 /**
  * 한 tick 이 매달릴 수 있는 시간. 상태 조회 IPC 가 영영 안 끝나도 감시 전체를 잠그지 않는다 —
- * 이 상한을 넘긴 tick 은 버리고 다음 간격에 새로 묻는다(그 사이 이미 나간 요청은 취소할 수
- * 없으므로 잠시 겹칠 수 있다. 겹침보다 "영영 안 묻는 것"이 훨씬 나쁘다).
+ * 이 상한이 지나면 그 요청의 잠금을 **만료**시켜 다음 간격에 새로 묻는다. 이미 나간 요청은
+ * 취소할 수 없으므로 그때부터는 잠시 겹칠 수 있다. 겹침보다 "영영 안 묻는 것"이 훨씬 나쁘다.
  */
 const POLL_TICK_LIMIT_MS = 15_000
 
@@ -63,8 +63,28 @@ const POLL_TICK_LIMIT_MS = 15_000
 type PollTimer = {
   interval?: ReturnType<typeof setInterval>
   deadline?: ReturnType<typeof setTimeout>
-  /** 지금 돌고 있는 tick 의 안전 타이머 — 감시를 지울 때 함께 지운다. */
-  guard?: ReturnType<typeof setTimeout>
+}
+
+/**
+ * 공급자별 **진행 중 조회** 표 — 감시 세대(교체 포함)를 넘어 공유한다.
+ *
+ * 예전에는 이 표가 Map 에 귀속돼 한 번 매달린 요청이 취소 뒤 새 로그인까지 영영 막았다(검토
+ * RT2-01). 그 고침에서 표를 감시 세대 **안**으로 옮겼더니, 이번에는 반대 불변이 깨졌다:
+ * 교체된 감시의 진행 중 요청과 새 감시의 tick 이 **겹쳐** 같은 공급자의 상태 조회가 동시에
+ * 두 번 나간다(CI `update-poll.spec.ts:62`, `overlap` 2).
+ *
+ * 지금은 두 불변을 함께 지킨다:
+ *  - 표는 세대 공용이다 → 교체해도 진행 중 요청과 겹치지 않는다(겹침 0).
+ *  - 표의 항목에는 상한(`POLL_TICK_LIMIT_MS`)이 있다 → 매달린 요청이 영영 잠그지 않는다.
+ * 늦게 끝난 옛 tick 이 이미 만료된 항목을 지우거나 새 항목의 잠금을 풀지 않도록 번호를 본다.
+ */
+type InflightRead = { seq: number; timer: ReturnType<typeof setTimeout> }
+const pendingReads = new WeakMap<Map<Provider, PollTimer>, Map<Provider, InflightRead>>()
+
+function inflightOf(map: Map<Provider, PollTimer>): Map<Provider, InflightRead> {
+  let pending = pendingReads.get(map)
+  if (!pending) { pending = new Map(); pendingReads.set(map, pending) }
+  return pending
 }
 
 /**
@@ -77,10 +97,10 @@ const globalPolls = new Map<Provider, PollTimer>()
 function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
   if (provider) {
     const timer = map.get(provider)
-    if (timer) { clearInterval(timer.interval); clearTimeout(timer.deadline); clearTimeout(timer.guard); map.delete(provider) }
+    if (timer) { clearInterval(timer.interval); clearTimeout(timer.deadline); map.delete(provider) }
     return
   }
-  for (const timer of map.values()) { clearInterval(timer.interval); clearTimeout(timer.deadline); clearTimeout(timer.guard) }
+  for (const timer of map.values()) { clearInterval(timer.interval); clearTimeout(timer.deadline) }
   map.clear()
 }
 
@@ -88,14 +108,14 @@ function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
  * 감시 하나를 건다. `onExpire` 는 감시가 끝까지(3분) 확인하지 못했을 때 **표시를 내리는**
  * 몫이다 — 예전에는 타이머만 지워서 화면이 "로그인 중"에 영원히 머물렀다(검토 RT2-01).
  *
- * 진행 중 표시(`running`)는 **이 감시 세대 안에만** 있다. 예전에는 Map 에 귀속된 Set 이라
- * 한 번 매달린 tick 이 취소 뒤 **새 로그인**까지 영영 막았다.
+ * 진행 중 조회 잠금은 **감시 세대 공용**(`pendingReads`)이고 항목마다 상한이 있다:
+ *  - 교체·취소해도 진행 중 요청과 겹치지 않는다(`update-poll` 겹침 0 불변).
+ *  - 15초 상한이 지나면 그 항목을 만료시켜 다음 tick 이 다시 묻는다(RT2-01 멈춘 tick 회복).
+ * 늦게 끝난 옛 요청은 자기 번호가 아니면 아무것도 건드리지 않는다.
  */
 function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void {
   clearPoll(map, provider)
-  /** 지금 돌고 있는 tick 의 번호. 늦게 끝난 옛 tick 이 새 tick 의 잠금을 풀지 않게 한다. */
-  let tickSeq = 0
-  let running = false
+  const pending = inflightOf(map)
   const timer: PollTimer = {}
   const stop = (expired: boolean): void => {
     if (map.get(provider) !== timer) return
@@ -103,17 +123,22 @@ function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Pro
     if (expired) onExpire?.()
   }
   timer.interval = setInterval(() => {
-    if (running || map.get(provider) !== timer) return
-    const mine = ++tickSeq
-    running = true
-    timer.guard = setTimeout(() => { if (mine === tickSeq) running = false }, POLL_TICK_LIMIT_MS)
+    if (map.get(provider) !== timer) return
+    // 진행 중 조회가 있으면 이번 간격은 건너뛴다(교체된 감시의 요청 포함).
+    if (pending.has(provider)) return
+    const mine = (pending.get(provider)?.seq ?? 0) + 1
+    const entry: InflightRead = { seq: mine, timer: setTimeout(() => {
+      // 상한: 매달린 요청은 잠금만 만료시킨다(그 요청 자체는 취소할 수 없다).
+      if (pending.get(provider) === entry) pending.delete(provider)
+    }, POLL_TICK_LIMIT_MS) }
+    pending.set(provider, entry)
     void tick()
       .then(done => { if (done) stop(false) })
       .catch(() => { /* tick 실패는 상태(`failed`·`unknown`)로만 드러난다 — 감시는 계속한다 */ })
       .finally(() => {
-        if (mine !== tickSeq) return
-        clearTimeout(timer.guard)
-        running = false
+        if (pending.get(provider) !== entry) return
+        clearTimeout(entry.timer)
+        pending.delete(provider)
       })
   }, POLL_MS)
   timer.deadline = setTimeout(() => stop(true), POLL_LIMIT_MS)
