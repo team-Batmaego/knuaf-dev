@@ -43,6 +43,8 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
   const first = card.variant === 'first' || card.variant === 'settings-enable'
   const settings = card.variant === 'settings-enable' || card.variant === 'settings-revert'
   const busy = state.kind === 'applying' || (pressed !== null && state.kind === 'open' && !slow)
+  /** §3-1 뼈대 4 — 적용 범위 한 줄. 설정 갈래는 [계속]만이라 문구가 다르다. */
+  const scope = settings ? LANE_CARD.scopeSettings : LANE_CARD.scope(first)
 
   if (settled) {
     return (
@@ -54,7 +56,13 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
             {open ? LANE_CARD.folded.detailsClose : LANE_CARD.folded.details}
           </button>
         </div>
-        {open && <CardBody card={card} first={first} settings={settings} detail setDetail={() => undefined} readOnly />}
+        {open && (
+          <>
+            <CardBody card={card} detail setDetail={() => undefined} readOnly />
+            {/* 접힌 카드의 [자세히]는 읽기 전용이라 단추가 없다 — 범위 줄은 표 아래 한 줄로 남긴다. */}
+            <p className="scope">{scope}</p>
+          </>
+        )}
       </div>
     )
   }
@@ -62,7 +70,6 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
   const changed = card.rows.filter((row) => row.after && !row.rejected).length
   const allRejected = changed === 0
   const allApplied = changed === card.rows.length
-  const scope = settings ? LANE_CARD.scopeSettings : LANE_CARD.scope(first)
   const actions: { action: CardAction; label: string; look: string }[] = []
   if (settings) {
     actions.push({ action: 'continue', label: LANE_CARD.act.settingsContinue, look: 'primary' })
@@ -91,7 +98,7 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
       {card.variant === 'first' && <p className="lead">{LANE_CARD.firstLead}</p>}
       {card.reviewDue && <p className="lead">{LANE_CARD.reviewDue}</p>}
       {card.quote && <p className="quote">{LANE_CARD.quote(card.quote)}</p>}
-      <CardBody card={card} first={first} settings={settings} detail={detail} setDetail={setDetail} />
+      <CardBody card={card} detail={detail} setDetail={setDetail} />
       {card.fastDrain && <p className="scope">ⓘ {LANE_CARD.fastDrain}</p>}
       <div className="lane-actions">
         {actions.map((item) => (
@@ -119,10 +126,8 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
 }
 
 /** 카드 본문 — 열린 카드와 접힌 카드의 [자세히]가 같은 것을 보여 준다(읽기 전용이면 단추 없음). */
-function CardBody({ card, first, settings, detail, setDetail, readOnly = false }: {
+function CardBody({ card, detail, setDetail, readOnly = false }: {
   card: LaneCard
-  first: boolean
-  settings: boolean
   detail: boolean
   setDetail: (value: boolean) => void
   readOnly?: boolean
@@ -181,7 +186,6 @@ function CardBody({ card, first, settings, detail, setDetail, readOnly = false }
           ))}
         </div>
       )}
-      {!settings && <p className="scope">{LANE_CARD.scope(first)}</p>}
       {design?.designSwitchTo && <p className="scope">{LANE_CARD.designSwitch(providerName(design.designSwitchTo))}</p>}
     </>
   )

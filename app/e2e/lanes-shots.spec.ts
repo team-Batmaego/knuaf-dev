@@ -166,7 +166,11 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
     // 동의 안 한 회사가 끼면 요금 상자(§3 뼈대 6).
     await expect(card.locator('.lane-risk')).toContainText('ChatGPT 요금 안내에 아직 동의하지 않았어요')
     await expect(card.locator('.lane-actions button')).toHaveText(['이 배치로 계속', '이번만', '나눠 맡기지 않기'])
-    await expect(card.locator('p.scope').last()).toContainText('계속: 이 논문의 기본 배치가 돼요')
+    // §3-1 뼈대 4: 적용 범위는 **단추 아래 한 곳**에만. 카드 본문(단추 위)에 또 있으면 문구가 두 번 읽힌다.
+    const scopes = card.getByText(/^계속: 이 논문의 기본 배치가 돼요/)
+    await expect(scopes, '적용 범위 줄이 카드에 두 번 나온다').toHaveCount(1)
+    const [scopeBox, actsBox] = [await scopes.first().boundingBox(), await card.locator('.lane-actions').boundingBox()]
+    expect(scopeBox && actsBox && scopeBox.y >= actsBox.y + actsBox.height - 1, '적용 범위 줄이 단추 위에 있다').toBe(true)
     await places()
     await shoot(page, 'lane-card-open')
 
