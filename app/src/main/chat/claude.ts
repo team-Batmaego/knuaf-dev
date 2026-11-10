@@ -11,6 +11,8 @@ import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import type { ConnectionStatus } from '../../shared/chat'
 import { CLAUDE_AUTH_COPY } from '../../shared/copy'
+import { tokenRecord, claudeTokens } from './jobs/tokens'
+import { appendTokenRecord } from './jobs/token-log'
 
 export class ClaudeAuthenticationError extends Error {
   constructor() { super(CLAUDE_AUTH_COPY.required) }
@@ -723,6 +725,41 @@ export class ClaudeConnection implements AgentConnection {
   private controller?: AbortController
   private approvals = new Map<string, (allow: boolean) => void>()
   constructor(private options: AgentOptions) {}
+  /**
+   * 한 턴(`result`)의 토큰 사용량을 대화별 JSONL 한 줄로 남긴다. 숫자와 식별자만 담고
+   * 학생 글은 담지 않는다. 기록은 비동기·best-effort 라 대화를 막지 않는다(token-log.ts).
+   * 요청 순번은 연결이 아니라 로그 파일에서 이어받으므로 재연결 뒤에도 [1, 2] 로 남는다.
+   */
+  private recordTokenUsage(message: { usage?: unknown; session_id?: unknown }, sessionId: string | undefined): void {
+    try {
+      const usage = message.usage as
+        | { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown }
+        | undefined
+      if (!usage || typeof usage.input_tokens !== 'number' || typeof usage.output_tokens !== 'number') return
+      // 클로저 안에서는 타입 좁히기가 유지되지 않으므로 숫자를 먼저 꺼내 둔다.
+      const input = usage.input_tokens
+      const output = usage.output_tokens
+      const cacheRead = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : undefined
+      const cacheWrite = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : undefined
+      const conversationId = typeof message.session_id === 'string' && message.session_id ? message.session_id : sessionId ?? ''
+      appendTokenRecord(this.options.root, 'claude', {
+        conversationId,
+        // 결과 한 건이 곧 한 요청이다 — 알림 순번을 요청과 섞지 않는다.
+        turnKey: randomUUID(),
+        build: ({ requestSequence, notificationSequence }) => tokenRecord({
+          conversationId, jobId: '', company: 'claude',
+          model: this.options.env.KNUAF_CLAUDE_MODEL ?? '',
+          effort: this.options.env.KNUAF_CLAUDE_EFFORT ?? null,
+          role: 'chat'
+        }, claudeTokens({
+          input_tokens: input,
+          output_tokens: output,
+          ...(cacheRead === undefined ? {} : { cache_read_input_tokens: cacheRead }),
+          ...(cacheWrite === undefined ? {} : { cache_creation_input_tokens: cacheWrite })
+        }, requestSequence, notificationSequence), new Date().toISOString())
+      })
+    } catch { /* 기록 실패는 대화를 막지 않는다 */ }
+  }
   private autoAllowed(name: string, input: unknown): boolean {
     return autoAllow(this.options.root, name, input, registeredSources(this.options.root))
   }
@@ -887,7 +924,10 @@ export class ClaudeConnection implements AgentConnection {
           const text = message.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
           if (text) events.message(message.uuid, text)
         }
-        if (message.type === 'result' && message.is_error) throw new Error('Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
+        if (message.type === 'result') {
+          this.recordTokenUsage(message, sessionId)
+          if (message.is_error) throw new Error('Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
+        }
       }
       // 턴이 성공으로 끝나도 그 안에서 조용히 죽은 작업이 있으면 그대로 말한다.
       // 이걸 안 하면 도우미의 마무리 인사만 남고 실패는 아무 데도 안 보인다.

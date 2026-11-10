@@ -1,8 +1,11 @@
 import { MODEL_SELECTION_COPY } from '../../shared/copy'
+import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
 import { applyRejection, recordRejection } from './rejectLog'
+import { codexTokens, tokenRecord, type TokenCounts } from './jobs/tokens'
+import { appendTokenRecord } from './jobs/token-log'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
@@ -98,8 +101,38 @@ export class CodexConnection implements AgentConnection {
   private serverArgs: string[]
   /** stop() 이후에는 진행 중인 connect() 의 재시도가 새 프로세스를 다시 띄우지 않는다. */
   private stopped = false
+  /** 이 턴에 **실제로 적용된** model·effort 와 턴 식별자 — 기록의 귀속 기준(검토 CT-02). */
+  private turnTokens?: { key: string; model: string; effort: string | null }
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
+  }
+  /**
+   * `thread/tokenUsage/updated` 알림 하나를 대화별 JSONL 한 줄로 남긴다. `last`(이번 턴)와
+   * `total`(서버 누적)을 **더하지 않고** 그대로 옮기며, 숫자·식별자만 담는다.
+   * 기록은 비동기·best-effort 라 대화를 막지 않는다(token-log.ts).
+   */
+  private recordTokenUsage(p: { threadId?: unknown; turnId?: unknown; tokenUsage?: unknown }): void {
+    try {
+      const usage = p.tokenUsage as
+        | { last?: unknown; total?: unknown }
+        | undefined
+      if (!usage || typeof usage.last !== 'object' || !usage.last || typeof usage.total !== 'object' || !usage.total) return
+      const conversationId = typeof p.threadId === 'string' && p.threadId ? p.threadId : this.thread ?? ''
+      if (!conversationId) return
+      // 턴마다 새 키 — 같은 턴의 알림 여러 개만 한 요청으로 묶고, 다음 턴은 새 요청이다.
+      // (서버 턴 id 를 키로 쓰면 재연결 뒤 같은 id 가 다시 와도 이어 세게 된다.)
+      const turnKey = this.turnTokens?.key ?? ''
+      if (!turnKey) return
+      const model = this.turnTokens?.model ?? ''
+      const effort = this.turnTokens?.effort ?? null
+      appendTokenRecord(this.options.root, 'codex', {
+        conversationId, turnKey,
+        build: ({ requestSequence, notificationSequence }) => tokenRecord({
+          conversationId, jobId: '', company: 'codex', model, effort, role: 'chat'
+        }, codexTokens({ last: usage.last as TokenCounts, total: usage.total as TokenCounts }, requestSequence, notificationSequence),
+        new Date().toISOString())
+      })
+    } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
   private async connect(): Promise<JsonRpcProcess> {
     if (this.stopped) throw new Error('Codex 연결이 중단됐어요.')
@@ -145,6 +178,10 @@ export class CodexConnection implements AgentConnection {
           provider: 'codex', command: p.item.command, output: p.item.aggregatedOutput, exitCode: p.item.exitCode
         })
         if (record) recordRejection(join(this.options.root, '.knuaf-gui', 'apply-reject.log'), record)
+      } else if (method === 'thread/tokenUsage/updated') {
+        // 캐시 토큰(cachedInputTokens·cacheWriteInputTokens)을 대화별로 기록만 한다 — 동작 불변.
+        // last 는 이번 턴, total 은 서버가 준 누적이다. 앱이 더하지 않고 그대로 옮긴다.
+        this.recordTokenUsage(p)
       }
       if (method === 'item/agentMessage/delta') {
         const text = (this.messages.get(p.itemId) ?? '') + p.delta
@@ -343,6 +380,16 @@ export class CodexConnection implements AgentConnection {
      * 서버가 새 대화에 쓰는 기본값을 명시적으로 다시 보낸다(검토 MC1-01).
      */
     const turnModel = await this.turnModelParams(!!sessionId)
+    /**
+     * 기록에 남길 **실제 적용값**(검토 CT-02). `thread/start` 응답은 이전 값이고, 학생이 이 턴에
+     * 고른 model·effort 는 `turn/start` 에 실려 나간다 — 보낸 값이 있으면 그 값이 이 턴에 적용된다.
+     * 없으면 이 대화가 지금 쓰는 값(thread 응답)이다.
+     */
+    this.turnTokens = {
+      key: randomUUID(),
+      model: turnModel.params.model ?? this.threadModel ?? this.options.env.KNUAF_CODEX_MODEL ?? '',
+      effort: turnModel.params.effort ?? this.threadEffort ?? this.options.env.KNUAF_CODEX_EFFORT ?? null
+    }
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {
