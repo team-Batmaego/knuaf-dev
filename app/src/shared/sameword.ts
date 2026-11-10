@@ -130,10 +130,54 @@ export function vanishedWordPairs(beforeBlock: string, afterBlock: string): Word
   return out
 }
 
+/** `](` 다음의 괄호 짝이 맞는 구간 — 중첩 괄호를 세어 찾는다. */
+function linkDestinations(text: string): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = []
+  const opener = /\]\(/g
+  let m: RegExpExecArray | null
+  while ((m = opener.exec(text)) !== null) {
+    const start = m.index + 1
+    let depth = 0
+    for (let i = start; i < text.length; i++) {
+      if (text[i] === '(') depth += 1
+      else if (text[i] === ')') {
+        depth -= 1
+        if (depth === 0) {
+          out.push({ start, end: i + 1 })
+          opener.lastIndex = i + 1
+          break
+        }
+      } else if (text[i] === '\n' && depth === 0) break
+    }
+  }
+  return out
+}
+
+/** 인라인 코드 자리 — 여는 백틱과 같은 길이의 백틱이 닫는다. */
+function inlineCodeSpans(text: string): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = []
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== '`') {
+      i += 1
+      continue
+    }
+    let ticks = 0
+    while (text[i + ticks] === '`') ticks += 1
+    const fence = '`'.repeat(ticks)
+    const close = text.indexOf(fence, i + ticks)
+    if (close === -1) break
+    out.push({ start: i, end: close + ticks })
+    i = close + ticks
+  }
+  return out
+}
+
 /**
  * 본문 글자만 표시한 마스크. `true` 인 자리에서만 낱말을 세고 바꾼다.
  *
- * 마스크 대상: 코드 펜스(``` ~~~), HTML 주석, 링크·이미지의 괄호 안 주소, 수식(`$…$`, `$$…$$`).
+ * 마스크 대상: 코드 펜스(``` ~~~)와 인라인 코드(`` `…` ``), HTML 주석, 링크·이미지의 괄호 안
+ * 주소, 수식(`$…$`, `$$…$$`).
  */
 export function bodyMask(text: string): boolean[] {
   const mask = new Array<boolean>(text.length).fill(true)
@@ -158,10 +202,15 @@ export function bodyMask(text: string): boolean[] {
     offset += line.length + 1
   }
   if (fence !== null) hide(fenceStart, text.length)
+  // 인라인 코드 — 펜스 밖의 `` `…` ``.
+  for (const span of inlineCodeSpans(text)) {
+    if (mask[span.start]) hide(span.start, span.end)
+  }
   // HTML 주석.
   for (const m of text.matchAll(/<!--[\s\S]*?-->/g)) hide(m.index, m.index + m[0].length)
-  // 링크·이미지의 괄호 안 주소: `(…)` 만 숨긴다 — 보이는 링크 글자는 본문이다.
-  for (const m of text.matchAll(/\]\([^)\n]*\)/g)) hide(m.index + 1, m.index + m[0].length)
+  // 링크·이미지의 괄호 안 주소: 괄호 짝을 세어 끝을 찾는다 — 주소 안의 `(x)` 같은 괄호에서
+  // 멈추면 그 뒤 주소 글자가 본문으로 새어 나온다(Roh 1회째 중요 7).
+  for (const at of linkDestinations(text)) hide(at.start, at.end)
   // 수식 — `$$…$$` 를 먼저 지우고 남은 `$…$` 를 지운다.
   const math = /(\$\$[\s\S]*?\$\$)|(\$[^$\n]*\$)/g
   for (const m of text.matchAll(math)) hide(m.index, m.index + m[0].length)

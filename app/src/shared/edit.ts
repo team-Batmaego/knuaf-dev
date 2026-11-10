@@ -56,13 +56,23 @@ function patternOf(text: string): RegExp {
   return new RegExp(parts.join('\\s+'), 'g')
 }
 
+/**
+ * 겹치는 자리까지 센다 — `가가가` 에서 `가가` 는 0·1 두 자리다.
+ *
+ * 겹치지 않게 세면(`exec` 반복) 화면에서 두 번째 `가가` 를 골라도 횟수가 0이라 엉뚱한
+ * 자리를 고친다(Roh 1회째 중요 6). 찾은 구간 길이는 패턴이 잰 것과 같다.
+ */
 function allMatches(re: RegExp, text: string): Array<{ start: number; end: number }> {
   const out: Array<{ start: number; end: number }> = []
-  re.lastIndex = 0
+  const scan = new RegExp(re.source, 'g')
   let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
+  while ((m = scan.exec(text)) !== null) {
+    if (m[0] === '') {
+      scan.lastIndex += 1
+      continue
+    }
     out.push({ start: m.index, end: m.index + m[0].length })
-    if (m[0] === '') re.lastIndex += 1
+    scan.lastIndex = m.index + 1
   }
   return out
 }
@@ -85,8 +95,9 @@ export function replacementViolation(text: string): 'newline' | 'marker' | null 
 }
 
 /**
- * 선택 글자 → 그 문단 원고 안의 구간. 여러 번 맞으면 `renderedBefore` 에서 센 횟수로
- * k번째를 고른다(설계 §4-1 3). 렌더 글자와 원고에서 맞는 총 횟수가 다르면 거절한다.
+ * 선택 글자 → 그 문단 원고 안의 구간. 여러 번 맞으면 `renderedBefore` 안에서 **시작한**
+ * 맞은 자리 수로 k번째를 고른다(설계 §4-1 3, 겹치는 자리 포함). 렌더 글자와 원고에서
+ * 맞는 총 횟수가 다르면 거절한다.
  */
 export function locateSelection(input: SelectionInput): Result<Located> {
   const blocks = splitBlocks(input.draft)
@@ -99,7 +110,10 @@ export function locateSelection(input: SelectionInput): Result<Located> {
   if (here.length === 0) return { ok: false, reason: 'not_located' }
   const rendered = allMatches(re, input.renderedBlock)
   if (rendered.length !== here.length) return { ok: false, reason: 'ambiguous' }
-  const occurrence = allMatches(re, input.renderedBefore).length
+  // 선택이 화면 문단에서 시작하는 자리 = 앞부분 글자 수. 그 앞에서 시작한 맞은 자리를 센다 —
+  // 앞부분에서 패턴이 통째로 맞는 횟수를 세면 겹치는 글자에서 0이 되어 자리를 놓친다.
+  const selectionStart = input.renderedBefore.trimEnd().length
+  const occurrence = rendered.filter((at) => at.start < selectionStart).length
   const hit = here[occurrence]
   if (hit === undefined) return { ok: false, reason: 'ambiguous' }
   return { ok: true, before_block: block, start: hit.start, end: hit.end, occurrence }

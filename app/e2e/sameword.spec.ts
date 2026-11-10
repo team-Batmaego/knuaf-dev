@@ -134,3 +134,12 @@ test('같은 문단의 여러 자리는 한 건으로 합치고, 치환은 뒤�
     { section_id: 'sec-02', before_block: '트랙터는 비싸다.', after_block: '경운기는 비싸다.' }
   ])
 })
+
+test('인라인 코드와 중첩 괄호 링크 주소 안 낱말은 본문으로 세지 않는다', () => {
+  expect(findPlaces([{ id: 'sec-01', draft: '사용 명령은 `트랙터`이다.' }], '트랙터')).toEqual([])
+  expect(findPlaces([{ id: 'sec-01', draft: '[자료](https://example.test/(x)트랙터.png)' }], '트랙터')).toEqual([])
+  // 보이는 링크 글자는 본문이다 — 주소만 숨긴다.
+  const visible = findPlaces([{ id: 'sec-01', draft: '[트랙터 자료](https://example.test/x.png)' }], '트랙터')
+  expect(visible).toHaveLength(1)
+  expect(visible[0].start).toBe(1)
+})

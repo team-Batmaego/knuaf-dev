@@ -6,7 +6,9 @@
   프로세스에서 `methods_edit` 의 저장 단계를 직접 몬다. 주입한 실패만 다르고 파일
   조작은 제품 코드 그대로다.
 """
+import hashlib
 import json
+import os
 import sys
 
 import pytest
@@ -234,7 +236,7 @@ def test_editing_the_claim_quote_needs_a_check_and_names_claim_location(sidecar,
     assert result["needs_check"] is True
     assert "claim_location" in {issue["check_id"] for issue in result["new_issues"]}
 
-    listed = {row["edit_id"]: row for row in sidecar.ok("section.edits", root=str(root))["result"]}
+    listed = {row["edit_id"]: row for row in sidecar.ok("section.edits", root=str(root))["result"]["edits"]}
     remaining = {i["check_id"] for i in listed[result["edit_id"]]["remaining_issues"]}
     assert "claim_location" in remaining
 
@@ -351,14 +353,14 @@ def test_sent_alone_does_not_clear_the_mark_until_the_turn_ends(sidecar, project
 
 
 def _find(sidecar, root, edit_id):
-    rows = sidecar.ok("section.edits", root=str(root))["result"]
+    rows = sidecar.ok("section.edits", root=str(root))["result"]["edits"]
     return next(row for row in rows if row["edit_id"] == edit_id)
 
 
 def test_a_confirmed_request_without_a_ledger_row_is_revived_as_lost(sidecar, project):
     first = _ok(sidecar, project)
     (project / ".knuaf-gui" / "student-edits.jsonl").unlink()
-    rows = sidecar.ok("section.edits", root=str(project))["result"]
+    rows = sidecar.ok("section.edits", root=str(project))["result"]["edits"]
     lost = [row for row in rows if row.get("lost_record")]
     assert len(lost) == 1
     assert lost[0]["edit_id"].startswith(methods_edit.REQUEST_PREFIX)
@@ -371,7 +373,7 @@ def test_a_broken_ledger_line_is_skipped_not_erased(sidecar, project):
     first = _ok(sidecar, project)
     path = project / ".knuaf-gui" / "student-edits.jsonl"
     path.write_text(path.read_text(encoding="utf-8") + "{깨진 줄\n", encoding="utf-8")
-    rows = sidecar.ok("section.edits", root=str(project))["result"]
+    rows = sidecar.ok("section.edits", root=str(project))["result"]["edits"]
     assert [row["edit_id"] for row in rows] == [first["edit_id"]]
     assert "{깨진 줄" in path.read_text(encoding="utf-8")
 
@@ -492,7 +494,8 @@ def test_committed_cleanup_pending_is_success_with_a_warning(project, monkeypatc
     assert "cleanup_warning" in result
     assert TYPED in (project / "sections" / "01.md").read_text(encoding="utf-8")
     # 확정(_cleanup_pending)은 보존 폴더를 지우지 않는다 — 실패 원인을 남겨 둔다(§4-2 7).
-    backups = list((project / ".knuaf-gui" / "edit-backup").glob("*/displaced-1-sec-01"))
+    # 파일 이름은 절 ID 대신 순번이다(§4-4-1).
+    backups = list((project / ".knuaf-gui" / "edit-backup").glob("*/displaced-1-0"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == original
 
@@ -545,73 +548,93 @@ def test_indeterminate_and_unreadable_leaves_the_files_alone(project, monkeypatc
 # ── 트랜잭션: 끼어들기 세 순서에서 지워지는 바이트가 없다 ─────────────────
 
 
-def _record(root, data):
+def _record(root, data, n=0):
     path = root / "sections" / "01.md"
+    raw = path.read_bytes()
     return {
+        "n": n,
         "section_id": "sec-01",
         "path": path,
-        "raw": path.read_bytes(),
+        "rel": "sections/01.md",
+        "raw": raw,
         "new": data,
         "mode": path.stat().st_mode & 0o7777,
+        "sha_a": hashlib.sha256(raw).hexdigest(),
+        "sha_c": hashlib.sha256(data).hexdigest(),
     }
 
 
 def _backup(root, name="t1"):
-    return root / ".knuaf-gui" / "edit-backup" / name
+    bundle = root / ".knuaf-gui" / "edit-backup" / name
+    bundle.mkdir(parents=True, exist_ok=True)
+    return bundle
+
+
+def _new_file(bundle, record):
+    (bundle / ("new-%d" % record["n"])).write_bytes(record["new"])
 
 
 def test_place_never_overwrites_an_existing_file(project):
     path = project / "sections" / "01.md"
     original = path.read_bytes()
+    bundle = _backup(project)
+    record = _record(project, b"new bytes")
+    _new_file(bundle, record)
     with pytest.raises(FileExistsError):
-        methods_edit._place_noclobber(path, b"new bytes", 0o644)
+        methods_edit._place(path, bundle / "new-0")
     assert path.read_bytes() == original
-    assert not [n for n in path.parent.iterdir() if n.name.startswith(".gg-edit-")]
 
 
 def test_an_outside_writer_before_displacement_is_preserved(project):
     record = _record(project, b"C\n")
-    backup = _backup(project)
+    bundle = _backup(project)
+    _new_file(bundle, record)
     stray = b"B: outside writer\n"
     (project / "sections" / "01.md").write_bytes(stray)
 
-    methods_edit._write_manuscripts([record], backup)
     with pytest.raises(RpcError) as caught:
-        methods_edit._verify_displaced([record])
+        methods_edit._store_file(bundle, record)
     assert caught.value.code == "stale_view"
-    methods_edit._revert([record], backup)
+    methods_edit._revert([record], bundle)
+    # 4-4-2 '비어 있음': 밀어낸 그 글이 그대로 제자리로 돌아온다(보존 이름은 뗀다).
     assert (project / "sections" / "01.md").read_bytes() == stray
+    assert not (bundle / "displaced-1-0").exists()
 
 
-def test_an_outside_writer_between_verify_and_place_is_preserved(project):
+def test_an_outside_writer_between_verify_and_place_is_preserved(project, monkeypatch):
     record = _record(project, b"C\n")
-    backup = _backup(project)
-    methods_edit._write_manuscripts([record], backup)
-    methods_edit._verify_displaced([record])
+    bundle = _backup(project)
+    _new_file(bundle, record)
     stray = b"B: slipped in between\n"
-    (project / "sections" / "01.md").write_bytes(stray)
+    real_place = methods_edit._place
 
+    def place_with_interloper(path, src):
+        path.write_bytes(stray)  # 확인과 놓기 사이에 남이 쓴 글
+        return real_place(path, src)
+
+    monkeypatch.setattr(methods_edit, "_place", place_with_interloper)
     with pytest.raises(RpcError) as caught:
-        methods_edit._place([record])
+        methods_edit._store_file(bundle, record)
     assert caught.value.code == "stale_view"
-    methods_edit._revert([record], backup)
+    monkeypatch.undo()
+    methods_edit._revert([record], bundle)
+    # 4-4-2 '파일이 있음': 그 글이 C 가 아니므로 그것을 제자리에 돌려놓고 A 는 보관한다.
     assert (project / "sections" / "01.md").read_bytes() == stray
-    assert (backup / "displaced-1-sec-01").read_bytes() == record["raw"]
+    assert (bundle / "displaced-1-0").read_bytes() == record["raw"]
 
 
 def test_an_outside_writer_after_place_is_preserved(project):
     record = _record(project, b"C\n")
-    backup = _backup(project)
-    methods_edit._write_manuscripts([record], backup)
-    methods_edit._verify_displaced([record])
-    methods_edit._place([record])
+    bundle = _backup(project)
+    _new_file(bundle, record)
+    methods_edit._store_file(bundle, record)
     assert (project / "sections" / "01.md").read_bytes() == b"C\n"
     stray = b"B: last writer wins\n"
     (project / "sections" / "01.md").write_bytes(stray)
 
-    methods_edit._revert([record], backup)  # apply 가 개정 불일치로 거절한 상황
+    methods_edit._revert([record], bundle)  # apply 가 개정 불일치로 거절한 상황
     assert (project / "sections" / "01.md").read_bytes() == stray
-    assert (backup / "displaced-1-sec-01").read_bytes() == record["raw"]
+    assert (bundle / "displaced-1-0").read_bytes() == record["raw"]
 
 
 def test_a_folder_that_cannot_place_without_overwriting_refuses_the_save(project, monkeypatch):
@@ -688,3 +711,416 @@ def test_a_failure_mid_displacement_leaves_every_manuscript_alone(two_sections, 
 def test_draft_span_matches_draft_for_every_manuscript_shape(text):
     start, end = methods_edit._draft_span(core, text)
     assert text[start:end].strip() == core.draft(text)
+
+
+# ── Roh 1회째 반례 뒤집기 (§4-4-7 기대 결과 · §4-4-8 10) ───────────────────
+
+
+def _has_bytes(root, needle):
+    return any(needle in path.read_bytes() for path in root.rglob("*") if path.is_file())
+
+
+@pytest.mark.parametrize("failure", ["occupied", "disk_full"])
+def test_review_batch_failure_preserves_external_update(two_sections, monkeypatch, failure):
+    """Roh 차단 1 — 묶음 둘째 파일에서 실패해도 손댄 첫 파일 자리의 남의 글 B1 은 남는다."""
+    root = two_sections
+    first = root / "sections" / "01.md"
+    second = root / "sections" / "02.md"
+    outsider = b"UNIQUE_EXTERNAL_STUDENT_UPDATE_B1"
+    real_place = methods_edit._place
+    injected = False
+
+    def place(path, src):
+        nonlocal injected
+        if path == second and not injected:
+            injected = True
+            first.write_bytes(outsider)
+            if failure == "occupied":
+                second.write_bytes(b"UNIQUE_EXTERNAL_STUDENT_UPDATE_B2")
+                raise FileExistsError("review: second path now occupied")
+            raise OSError(28, "review: disk full")
+        return real_place(path, src)
+
+    monkeypatch.setattr(methods_edit, "_place", place)
+    p = core.load(root)
+    with pytest.raises(RpcError):
+        methods_edit.section_edit_batch(None, {
+            "root": str(root), "expected_revision": p["revision"],
+            "edits": [
+                {"section_id": "sec-01", "before_block": BODY, "after_block": TYPED},
+                {"section_id": "sec-02", "before_block": "농장A는 600평 규모다.",
+                 "after_block": "농장A는 700평 규모다."},
+            ],
+        })
+    assert injected
+    # 기대(§4-4-7 1): 남의 글은 자리에 그대로, 원래 글 A1 은 보존 폴더에 보관·알림.
+    assert first.read_bytes() == outsider
+    assert _has_bytes(root, outsider)
+    assert any(row["state"] == "aborted" for row in _ledger(root))
+    backups = list((root / ".knuaf-gui" / "edit-backup").glob("*/displaced-1-*"))
+    assert backups, "감춰 둔 원래 글이 보존 폴더에 남아야 한다"
+
+
+def test_review_success_preserves_preopened_writer(two_sections, monkeypatch):
+    """Roh 차단 2 — 성공한 저장이 미리 열어 둔 핸들이 쓴 B 를 지우지 않는다."""
+    root = two_sections
+    path = root / "sections" / "01.md"
+    outsider = b"UNIQUE_PREOPENED_HANDLE_STUDENT_UPDATE_B"
+    real_apply = core.apply
+    clock = {"n": 0}
+
+    with path.open("r+b") as external:
+        def apply(root_arg, change, expected):
+            with external as handle:
+                if clock["n"] == 0:
+                    clock["n"] = 1
+                    handle.seek(0)
+                    handle.write(outsider)
+                    handle.truncate()
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            return real_apply(root_arg, change, expected)
+
+        monkeypatch.setattr(core, "apply", apply)
+        result = methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
+        # 청소는 그 자리에서 돌지 않는다(10분 규칙) — 보존본에 B 가 남아 있어야 한다.
+        assert result["revision"] == core.load(root)["revision"]
+    assert _has_bytes(root, outsider), "성공한 저장이 미리 열어 둔 핸들의 글을 지웠다"
+
+
+def test_review_disk_full_restore_never_leaves_partial_manuscript(two_sections, monkeypatch):
+    """Roh 차단 3 — 되돌리기가 실패하면 원고 자리는 전체 아니면 없음, 알림이 남는다."""
+    root = two_sections
+    path = root / "sections" / "01.md"
+    original = path.read_bytes()
+
+    def no_restore(path_arg, src):
+        raise OSError(28, "review: disk full while restoring")
+
+    # 놓기는 성공하고(원고 자리에서만) 되돌리기(이름 걸기)만 실패하는 경우 — 자리는 비고 글이
+    # 보존 폴더에 통째로 있다. 저장 전 시험(probe)은 정상이어야 그 자리에 닿는다.
+    real_place = methods_edit._place
+
+    def place(target, src):
+        if target == path:
+            raise OSError(28, "review: disk full")
+        return real_place(target, src)
+
+    monkeypatch.setattr(methods_edit, "_restore_noclobber", no_restore)
+    monkeypatch.setattr(methods_edit, "_place", place)
+    with pytest.raises(RpcError) as pending:
+        _call_edit(root)
+    assert pending.value.code == "restore_pending"
+    # 원고 자리는 통째로 있거나 비어 있다 — 반쪽(A1:)이면 안 된다.
+    assert not path.exists() or path.read_bytes() == original
+    assert pending.value.data["backup"]
+    # 줄은 `writing` 그대로 남고, 목록은 그것을 숨기지 않고 알린다.
+    assert [row["state"] for row in _ledger(root)][-1] == "writing"
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    assert any(n["kind"] == "restore_pending" for n in listed["notices"])
+
+
+def test_review_process_exit_restores_or_exposes_interrupted_edit(tmp_path):
+    """Roh 차단 4 — 밀어낸 직후 꺼져도 다음 입구가 원고 자리를 채운다."""
+    import subprocess
+
+    from conftest import SCRIPTS, write_section
+
+    root = tmp_path / "crash"
+    root.mkdir()
+    core.init(root)
+    write_section(root, "sections/01.md", "Ⅰ. 머리말", BODY)
+    p = core.load(root)
+    core.apply(root, {"request_id": "test:crash", "ops": [{"collection": "sections", "value": {
+        "id": "sec-01", "title": "Ⅰ. 머리말", "order": 1, "path": "sections/01.md",
+        "status": "drafting",
+    }}]}, p["revision"])
+    code = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "import gg_core as core\n"
+        "from knuaf_sidecar import methods_edit\n"
+        "root = Path(os.environ['CRASH_ROOT'])\n"
+        "p = core.load(root)\n"
+        "real = methods_edit._displace\n"
+        "def stop(path, dest):\n"
+        "    real(path, dest)\n"
+        "    os._exit(73)\n"
+        "methods_edit._displace = stop\n"
+        "methods_edit.section_edit(None, {'root': str(root), 'id': 'sec-01',\n"
+        "    'expected_revision': p['revision'],\n"
+        "    'expected_draft_hash': p['sections']['sec-01']['draft_hash'],\n"
+        "    'before_block': %r, 'after_block': %r})\n" % (BODY, TYPED)
+    )
+    proc = subprocess.run([sys.executable, "-c", code], env={
+        **os.environ, "CRASH_ROOT": str(root),
+        "PYTHONPATH": str(SCRIPTS) + os.pathsep + str(SIDECAR_DIR),
+    }, check=False)
+    assert proc.returncode == 73
+    assert not (root / "sections" / "01.md").exists()  # 자리가 비었다
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    # 첫 입구가 §4-4-3 표 둘째 줄대로 되돌린다.
+    assert (root / "sections" / "01.md").read_bytes() == original_bytes(root)
+    assert any(n["kind"] == "restored" for n in listed["notices"])
+    assert [row["state"] for row in _ledger(root)][-1] == "aborted"
+
+
+def original_bytes(root):
+    from conftest import END, START
+
+    return ("# Ⅰ. 머리말\n\n%s\n%s\n%s\n" % (START, BODY, END)).encode()
+
+
+def test_review_ledger_symlink_cannot_write_outside_the_project(tmp_path):
+    """Roh 중요 5 — 원장이 바로가기면 논문 폴더 밖 파일에 쓰지 않고 거절한다."""
+    root = tmp_path / "project"
+    root.mkdir()
+    target = tmp_path / "outside-protected.txt"
+    original = b"Outside project data.\n"
+    target.write_bytes(original)
+    app_dir = root / ".knuaf-gui"
+    app_dir.mkdir()
+    try:
+        (app_dir / "student-edits.jsonl").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 파일 시스템은 바로가기를 만들지 못한다")
+    with pytest.raises(RpcError) as caught:
+        methods_edit._append_ledger(root, {"edit_id": "edit-review", "state": "writing"})
+    assert caught.value.code == "ledger_unreadable"
+    assert target.read_bytes() == original
+
+
+def test_review_symlinked_app_folder_is_refused(tmp_path):
+    """§4-4-8 8 — 앱 폴더 자체가 바로가기여도 거절한다."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "project2"
+    root.mkdir()
+    try:
+        (root / ".knuaf-gui").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 파일 시스템은 바로가기를 만들지 못한다")
+    with pytest.raises(RpcError) as caught:
+        methods_edit._backup_root(root)
+    assert caught.value.code == "ledger_unreadable"
+    assert not list(outside.iterdir())
+
+
+# ── 단계별 종료 → 복구가 §4-4-3 표와 같은 끝을 낸다 (§4-4-8 10) ──────────
+
+CRASH_SCRIPT = '''
+import os
+from pathlib import Path
+import gg_core as core
+from knuaf_sidecar import methods_edit as m
+
+root = Path(os.environ["CRASH_ROOT"])
+stage = os.environ["CRASH_STAGE"]
+
+def die(*_args, **_kwargs):
+    os._exit(73)
+
+def wrap(name, before=None):
+    real = getattr(m, name)
+    def inner(*args, **kwargs):
+        # 저장 전 시험(⓪)은 그대로 통과시킨다 — 죽는 자리는 실제 저장 단계다.
+        first = args[0] if args else None
+        if first is not None and ".gg-" in Path(str(first)).name:
+            return real(*args, **kwargs)
+        if before is not None:
+            before(*args, **kwargs)
+        real(*args, **kwargs)
+        os._exit(73)
+    setattr(m, name, inner)
+
+if stage == "01_new_file":
+    wrap("_write_backup")
+elif stage == "02_ledger":
+    wrap("_append_ledger")
+elif stage == "03_displace":
+    wrap("_displace")
+elif stage == "03_place":
+    wrap("_place")
+elif stage == "04_apply":
+    real_apply = core.apply
+    def stop(root_arg, change, expected):
+        real_apply(root_arg, change, expected)
+        os._exit(73)
+    core.apply = stop
+elif stage == "05_confirm":
+    wrap("_mark_undone") if os.environ.get("CRASH_UNDO") else None
+    if not os.environ.get("CRASH_UNDO"):
+        wrap("_row")
+
+p = core.load(root)
+if os.environ.get("CRASH_UNDO"):
+    m.section_edit_undo(None, {"root": str(root), "edit_id": os.environ["CRASH_EDIT"],
+                               "expected_revision": p["revision"]})
+else:
+    m.section_edit(None, {"root": str(root), "id": "sec-01",
+                          "expected_revision": p["revision"],
+                          "expected_draft_hash": p["sections"]["sec-01"]["draft_hash"],
+                          "before_block": os.environ["CRASH_BEFORE"],
+                          "after_block": os.environ["CRASH_AFTER"]})
+'''
+
+
+def _crash_project(tmp_path, name="crash"):
+    from conftest import write_section
+
+    root = tmp_path / name
+    root.mkdir()
+    core.init(root)
+    write_section(root, "sections/01.md", "Ⅰ. 머리말", BODY)
+    write_section(root, "sections/02.md", "Ⅱ. 본문", "농장A는 600평 규모다.")
+    p = core.load(root)
+    core.apply(root, {"request_id": "test:crash", "ops": [
+        {"collection": "sections", "value": {
+            "id": "sec-01", "title": "Ⅰ. 머리말", "order": 1, "path": "sections/01.md",
+            "status": "drafting",
+        }},
+        {"collection": "sections", "value": {
+            "id": "sec-02", "title": "Ⅱ. 본문", "order": 2, "path": "sections/02.md",
+            "status": "drafting",
+        }},
+    ]}, p["revision"])
+    return root
+
+
+def _run_crash(root, stage, env=None):
+    import subprocess
+
+    from conftest import SCRIPTS
+
+    script = root.parent / ("crash-%s.py" % stage)
+    script.write_text(CRASH_SCRIPT, encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(script)], env={
+        **os.environ, "CRASH_ROOT": str(root), "CRASH_STAGE": stage,
+        "CRASH_BEFORE": BODY, "CRASH_AFTER": TYPED,
+        "PYTHONPATH": str(SCRIPTS) + os.pathsep + str(SIDECAR_DIR),
+        **(env or {}),
+    }, check=False)
+    return proc.returncode
+
+
+def _manuscript(root):
+    return (root / "sections" / "01.md")
+
+
+@pytest.mark.parametrize("stage,expect", [
+    ("01_new_file", "A"),   # ① 에서 멈춤 — 원고 안 움직임
+    ("02_ledger", "A"),     # ② 뒤 멈춤(원장 줄은 있다) — 원고 안 움직임
+    ("03_displace", "A"),   # ③-1 뒤 — 복구가 돌려놓는다
+    ("03_place", "A"),      # ③-3 뒤 — 복구가 내 글을 걷고 A 를 되돌린다
+])
+def test_crash_at_each_write_stage_leaves_the_original(tmp_path, stage, expect):
+    root = _crash_project(tmp_path, stage)
+    revision = core.load(root)["revision"]
+    original = _manuscript(root).read_bytes()
+    assert _run_crash(root, stage) == 73
+    methods_edit.section_edits(None, {"root": str(root)})  # 입구가 복구한다
+    # §4-4-3: 어느 단계에서 꺼져도 원고 자리는 A 전체이거나(복구 뒤) 복구가 채운다.
+    assert _manuscript(root).read_bytes() == original
+    assert core.load(root)["revision"] == revision  # 정본은 그대로(등록 전)
+    states = [row["state"] for row in _ledger(root)]
+    # 쪽지(②)를 적기 전에 멈춘 단계는 원장에 아무 줄도 남기지 않는다(움직인 것이 없다).
+    assert states == [] or states[-1] in ("aborted", "plain", "pending")
+
+
+def test_crash_after_registration_is_closed_as_pending(tmp_path):
+    """④ 뒤(등록됨)·⑤ 전 — 파일은 손대지 않고 확정 줄을 `pending` 으로 채운다."""
+    root = _crash_project(tmp_path, "confirm")
+    assert _run_crash(root, "04_apply") == 73
+    assert TYPED in _manuscript(root).read_text(encoding="utf-8")
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    assert _manuscript(root).read_bytes().endswith(b"\n")
+    assert TYPED in _manuscript(root).read_text(encoding="utf-8")
+    states = [row["state"] for row in _ledger(root)]
+    assert states[-1] == "pending"
+    assert listed["edits"] and listed["edits"][-1]["state"] == "pending"
+
+
+def test_crash_before_the_confirmation_row_is_closed_once(tmp_path):
+    """⑤ 전 — 파일은 C 그대로, 복구가 확정 줄을 `pending` 으로 채우고 다시 돌아도 안 더한다."""
+    root = _crash_project(tmp_path, "confirm2")
+    assert _run_crash(root, "05_confirm") == 73
+    assert TYPED in _manuscript(root).read_text(encoding="utf-8")
+    assert [row["state"] for row in _ledger(root)] == ["writing"]
+    methods_edit.section_edits(None, {"root": str(root)})
+    after_one = [row["state"] for row in _ledger(root)]
+    assert after_one == ["writing", "pending"]
+    methods_edit.section_edits(None, {"root": str(root)})
+    assert [row["state"] for row in _ledger(root)] == after_one
+
+
+def test_recovery_dying_again_ends_the_same_way(tmp_path):
+    """복구 도중 또 꺼져도 다음에 같은 표로 이어 간다."""
+    root = _crash_project(tmp_path, "recover")
+    original = _manuscript(root).read_bytes()
+    assert _run_crash(root, "03_place") == 73
+    real = methods_edit._restore_noclobber
+    methods_edit._restore_noclobber = lambda *a, **k: (_ for _ in ()).throw(OSError(5, "죽음"))
+    try:
+        stuck = methods_edit.section_edits(None, {"root": str(root)})
+    finally:
+        methods_edit._restore_noclobber = real
+    # 못 돌려놓았으면 줄은 `writing` 그대로, 목록은 숨기지 않고 알린다.
+    assert [row["state"] for row in _ledger(root)] == ["writing"]
+    assert any(n["kind"] == "restore_pending" for n in stuck["notices"])
+    methods_edit.section_edits(None, {"root": str(root)})
+    assert _manuscript(root).read_bytes() == original
+    assert [row["state"] for row in _ledger(root)][-1] == "aborted"
+
+
+def test_cleanup_keeps_a_backup_whose_bytes_changed(tmp_path):
+    """P1 — 지문이 다른 보존본은 10분이 지나도 지우지 않고 `kept` 로 알린다."""
+    root = _crash_project(tmp_path, "cleanup")
+    p = core.load(root)
+    result = _call_edit(root)
+    assert result["revision"] == p["revision"] + 1
+    bundles = list((root / ".knuaf-gui" / "edit-backup").iterdir())
+    assert len(bundles) == 1
+    displaced = bundles[0] / "displaced-1-0"
+    displaced.write_bytes(b"A1: opened handle wrote later")
+    rows = methods_edit._latest(methods_edit._read_ledger(root))
+    for row in rows.values():
+        row["at"] = "2020-01-01T00:00:00+00:00"
+    methods_edit._append_ledger(root, dict(next(iter(rows.values())), at="2020-01-01T00:00:00+00:00"))
+    notices = methods_edit._cleanup(root, methods_edit._read_ledger(root))
+    assert displaced.exists(), "지문이 다른 보존본을 지웠다"
+    assert any(n["kind"] == "kept" for n in notices)
+
+
+def test_cleanup_deletes_matching_backups_only_after_ten_minutes(tmp_path):
+    """§4-4-4 — 10분 안 된 건은 그대로, 지난 건은 지문 같은 것만 지운다."""
+    root = _crash_project(tmp_path, "window")
+    _call_edit(root)
+    bundle = next((root / ".knuaf-gui" / "edit-backup").iterdir())
+    assert (bundle / "displaced-1-0").exists()
+    methods_edit._cleanup(root, methods_edit._read_ledger(root))
+    assert (bundle / "displaced-1-0").exists(), "10분 안 된 건을 지웠다"
+
+    rows = methods_edit._read_ledger(root)
+    for row in rows:
+        row["at"] = "2020-01-01T00:00:00+00:00"
+    methods_edit._cleanup(root, rows)
+    assert not bundle.exists()
+
+
+def test_undo_in_progress_crash_closes_its_own_row(tmp_path):
+    """되돌리기도 자기 `writing` 줄을 열고, 꺼지면 복구가 같은 순서로 닫는다(§4-3)."""
+    root = _crash_project(tmp_path, "undo")
+    first = _call_edit(root)
+    revision = core.load(root)["revision"]
+    assert _run_crash(root, "03_place", {
+        "CRASH_UNDO": "1", "CRASH_EDIT": first["edit_id"],
+    }) == 73
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    ids = [row["edit_id"] for row in listed["edits"]]
+    assert first["edit_id"] in ids
+    states = [row["state"] for row in _ledger(root)]
+    assert states[-1] in ("aborted", "plain", "pending", "undone")
+    assert core.load(root)["revision"] == revision
+    # 원고는 되돌리기 전(고친 글) 또는 되돌린 글 — 둘 중 하나로 온전하다.
+    text = (root / "sections" / "01.md").read_text(encoding="utf-8")
+    assert TYPED in text or BODY in text

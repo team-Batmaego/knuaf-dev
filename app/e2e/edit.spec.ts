@@ -181,3 +181,23 @@ test('고친 글자의 줄바꿈·DRAFT 마커·빈 문단은 거절한다', () 
   expect(replaceInBlock({ ...base, replacement: 'a\nb' })).toEqual({ ok: false, reason: 'invalid_replacement' })
   expect(replaceInBlock({ ...base, replacement: '   ' })).toEqual({ ok: false, reason: 'empty_block' })
 })
+
+test('겹치는 같은 글자는 화면에서 고른 자리를 따른다', () => {
+  // `가가가` 에서 두 번째 `가가` 를 골랐다 — 겹치지 않게 세면 0번째로 가서 앞이 바뀐다.
+  expect(replaceInBlock({
+    draft: '가가가',
+    blockIndex: 0,
+    renderedBlock: '가가가',
+    renderedBefore: '가',
+    selectionText: '가가',
+    replacement: '나'
+  })).toEqual({ ok: true, before_block: '가가가', after_block: '가나' })
+  expect(replaceInBlock({
+    draft: '가가가',
+    blockIndex: 0,
+    renderedBlock: '가가가',
+    renderedBefore: '',
+    selectionText: '가가',
+    replacement: '나'
+  })).toEqual({ ok: true, before_block: '가가가', after_block: '나가' })
+})
