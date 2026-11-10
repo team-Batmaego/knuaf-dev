@@ -1,11 +1,13 @@
 import type { AgentConnection, AgentEvents } from '../contracts'
-import type { Provider, WorkLane } from '../../../shared/chat'
+import type { Provider } from '../../../shared/chat'
 import type { AccountSnapshot, LaneEntry, LanePlan } from '../../../shared/lanes'
 import type { RelayIsolation } from './isolation'
 import type { TokenEvent } from './tokens'
+import type { ConversationOwner, JobLane, JobStatus, UsageState } from '../../../shared/lanes-ipc'
 
-export type JobLane = Exclude<WorkLane, 'design'>
-export type JobStatus = 'queued' | 'running' | 'completed' | 'limit' | 'unknown' | 'auth' | 'stopped' | 'interrupted' | 'rejected' | 'error' | 'violation'
+/** 화면도 읽는 타입은 정의를 `shared/lanes-ipc.ts` 한 곳에 두고 여기서는 재수출만 한다. */
+export type { ConversationOwner, JobLane, JobStatus, UsageState }
+
 export interface InputReference { sourceId: string; path: string; hash: string; section: string }
 export interface JobSpec {
   schema: number
@@ -30,8 +32,6 @@ export interface JobSpec {
   parent?: string
   cause?: 'student-continue-after-limit'
 }
-/** App-owned identity, never read from a job file or lanes.json. */
-export interface ConversationOwner { id: string; sessionId: string; company: Provider }
 export interface JobRecord {
   spec: JobSpec
   rootJobId: string
@@ -50,7 +50,6 @@ export interface JobRecord {
   outputs: string[]
   createdAt: string
 }
-export type UsageState = 'allowed' | 'limit' | 'unknown' | 'auth'
 export interface ExecutionAccount {
   accountId: string
   connected: boolean
