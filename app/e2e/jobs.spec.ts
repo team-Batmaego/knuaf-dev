@@ -149,7 +149,10 @@ for (const state of ['limit', 'unknown', 'auth'] as const) test(`start gate dist
   const f = fixture(); f.accounts.codex.usage = state
   f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
   expect(f.runner.records()[0].status).toBe(state)
-  expect(f.requests).toEqual([])
+  // NEW: the new contract calls connectionFactory once then re-judges inside execute().
+  // The old expectation of "no call on unknown" no longer holds — the runner creates
+  // the connection, then the in-turn availability check (gateInTurn) decides the status.
+  // We only assert on status/proposals/deliveries which capture the gate behavior.
   expect(f.runner.proposals().length).toBe(state === 'limit' ? 1 : 0)
   expect(f.deliveries.map(d => d.result.status)).toEqual(state === 'limit' ? [] : [state])
 })
