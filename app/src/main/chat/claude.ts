@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
@@ -974,37 +974,66 @@ export function relayPluginPath(appDir: string, jobId: string): string {
 
 export function prepareRelayPlugin(appDir: string, jobId: string, skill: string): string {
   const dir = relayPluginPath(appDir, jobId)
+  // 기존 폴더에 표식이 없으면 **우리 것이 아니다** — 그 자리는 쓰지 않는다(덮어쓰기·삭제 금지).
+  if (existsSync(dir) && !ownsRelayPlugin(dir)) {
+    throw new Error('담당 플러그인 자리에 앱이 만들지 않은 폴더가 있어요. 이 주문은 열지 않습니다.')
+  }
   mkdirSync(dir, { recursive: true })
   const manifest = join(dir, '.claude-plugin')
   mkdirSync(manifest, { recursive: true })
   writeFileSync(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }))
   // 스킬 사본은 앱이 소유한 원본에서 이 주문 전용으로 한 번만 뜬다.
   cpSync(skill, join(dir, 'skills', 'knuaf-dev'), { recursive: true, force: true })
+  // 표식은 **다 만든 뒤에** 쓴다 — 정리가 반쯤 만들어진 폴더를 "우리 것"으로 지우지 않게.
+  writeFileSync(join(dir, RELAY_PLUGIN_MARK), JSON.stringify({ version: 1 }) + '\n')
   return dir
 }
 
-/** 주문이 끝났을 때(성공·실패·중단) 그 주문 전용 폴더를 지운다. 없어도 조용히 넘어간다. */
+/** 이 폴더가 앱이 만든 담당 플러그인 폴더인가 — 표식 파일 이름은 `RELAY_PLUGIN_MARK`. */
+const RELAY_PLUGIN_MARK = '.knuaf-relay-plugin'
+
+/**
+ * 소유 판정. **표식 파일**이 있고, 폴더 자체가 링크가 아니고, 그 표식도 링크가 아닐 때만 참이다.
+ * 이름 규칙(`<jobId>`)만으로는 남의 폴더가 우연히 맞을 수 있어 표식을 함께 본다.
+ */
+function ownsRelayPlugin(dir: string): boolean {
+  try {
+    if (lstatSync(dir).isSymbolicLink() || !lstatSync(dir).isDirectory()) return false
+    const mark = lstatSync(join(dir, RELAY_PLUGIN_MARK))
+    return mark.isFile() && !mark.isSymbolicLink()
+  } catch { return false }
+}
+
+/** 주문이 끝났을 때(성공·실패·중단) 그 주문 전용 폴더를 지운다. 우리 것이 아니면 건드리지 않는다. */
 export function removeRelayPlugin(appDir: string, jobId: string): void {
   if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) return
-  try { rmSync(relayPluginPath(appDir, jobId), { recursive: true, force: true }) } catch { /* 다음 시작 정리가 맡는다 */ }
+  const path = relayPluginPath(appDir, jobId)
+  // 표식이 없으면 이 폴더는 우리가 만든 것이 아니다 — 지우지 않는다.
+  if (!ownsRelayPlugin(path)) return
+  try { rmSync(path, { recursive: true, force: true }) } catch { /* 다음 시작 정리가 맡는다 */ }
 }
 
 /**
  * 앱 시작 때 지난 실행의 잔여 폴더를 치운다.
  *
- * 지우는 것은 **이 앱이 만든 폴더 이름**뿐이다 — `relay-plugin/` 바로 아래 항목이고, 그 아래
- * `.claude-plugin`·`skills` 만 앱이 쓴다. 링크는 따라가지 않도록 `rmSync` 대신 항목별로 지운다.
+ * **앱이 만든 것만** 지운다:
+ *  · 기준 폴더(`relay-plugin`)가 링크면 **아무것도 하지 않는다** — 바깥을 우리 저장소로 착각하면
+ *    남의 파일을 지울 수 있다(검토 4회차 정적 분석).
+ *  · 항목마다 `ownsRelayPlugin` 로 표식을 확인한다. 표식이 없는 폴더·파일은 남긴다.
+ *  · 항목이 링크면 따라가지 않고 링크 자체만 지운다 — 그것도 표식이 없으면 그대로 둔다.
  */
 export function sweepRelayPlugins(appDir: string): void {
   const base = join(appDir, 'relay-plugin')
   let names: string[]
-  try { names = readdirSync(base) } catch { return }
+  try {
+    const stat = lstatSync(base)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return
+    names = readdirSync(base)
+  } catch { return }
   for (const name of names) {
     const path = join(base, name)
-    try {
-      if (lstatSync(path).isSymbolicLink()) { unlinkSync(path); continue }
-      rmSync(path, { recursive: true, force: true })
-    } catch { /* 하나 못 지워도 나머지는 지운다 */ }
+    if (!ownsRelayPlugin(path)) continue
+    try { rmSync(path, { recursive: true, force: true }) } catch { /* 하나 못 지워도 나머지는 지운다 */ }
   }
 }
 

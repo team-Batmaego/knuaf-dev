@@ -98,15 +98,90 @@ test('[차단 1·3회차] 주문이 끝나면 플러그인 폴더를 지운다',
   expect(() => removeRelayPlugin(appDir, 'j1')).not.toThrow()
 })
 
-/** 앱 시작 때 남은 것을 치운다 — 지난 실행이 중간에 죽어 남긴 폴더. */
-test('[차단 1·3회차] 앱 시작 정리가 지난 실행의 잔여 폴더를 지운다', () => {
-  const { skill } = fixtureRoot('plugin-sweep')
-  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay4-')))
-  const stale = prepareRelayPlugin(appDir, 'old-job', skill)
-  expect(existsSync(stale)).toBe(true)
+/**
+ * [중요 1 · 4회차] 앱 시작 정리는 **앱이 만든 폴더만** 지운다.
+ *
+ * 이전 구현은 `relay-plugin/` 바로 아래 항목을 확인 없이 지웠다(검토 VM 재현: 미리 둔
+ * `keep.txt` 삭제). 소유는 **표식 파일**(`.knuaf-relay-plugin`)로 확인한다 — 이름 규칙만으로는
+ * 남의 폴더가 우연히 맞을 수 있고, 표식이 있으면 우리가 만든 것임이 분명하다.
+ */
+test('[중요 1·4회차] 정리는 남의 파일과 남의 폴더를 건드리지 않는다', () => {
+  const { skill } = fixtureRoot('sweep-foreign')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-sweep-')))
+  const base = join(appDir, 'relay-plugin')
+  mkdirSync(base, { recursive: true })
+  // ① 우리가 만든 주문 폴더 — 지워져야 한다.
+  const ours = prepareRelayPlugin(appDir, 'job-a', skill)
+  // ② 기준 폴더에 미리 둔 남의 파일 — 남아야 한다.
+  writeFileSync(join(base, 'keep.txt'), 'KEEP')
+  // ③ 이름 규칙은 맞지만 표식이 없는 폴더 — 남아야 한다.
+  const foreign = join(base, 'job-b')
+  mkdirSync(foreign, { recursive: true })
+  writeFileSync(join(foreign, 'theirs.md'), 'THEIRS')
+  // ④ 이름 규칙에 안 맞는 폴더 — 남아야 한다.
+  const odd = join(base, 'not.a.job')
+  mkdirSync(odd, { recursive: true })
+
   sweepRelayPlugins(appDir)
-  expect(existsSync(join(appDir, 'relay-plugin', 'old-job'))).toBe(false)
-  expect(existsSync(join(appDir, 'relay-plugin'))).toBe(true)
+
+  expect(existsSync(ours)).toBe(false)
+  expect(readFileSync(join(base, 'keep.txt'), 'utf8')).toBe('KEEP')
+  expect(readFileSync(join(foreign, 'theirs.md'), 'utf8')).toBe('THEIRS')
+  expect(existsSync(odd)).toBe(true)
+})
+
+/** 기준 폴더(`relay-plugin`)가 링크면 아무것도 지우지 않는다 — 바깥을 순회할 수 없다. */
+test('[중요 1·4회차] 기준 폴더가 링크면 정리하지 않는다', () => {
+  const { skill } = fixtureRoot('sweep-link-base')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-sweep-link-')))
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-sweep-outside-')))
+  // 바깥에 "우리 것처럼 보이는" 폴더를 두고, 기준 폴더를 그쪽으로 링크한다.
+  writeFileSync(join(outside, 'keep.txt'), 'KEEP')
+  const decoy = join(outside, 'job-a')
+  mkdirSync(join(decoy, '.claude-plugin'), { recursive: true })
+  writeFileSync(join(decoy, '.knuaf-relay-plugin'), '{"version":1}\n')
+  writeFileSync(join(decoy, '.claude-plugin', 'plugin.json'), '{}')
+  symlinkSync(outside, join(appDir, 'relay-plugin'))
+  // 기준 폴더가 링크면 정리는 손대지 않는다(바깥을 우리 저장소로 착각하지 않는다).
+  sweepRelayPlugins(appDir)
+  expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('KEEP')
+  expect(existsSync(decoy)).toBe(true)
+  void skill
+})
+
+/** 앱이 만든 폴더는 링크가 아니고 표식을 갖는다 — 그것으로 소유를 판별한다. */
+test('[중요 1·4회차] 앱이 만든 폴더는 표식을 갖고 링크가 아니다', () => {
+  const { skill } = fixtureRoot('sweep-mark')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-sweep-mark-')))
+  const dir = prepareRelayPlugin(appDir, 'job-c', skill)
+  expect(lstatSync(dir).isSymbolicLink()).toBe(false)
+  expect(existsSync(join(dir, '.knuaf-relay-plugin'))).toBe(true)
+})
+
+/** 표식이 없는 남의 폴더 자리에는 플러그인을 만들지 않는다(덮어쓰기 금지). */
+test('[중요 1·4회차] 표식 없는 폴더 자리에는 만들지 않고 거절한다', () => {
+  const { skill } = fixtureRoot('mark-foreign-dir')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-mark-foreign-')))
+  const squatted = join(appDir, 'relay-plugin', 'job-x')
+  mkdirSync(squatted, { recursive: true })
+  writeFileSync(join(squatted, 'theirs.md'), 'THEIRS')
+  expect(() => prepareRelayPlugin(appDir, 'job-x', skill)).toThrow()
+  expect(readFileSync(join(squatted, 'theirs.md'), 'utf8')).toBe('THEIRS')
+})
+
+/** 주문 종료 삭제도 소유를 본다 — 표식 없는 폴더는 남는다. */
+test('[중요 1·4회차] 종료 삭제도 표식 없는 폴더는 남긴다', () => {
+  const { skill } = fixtureRoot('remove-foreign')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-remove-foreign-')))
+  const foreign = join(appDir, 'relay-plugin', 'job-y')
+  mkdirSync(foreign, { recursive: true })
+  writeFileSync(join(foreign, 'theirs.md'), 'THEIRS')
+  removeRelayPlugin(appDir, 'job-y')
+  expect(existsSync(join(foreign, 'theirs.md'))).toBe(true)
+  // 우리 것은 지운다.
+  const ours = prepareRelayPlugin(appDir, 'job-y2', skill)
+  removeRelayPlugin(appDir, 'job-y2')
+  expect(existsSync(ours)).toBe(false)
 })
 
 /** SDK 에 넘어가는 `plugins` 경로가 앱 전용 자리다 — 실제 연결 옵션으로 확인한다. */
