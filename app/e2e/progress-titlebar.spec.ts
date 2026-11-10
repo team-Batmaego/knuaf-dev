@@ -25,6 +25,9 @@ const REAL_STEP4_CODEX_OLD = `**창업논문 진행 목록** · 7단계 중 1–
 - **지금 확인할 것**: 아래 Q2 — 자료가 없으니 계획은 인터뷰로 세웁니다.`
 
 test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단계(옛날) → 제목줄 4/7 유지, 저장값도 4단계', async () => {
+  // 앱을 두 번 띄운다 — 기본 90초는 느린 기계에서 종료 대기만으로도 바닥난다(맥 CI 실측:
+  // close 한 번에 68초). 다른 다중 실행 시험과 같은 180초를 준다. 단정은 그대로다.
+  test.setTimeout(180_000)
   const dir = scratch()
   const bin = join(dir, 'bin')
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
@@ -42,18 +45,24 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     '- **지금 확인할 것**: 아래 Q3 두 가지.',
   ].join('\n')
   mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
+  // 시각은 고정한다 — `at(n)` 은 부를 때마다 Date.now() 를 읽으므로, 공급자 파일을 각각 쓰면
+  // Codex 쪽이 1ms 더 새로 찍힐 수 있다. 그러면 `pickProgress` 가 대화값(2/7)을 저장값(4/7)보다
+  // 새것으로 보고 제목줄이 2/7 로 돌아간다(맥 CI 1회째 실패의 원인). Codex 답은 실제로 옛날이다.
+  const atClaude4 = '2026-11-10T20:02:00.000Z'
+  const atCodexOld2 = '2026-11-10T20:01:00.000Z'
+  const atUser = '2026-11-10T20:00:00.000Z'
   writeFileSync(join(root, '.knuaf-gui', 'chat-claude.json'), JSON.stringify({
     root, provider: 'claude', state: 'idle',
     messages: [
-      { id: 'u0', role: 'user', text: '시작하기', at: at(0), delivery: 'sent' },
-      { id: 'm-claude-4', role: 'assistant', text: STEP4_TEXT, at: at(1) },
+      { id: 'u0', role: 'user', text: '시작하기', at: atUser, delivery: 'sent' },
+      { id: 'm-claude-4', role: 'assistant', text: STEP4_TEXT, at: atClaude4 },
     ],
   }), 'utf-8')
   writeFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), JSON.stringify({
     root, provider: 'codex', state: 'idle',
     messages: [
-      { id: 'u0', role: 'user', text: '시작하기', at: at(0), delivery: 'sent' },
-      { id: 'm-codex-2', role: 'assistant', text: REAL_STEP4_CODEX_OLD, at: at(1) },
+      { id: 'u0', role: 'user', text: '시작하기', at: atUser, delivery: 'sent' },
+      { id: 'm-codex-2', role: 'assistant', text: REAL_STEP4_CODEX_OLD, at: atCodexOld2 },
     ],
   }), 'utf-8')
 
@@ -91,6 +100,9 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     // 앱 재시작 — 같은 userData(localStorage 유지)로 다시 켜면 제목줄이 여전히 4/7
     // provider_choice는 ChatGPT로 바뀐 채로 재시작한다 — Codex 2단계(옛날)가 대화값이라
     // 저장값(4단계)이 더 늦다는 것을 보여준다.
+    // 재시작 전 저장값이 디스크에 내려가는지에 기대지 않는다 — Chromium 의 leveldb 는 값을
+    // snappy 로 압축하므로 파일 바이트로 "내려갔다"를 확인할 수 없다(20초 대기가 헛돌았다).
+    // 대신 픽스처 시각을 고정해 재시작 뒤 고르는 값이 **결정적으로** 저장값(4단계)이 되게 한다.
     await electronApp.close()
     const second = await launch({ env, userData })
     try {
@@ -380,6 +392,8 @@ test('U8-small 작은 창(높이 720) — [제출 전 점검]이 펼침 안에 �
 // Roh [중요 1] 보강: 같은 messageId로 text만 갱신되는 스트리밍 — 1단계 덩어리 뒤 4단계 덩어리 붙음.
 // service.ts는 같은 id로 text만 바꾼다. 저장 여부는 고른 진행값 자체(단계 상태)로 판단한다.
 test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값 4, Codex 전환에도 4/7', async () => {
+  // U-switch 와 같은 이유(앱 두 번)로 180초. 단정은 그대로다.
+  test.setTimeout(180_000)
   const dir = scratch()
   const bin = join(dir, 'bin')
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
@@ -437,6 +451,8 @@ test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값
     // 파일만 바꾸면 메모리 스냅샷이 안 갱신된다 — 앱을 다시 띄우면 새 파일에서 읽는다.
     // 앱을 다시 띄우면 새 파일에서 읽어 focus가 4단계로 바뀐다(고른 진행값 서명 변경).
     // 이 흐름은 file→load 경로를 그대로 확인한다.
+    // 재시작 뒤에는 파일의 4단계 덩어리를 대화값으로 다시 고른다 — 저장값이 디스크에
+    // 내려갔는지에 기대지 않는다(leveldb 압축 때문에 확인 자체가 불가능하다).
     await electronApp.close()
     const second = await launch({ env, userData })
     try {
