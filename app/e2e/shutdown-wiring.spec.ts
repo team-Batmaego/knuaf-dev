@@ -1,0 +1,122 @@
+// 실제 Electron 기동 시험 — `before-quit` 배선과 자식 회수(검토 RT2-04, RT2-03).
+//
+// 앞선 단위 시험들은 helper(`shutdownWithin`)와 `close()` 만 본다. index.ts 의 배선을 지우거나
+// `app.exit` 분기를 훼손해도 그것들은 통과했다. 이 시험은 **앱을 진짜로 띄워** 홀드된 턴을
+// 남긴 채 종료하고, (1) 종료가 마감 안에 돌아오는지 (2) 엔진 자식이 남지 않는지
+// (3) `[shutdown]` 진단 줄이 실제로 남는지를 본다.
+import { expect, test, type ElectronApplication } from '@playwright/test'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { launch, openProject, synthProject } from './helpers'
+import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith } from './fixtures/fake-codex'
+
+/** 메인 프로세스의 stderr — `[shutdown]` 진단이 여기로 나온다. */
+function mainLog(app: ElectronApplication): { read: () => string } {
+  const chunks: string[] = []
+  app.process().stderr?.on('data', (d: Buffer) => chunks.push(d.toString()))
+  app.process().stdout?.on('data', (d: Buffer) => chunks.push(d.toString()))
+  return { read: () => chunks.join('') }
+}
+
+/**
+ * 가짜 엔진 shim — 자기 pid 를 먼저 남기고 서버를 그대로 띄운다. 그래야 시험이
+ * "끝난 뒤에도 그 pid 가 살아 있는가"를 물을 수 있다(자식 회수 확인).
+ */
+function pidWritingShim(bin: string, pidFile: string): void {
+  const proxy = join(bin, 'codex-proxy.mjs')
+  writeFileSync(proxy, [
+    `import { writeFileSync } from 'node:fs'`,
+    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
+    // 동적 import 가 필요하다: 이 파일은 시험이 만들어 **자식 node 프로세스**가 단독 실행하는
+    // 스크립트이고, pid 를 먼저 남긴 **뒤에** 가짜 서버를 시작해야 한다(정적 import 는 먼저 실행된다).
+    `await import(${JSON.stringify(resolve(__dirname, 'fixtures/fake-codex-server.mjs'))})`
+  ].join('\n'), 'utf-8')
+  writeFileSync(join(bin, 'codex'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(proxy)} "$@"\n`, { mode: 0o755 })
+}
+
+const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
+
+async function waitAlive(pidFile: string): Promise<number> {
+  for (let i = 0; i < 300; i++) {
+    if (existsSync(pidFile)) {
+      const pid = Number(readFileSync(pidFile, 'utf-8').trim())
+      if (pid > 0) return pid
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  throw new Error('가짜 엔진이 뜨지 않았다 — pid 파일이 없다')
+}
+
+test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오고, 엔진 자식이 남지 않는다 (RT2-03·RT2-04)', async () => {
+  const dir = scratch(), bin = join(dir, 'bin')
+  // `FAKE_CODEX_HOLD=1` — turn/start 뒤에 턴을 끝내지 않는다. 그 턴이 종료를 붙잡는다.
+  const env = fakeCodexEnv(bin, { FAKE_CODEX_HOLD: '1', FAKE_CODEX_REPLY: replyFile(dir, '홀드된 답') })
+  const pidFile = join(dir, 'engine.pid')
+  pidWritingShim(bin, pidFile)
+  const root = synthProject()
+  seedChat(root, [{ id: 'previous', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
+  const { electronApp, page } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' } }) })
+  const log = mainLog(electronApp)
+  let closed = false
+  let enginePid = 0
+  try {
+    await openProject(page, root)
+    const chip = page.getByTitle('이 논문의 도우미')
+    await expect(chip).toContainText('연결됨')
+    await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('매달릴 요청')
+    await page.getByRole('button', { name: '보내기', exact: true }).click()
+    // 턴이 시작됐다 — 이 상태에서 종료하면 예전에는 run 이 영원히 안 끝나 앱이 안 꺼졌다.
+    await expect(page.getByRole('button', { name: '중단', exact: true })).toBeVisible()
+    enginePid = await waitAlive(pidFile)
+    expect(alive(enginePid), '가짜 엔진이 살아 있지 않다').toBe(true)
+
+    const started = Date.now()
+    await electronApp.close()
+    closed = true
+    const elapsed = Date.now() - started
+    // 마감 10초 + 자식 회수 관측 1.5초 + 여유. 예전 배선이면 여기서 영원히 매달렸다.
+    expect(elapsed, `종료가 마감을 넘겨 ${elapsed}ms 걸렸다`).toBeLessThan(45_000)
+
+    // 엔진 자식이 남지 않았는지 **관측**한다(가정하지 않는다).
+    for (let i = 0; i < 40 && alive(enginePid); i++) await new Promise((r) => setTimeout(r, 50))
+    expect(alive(enginePid), `종료 뒤에도 엔진 자식이 살아 있다 pid=${enginePid}`).toBe(false)
+    // 진단은 실제 배선에서 나온 것이어야 한다 — helper 시험에는 이 줄이 없다.
+    expect(log.read(), '종료 진단 줄이 없다 — before-quit 배선을 확인할 수 없다').toMatch(/\[shutdown\]/)
+  } finally {
+    if (!closed) {
+      try { await electronApp.close() } catch { /* 이미 끝남 */ }
+    }
+    if (enginePid && alive(enginePid)) { try { process.kill(enginePid, 'SIGKILL') } catch { /* gone */ } }
+  }
+})
+
+test('추가 before-quit 청취자가 있으면 강제 종료하지 않고 그 청취자의 몫으로 넘긴다 (RT2-04)', async () => {
+  // index.ts 의 `listenerCount('before-quit') === 1` 분기 — 다른 청취자의 veto 를 무시하지 않는다.
+  // 시험은 그 청취자를 **일부러 막는** 것으로 두고, 우리 마감이 끝난 뒤에도 앱이 살아 있음을 본다.
+  const dir = scratch(), bin = join(dir, 'bin')
+  const env = fakeCodexEnv(bin, { FAKE_CODEX_HOLD: '1' })
+  const { electronApp, page } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
+  let released = false
+  try {
+    await electronApp.evaluate(({ app }) => {
+      const state = { release: false }
+      Object.assign(globalThis, { vetoProbe: state })
+      app.on('before-quit', (e) => { if (!state.release) e.preventDefault() })
+    })
+    const started = Date.now()
+    // `app.quit()` 은 우리 before-quit 을 지나 마감까지 간다 — 그 뒤 veto 청취자가 막는다.
+    await electronApp.evaluate(({ app }) => app.quit())
+    await new Promise((r) => setTimeout(r, 12_000))
+    expect(Date.now() - started).toBeGreaterThan(10_000)
+    // 창은 아직 살아 있다 — 강제 종료가 veto 를 무시하지 않았다는 뜻이다.
+    expect(await page.evaluate(() => 1 + 1)).toBe(2)
+    await electronApp.evaluate(() => { Reflect.get(globalThis, 'vetoProbe').release = true })
+    released = true
+    await electronApp.close()
+  } finally {
+    if (!released) {
+      try { await electronApp.evaluate(() => { Reflect.get(globalThis, 'vetoProbe').release = true }) } catch { /* already gone */ }
+      try { await electronApp.close() } catch { /* already gone */ }
+    }
+  }
+})
