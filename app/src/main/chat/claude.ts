@@ -575,6 +575,8 @@ function pathOpsFor(root: string): typeof posix {
  */
 function relIn(ops: typeof posix, root: string, value: string): string | null {
   if (!value) return null
+  // `C:foo` 는 그 드라이브의 **현재 디렉터리** 기준이라 작업폴더 안이라고 단정할 수 없다.
+  if (ops === win32 && /^[A-Za-z]:(?![\\/])/.test(value)) return null
   const fold = ops === win32 ? (x: string) => x.normalize('NFC').toLowerCase() : (x: string) => x.normalize('NFC')
   const base = fold(ops.resolve(root))
   const abs = fold(ops.resolve(ops.resolve(root), value))
@@ -761,8 +763,9 @@ function describePowerShell(root: string, cmd: string): { title: string; detail:
   // 인용부호를 지켜 낱말을 얻는다. 공백이 든 폴더 이름(`무제 폴더`)을 쪼개면 엉뚱한 경로를 짚는다.
   const parsed = powerShellWords(cmd)
   const words = parsed?.words ?? []
-  // 플래그(`-Value`, `-Recurse`)는 경로로 보지 않는다. 경로처럼 생긴 낱말만 대상이다.
-  const args = words.filter((w) => !w.startsWith('-') || looksLikePath(w, platform))
+  // 실행 파일 자리(`t[0]`)는 뺀다 — Bash 카드와 같은 범위다. 설치본 파이썬은 폴더 밖에 있고,
+  // 그것을 "폴더 밖 파일을 건드린다"고 적으면 학생이 무엇을 물었는지 잘못 읽는다.
+  const args = words.slice(1).filter((w) => !w.startsWith('-') || looksLikePath(w, platform))
   const outside = [...new Set(args.filter((a) => looksLikePath(a, platform) && relIn(ops, root, a) === null))]
   if (outside.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${cmd}\n\n폴더 밖: ${outside.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
   // 폴더 밖이 아니면 권한 파일을 건드리는지 본다. 둘 다 걸리면 폴더 밖을 먼저 말한다.

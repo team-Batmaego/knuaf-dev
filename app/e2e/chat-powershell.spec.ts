@@ -149,3 +149,39 @@ test('PowerShell 전용 꼴은 Bash 판정으로 통과하지 않는다', () => 
   const cmd = `"${WIN}\\resources\\python\\python.exe" "${SKILL}\\gg.py" status "${WIN}"`
   expect(autoAllow(WIN, 'Bash', { command: cmd })).toBe(false)
 })
+
+/**
+ * 경로 해석의 함정. `C:foo` 는 그 드라이브의 **현재 디렉터리** 기준이라 "폴더 안"이라고
+ * 단정할 수 없고, UNC(`\\srv\share`)는 다른 기계다. 둘 다 묻는다.
+ */
+test('드라이브 상대경로·UNC·긴 경로 접두는 폴더 안으로 접히지 않는다', () => {
+  for (const arg of ['C:gg.py', '\\\\srv\\공유\\gg.py', '\\\\?\\C:\\Windows\\gg.py', '..\\..\\gg.py']) {
+    const cmd = `python.exe "${SKILL}\\gg.py" status "${arg}"`
+    expect(autoAllow(WIN, 'PowerShell', { command: cmd }), arg).toBe(false)
+  }
+  // 폴더 안 절대경로·상대경로는 그대로 통과한다.
+  for (const arg of [`${WIN}\\sources\\a.md`, 'sources\\a.md', '.']) {
+    const cmd = `python.exe "${SKILL}\\gg.py" status "${arg}"`
+    expect(autoAllow(WIN, 'PowerShell', { command: cmd }), arg).toBe(true)
+  }
+})
+
+/** 맥 뿌리에서 `\` 는 구분자가 아니다 — PowerShell 판정도 그것을 경로로 접지 않는다. */
+test('맥 뿌리의 PowerShell 판정에서 역슬래시는 구분자가 아니다', () => {
+  expect(autoAllow(MAC, 'PowerShell', { command: 'python.exe ".claude\\skills\\knuaf-dev\\scripts\\gg.py" status' })).toBe(false)
+  expect(autoAllow(MAC, 'PowerShell', { command: 'python.exe ".claude/skills/knuaf-dev/scripts/gg.py" status' })).toBe(true)
+})
+
+/** 스크립트 자리도 같은 선 — 스킬 사본 자리가 아닌 `.py` 는 통과하지 않는다(Bash 와 같은 선). */
+test('스킬 사본 자리가 아닌 gg.py 는 통과하지 않는다', () => {
+  for (const script of [
+    `${WIN}\\scripts\\gg.py`,
+    `${WIN}\\build\\.claude\\skills\\knuaf-dev\\scripts\\gg.py`,   // 폴더 안이지만 사본 자리 밖
+    `${WIN}\\..\\무제 폴더2\\.claude\\skills\\knuaf-dev\\scripts\\gg.py`
+  ]) {
+    expect(autoAllow(WIN, 'PowerShell', { command: `python.exe "${script}" status` }), script).toBe(false)
+  }
+  // `.claude/skills/` 아래면 어느 스킬 폴더든 통과한다 — Bash 판정과 같은 접두 규칙이다
+  // (그 자리에 쓰는 일은 `.claude` 보호 경로라 따로 막힌다).
+  expect(autoAllow(WIN, 'PowerShell', { command: `python.exe "${WIN}\\.claude\\skills\\other\\gg.py" status` })).toBe(true)
+})
