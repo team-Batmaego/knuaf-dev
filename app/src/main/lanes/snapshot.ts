@@ -91,8 +91,13 @@ export interface LaneSettingsInput {
   accounts: Partial<Record<Provider, LaneAccountView>>
   /** 추천 줄(요금제에서 파생). 계정이 없으면 `null`. */
   recommended: { rowId: LaneRowId; plan: LanePlan; notes: LaneNote[] } | null
-  /** [이번만]으로 도는 값 — U5 카드 적용이 남긴다. 지금은 빈 배열. */
+  /** [이번만]으로 도는 값 — U5 카드 적용이 남긴다. */
   temporary?: LaneTemporary[]
+  /**
+   * [이번만] 배치의 설계 회사. 설계는 `temporary` 목록에 넣지 않으므로(주문 차선이 아니다)
+   * "다음 메시지부터 {회사} 대화로"를 그리려면 따로 받는다.
+   */
+  temporaryDesign?: Provider | null
 }
 
 /** 조립기가 러너에게서 읽는 것 — 이 둘뿐이다. `JobRunner` 가 그대로 만족한다. */
@@ -226,8 +231,9 @@ export function lanesSettings(input: LaneSettingsInput): LanesSettingsView {
     differsFromRecommendation: Boolean(approved && recommendedPlan && !samePlan(approved, recommendedPlan)),
     temporary: input.temporary ?? [],
     recommendedDesign: design?.model ? { company: design.company, model: design.model, effort: design.effort } : null,
-    // "다음 메시지부터: 설계 {회사}" 는 [이번만] 카드가 정한다 — U5 가 `temporary` 로 넘긴다.
-    nextDesignCompany: null,
+    // "다음 메시지부터: 설계 {회사}" — [이번만] 배치가 지금 설계 회사와 다를 때만.
+    nextDesignCompany:
+      input.temporaryDesign && input.temporaryDesign !== design?.company ? input.temporaryDesign : null,
     consents
   }
 }
@@ -439,8 +445,8 @@ function versionLines(input: LaneInput): LaneLine[] {
 /** `seq`·`announcement` 는 보내는 쪽(`LanesPublisher`)이 붙인다. */
 export type SnapshotBody = Omit<LanesSnapshot, 'seq' | 'announcement'>
 
-/** 카드에서 앱 전용 칸(`boundAccounts`)을 떼고 계약 모양만 남긴다. */
-const publicCard = (card: LaneCard): LaneCard => ({
+/** 카드에서 앱 전용 칸(`boundAccounts`·`plan`)을 떼고 계약 모양만 남긴다. */
+export const publicCard = (card: LaneCard): LaneCard => ({
   cardId: card.cardId,
   root: card.root,
   variant: card.variant,

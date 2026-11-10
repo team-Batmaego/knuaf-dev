@@ -33,8 +33,16 @@ export interface ConsentRecord {
 
 export interface StoredConsent extends ConsentRecord { company: Provider; accountId: string }
 
-/** 계약 `LaneCard` + 앱만 아는 계정 결박([Roh 중요 3]). 화면으로는 `LaneCard` 만 나간다. */
-export type StoredCard = LaneCard & { boundAccounts: Partial<Record<Provider, string>> }
+/**
+ * 계약 `LaneCard` + 앱만 아는 칸. `boundAccounts` 는 카드를 띄운 계정([Roh 중요 3]),
+ * `plan` 은 그 카드가 적용할 **앱이 만든** 배치다 — 화면이 보낸 값으로 다시 짓지 않는다
+ * (§6 "화면은 계산하지 않는다"). 화면으로는 `LaneCard` 만 나간다.
+ */
+export type StoredCard = LaneCard & {
+  boundAccounts: Partial<Record<Provider, string>>
+  /** 옛 파일의 카드에는 없다 — 그때는 적용할 배치가 없으므로 `invalid` 로 닫는다. */
+  plan?: LanePlan
+}
 
 export type CardClaim =
   | { ok: true; card: StoredCard }
@@ -57,6 +65,19 @@ interface StoreState {
   dismissed: Record<string, string[]>
   /** 폴더별 승인 시각 — §5 "내가 정함 · {날짜}" 의 근거. 옛 파일에는 없다. */
   approvalAt: Record<string, string>
+  /**
+   * 폴더별 [이번만] 배치(Q5) — 승인 배치를 덮지 않는다. 묶인 차례가 끝나고 그 차례 주문이
+   * 모두 끝나면 지운다(`once-ended`). 옛 파일에는 없다.
+   */
+  temporary: Record<string, TemporaryPlan>
+}
+
+/** [이번만]으로 도는 배치와 그것이 묶인 차례. */
+export interface TemporaryPlan {
+  plan: LanePlan
+  /** 도우미가 답하는 중이었으면 그 차례 id, 쉬는 중이었으면 `'next-student-turn'`. */
+  boundTurn: string
+  at: string
 }
 
 /** 한 폴더에 남기는 기록 줄 상한 — 무한히 자라지 않게 오래된 것부터 버린다. */
@@ -116,13 +137,16 @@ function consentOf(value: unknown): ConsentRecord | null {
  */
 function isStoredCard(value: unknown): value is StoredCard {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-  const card = value as { cardId?: unknown; root?: unknown; state?: unknown; rows?: unknown; boundAccounts?: unknown }
+  const card = value as {
+    cardId?: unknown; root?: unknown; state?: unknown; rows?: unknown; boundAccounts?: unknown; plan?: unknown
+  }
   if (typeof card.cardId !== 'string' || !card.cardId) return false
   if (typeof card.root !== 'string' || !card.root) return false
   if (!Array.isArray(card.rows)) return false
   if (typeof card.state !== 'object' || card.state === null) return false
   const bound = card.boundAccounts
   if (bound !== undefined && (typeof bound !== 'object' || bound === null || Array.isArray(bound))) return false
+  if (card.plan !== undefined && !isPlan(card.plan)) return false
   return true
 }
 
@@ -149,7 +173,7 @@ function parse(text: string): StoreState {
     approvals: state.approvals as Record<string, LanePlan>,
     consent: {},
     deliveries: state.deliveries as Record<string, DeliveryRecord>,
-    cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}
+    cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}
   }
   for (const [key, record] of Object.entries(state.consent as Record<string, unknown>)) {
     const consent = consentOf(record)
@@ -200,6 +224,15 @@ function parse(text: string): StoreState {
       parsed.approvalAt[root] = at
     }
   }
+  if (state.temporary !== undefined) {
+    if (!isRecord(state.temporary)) throw new Error('Invalid job store')
+    for (const [root, value] of Object.entries(state.temporary as Record<string, unknown>)) {
+      if (!isRecord(value) || !isPlan(value.plan)) throw new Error('Invalid job store')
+      if (typeof value.boundTurn !== 'string' || !value.boundTurn) throw new Error('Invalid job store')
+      if (typeof value.at !== 'string' || !value.at) throw new Error('Invalid job store')
+      parsed.temporary[root] = { plan: value.plan, boundTurn: value.boundTurn, at: value.at }
+    }
+  }
   return parsed
 }
 
@@ -221,7 +254,7 @@ export class JobStore {
     // The store file only ever lives in app storage; readRecoverable also restores a complete .tmp.
     this.state = readRecoverable(this.file, parse)?.value ?? {
       version: 1, approvals: {}, consent: {}, deliveries: {},
-      cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}
+      cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}
     }
     // Delivery claim happened before the crash: surface it once, never resend automatically.
     let recovered = false
@@ -262,6 +295,35 @@ export class JobStore {
   /** §5 "내가 정함 · {날짜}" — 승인 기록이 없으면 null. */
   approvedAt(root: string): string | null {
     return this.state.approvalAt[rootKey(root)] ?? null
+  }
+
+  // ------------------------------------------------------------------ §3 [이번만]
+
+  /** 지금 [이번만]으로 도는 배치 — 없으면 null. */
+  temporary(root: string): TemporaryPlan | null {
+    const value = this.state.temporary[rootKey(root)]
+    return value ? structuredClone(value) : null
+  }
+
+  /**
+   * [이번만] 배치를 세운다. 승인 배치(`approvals`)는 건드리지 않는다 — 그 차례가 끝나면
+   * 이 값만 지우면 원래 배치로 돌아간다.
+   */
+  setTemporary(root: string, plan: LanePlan, boundTurn: string): TemporaryPlan {
+    const key = rootKey(root)
+    const next: TemporaryPlan = { plan: structuredClone(plan), boundTurn, at: new Date().toISOString() }
+    this.state.temporary[key] = next
+    this.persist()
+    return structuredClone(next)
+  }
+
+  /** [이번만]을 접는다. 실제로 지웠을 때만 true — `once-ended` 를 두 번 남기지 않는다. */
+  clearTemporary(root: string): boolean {
+    const key = rootKey(root)
+    if (!this.state.temporary[key]) return false
+    delete this.state.temporary[key]
+    this.persist()
+    return true
   }
 
   /** 동의는 **지우지 않는다** — 거둠도 날짜와 함께 남아야 §5 가 `withdrawn` 을 그린다(Q4). */
@@ -440,13 +502,27 @@ export class JobStore {
     return next
   }
 
-  addCard(card: LaneCard, boundAccounts: Partial<Record<Provider, string>>): StoredCard {
+  /**
+   * 카드 하나를 연다. `plan` 은 그 카드가 적용할 배치 — `decideCard` 가 화면 값 대신 이것을
+   * 쓴다. `boundAccounts` 는 지금 로그인한 계정(나중에 다시 대조한다).
+   */
+  addCard(card: LaneCard, boundAccounts: Partial<Record<Provider, string>>, plan?: LanePlan): StoredCard {
     const key = rootKey(card.root)
     const stored: StoredCard = { ...structuredClone(card), boundAccounts: { ...boundAccounts } }
+    if (plan) stored.plan = structuredClone(plan)
     const list = this.state.cards[key] ??= []
     list.push(stored)
     this.persist()
     return structuredClone(stored)
+  }
+
+  /** 카드가 적용할 배치. 옛 파일의 카드처럼 없으면 `null` — 그 카드는 적용할 수 없다. */
+  cardPlan(cardId: string): LanePlan | null {
+    for (const list of Object.values(this.state.cards)) {
+      const found = list.find(card => card.cardId === cardId)
+      if (found) return found.plan ? structuredClone(found.plan) : null
+    }
+    return null
   }
 
   /**

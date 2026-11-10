@@ -6,14 +6,14 @@
  * 폴더 없이도 보이고, 그때 모드는 `null` 이다.
  */
 import type { Provider } from '../../shared/chat'
-import type { AccountSnapshot, LaneNote, LanePlan, LaneRowId } from '../../shared/lanes'
+import type { AccountSnapshot, LaneEntry, LaneNote, LanePlan, LaneRowId } from '../../shared/lanes'
 import { judgePlan, planFromRow, resolveLanes, selectLaneRow } from '../../shared/lanes'
 import type { LanesSnapshot } from '../../shared/lanes-ipc'
 import type { JobRunner } from '../chat/jobs'
 import type { ExecutionAccount } from '../chat/jobs/types'
 import type { JobStore } from '../chat/jobs/store'
 import {
-  LanesPublisher, lanesSettings, type LaneAccountView, type LaneInput
+  LanesPublisher, lanesSettings, type LaneAccountView, type LaneInput, type LaneTemporary
 } from './snapshot'
 
 /** 이 폴더 상태를 만들기 위해 `ChatService` 가 넘기는 읽기 이음매. */
@@ -30,15 +30,50 @@ export interface LaneSource {
   extraLines?: (root: string) => LanesSnapshot['lines']
 }
 
+/** 엔진이 준 계정과 조립기용 보기 — 두 회사를 한 번씩만 묻는다. */
+export interface LaneAccounts {
+  executions: Partial<Record<Provider, ExecutionAccount>>
+  views: Partial<Record<Provider, LaneAccountView>>
+}
+
+export async function laneAccounts(
+  source: Pick<LaneSource, 'account'>
+): Promise<LaneAccounts> {
+  const executions: Partial<Record<Provider, ExecutionAccount>> = {}
+  const views: Partial<Record<Provider, LaneAccountView>> = {}
+  for (const company of ['claude', 'codex'] as const) {
+    const account = await source.account(company)
+    if (!account) continue
+    executions[company] = account
+    views[company] = {
+      connected: account.connected,
+      consented: account.consented,
+      usage: account.usage,
+      accountId: account.accountId,
+      account: account.account
+    }
+  }
+  return { executions, views }
+}
+
+/** 추천 줄 + 제안에 필요한 계정 묶음. 계정이 없거나 차선표를 못 고르면 `null`. */
+export interface LaneRecommendation {
+  rowId: LaneRowId
+  plan: LanePlan
+  notes: LaneNote[]
+  /** `proposeLaneRequest` 가 요금제·모델 목록을 판정하는 데 쓰는 값. */
+  snapshots: AccountSnapshot[]
+}
+
 /**
  * 추천 배치 — 두 회사의 요금제를 읽어 차선표 한 줄을 고른다. 계정이 하나도 없으면 `null`.
  * `mainCompany` 를 설계 회사로 고정한다(설계는 본대화가 맡는다).
  */
-function recommend(
+export function recommendation(
   accounts: Partial<Record<Provider, ExecutionAccount>>,
   mainCompany: Provider,
   designModel: string | null
-): { rowId: LaneRowId; plan: LanePlan; notes: LaneNote[]; accounts: AccountSnapshot[] } | null {
+): LaneRecommendation | null {
   const snapshots = (['claude', 'codex'] as const)
     .map(company => accounts[company]?.account)
     .filter((account): account is AccountSnapshot => Boolean(account))
@@ -56,43 +91,55 @@ function recommend(
     catalog,
     design: designModel ? { model: designModel, effort: null } : undefined
   })
-  return { rowId, plan: resolved.plan, notes: resolved.notes, accounts: snapshots }
+  return { rowId, plan: resolved.plan, notes: resolved.notes, snapshots }
 }
 
 /** 저장소·러너 → 조립기 입력. 폴더가 없으면 승인·카드·주문 줄이 모두 비어 있다. */
 export async function laneInput(source: LaneSource, root: string | null): Promise<LaneInput> {
-  const accounts: Partial<Record<Provider, LaneAccountView>> = {}
-  const executions: Partial<Record<Provider, ExecutionAccount>> = {}
-  for (const company of ['claude', 'codex'] as const) {
-    const account = await source.account(company)
-    if (!account) continue
-    executions[company] = account
-    accounts[company] = {
-      connected: account.connected,
-      consented: account.consented,
-      usage: account.usage,
-      accountId: account.accountId,
-      account: account.account
-    }
-  }
+  const { executions, views } = await laneAccounts(source)
   const design = root ? source.store.approvedPlan(root)?.design?.model ?? null : null
-  const recommended = recommend(executions, source.mainCompany, design)
+  const recommended = recommendation(executions, source.mainCompany, design)
+  const temporary = root ? source.store.temporary(root) : null
+  const shown = root ? source.store.approvedPlan(root) ?? recommended?.plan ?? null : null
   const settings = lanesSettings({
     root,
     store: source.store,
     mainCompany: source.mainCompany,
-    accounts,
-    recommended: recommended ? { rowId: recommended.rowId, plan: recommended.plan, notes: recommended.notes } : null
+    accounts: views,
+    recommended: recommended ? { rowId: recommended.rowId, plan: recommended.plan, notes: recommended.notes } : null,
+    temporary: temporary ? temporaryRows(temporary.plan, shown) : [],
+    temporaryDesign: temporary?.plan.design?.company ?? null
   })
   return {
     root,
     store: source.store,
     runner: source.runner,
     settings,
-    accounts,
+    accounts: views,
     archives: root && source.archives ? source.archives(root) : [],
     extraLines: root && source.extraLines ? source.extraLines(root) : []
   }
+}
+
+/**
+ * [이번만] 배치 → 설정 보기. 설계는 본대화가 고정이라 주문 차선만 넘긴다(계약
+ * `LanesSettingsView.temporary`) — 그리고 **지금 보이는 배치와 다른 차선만** 넘긴다. 같으면
+ * "지금 이번 차례만" 줄이 아무것도 안 바뀐 값을 되풀이한다(UI-DESIGN §7).
+ */
+function temporaryRows(plan: LanePlan, shown: LanePlan | null): LaneTemporary[] {
+  const rows: LaneTemporary[] = []
+  for (const lane of ['research', 'writing', 'repeat', 'review'] as const) {
+    const entry = plan[lane]
+    if (!entry) continue
+    if (sameLane(entry, shown?.[lane] ?? null)) continue
+    rows.push({ lane, entry })
+  }
+  return rows
+}
+
+function sameLane(a: LaneEntry | null, b: LaneEntry | null): boolean {
+  if (!a || !b) return a === b
+  return a.company === b.company && a.model === b.model && a.effort === b.effort && a.how === b.how
 }
 
 /** 묶음을 지어 보낸다. `send` 는 `ipc.ts` 가 넘기는 창 송신기. */
