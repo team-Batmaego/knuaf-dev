@@ -125,6 +125,18 @@ export function lineView(line: LaneLine, now: number): LaneLineView {
         detail: detailText(line.detail),
         actions: [{ id: 'redeliver', label: LANE_ACTION.redeliver }]
       }
+    /**
+     * 넘기는 도중 앱이 닫혀 들어갔는지 모르는 줄(계약 §8-2 [F3]). **다시 넘기지 않는다** —
+     * 두 번 들어가면 같은 결과가 대화에 두 번 실리므로, 단추는 [자세히]와 ✕뿐이다.
+     * 설계 r3c에 이 줄의 문구가 없어 `QUESTIONS-C2.md` Q1로 물어 둔다.
+     */
+    case 'deliver-uncertain':
+      return {
+        ...base,
+        title: LANE_LINE.deliverUncertain(lane),
+        sub: LANE_LINE.deliverUncertainSub,
+        detail: detailText(line.detail)
+      }
     case 'limit-offer': {
       const reset = line.resetAt ? LANE_LINE.limitOfferSub(lane, providerName(line.to.company), providerName(line.assignee.company), line.resetAt) : null
       const head = reset ?? [lane, `${providerName(line.to.company)} 계정 사용량이 줄어요`].join(' · ')
@@ -222,8 +234,8 @@ export function lineView(line: LaneLine, now: number): LaneLineView {
       return {
         ...base,
         title: LANE_LINE.mainLimit(modelLabel(line.to)),
-        sub: LANE_LINE.mainLimitSub(providerName(line.to.company)),
-        detail: LANE_LINE.mainLimitDetail,
+        sub: LANE_LINE.mainLimitSub(providerName(line.to.company), line.trimmed),
+        detail: LANE_LINE.mainLimitDetail(line.trimmed),
         actions: [
           { id: 'continue', label: LANE_ACTION.continue, look: 'primary' },
           { id: 'later', label: LANE_ACTION.later, look: 'quiet' }
@@ -327,14 +339,12 @@ export function eventView(event: LaneEvent): LaneEventView | null {
       return { id: event.id, at, warn: false, text: LANE_EVENT.onceEnded(event.afterFirst) }
     case 'lanes-declined':
       return { id: event.id, at, warn: false, text: LANE_EVENT.declined }
-    case 'settings-applied':
-      return { id: event.id, at, warn: false, text: LANE_EVENT.settingsApplied }
     case 'handoff-done':
       return {
         id: event.id,
         at,
         warn: true,
-        text: LANE_EVENT.handoffDone(providerName(event.to.company)),
+        text: LANE_EVENT.handoffDone(providerName(event.from.company), modelLabel(event.to)),
         archiveId: event.archiveId
       }
     default:

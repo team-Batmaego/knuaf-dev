@@ -144,6 +144,12 @@ export const LANE_LINE = {
   },
   delivering: (lane: string) => `${lane} 담당이 끝났어요 — 도우미에게 넘기는 중`,
   deliverFailed: (lane: string) => `${lane} 결과를 도우미에게 넘기지 못했어요`,
+  /**
+   * 계약 §8-2 [F3] `deliver-uncertain` — 넘기는 도중 앱이 닫혀 들어갔는지 모른다.
+   * 설계 r3c에 이 줄의 문구가 없다(`QUESTIONS-C2.md` Q1). 계약 주석의 뜻만 옮겨 임시로 둔다.
+   */
+  deliverUncertain: (lane: string) => `${lane} 결과를 도우미에게 넘겼는지 확인하지 못했어요`,
+  deliverUncertainSub: '넘기는 도중에 앱이 꺼졌어요 — 넘어갔을 수도 있어 다시 넘기지 않아요',
   keptResult: '결과는 보관돼 있어요',
   /** §4 한도 + 이어 하기 가능. */
   limitOffer: (to: string, effortLowered: boolean) =>
@@ -185,17 +191,25 @@ export const LANE_LINE = {
   cardPending: '작업 분담 확인이 남아 있어요',
   /** §4-1 본대화 한도. */
   mainLimit: (to: string) => `한도에 걸렸어요 — ${to}로 이어서 대화할까요?`,
-  mainLimitSub: (company: string) =>
-    `${company} 계정 사용량이 줄어요 · 이 대화에서 내가 쓴 글과 마지막 답을 ${company}에 넘겨요`,
+  /** [r3c C0] 길어서 묶음을 줄였으면(`trimmed`) "전부"라고 말하지 않는다. */
+  mainLimitSub: (company: string, trimmed: boolean) =>
+    `${company} 계정 사용량이 줄어요 · 이 대화에서 ${
+      trimmed
+        ? `내가 쓴 글 일부(길어서 앞부분을 줄였어요)와 마지막 답을 ${company}에 넘겨요`
+        : `내가 쓴 글과 마지막 답을 ${company}에 넘겨요`
+    }`,
   mainLimitTooLong: '앞 대화가 너무 길어 자동으로 이어 받을 수 없어요',
   /** "넘겨요 ▸" 펼침 — 정본 이어 받기 묶음 ①~⑤. */
-  mainLimitDetail: [
-    '내가 쓴 글 전부',
-    '마지막 AI 답',
-    '이 대화 동안 바뀐 파일 이름',
-    '작업 분담·주문 상태',
-    '스킬 판'
-  ].map((item, index) => `${index + 1}. ${item}`).join('\n'),
+  mainLimitDetail: (trimmed: boolean) =>
+    [
+      trimmed ? '내가 쓴 글 — 길어서 앞부분 일부는 빠져요(원래 대화는 ‘한도로 멈춘 대화’에 그대로 남아요)' : '내가 쓴 글 전부',
+      '마지막 AI 답',
+      '이 대화 동안 바뀐 파일 이름',
+      '작업 분담·주문 상태',
+      '스킬 판'
+    ]
+      .map((item, index) => `${index + 1}. ${item}`)
+      .join('\n'),
   handoffRunning: (company: string) => `${company}로 넘기는 중…`,
   handoffFailed: (company: string) => `${company}로 넘기지 못했어요`
 } as const
@@ -245,8 +259,13 @@ export const LANE_EVENT = {
   onceEnded: (afterFirst: boolean) =>
     `이번만 쓴 작업 분담이 끝났어요 — ${afterFirst ? '다음에 나눠 맡길 때 다시 물어봐요' : '기본 배치로 돌아가요'}`,
   declined: '나눠 맡기지 않기로 했어요 — 도우미가 혼자 해요. 설정 › 작업 분담에서 다시 켤 수 있어요',
-  settingsApplied: '설정에서 작업 분담을 바꿨어요',
-  handoffDone: (to: string) => `한도로 멈췄어요 — ${to}이 이어 받았어요`,
+  /**
+   * §4-1 이어 받은 대화 첫 줄(기록으로 저장) — `switchNotice` 자리.
+   * §4-2 보관 대화 맨 끝 줄은 같은 사건을 다르게 쓴다(`handoffEnd`).
+   */
+  handoffDone: (from: string, to: string) =>
+    `${from} 대화가 한도로 멈춰 ${to}가 이어 받았어요. 논문 파일과 진행 상황은 그대로예요`,
+  handoffEnd: (to: string) => `한도로 멈췄어요 — ${to}이 이어 받았어요`,
   archiveLink: '멈춘 대화 보기'
 } as const
 
@@ -311,6 +330,8 @@ export const LANE_CARD = {
     cancelled: '취소했어요',
     declined: '나눠 맡기지 않기로 했어요',
     invalid: '이 카드는 이미 처리됐거나 더 이상 쓸 수 없어요 — 지금 배치는 설정 › 작업 분담에서 볼 수 있어요',
+    /** [r3c C0] 계약 `reason:'account-changed'` — 위 줄 대신 이 한 줄로 접힌다. */
+    accountChanged: '로그인 계정이 바뀌어 이 카드는 쓸 수 없어요 — 다시 맡기면 새 카드로 물어봐요',
     superseded: '새 카드로 바뀌었어요',
     details: '자세히',
     detailsClose: '접기'

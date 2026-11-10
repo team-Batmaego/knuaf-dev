@@ -4,6 +4,7 @@ import type {
   ArchivedChatSummary,
   CardAction,
   CardDecision,
+  CardInvalidReason,
   ConsentRow,
   LaneCard,
   LanesReply,
@@ -49,6 +50,8 @@ type JobsApi = {
   discard(root: string, jobId: string): Promise<LanesReply<void>>
   redeliver(root: string, jobId: string): Promise<LanesReply<void>>
   authLater(root: string, jobId: string): Promise<LanesReply<void>>
+  /** [Roh 중요 1] 전달문 원문 — 읽기만 한다(다시 넘기지 않는다). */
+  deliveryText(root: string, jobId: string): Promise<LanesReply<{ text: string | null }>>
 }
 
 /** `window.knuaf` 의 preload 타입(`preload/index.d.ts`)에 아직 없는 두 갈래 — 배선 C1이 더한다. */
@@ -89,6 +92,11 @@ interface LanesState {
   injected: boolean
   /** 마지막 요청의 오류 코드(화면은 [다시 확인] 안내에만 쓴다). */
   lastError: string | null
+  /**
+   * 카드별 무효 사유 — 계약 `CardDecision.reason` 은 응답에만 실리고 카드 저장에는 없다.
+   * 접힌 줄이 `account-changed` 만 다른 문구를 쓰므로(설계 §3-5 [r3c C0]) 응답에서 받아 여기 둔다.
+   */
+  invalid: Record<string, CardInvalidReason>
 
   attach: () => void
   detach: () => void
@@ -98,6 +106,8 @@ interface LanesState {
   clear: () => void
   /** 응답을 기다리지 않는 요청 — 화면은 밀려온 묶음으로 다시 그린다. 실패하면 오류 코드를 돌려준다. */
   ask: (call: (api: { lanes: LanesApi; jobs: JobsApi }) => Promise<LanesReply<unknown>>) => Promise<string | null>
+  /** 응답 **값**이 필요한 요청 — 보관 대화 열기, 카드 무효 사유처럼 묶음 밖의 답을 쓴다. */
+  callValue: <T>(call: (api: { lanes: LanesApi; jobs: JobsApi }) => Promise<LanesReply<T>>) => Promise<{ value: T } | { error: string }>
 }
 
 /** 리스너를 한 번만 거는 표시 — `attach` 는 화면을 오갈 때마다 다시 불린다. */
@@ -110,6 +120,7 @@ export const useLanes = create<LanesState>((set, get) => ({
   listening: false,
   injected: false,
   lastError: null,
+  invalid: {},
 
   attach: () => {
     const { lanes } = seam()
@@ -174,6 +185,18 @@ export const useLanes = create<LanesState>((set, get) => ({
     }
     set({ lastError: null })
     return null
+  },
+
+  callValue: async <T,>(call: (api: { lanes: LanesApi; jobs: JobsApi }) => Promise<LanesReply<T>>) => {
+    const { lanes, jobs } = seam()
+    if (!lanes || !jobs) {
+      set({ unavailable: true })
+      return { error: 'unavailable' } as const
+    }
+    const r = await laneCall(() => call({ lanes, jobs }))
+    if ('error' in r) set({ lastError: r.error })
+    else set({ lastError: null })
+    return r
   }
 }))
 
@@ -181,9 +204,26 @@ export const useLanes = create<LanesState>((set, get) => ({
 export function laneActions() {
   const ask = useLanes.getState().ask
   return {
-    decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) =>
-      ask(({ lanes }) => lanes.decideCard(root, cardId, baseVersion, action)),
-    cardStatus: (root: string, cardId: string) => ask(({ lanes }) => lanes.cardStatus(root, cardId)),
+    /**
+     * 카드 승인. 응답의 `reason` 은 묶음에 실리지 않으므로 여기서 `invalid` 에 적어 둔다 —
+     * 접힌 줄이 `account-changed` 만 다른 문구를 쓰기 때문이다(설계 §3-5 [r3c C0]).
+     */
+    decideCard: async (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<string | null> => {
+      const r = await useLanes.getState().callValue(({ lanes }) => lanes.decideCard(root, cardId, baseVersion, action))
+      if ('error' in r) return r.error
+      const reason = r.value.outcome === 'invalid' ? r.value.reason : null
+      if (reason) useLanes.setState((state) => ({ invalid: { ...state.invalid, [cardId]: reason } }))
+      return null
+    },
+    cardStatus: async (root: string, cardId: string): Promise<string | null> => {
+      const r = await useLanes.getState().callValue(({ lanes }) => lanes.cardStatus(root, cardId))
+      if ('error' in r) return r.error
+      if (r.value.outcome === 'invalid' && r.value.reason) {
+        const reason = r.value.reason
+        useLanes.setState((state) => ({ invalid: { ...state.invalid, [cardId]: reason } }))
+      }
+      return null
+    },
     settingsCard: (root: string, kind: 'enable' | 'revert') => ask(({ lanes }) => lanes.settingsCard(root, kind)),
     disable: (root: string) => ask(({ lanes }) => lanes.disable(root)),
     dismiss: (root: string, lineId: string) => ask(({ lanes }) => lanes.dismiss(root, lineId)),

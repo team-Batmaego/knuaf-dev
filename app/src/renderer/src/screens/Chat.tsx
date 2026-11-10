@@ -327,6 +327,8 @@ export function Chat() {
   /** 작업 분담 — preload 이 아직 `lanes` 를 안 내보내면(배선 C1 몫) 조용히 꺼진 채로 둔다. */
   const lanesSnapshot = useLanes((s) => s.snapshot)
   const lanesUnavailable = useLanes((s) => s.unavailable)
+  /** 카드별 무효 사유(`account-changed` 만 다른 문구). */
+  const laneInvalid = useLanes((s) => s.invalid)
   const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, insertPath, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, insertPath: s.insertPath, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
   /** 이 폴더의 준비(.venv) 중인가 — 그동안 보낸 글은 끝날 때까지 기다린다(store/prep.ts). */
   /** 이 폴더에서 기다리는 것 — 폴더 준비('prep')·저장·검사('write'). 그동안 보내기는 잠긴다. */
@@ -810,7 +812,7 @@ export function Chat() {
     thread.push({
       key: `card-${card.cardId}`,
       at: Date.parse(card.createdAt) || 0,
-      node: <LanePlanCard card={card} onDecide={decideCard} onStatus={recheckCard} />
+      node: <LanePlanCard card={card} invalidReason={laneInvalid[card.cardId] ?? null} onDecide={decideCard} onStatus={recheckCard} />
     })
   }
   thread.sort((a, b) => a.at - b.at)

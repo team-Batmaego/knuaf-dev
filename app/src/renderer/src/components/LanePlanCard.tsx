@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import type { CardAction, CardRow, LaneCard } from '../../../shared/lanes-ipc'
+import type { CardAction, CardInvalidReason, CardRow, LaneCard } from '../../../shared/lanes-ipc'
 import type { LaneEntry } from '../../../shared/lanes'
-import { LANE_CARD, LANE_NAME, depthName, modelName, providerName } from '../copy-lanes'
+import { LANE_CARD, LANE_NAME, depthName, modelLabel, modelName, providerName } from '../copy-lanes'
 import { appliedText, rejectedText } from '../laneLines'
 import { Icon } from './Icon'
 
@@ -13,8 +13,10 @@ import { Icon } from './Icon'
  * 승인은 main이 카드 id 단위로 원자적으로 소비한다(계약 `decideCard`). 화면은 `baseVersion`을 그대로
  * 돌려보내고, 결과는 밀려온 새 묶음의 `state`로만 그린다 — 두 번째 누름부터는 `already-handled`다.
  */
-export function LanePlanCard({ card, onDecide, onStatus }: {
+export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }: {
   card: LaneCard
+  /** 계약 `CardDecision.reason` — 응답에만 실려 store 가 카드 id로 모아 둔 값. */
+  invalidReason?: CardInvalidReason | null
   onDecide: (cardId: string, baseVersion: number, action: CardAction) => void
   onStatus: (cardId: string) => void
 }) {
@@ -47,7 +49,7 @@ export function LanePlanCard({ card, onDecide, onStatus }: {
       <div className="lane-card folded" id={`lane-card-${card.cardId}`} tabIndex={-1}>
         <div className="lane-folded">
           <span className="dot" aria-hidden="true"><Icon name="check" size={14} /></span>
-          <span>{foldedText(card, first, state)}</span>
+          <span>{foldedText(card, first, state, invalidReason)}</span>
           <button type="button" className="lk" ref={folded} aria-expanded={open} onClick={() => setOpen(!open)}>
             {open ? LANE_CARD.folded.detailsClose : LANE_CARD.folded.details}
           </button>
@@ -136,7 +138,11 @@ function CardBody({ card, first, settings, detail, setDetail, readOnly = false }
           {rows.map((row) => (
             <Fragment key={row.lane}><Row row={row} /></Fragment>
           ))}
-          {(design || card.variant === 'first') && <div className="chipref">{LANE_CARD.chipref(null)}</div>}
+          {(design || card.variant === 'first') && (
+            <div className="chipref">
+              {LANE_CARD.chipref(card.recommendedDesign ? modelLabel(card.recommendedDesign) : null)}
+            </div>
+          )}
         </dl>
       )}
       {!readOnly && (
@@ -218,12 +224,12 @@ function entryText(entry: LaneEntry): string {
   return parts.join(' · ')
 }
 
-/** 접힌 카드 한 줄 — 설계 §3-5 원문. `applied`만 실제로 바뀐 줄을 나열한다. */
-function foldedText(card: LaneCard, first: boolean, state: LaneCard['state']): string {
+/** 접힌 카드 한 줄 — 설계 §3-5 원문. `card.rows` 하나만 읽어 실제로 바뀐 줄을 나열한다(적용 = `rejected === null`). */
+function foldedText(card: LaneCard, first: boolean, state: LaneCard['state'], invalidReason: CardInvalidReason | null): string {
   switch (state.kind) {
     case 'applied': {
       const applied = card.rows
-        .filter((row) => row.after && !row.rejected && state.applied.includes(row.lane))
+        .filter((row) => row.after && !row.rejected)
         .map((row) => appliedText(row.lane, row.after!))
       const rejected = card.rows
         .filter((row) => row.rejected)
@@ -240,7 +246,8 @@ function foldedText(card: LaneCard, first: boolean, state: LaneCard['state']): s
     case 'cancelled':
       return LANE_CARD.folded.cancelled
     case 'invalid':
-      return LANE_CARD.folded.invalid
+      // [r3c C0] 계정이 바뀌어 거절된 카드는 다른 한 줄로 접힌다 — 사유는 응답(`CardDecision.reason`)에서 왔다.
+      return invalidReason === 'account-changed' ? LANE_CARD.folded.accountChanged : LANE_CARD.folded.invalid
     case 'superseded':
       return LANE_CARD.folded.superseded
     default:
