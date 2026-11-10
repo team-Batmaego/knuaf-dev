@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { join, sep } from 'node:path'
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   emptyNotices, NOTICE_FILE, readNoticeDocument, type NoticeDocument, type NoticeRow
 } from '../shared/notice'
@@ -24,33 +24,36 @@ export function noticeFilePath(root: string): string {
 }
 
 /**
- * `candidate` 의 **실제 경로**가 `rootReal` 안인가.
- * 아직 없는 조각(받은 영수증 파일 등)은 있는 조상까지 올라가 그 조상을 풀고 남은 조각을 그대로 붙인다.
- * 풀 수 없거나 밖이면 null — 심볼릭 링크로 밖을 가리키는 경로는 여기서 걸린다.
+ * `rootReal` 아래 상대 조각 `relPath` 가 **링크를 하나도 지나지 않고** 도달 가능한가.
+ *
+ * 논문 폴더 아래 어느 조각이든 심볼릭 링크(lstat)면 **대상의 존재·위치와 무관하게** 거절한다.
+ * 링크가 하나라도 끼면 "폴더 안"이라는 판정 자체가 링크를 만든 사람 손에 넘어가기 때문이다
+ * (끊긴 링크는 `existsSync` 가 거짓이라 미존재 경로처럼 보인다 — 그 구멍을 여기서 닫는다).
+ * 링크가 아닌 미존재 조각은 그냥 없는 이름이므로, 있는 곳까지 내려온 실제 경로에 그대로 붙여 판정한다.
  */
-function realInside(rootReal: string, candidate: string): string | null {
-  try {
-    let head = candidate
-    const tail: string[] = []
-    while (!existsSync(head)) {
-      const cut = head.lastIndexOf(sep)
-      // 뿌리까지 올라갔는데도 없다 — 판단할 수 없으니 보수적으로 밖으로 친다.
-      if (cut <= 0) return null
-      tail.unshift(head.slice(cut + 1))
-      head = head.slice(0, cut)
+function confinedReal(rootReal: string, relPath: string): string | null {
+  const parts = relPath.split('/').filter(Boolean)
+  // 순수 함수가 이미 걸러 내지만, 여기 들어오는 값은 언제나 **폴더 아래 상대 경로**여야 한다.
+  if (!parts.length || parts.some((part) => part === '..')) return null
+  let head = rootReal
+  for (let index = 0; index < parts.length; index += 1) {
+    head = join(head, parts[index])
+    let stat
+    try {
+      stat = lstatSync(head)
+    } catch {
+      // 없는 이름(또는 디렉터리가 아닌 조상 아래) — 남은 조각은 실재할 수 없다. 여기까지가 실제 경로다.
+      return join(head, ...parts.slice(index + 1))
     }
-    const real = [realpathSync(head), ...tail].join(sep)
-    return real.startsWith(rootReal + sep) ? real : null
-  } catch {
-    /* 권한 없음·끊긴 링크 등: 실제 경로를 말할 수 없으면 인정하지 않는다. */
-    return null
+    if (stat.isSymbolicLink()) return null
   }
+  return head
 }
 
-/** receipt 는 폴더 안 실제 경로일 때만 남긴다 — 밖이면 null(계약: `NoticeRow.receiptPath`). */
+/** receipt 는 폴더 안 실제 경로일 때만 남긴다 — 밖이거나 링크를 지나면 null(계약: `NoticeRow.receiptPath`). */
 function confineReceipt(rootReal: string, notice: NoticeRow): NoticeRow {
   if (!notice.receiptPath) return notice
-  return realInside(rootReal, join(rootReal, notice.receiptPath)) ? notice : { ...notice, receiptPath: null }
+  return confinedReal(rootReal, notice.receiptPath) ? notice : { ...notice, receiptPath: null }
 }
 
 export function readNotices(root: string): NoticeDocument {
@@ -58,9 +61,10 @@ export function readNotices(root: string): NoticeDocument {
     if (!root || !existsSync(root)) return emptyNotices()
     const rootReal = realpathSync(root)
     const file = noticeFilePath(root)
+    // 알림 파일 자체도 같은 경계다 — 링크(끊긴 링크 포함)를 지나면 읽지 않는다.
+    // `existsSync` 보다 먼저 본다: 끊긴 링크도 existsSync 에서는 "파일 없음"과 똑같이 보이기 때문이다.
+    if (!confinedReal(rootReal, NOTICE_FILE)) return emptyNotices()
     if (!existsSync(file)) return emptyNotices()
-    // 알림 파일 자체가 밖을 가리키는 심볼릭 링크면 읽지 않는다 — 같은 경계다.
-    if (!realInside(rootReal, file)) return emptyNotices()
     const stat = statSync(file)
     if (!stat.isFile() || stat.size > MAX_BYTES) return emptyNotices()
     const text = readFileSync(file, 'utf-8')

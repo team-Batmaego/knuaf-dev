@@ -589,6 +589,44 @@ test('논문 폴더 안 심볼릭 링크로 밖을 가리키는 receipt_path 는
   expect(readNotices(plain).notices[0].receiptPath).toBe('out/receipt.json')
 })
 
+test('끊긴 심볼릭 링크는 대상이 없어도 폴더 밖으로 친다', () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-notice-deadlink-'))
+  const paper = join(root, 'paper')
+  mkdirSync(paper, { recursive: true })
+
+  const raw = JSON.parse(JSON.stringify(hortBefore)) as { notices: Record<string, unknown>[] }
+  raw.notices[0].receipt_path = 'out/receipt.json'
+  writeFileSync(noticeFilePath(paper), JSON.stringify(raw), 'utf-8')
+
+  // 폴더 밖의 **아직 없는** 대상을 가리키는 링크 — existsSync 는 거짓이라 미존재 경로처럼 보인다.
+  symlinkSync(join(root, 'outside', 'nope'), join(paper, 'out'), 'dir')
+  expect(existsSync(join(paper, 'out'))).toBe(false) // 링크가 끊겼다는 사실을 시험이 먼저 못박는다.
+  expect(readNotices(paper).notices[0].receiptPath).toBeNull()
+})
+
+test('폴더 안을 가리키는 멀쩡한 링크도 거절한다(링크면 거절)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-notice-insidelink-'))
+  const paper = join(root, 'paper')
+  mkdirSync(join(paper, 'real'), { recursive: true })
+  writeFileSync(join(paper, 'real', 'receipt.json'), '{}', 'utf-8')
+
+  const raw = JSON.parse(JSON.stringify(hortBefore)) as { notices: Record<string, unknown>[] }
+  raw.notices[0].receipt_path = 'out/receipt.json'
+  writeFileSync(noticeFilePath(paper), JSON.stringify(raw), 'utf-8')
+
+  // 대상이 폴더 안이라 실제 경로 판정만으로는 통과한다 — 조각에 링크가 있다는 사실 자체로 거절한다.
+  symlinkSync(join(paper, 'real'), join(paper, 'out'), 'dir')
+  expect(existsSync(join(paper, 'out', 'receipt.json'))).toBe(true)
+  expect(readNotices(paper).notices[0].receiptPath).toBeNull()
+
+  // 대조: 링크가 아니라 진짜 폴더면 같은 경로가 그대로 남는다.
+  const plain = join(root, 'plain')
+  mkdirSync(join(plain, 'out'), { recursive: true })
+  writeFileSync(join(plain, 'out', 'receipt.json'), '{}', 'utf-8')
+  writeFileSync(noticeFilePath(plain), JSON.stringify(raw), 'utf-8')
+  expect(readNotices(plain).notices[0].receiptPath).toBe('out/receipt.json')
+})
+
 test('알림 파일 자체가 밖을 가리키는 심볼릭 링크면 읽지 않는다', () => {
   const root = mkdtempSync(join(tmpdir(), 'kd-notice-filelink-'))
   const paper = join(root, 'paper')
@@ -599,6 +637,17 @@ test('알림 파일 자체가 밖을 가리키는 심볼릭 링크면 읽지 않
   writeFileSync(join(outside, 'notices.json'), JSON.stringify(raw), 'utf-8')
   symlinkSync(join(outside, 'notices.json'), join(paper, '.knuaf-notices.json'), 'file')
   expect(readNotices(paper)).toEqual({ notices: [] })
+
+  // 끊긴 링크(대상 없음)도 같은 규칙 — existsSync 로는 "파일 없음"과 구별되지 않는다.
+  const dead = join(root, 'dead')
+  mkdirSync(dead, { recursive: true })
+  symlinkSync(join(outside, 'missing.json'), join(dead, '.knuaf-notices.json'), 'file')
+  expect(existsSync(join(dead, '.knuaf-notices.json'))).toBe(false)
+  expect(readNotices(dead)).toEqual({ notices: [] })
+  // 대상이 나중에 밖에 생겨도 링크는 링크다 — 읽히지 않는다.
+  writeFileSync(join(outside, 'missing.json'), JSON.stringify(raw), 'utf-8')
+  expect(existsSync(join(dead, '.knuaf-notices.json'))).toBe(true)
+  expect(readNotices(dead)).toEqual({ notices: [] })
 
   // 대조: 링크가 아니라 폴더 안 실제 파일이면 그대로 읽는다.
   const plain = join(root, 'plain')
