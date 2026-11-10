@@ -55,21 +55,38 @@ function itemLine(what: string, cells: readonly string[]): string {
   return cells.length ? `${what} · ${cells.join(', ')}` : what
 }
 
+/**
+ * 선택 한 번의 상태 — **어느 알림의 요청인지**(열쇠)를 함께 든다.
+ * 부품은 같은 자리에서 다른 알림을 그릴 수 있다(대화 창이 알림을 갈아 끼운다). 열쇠를 안 들면
+ * 앞 알림의 잠금·늦은 실패가 새 알림에 얹힌다.
+ */
+interface ChoiceAttempt {
+  key: string
+  value: NoticeChoiceValue
+  failed: boolean
+}
+
 /** 알림 한 건. 부르는 쪽이 띄울지 정하고, 여기서는 그리기·선택 잠금만 한다. */
 export function NoticeBubble({ notice, onDismiss, onChoose, onFootnote, forceOpen = false }: NoticeBubbleProps) {
-  const [picked, setPicked] = useState<NoticeChoiceValue | null>(null)
-  const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState<ChoiceAttempt | null>(null)
+  // 열쇠가 다르면 없는 것으로 친다 — 새 알림은 **같은 렌더에서** 곧바로 선택지를 되찾는다(초기화 렌더 없음).
+  const current = attempt && attempt.key === notice.key ? attempt : null
+  const picked = current && !current.failed ? current.value : null
+  const failed = current?.failed ?? false
   const showChoices = choiceOpen(notice, picked) && !!onChoose
   const footnoteReady = notice.choice === 'footnote' && !!onFootnote
 
   const pick = (value: NoticeChoiceValue): void => {
+    const key = notice.key
     // 렌더를 기다리지 않고 즉시 잠근다 — 두 번 눌러도 기록은 하나.
-    setPicked(value)
-    setFailed(false)
-    Promise.resolve(onChoose?.(value)).catch(() => {
-      setPicked(null)
-      setFailed(true)
-    })
+    setAttempt({ key, value, failed: false })
+    // 부르는 쪽이 동기 함수일 수 있다 — 호출을 마이크로태스크 안에서 해야 동기 throw 도 같은 실패 경로로 온다.
+    void Promise.resolve()
+      .then(() => onChoose?.(value))
+      .catch(() => {
+        // 응답은 요청 때의 열쇠·값이 아직 그 자리일 때만 반영한다 — 앞 알림의 늦은 실패가 새 알림을 건드리지 않는다.
+        setAttempt((prev) => (prev && prev.key === key && prev.value === value ? { key, value, failed: true } : prev))
+      })
   }
 
   return (

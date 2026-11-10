@@ -10,12 +10,17 @@
  * ⑤ 폴더 밖 `receipt_path` 는 무시한다.
  * ⑥ 도우미가 쓴 글을 마크다운·링크로 해석하지 않는다(서식 없는 글자).
  * ⑦ main 쪽 읽기 — 없음·깨짐·스키마 다름은 전부 "알림 없음"이고 던지지 않는다.
+ * ⑧ 훅 상태는 **알림 열쇠에 묶인다** — 같은 자리에 새 알림을 갈아 끼워도 앞 알림의 잠금·늦은 실패가
+ *    새 알림에 얹히지 않는다(1심 검토 지적).
+ * ⑨ 동기 throw 도 비동기 거절과 **같은 실패 경로**로 온다 — 단추가 돌아오고 실패 줄이 뜬다.
+ * ⑩ 경계는 문자열이 아니라 **실제 경로**다 — 폴더 안 심볼릭 링크로 밖을 가리키는 `receipt_path` 와
+ *    알림 파일 자체가 밖을 가리키는 링크는 둘 다 버린다(main 이 판정).
  */
 import { expect, test } from '@playwright/test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 import { createRequire } from 'node:module'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { JsxEmit, ModuleKind, ScriptTarget, transpileModule } from 'typescript'
@@ -203,7 +208,7 @@ test('닫기 기억 — 같은 열쇠는 다시 안 뜨고, 개정되면 다시 
   expect(noticeVisible(after, [before.key])).toBe(false)
 
   // 개정으로 열쇠가 바뀌면 다시 뜬다.
-  const revised: NoticeRow = { ...before, key: noticeKey('760bb30514899cd1434376bfa4a21da994b6fd6b9bdabe3190f48c5d69cd9cea', 'f'.repeat(64)) }
+  const revised: NoticeRow = { ...before, key: noticeKey(before.key.slice(0, before.key.indexOf(':')), 'f'.repeat(64)) }
   expect(noticeVisible(revised, [before.key])).toBe(true)
 
   // SKE-09 "다시 보기"만 닫기 기억을 넘는다.
@@ -279,4 +284,325 @@ test('main 읽기 — 없음·깨짐·스키마 다름은 "알림 없음"이고 
   const rows = readNotices(paper).notices
   expect(rows).toHaveLength(1)
   expect(rows[0].receiptPath).toBe('out/receipt.json')
+})
+
+/**
+ * ── 훅 상태 시험 ────────────────────────────────────────────────────────────
+ * 위 시험은 매번 **새 부품**을 서버 렌더한다. 그래서 1심 검토의 두 결함이 전부 빠져나갔다:
+ * ① 잠금이 알림이 아니라 부품 자리에 묶여 있었다 — 같은 자리에 다른 알림을 갈아 끼우면 새 알림의
+ *    선택지가 사라지고, 앞 알림의 늦은 실패가 새 알림에 얹혔다.
+ * ② `Promise.resolve(onChoose?.(value))` 는 호출이 먼저라 동기 throw 가 `.catch` 를 비껴갔다.
+ * 아래는 같은 뿌리에 알림을 갈아 끼우며 **실제 훅 상태**를 본다. 브라우저가 아니라 React 19
+ * 클라이언트 렌더러가 요구하는 최소 DOM 만 세운다(검토자 재현 하네스와 같은 수법).
+ */
+class HostNode {
+  nodeType: number
+  nodeName: string
+  tagName: string
+  ownerDocument: HostNode | null
+  namespaceURI: string
+  nodeValue: string
+  childNodes: HostNode[]
+  parentNode: HostNode | null
+  attrs: Record<string, string>
+  style: Record<string, string>
+  listeners: Record<string, Array<(...args: unknown[]) => void>>
+
+  constructor(name: string, owner: HostNode | null, type = 1) {
+    this.nodeType = type
+    this.nodeName = name.toUpperCase()
+    this.tagName = this.nodeName
+    this.ownerDocument = owner
+    this.namespaceURI = 'http://www.w3.org/1999/xhtml'
+    this.nodeValue = ''
+    this.childNodes = []
+    this.parentNode = null
+    this.attrs = {}
+    this.style = {}
+    this.listeners = {}
+  }
+
+  appendChild(node: HostNode): HostNode {
+    if (node.parentNode) node.parentNode.removeChild(node)
+    this.childNodes.push(node)
+    node.parentNode = this
+    return node
+  }
+
+  insertBefore(node: HostNode, ref: HostNode): HostNode {
+    if (node.parentNode) node.parentNode.removeChild(node)
+    this.childNodes.splice(this.childNodes.indexOf(ref), 0, node)
+    node.parentNode = this
+    return node
+  }
+
+  removeChild(node: HostNode): HostNode {
+    this.childNodes.splice(this.childNodes.indexOf(node), 1)
+    node.parentNode = null
+    return node
+  }
+
+  setAttribute(key: string, value: unknown): void { this.attrs[key] = String(value) }
+  setAttributeNS(_namespace: string, key: string, value: unknown): void { this.setAttribute(key, value) }
+  removeAttribute(key: string): void { delete this.attrs[key] }
+  addEventListener(key: string, fn: (...args: unknown[]) => void): void { (this.listeners[key] ??= []).push(fn) }
+  removeEventListener(): void { /* 이 시험은 이벤트를 걷어내지 않는다 */ }
+
+  get className(): string { return this.attrs.class ?? '' }
+  set className(value: string) { this.attrs.class = value }
+  get firstChild(): HostNode | null { return this.childNodes[0] ?? null }
+  get lastChild(): HostNode | null { return this.childNodes.at(-1) ?? null }
+  get nextSibling(): HostNode | null {
+    const list = this.parentNode?.childNodes ?? []
+    return list[list.indexOf(this) + 1] ?? null
+  }
+  get textContent(): string {
+    return this.nodeType === 3 ? this.nodeValue : this.childNodes.map((node) => node.textContent).join('')
+  }
+  set textContent(text: string) {
+    this.childNodes = []
+    if (text && this.ownerDocument) this.appendChild(this.ownerDocument.createTextNode(text))
+  }
+  contains(node: HostNode): boolean {
+    return node === this || this.childNodes.some((child) => child.contains(node))
+  }
+}
+
+interface HostDocument extends HostNode {
+  createElement(name: string): HostNode
+  createElementNS(namespace: string, name: string): HostNode
+  createTextNode(text: string): HostNode
+  createComment(text: string): HostNode
+  documentElement: HostNode
+  body: HostNode
+  activeElement: HostNode
+  defaultView: unknown
+}
+
+/**
+ * 시험 하나 동안만 DOM 전역을 세운다. 끝나면 **원래 값으로 되돌린다** — 같은 워커에서 도는
+ * 다른 스펙(서버 렌더·스토어)이 이 전역을 보지 않게 한다.
+ */
+async function withHostDom(run: (hostDocument: HostDocument, act: (body: () => Promise<void> | void) => Promise<void>) => Promise<void>): Promise<void> {
+  const document = new HostNode('#document', null, 9) as HostDocument
+  document.ownerDocument = document
+  document.createElement = (name: string) => new HostNode(name, document)
+  document.createElementNS = (namespace: string, name: string) => {
+    const node = new HostNode(name, document)
+    node.namespaceURI = namespace
+    return node
+  }
+  document.createTextNode = (text: string) => {
+    const node = new HostNode('#text', document, 3)
+    node.nodeValue = String(text)
+    return node
+  }
+  document.createComment = (text: string) => {
+    const node = new HostNode('#comment', document, 8)
+    node.nodeValue = String(text)
+    return node
+  }
+  document.documentElement = document.createElement('html')
+  document.body = document.createElement('body')
+  document.documentElement.appendChild(document.body)
+  document.activeElement = document.body
+  document.defaultView = globalThis
+
+  const globals = globalThis as unknown as Record<string, unknown>
+  const saved = new Map<string, unknown>()
+  const install = (name: string, value: unknown): void => {
+    saved.set(name, globals[name])
+    globals[name] = value
+  }
+  install('window', globalThis)
+  install('document', document)
+  install('HTMLElement', HostNode)
+  install('HTMLIFrameElement', class {})
+  install('IS_REACT_ACT_ENVIRONMENT', true)
+  try {
+    const { act } = real('react') as { act: (body: () => Promise<void> | void) => Promise<void> }
+    await run(document, act)
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete globals[name]
+      else globals[name] = value
+    }
+  }
+}
+
+interface BubbleRoot { render: (element: unknown) => void; unmount: () => void }
+interface BubblePaint extends Paint { notice: NoticeRow }
+
+function walk(node: HostNode, hit: (node: HostNode) => boolean, out: HostNode[] = []): HostNode[] {
+  if (hit(node)) out.push(node)
+  for (const child of node.childNodes) walk(child, hit, out)
+  return out
+}
+
+/** 화면에 있는 선택 단추 — `.notice-choice` 안의 `button` 만. */
+function visibleChoices(host: HostNode): HostNode[] {
+  return walk(host, (node) => node.attrs.class === 'notice-choice').flatMap((box) => walk(box, (node) => node.tagName === 'BUTTON'))
+}
+
+/** 실패 알림 줄 — `.notice-failed`(role=alert). */
+function failedLines(host: HostNode): HostNode[] {
+  return walk(host, (node) => node.attrs.class === 'notice-failed')
+}
+
+function pressChoice(button: HostNode): void {
+  const holder = button as unknown as Record<string, { onClick?: () => void }>
+  const propKey = Object.keys(holder).find((name) => name.startsWith('__reactProps$'))
+  if (!propKey) throw new Error('단추에서 React props 를 찾지 못했다')
+  holder[propKey].onClick?.()
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } {
+  let resolve = (): void => {}
+  let reject = (_error: Error): void => {}
+  const promise = new Promise<void>((ok, fail) => { resolve = ok; reject = fail })
+  return { promise, resolve, reject }
+}
+
+/** 같은 뿌리에 알림을 갈아 끼운다 — 부품 자리(마운트)는 그대로다. */
+async function paintLive(
+  document: HostDocument,
+  act: (body: () => Promise<void> | void) => Promise<void>,
+  props: BubblePaint,
+  reactKey?: string
+): Promise<{ host: HostNode; root: BubbleRoot; render: (next: BubblePaint, key?: string) => Promise<void> }> {
+  const { createRoot } = real('react-dom/client') as { createRoot: (container: HostNode) => BubbleRoot }
+  const host = document.createElement('div')
+  document.body.appendChild(host)
+  const root = createRoot(host)
+  const render = async (next: BubblePaint, key?: string): Promise<void> => {
+    await act(async () => {
+      root.render(createElement(NoticeBubble as unknown as (props: BubblePaint) => unknown, { ...next, ...(key ? { key } : {}) }))
+    })
+  }
+  await render(props, reactKey)
+  return { host, root, render }
+}
+
+/** 견본 before 를 같은 프로젝트의 **개정 알림**으로 — 열쇠만 다르다. */
+function revisedNotice(before: NoticeRow): NoticeRow {
+  const projectId = (hortBefore as { project_id: string }).project_id
+  return { ...before, key: noticeKey(projectId, 'f'.repeat(64)) }
+}
+
+test('열쇠가 바뀐 알림은 앞 알림의 잠금을 물려받지 않는다', async () => {
+  await withHostDom(async (document, act) => {
+    const before = one(hortBefore)
+    const next = revisedNotice(before)
+    let calls = 0
+    const { host, root, render } = await paintLive(document, act, { notice: before, onChoose: () => { calls += 1 } })
+    await act(async () => pressChoice(visibleChoices(host)[1]))
+    // 잠금 확인 — 같은 알림에서는 다시 묻지 않는다.
+    expect(visibleChoices(host)).toHaveLength(0)
+    await render({ notice: next, onChoose: () => { calls += 1 } })
+    // 새 알림은 **같은 렌더에서** 선택지를 되찾는다(초기화 렌더 없음).
+    expect(next.choice).toBeNull()
+    expect(visibleChoices(host)).toHaveLength(2)
+    expect(calls).toBe(1)
+    await act(async () => root.unmount())
+  })
+})
+
+test('동기 throw 도 비동기 거절과 같은 실패 경로로 온다', async () => {
+  await withHostDom(async (document, act) => {
+    const before = one(hortBefore)
+    let thrown: string | null = null
+    const { host, root } = await paintLive(document, act, {
+      notice: before,
+      onChoose: () => { throw new Error('sync rejection') }
+    })
+    await act(async () => {
+      try { pressChoice(visibleChoices(host)[0]) } catch (error) { thrown = (error as Error).message }
+    })
+    expect(thrown).toBeNull()
+    expect(visibleChoices(host)).toHaveLength(2)
+    expect(failedLines(host)).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+})
+
+test('비동기 거절은 잠금을 풀고 실패를 알린다(대조군)', async () => {
+  await withHostDom(async (document, act) => {
+    const { host, root } = await paintLive(document, act, {
+      notice: one(hortBefore),
+      onChoose: () => Promise.reject(new Error('async rejection'))
+    })
+    await act(async () => pressChoice(visibleChoices(host)[0]))
+    expect(visibleChoices(host)).toHaveLength(2)
+    expect(failedLines(host)).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+})
+
+test('앞 알림의 늦은 거절은 새 알림에 실패를 적지 않는다', async () => {
+  await withHostDom(async (document, act) => {
+    const before = one(hortBefore)
+    const next = revisedNotice(before)
+    const pending = deferred()
+    const { host, root, render } = await paintLive(document, act, { notice: before, onChoose: () => pending.promise })
+    await act(async () => pressChoice(visibleChoices(host)[0]))
+    await render({ notice: next, onChoose: () => {} })
+    await act(async () => { pending.reject(new Error('old identity failed')) })
+    expect(failedLines(host)).toHaveLength(0)
+    expect(visibleChoices(host)).toHaveLength(2)
+    await act(async () => root.unmount())
+  })
+})
+
+test('부르는 쪽이 React key 를 주면 잠금도 함께 갈린다(대조군)', async () => {
+  await withHostDom(async (document, act) => {
+    const before = one(hortBefore)
+    const next = revisedNotice(before)
+    const { host, root, render } = await paintLive(document, act, { notice: before, onChoose: () => {} }, before.key)
+    await act(async () => pressChoice(visibleChoices(host)[0]))
+    await render({ notice: next, onChoose: () => {} }, next.key)
+    expect(visibleChoices(host)).toHaveLength(2)
+    expect(failedLines(host)).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+})
+
+test('논문 폴더 안 심볼릭 링크로 밖을 가리키는 receipt_path 는 main 이 버린다', () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-notice-link-'))
+  const paper = join(root, 'paper')
+  const outside = join(root, 'outside')
+  mkdirSync(paper, { recursive: true })
+  mkdirSync(outside, { recursive: true })
+  writeFileSync(join(outside, 'receipt.json'), '{}', 'utf-8')
+
+  const raw = JSON.parse(JSON.stringify(hortBefore)) as { notices: Record<string, unknown>[] }
+  raw.notices[0].receipt_path = 'out/receipt.json'
+
+  // 밖을 가리키는 링크 — 문자열만 보면 폴더 안이지만 실제 경로는 밖이다.
+  symlinkSync(outside, join(paper, 'out'), 'dir')
+  writeFileSync(noticeFilePath(paper), JSON.stringify(raw), 'utf-8')
+  expect(readNotices(paper).notices[0].receiptPath).toBeNull()
+
+  // 대조: 같은 값이라도 링크가 없으면(아직 없는 파일이어도) 폴더 안 상대 경로로 남는다.
+  const plain = join(root, 'plain')
+  mkdirSync(plain, { recursive: true })
+  writeFileSync(noticeFilePath(plain), JSON.stringify(raw), 'utf-8')
+  expect(readNotices(plain).notices[0].receiptPath).toBe('out/receipt.json')
+})
+
+test('알림 파일 자체가 밖을 가리키는 심볼릭 링크면 읽지 않는다', () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-notice-filelink-'))
+  const paper = join(root, 'paper')
+  const outside = join(root, 'outside')
+  mkdirSync(paper, { recursive: true })
+  mkdirSync(outside, { recursive: true })
+  const raw = JSON.parse(JSON.stringify(hortBefore)) as { notices: Record<string, unknown>[] }
+  writeFileSync(join(outside, 'notices.json'), JSON.stringify(raw), 'utf-8')
+  symlinkSync(join(outside, 'notices.json'), join(paper, '.knuaf-notices.json'), 'file')
+  expect(readNotices(paper)).toEqual({ notices: [] })
+
+  // 대조: 링크가 아니라 폴더 안 실제 파일이면 그대로 읽는다.
+  const plain = join(root, 'plain')
+  mkdirSync(plain, { recursive: true })
+  writeFileSync(noticeFilePath(plain), JSON.stringify(raw), 'utf-8')
+  expect(readNotices(plain).notices).toHaveLength(1)
 })

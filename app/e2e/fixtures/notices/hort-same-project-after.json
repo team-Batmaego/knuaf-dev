@@ -1,7 +1,7 @@
 {
   "schema": "knuaf.notices/1",
-  "written_at": "2026-11-10T16:15:16.903269+00:00",
-  "project_id": "760bb30514899cd1434376bfa4a21da994b6fd6b9bdabe3190f48c5d69cd9cea",
+  "written_at": "2026-11-10T20:16:52.242139+00:00",
+  "project_id": "d29edc18f40887ca323113e98b70f9af3d23b4e7ade89cdf4115ada427f51942",
   "notices": [
     {
       "check_id": "finance_workbook_notice",
@@ -246,7 +246,7 @@
           "in_school_form": true
         }
       ],
-      "notice_identity": "954e00896799b4e77b289e68b0507fe7686e56e3e4b5f26b18758103f82913e9",
+      "notice_identity": "a69dd25772be8e49c05e95f472b4e417d6101e0f995d3689fcf63d8f78cd6f11",
       "receipt_path": "out/receipt.json",
       "record_refs": [
         {
@@ -258,7 +258,7 @@
       "method_count": 67,
       "dismissible": true,
       "redisplay_rule": "identity_changed",
-      "project_id": "760bb30514899cd1434376bfa4a21da994b6fd6b9bdabe3190f48c5d69cd9cea",
+      "project_id": "d29edc18f40887ca323113e98b70f9af3d23b4e7ade89cdf4115ada427f51942",
       "choices": [
         {
           "value": "direct_tell",
