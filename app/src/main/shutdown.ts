@@ -51,6 +51,62 @@ export function openHandles(): string {
 }
 
 /**
+ * 마감 뒤 남은 자식 회수 — **시도와 관측**까지만 한다(검토 RT2-03).
+ *
+ * `app.exit(0)` 는 Electron main 을 끝낼 뿐, 그 자식(사이드카·엔진·taskkill 이 놓친 손자)을
+ * 회수한다는 보장이 없다. OS 가 정리해 줄 것이라고 가정하지 않고, 우리가 아는 pid 를 한 번 더
+ * 트리째 끝내고 **살아 있는지 관측한 결과**를 돌려준다. 관측이 실패하면 그 사실을 남긴다 —
+ * "회수 보장"이 아니라 "회수 시도 + 관측"이다.
+ */
+export interface ReclaimOutcome {
+  /** 트리 종료를 시도한 pid. */
+  pids: number[]
+  /** 관측 시점에 아직 살아 있던 pid. 비어 있지 않으면 고아가 남았다는 뜻이다. */
+  alive: number[]
+  /** 관측 자체를 못 한 pid(권한 등). */
+  unknown: number[]
+}
+
+/** pid 가 살아 있는가 — 신호 0 은 죽이지 않고 존재만 본다. */
+function alive(pid: number): boolean | null {
+  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' ? null : false }
+}
+
+const delay = (ms: number): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
+}
+
+/**
+ * pid 들을 트리째 끝내고 `deadlineMs` 동안 회수를 관측한다. 던지지 않는다.
+ * `kill` 은 호출자가 넘긴다(`win.ts` 의 `killTree`) — 이 파일이 프로세스 구현을 알 필요는 없다.
+ */
+export async function reclaimChildren(
+  pids: readonly number[],
+  kill: (pid: number) => void,
+  deadlineMs = 1_500
+): Promise<ReclaimOutcome> {
+  const unique = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))]
+  const outcome: ReclaimOutcome = { pids: unique, alive: [], unknown: [] }
+  if (!unique.length) return outcome
+  for (const pid of unique) { try { kill(pid) } catch { /* 아래 관측이 사실을 말한다 */ } }
+  const end = Date.now() + Math.max(0, deadlineMs)
+  let remaining = unique
+  for (;;) {
+    remaining = remaining.filter((pid) => alive(pid) !== false)
+    if (!remaining.length || Date.now() >= end) break
+    await delay(50)
+  }
+  for (const pid of remaining) {
+    const state = alive(pid)
+    if (state === null) outcome.unknown.push(pid)
+    else if (state) outcome.alive.push(pid)
+  }
+  return outcome
+}
+
+/**
  * 모든 정리를 시작하고 `deadlineMs` 까지 기다린다. **던지지 않는다** — 거절은 `failed` 로 돌려준다.
  * 마감이 지나면 끝나지 않은 것을 기다리지 않고 `pending` 으로 알린다.
  */

@@ -94,3 +94,37 @@ test('동기 작업이 없는 정상 경로는 마감 안에 끝나고 경과가
   expect(outcome.pending).toEqual([])
   expect(outcome.elapsedMs, '마감(1000ms)을 넘겼다').toBeLessThan(200)
 })
+
+test('남은 자식은 트리 종료를 시도하고 **살아 있는지 관측**한다 — 회수를 가정하지 않는다 (RT2-03)', async () => {
+  // 이 시험이 띄우는 자식은 우리가 직접 만든 것이라 실제 kill 로 정리한다(고아 금지).
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  await new Promise<void>((resolve) => child.once('spawn', resolve))
+  const pid = child.pid!
+  try {
+    const killed: number[] = []
+    const outcome = await reclaimChildren([pid], (p) => { killed.push(p); try { child.kill('SIGKILL') } catch { /* gone */ } }, 2_000)
+    expect(outcome.pids).toEqual([pid])
+    expect(killed, '트리 종료를 시도하지 않았다').toEqual([pid])
+    expect(outcome.alive, '죽인 자식이 살아 있다고 나온다').toEqual([])
+    expect(outcome.unknown).toEqual([])
+  } finally {
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+  }
+})
+
+test('kill 이 실패하면 관측 결과가 살아있음으로 남는다 — 성공을 꾸미지 않는다 (RT2-03)', async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  await new Promise<void>((resolve) => child.once('spawn', resolve))
+  const pid = child.pid!
+  try {
+    const outcome = await reclaimChildren([pid], () => { /* kill 실패를 흉내낸다 */ }, 200)
+    expect(outcome.alive, 'kill 실패인데 회수됐다고 말한다').toEqual([pid])
+  } finally {
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+  }
+})
+
+test('pid 가 없으면 회수 시도도 관측도 하지 않는다', async () => {
+  const outcome = await reclaimChildren([], () => { throw new Error('부르면 안 된다') })
+  expect(outcome).toEqual({ pids: [], alive: [], unknown: [] })
+})

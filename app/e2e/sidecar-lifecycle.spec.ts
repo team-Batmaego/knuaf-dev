@@ -269,6 +269,37 @@ test('Windows taskkill 자체가 멈춰도 6초에 실패하며 종료 명령을
   expect(h.children).toHaveLength(1)
 })
 
+test('stopForExit 는 큐를 기다리지 않아 종료 실패가 가려지지 않는다 (RT2-03)', async () => {
+  // 검토 RT2-03 재현: lifecycle 큐가 길면 `sidecar.stop()` 의 반환도 늦어져, 외부 마감에서는
+  // 실제 종료 실패(`sidecar_stop_failed`)가 `failed` 가 아니라 `pending` 으로 보였다.
+  // `stopForExit` 는 같은 정지를 하되 큐 뒤에 서지 않으므로 실패가 **정착한 실패**로 돌아온다.
+  const h = harness('win32')
+  await h.sidecar.configure('/project', 'base')
+  const child = h.children[0]; child.shutdown = false
+  // 큐를 붙잡는 작업 — 끝나지 않는 시작(configure)을 먼저 넣어 둔다.
+  h.manualReady()
+  const blocked = h.sidecar.configure('/other', 'venv')
+  void blocked.catch(() => { /* 아래 stopForExit 이 취소한다 */ })
+  await flush()
+
+  const queued = h.sidecar.stop()
+  let queuedSettled = false
+  void queued.then(() => { queuedSettled = true }, () => { queuedSettled = true })
+  const exitStop = h.sidecar.stopForExit().then(
+    () => { throw new Error('stopForExit 가 실패로 정착하지 않았다') },
+    (error: { code?: string; data?: { recovery?: string } }) => error
+  )
+  await h.advance(3000)
+  h.killers[0].exit(1)
+  const error = await exitStop
+  expect(error.code, '종료 실패 코드가 사라졌다').toBe('sidecar_stop_failed')
+  expect(error.data?.recovery).toBe('retry_stop')
+  expect(queuedSettled, '큐에 선 stop 이 먼저 정착했다 — 이 시험은 가려짐을 재현하지 못했다').toBe(false)
+  child.close()
+  await queued.catch(() => { /* 같은 실패 */ })
+  await blocked.catch(() => { /* 시작 취소 */ })
+})
+
 for (const phase of ['ready', 'methods.list'] as const) {
   test(`F-IMPL-01 ${phase} 무응답도 시작 전체 10초에 실패하고 소유 프로세스를 정리한다`, async () => {
     const h = harness(); h.manualReady()

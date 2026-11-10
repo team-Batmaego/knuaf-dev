@@ -10,7 +10,8 @@ import { installMenu, type MenuAction } from './menu'
 import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { defaultWindowSize } from '../shared/window'
-import { openHandles, shutdownWithin } from './shutdown'
+import { killTree } from './win'
+import { openHandles, reclaimChildren, shutdownWithin } from './shutdown'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
@@ -147,9 +148,12 @@ else {
        * 함께 받아 마감보다 길면 그대로 남긴다 — 타이머는 이벤트 루프가 돌아야 하므로, 같은 루프를
        * 막는 일이 있으면 마감은 늦어지고 그 사실이 로그에 숫자로 보여야 한다.
        *
+       * `sidecar.stop()` 이 아니라 `stopForExit()` 를 쓴다: 큐 뒤에 줄 서면 실제 종료 실패가
+       * `pending` 으로 가려진다(검토 RT2-03).
        */
+      const ownedPids = sidecar.ownedPids()
       void shutdownWithin([
-        { name: 'sidecar.stop', start: () => sidecar.stop() },
+        { name: 'sidecar.stop', start: () => sidecar.stopForExit() },
         { name: 'chat.close', start: () => chat?.close() ?? Promise.resolve() }
       ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
         for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, failure.reason)
@@ -169,6 +173,12 @@ else {
          * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
          */
         if (app.listenerCount('before-quit') !== 1) { app.quit(); return }
+        // 남은 자식을 먼저 한 번 더 트리째 끝내고, 살아 있는지 **관측**한다. OS 회수를 가정하지 않는다.
+        const reclaim = await reclaimChildren(ownedPids, (pid) => killTree({ pid, kill: () => false }))
+        console.error(`[shutdown] 남은 핸들: ${openHandles() || '(없음)'}`)
+        if (reclaim.pids.length) {
+          console.error(`[shutdown] 자식 회수 시도 pid=${reclaim.pids.join(',')} 살아있음=${reclaim.alive.join(',') || '없음'} 확인못함=${reclaim.unknown.join(',') || '없음'}`)
+        }
         app.exit(0)
       })
     }

@@ -67,6 +67,26 @@ export class Sidecar extends EventEmitter {
     return this.enqueue(() => stopped)
   }
 
+  /**
+   * 종료 전용 정지 — **큐를 기다리지 않는다**(검토 RT2-03).
+   *
+   * `stop()` 은 큐에 줄을 서서 반환값이 늦어질 수 있다. 그래서 앱 종료 마감에서 그것을 보면
+   * 실제 종료 실패(`sidecar_stop_failed`·`sidecar_stop_timeout`)가 `pending` 으로 가려졌다.
+   * 여기서는 같은 일(진행 중 시작 취소 + `stopNow`)을 하되 결과 약속을 그대로 돌려준다 —
+   * 실패는 호출자에게 **정착한 실패**로 보인다. 정지의 자체 상한은 `stopNow` 의 6초 그대로다.
+   */
+  stopForExit(): Promise<void> {
+    ++this.stopVersion
+    this.abortStart?.(START_CANCELLED)
+    return this.stopNow()
+  }
+
+  /** 앱이 소유한 자식 pid — 마감 뒤 마지막 트리 종료 시도와 진단 줄에 쓴다. */
+  ownedPids(): number[] {
+    const pid = this.owner?.child.pid
+    return typeof pid === 'number' && pid > 0 ? [pid] : []
+  }
+
   private async configureNow(projectRoot: string | null, override: string | null, version: number): Promise<SidecarInfo> {
     if (version !== this.stopVersion) throw START_CANCELLED
     this.projectRoot = projectRoot
