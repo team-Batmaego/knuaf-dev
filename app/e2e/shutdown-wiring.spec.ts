@@ -8,7 +8,7 @@ import { expect, test, type ElectronApplication } from '@playwright/test'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { launch, openProject, synthProject } from './helpers'
-import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith } from './fixtures/fake-codex'
+import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeCliShim } from './fixtures/fake-codex'
 
 /** 메인 프로세스의 stderr — `[shutdown]` 진단이 여기로 나온다. */
 function mainLog(app: ElectronApplication): { read: () => string } {
@@ -31,7 +31,12 @@ function pidWritingShim(bin: string, pidFile: string): void {
     // 스크립트이고, pid 를 먼저 남긴 **뒤에** 가짜 서버를 시작해야 한다(정적 import 는 먼저 실행된다).
     `await import(${JSON.stringify(resolve(__dirname, 'fixtures/fake-codex-server.mjs'))})`
   ].join('\n'), 'utf-8')
-  writeFileSync(join(bin, 'codex'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(proxy)} "$@"\n`, { mode: 0o755 })
+  // `findExecutable` 은 윈도우에서 `codex.exe` → `codex.cmd` → `codex.bat` 순으로 찾는다
+  // (`agent.ts` `winCandidateNames`). 확장자 없는 `codex` 만 바꾸면 윈도우에서는 **기존
+  // `codex.cmd`** 가 선택돼 이 proxy 에 닿지 않는다(검토 RT2-04). 같은 이름 규칙으로 놓는다.
+  writeCliShim(bin, 'codex',
+    `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(proxy)} "$@"`,
+    `"${process.execPath}" "${proxy}" %*`)
 }
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
@@ -81,12 +86,43 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
     for (let i = 0; i < 40 && alive(enginePid); i++) await new Promise((r) => setTimeout(r, 50))
     expect(alive(enginePid), `종료 뒤에도 엔진 자식이 살아 있다 pid=${enginePid}`).toBe(false)
     // 진단은 실제 배선에서 나온 것이어야 한다 — helper 시험에는 이 줄이 없다.
-    expect(log.read(), '종료 진단 줄이 없다 — before-quit 배선을 확인할 수 없다').toMatch(/\[shutdown\]/)
+    // "정상 완료" 실행과 강제 마감 실행을 **구별**한다(검토 RT2-04).
+    expect(log.read(), '종료 진단 줄이 없다 — before-quit 배선을 확인할 수 없다').toMatch(/\[shutdown\] 정리 완료 \d+ms/)
   } finally {
     if (!closed) {
       try { await electronApp.close() } catch { /* 이미 끝남 */ }
     }
     if (enginePid && alive(enginePid)) { try { process.kill(enginePid, 'SIGKILL') } catch { /* gone */ } }
+  }
+})
+
+test('마감을 넘기면 회수·강제 종료 분기를 실제로 밟는다 — 그 경로를 단언한다 (RT2-04)', async () => {
+  // 검토 지적: 앞 시험은 앱이 정상 정리되면 `[shutdown]` 만 확인해 **강제 종료/reclaim 분기까지
+  // 밟았는지** 알 수 없었다. `KNUAF_E2E_QUIT_STALL=1` 로 sidecar 정리를 정착하지 않게 만들어
+  // 마감 초과를 결정적으로 만든다(추가 청취자 없음 → listenerCount 분기 통과).
+  const dir = scratch(), bin = join(dir, 'bin')
+  const env = fakeCodexEnv(bin, { FAKE_CODEX_HOLD: '1', KNUAF_E2E_QUIT_STALL: '1' })
+  const root = synthProject()
+  const { electronApp, page } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
+  let closed = false
+  try {
+    // 사이드카를 실제로 띄운다 — 그래야 회수 대상 pid 가 있고, "죽였는가"를 관측할 수 있다.
+    await openProject(page, root)
+    const log = mainLog(electronApp)
+    const started = Date.now()
+    await electronApp.close()
+    closed = true
+    const text = log.read()
+    // 마감(10초) + 회수 관측(1.5초) 안에 끝나야 한다.
+    expect(Date.now() - started, '강제 종료가 마감을 한참 넘겼다').toBeLessThan(40_000)
+    expect(text, '마감을 넘겼는데 그 사실이 로그에 없다').toMatch(/\[shutdown\] 10000ms 안에 끝나지 않은 정리: sidecar\.stop/)
+    expect(text, '회수 시도를 하지 않았다 — exit 경로가 아니다').toMatch(/\[shutdown\] 자식 회수 시도 pid=\d/)
+    // 회수 콜백이 **실제로 신호를 보냈는지** — 아무 신호도 보내지 않는 옛 배선이면 여기에 살아 있음이 남는다.
+    expect(text, '회수 콜백이 아무 신호도 보내지 않았다(옛 배선)').toMatch(/살아있음=없음|확인못함=\d/)
+    expect(text, '회수 뒤에도 자식이 살아 있다').not.toMatch(/살아있음=\d/)
+    expect(text, '강제 종료가 아니라 정상 정리로 끝났다').not.toMatch(/\[shutdown\] 정리 완료/)
+  } finally {
+    if (!closed) { try { await electronApp.close() } catch { /* already gone */ } }
   }
 })
 
@@ -110,6 +146,9 @@ test('추가 before-quit 청취자가 있으면 강제 종료하지 않고 그 �
     expect(Date.now() - started).toBeGreaterThan(10_000)
     // 창은 아직 살아 있다 — 강제 종료가 veto 를 무시하지 않았다는 뜻이다.
     expect(await page.evaluate(() => 1 + 1)).toBe(2)
+    // 그리고 **강제 종료 분기에 들어가지 않았다**: 그 분기였다면 프로세스가 이미 죽어 이 단언에 닿지 못한다.
+    const after = await electronApp.evaluate(({ app }) => app.isReady())
+    expect(after, '앱이 아직 실행 중이어야 한다').toBe(true)
     await electronApp.evaluate(() => { Reflect.get(globalThis, 'vetoProbe').release = true })
     released = true
     await electronApp.close()
