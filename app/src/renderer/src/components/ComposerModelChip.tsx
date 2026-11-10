@@ -25,15 +25,16 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   })))
   const sameProvider = modelProvider === provider
   const catalog = sameProvider ? models : null
-  const stored = provider === 'codex' ? settings?.chat_models?.[provider] ?? null : null
-  const currentChoice = provider === 'codex' ? (sameProvider && catalog !== null ? modelChoice : stored) : null
+  const stored = settings?.chat_models?.[provider] ?? null
+  const currentChoice = sameProvider && catalog !== null ? modelChoice : stored
   // 제외된 선택은 미선택이 아니다. 목록 실패 때도 저장된 외부 ID를 표시하지 않는다.
   const needsReselection = provider === 'codex' && (
     isCrossProviderModelId(stored?.model ?? '') || isCrossProviderModelId(currentChoice?.model ?? '')
   )
   const choice = needsReselection ? null : currentChoice
   const selected = catalog?.find((m) => m.model === choice?.model)
-  const recommendations = codexRecommendations(catalog ?? [])
+  // 추천표는 ChatGPT 모델 별칭(sol·terra·astra·luna)으로 만든 표다 — 다른 회사 목록에는 붙이지 않는다.
+  const recommendations = codexRecommendations(provider === 'codex' ? catalog ?? [] : [])
   const loading = sameProvider && modelLoading
   const saving = sameProvider && modelSaving
   const listError = sameProvider ? modelsError : null
@@ -43,7 +44,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   const close = (): void => { setOpen(false); trigger.current?.focus() }
 
   useEffect(() => {
-    if (open && provider === 'codex' && state === 'connected') void loadModels(provider)
+    if (open && state === 'connected') void loadModels(provider)
   }, [open, provider, state, loadModels])
 
   useLayoutEffect(() => {
@@ -81,14 +82,14 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
           <PopHead>{MODEL_PICKER.companyTitle}</PopHead>
           <AccountChooser onPicked={close} />
           <PopSep />
-          {provider === 'codex' ? <>
-            <div className="model-picker-heading"><PopHead>{MODEL_PICKER.modelsTitle}</PopHead>
+          <>
+            <div className="model-picker-heading"><PopHead>{MODEL_PICKER.modelsTitleFor(PROVIDER_NAME[provider])}</PopHead>
               {state === 'connected' && <button type="button" className="quiet" aria-label={MODEL_PICKER.reload} onClick={() => void loadModels(provider)} disabled={loading || saving}><Icon name="refresh" size={14} /></button>}
             </div>
             {state !== 'connected' ? <p className="model-picker-note">{MODEL_PICKER.connectFirst}</p> : <>
               {needsReselection && <p className="model-picker-note" role="alert">{MODEL_PICKER.reselectionRequired}</p>}
               <button type="button" className={`pop-row model-option${!choice && !needsReselection ? ' cur' : ''}`} aria-pressed={!choice && !needsReselection} disabled={saving} onClick={() => void pick(null)}>
-                <span className="c"><b>{MODEL_PICKER.accountDefault}</b><small>{MODEL_PICKER.accountDefaultHint}</small></span>
+                <span className="c"><b>{MODEL_PICKER.accountDefault}</b><small>{MODEL_PICKER.accountDefaultHintFor(PROVIDER_NAME[provider])}</small></span>
                 {!choice && !needsReselection && <Icon name="check" size={16} />}
               </button>
               {loading && <p className="model-picker-note" role="status">{MODEL_PICKER.loading}</p>}
@@ -112,14 +113,13 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
               {!choice && <p className="model-picker-note">{MODEL_PICKER.chooseForDepth}</p>}
               {saving && <p className="model-picker-note" role="status">{MODEL_PICKER.saving}</p>}
               {saveError && <p className="model-picker-note" role="alert">{saveError}</p>}
-              <p className="model-picker-note">{MODEL_PICKER.sameConversation}</p>
-              {recommendations.lanes.some((l) => l.lane === 'review') && <p className="model-picker-note">{MODEL_PICKER.reviewNotice}</p>}
-              {recommendations.tier === 'high' && <p className="model-picker-note">{MODEL_PICKER.limitNotice}</p>}
+              <p className="model-picker-note">{MODEL_PICKER.sameConversationFor(PROVIDER_NAME[provider])}</p>
+              {/* ultra 는 "더 깊이 생각"만이 아니다 — 엔진이 스스로 담당을 띄운다(설계 §1). 막지 않고 알린다. */}
+              {choice?.effort === 'ultra' && <p className="model-picker-note">{MODEL_PICKER.ultraNotice}</p>}
+              {provider === 'codex' && recommendations.lanes.some((l) => l.lane === 'review') && <p className="model-picker-note">{MODEL_PICKER.reviewNotice}</p>}
+              {provider === 'codex' && recommendations.tier === 'high' && <p className="model-picker-note">{MODEL_PICKER.limitNotice}</p>}
             </>}
-          </> : <>
-            <PopHead>{CHAT.depthTitle}</PopHead>
-            <div className="pop-row off" aria-disabled="true"><span className="c"><b>{CHAT.depthDefault}</b><small>{CHAT.depthFollows(PROVIDER_NAME[provider])}</small></span></div>
-          </>}
+          </>
           <PopSep />
           <p className="model-picker-note">{MODEL_PICKER.subscription}</p>
         </div>
