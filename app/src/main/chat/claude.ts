@@ -595,15 +595,74 @@ function protectedInRel(rel: string): boolean {
   return segs.length === 1 && PROTECTED_ROOT_FILES.includes(last)
 }
 
+/**
+ * 인자 하나가 가리키는 **실제 자리**까지 본 뿌리 기준 상대경로. 뿌리 밖이면 null.
+ *
+ * 문자열 계산(`relIn`)만 하면 폴더 안의 심볼릭 링크를 놓친다. `receipt.json → CLAUDE.md` 를
+ * 출력 파일로 넘기면 이름에는 보호 대상이 없어 통과하고, 스킬 스크립트가 그 링크를 따라
+ * 보호 파일을 덮어쓴다(검토 FIX1 차단 — 실제 `gg_toc_check.py` 로 덮어쓰기 확인).
+ * Bash 판정은 `protectedRel` 에서 `realOrSelfDeep` 로 링크를 풀어 막으므로, PowerShell 도
+ * **같은 도구**를 쓴다. 뿌리 자체도 링크일 수 있어(`/var` → `/private/var`) 양쪽을 함께 본다.
+ *
+ * 이 호스트에서 뿌리를 볼 수 없으면(윈도우 뿌리를 맥에서 판정) 문자열 자리만 돌려준다 —
+ * 풀 수 없는 경로를 풀었다고 우기지 않는다.
+ */
+function relInReal(ops: typeof posix, root: string, value: string): (string | null)[] {
+  const literal = relIn(ops, root, value)
+  if (!value || !existsSync(ops.resolve(root))) return [literal]
+  // `C:foo` 는 그 드라이브의 현재 디렉터리 기준이라 실제 자리를 단정할 수 없다(relIn 과 같은 선).
+  if (ops === win32 && /^[A-Za-z]:(?![\\/])/.test(value)) return [null]
+  const fold = ops === win32 ? (x: string) => x.normalize('NFC').toLowerCase() : (x: string) => x.normalize('NFC')
+  const abs = ops.resolve(ops.resolve(root), value)
+  const targets = [...new Set([abs, realOrSelfDeep(abs)])]
+  const bases = [...new Set([ops.resolve(root), realOrSelfDeep(ops.resolve(root))])]
+  const out: (string | null)[] = [literal]
+  for (const t of targets) {
+    for (const b of bases) {
+      const rel = ops.relative(fold(b), fold(t))
+      if (rel === '') { out.push('') ; continue }
+      out.push(rel.startsWith('..') || ops.isAbsolute(rel) ? null : ops === win32 ? rel.replace(/\\/g, '/') : rel)
+    }
+  }
+  return out
+}
+
+/**
+ * 인자에서 **경로로 볼 조각**들. `--out=경로` 처럼 플래그에 붙은 값도 꺼낸다.
+ *
+ * 값을 꺼내지 않으면 `--json=C:\review-outside.json` 전체가 한 낱말이라 뿌리 기준 상대경로가
+ * "폴더 안"으로 접히고, 스킬 스크립트가 지정한 폴더 **밖**에 파일을 쓴다(검토 FIX1 실측).
+ */
+function argPathPieces(a: string): string[] {
+  const value = (a.startsWith('-') ? a.replace(/^-+[A-Za-z0-9_-]*=?/, '') : a).trim()
+  return value ? [value] : []
+}
+
+/**
+ * 이 낱말이 앱이 깔아 둔 스킬 스크립트인가(판정과 카드가 **같은 선**을 쓰도록 한 곳에 둔다).
+ *
+ * `.claude/skills/` 아래의 `gg*.py` 꼴만 인정한다. `..` 가 섞이면 사본 자리를 벗어날 수
+ * 있으므로 묻는다. 경로 비교는 뿌리 모양에 맞춘 연산(`relIn`)으로 한다.
+ * 이름 비교는 **접은 상대경로**로 한다 — 윈도우 파일시스템은 대소문자를 가리지 않아
+ * `.CLAUDE/SKILLS/…/GG.PY` 가 같은 파일인데, 원문으로만 보면 정상 호출을 묻는다.
+ * 인정 범위는 그대로다(접힌 경로가 정확히 사본 자리의 스킬 스크립트여야 한다).
+ */
+function isSkillScript(ops: typeof posix, root: string, script: string): boolean {
+  const s = ops === win32 ? script.replace(/\\/g, '/') : script
+  if (s.startsWith('-') || s.includes('..')) return false
+  if (!SKILL_PATH.test(s)) return false
+  const rel = relIn(ops, root, script)
+  // 접두 비교도 같은 선이다 — 윈도우에서만 접는다. 맥에서 접으면 `.CLAUDE/…`(다른 파일)를
+  // 사본으로 오인해 자동 허용한다.
+  if (!rel || !(ops === win32 ? rel.toLowerCase().startsWith(APP_SKILL_PREFIX) : rel.startsWith(APP_SKILL_PREFIX))) return false
+  // 대소문자 접기는 **윈도우 뿌리에서만**. 맥 뿌리(대소문자 구분 파일시스템)에서 접으면
+  // `.CLAUDE/…` 라는 다른 파일을 사본으로 오인한다 — 접어서 얻는 것은 더 묻는 쪽이어야 한다.
+  return SKILL_SCRIPT.test(ops === win32 ? rel.toLowerCase() : rel)
+}
+
 /** 인자 하나가 보호 경로를 가리키는가. 플래그에 붙은 경로(`--out=…`)도 본다. */
 function relProtected(ops: typeof posix, root: string, a: string): boolean {
-  const pieces = [a]
-  if (a.startsWith('-')) pieces.push(a.replace(/^-+[A-Za-z0-9_-]*=?/, ''))
-  return pieces.some((p) => {
-    if (!p) return false
-    const rel = relIn(ops, root, p)
-    return rel !== null && protectedInRel(rel)
-  })
+  return argPathPieces(a).some((p) => relInReal(ops, root, p).some((rel) => rel !== null && protectedInRel(rel)))
 }
 
 /**
@@ -665,16 +724,14 @@ function powerShellSkillCall(root: string, raw: string): boolean {
   const [exe, script, ...args] = words
   if (!INTERPRETERS.test(exeName(exe))) return false
   const ops = pathOpsFor(root)
-  const s = ops === win32 ? script.replace(/\\/g, '/') : script
-  if (s.startsWith('-') || s.includes('..')) return false
-  if (!SKILL_PATH.test(s) || !SKILL_SCRIPT.test(s)) return false
-  const rel = relIn(ops, root, script)
-  if (!rel || !rel.toLowerCase().startsWith(APP_SKILL_PREFIX)) return false
+  if (!isSkillScript(ops, root, script)) return false
   for (const a of args) {
     if (relProtected(ops, root, a)) return false
-    // 플래그(`-Recurse`)는 경로가 아니다. 그 밖의 낱말은 경로일 때 폴더 안이어야 한다.
-    if (a.startsWith('-') && !looksLikePath(a, ops === win32 ? 'win32' : 'darwin')) continue
-    if (looksLikePath(a, ops === win32 ? 'win32' : 'darwin') && relIn(ops, root, a) === null) return false
+    // 플래그(`-Recurse`)는 경로가 아니다. 다만 `--json=…` 처럼 **값이 붙은** 플래그는 값이 경로다.
+    const pieces = argPathPieces(a)
+    if (!pieces.some((p) => looksLikePath(p, ops === win32 ? 'win32' : 'darwin'))) continue
+    // 폴더 안 링크가 밖을 가리킬 수 있으므로 실제 자리까지 본다(보호 경로와 같은 링크 풀기).
+    if (pieces.some((p) => relInReal(ops, root, p).some((rel) => rel === null))) return false
   }
   return true
 }
@@ -751,6 +808,43 @@ export function lostToolCalls(message: unknown): number {
 }
 
 /**
+ * 카드에 보여 줄 명령에서 **비밀값 꼴만** 가린다.
+ *
+ * 승인 카드는 명령 원문을 그대로 보여 준다. 그런데 모델이 만든 명령에는 인증 헤더·토큰이
+ * 값으로 들어올 수 있고, 그러면 학생 화면(화면 공유·스크린샷 포함)에 자격증명이 남는다
+ * (검토 FIX1 중요). **실행에 넘기는 원본은 건드리지 않고 보여 줄 사본만** 가린다.
+ *
+ * 가리는 것은 값 자리뿐이다. 무엇을 하려는 명령인지(`Invoke-WebRequest … -Headers …`)는
+ * 그대로 남겨야 학생이 판단할 수 있다. 확실히 알아보는 꼴이 아니면 원문을 그대로 두지 않고
+ * 헤더·토큰 자리를 통째로 가린다 — 모르는 값을 보여 주는 쪽이 더 위험하다.
+ */
+function redactForCard(cmd: string): string {
+  const MASK = '***'
+  return cmd
+    // 인코딩된 명령은 내용 자체를 보여 줄 수 없다(`-EncodedCommand <base64>`·`-e`).
+    .replace(/(-\s*(?:e|ec|enc|encodedcommand)\b\s+)(?:"[^"]*"|'[^']*'|\S+)/gi, `$1${MASK}`)
+    // 헤더 묶음은 값 전부를 가린다 — 어떤 이름이 들어와도 자격증명 자리다.
+    .replace(/(-headers\b\s+@\{)[^}]*(\})/gi, `$1${MASK}$2`)
+    // `Authorization: Bearer x` · `Authorization="Bearer x"` · `Authorization=x`
+    .replace(/(["']?\bauthorization["']?\s*[:=]\s*)(?:(?:bearer|basic|token|digest|negociate|ntlm)\s+)?(?:"[^"]*"|'[^']*'|\{[^}]*\}|[^\s,;)}]+)/gi, `$1${MASK}`)
+    // 이름이 없어도 토큰 꼴이면 가린다(`Bearer <값>`·`Basic <값>`).
+    .replace(/\b(bearer|basic)\s+(?!\*{3})[A-Za-z0-9._~+/=-]{6,}/gi, `$1 ${MASK}`)
+    // 이름=값 꼴. 값이 인용돼 있으면 인용째로 가린다.
+    .replace(/(["']?\b(?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|clientsecret|secret|token|password|passwd|pwd|credential)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\{[^}]*\}|[^\s,;)}]+)/gi, `$1${MASK}`)
+    // PowerShell 식 이름-값(`-Value x`·`-Password x`·`-Token x`). 값이 자격증명 자리다.
+    .replace(/(-(?:value|secret|password|passwd|token|apikey|api[_-]?key|credential|thumbprint)\b\s+)(?:"[^"]*"|'[^']*'|[^\s,;)}]+)/gi, `$1${MASK}`)
+    // 널리 쓰이는 키 접두 — 이름 없이 값만 온다.
+    .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}/g, MASK)
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{8,}/g, MASK)
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{8,}/g, MASK)
+    .replace(/\bAKIA[0-9A-Z]{12,}/g, MASK)
+    .replace(/\bxox[abprs]-[A-Za-z0-9-]{8,}/g, MASK)
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, MASK)
+    // JWT — 머리(`eyJ…`)만 보고 판단한다.
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, MASK)
+}
+
+/**
  * PowerShell 명령 카드 — 원시 JSON 대신 사람이 읽는 문장.
  *
  * Bash 카드와 같은 어휘를 쓰되 판정기는 따로다(Bash 파서로 PowerShell 을 읽으면 오판한다).
@@ -760,24 +854,37 @@ export function lostToolCalls(message: unknown): number {
 function describePowerShell(root: string, cmd: string): { title: string; detail: string } {
   const ops = pathOpsFor(root)
   const platform = ops === win32 ? 'win32' : 'darwin'
+  // 카드에 보여 줄 사본에서 비밀값만 가린다. 실행에 넘기는 원본(`cmd`)은 그대로다.
+  const shown = redactForCard(cmd)
   // 인용부호를 지켜 낱말을 얻는다. 공백이 든 폴더 이름(`무제 폴더`)을 쪼개면 엉뚱한 경로를 짚는다.
   const parsed = powerShellWords(cmd)
   const words = parsed?.words ?? []
+  // 실행할 스크립트 자리. 이것은 **읽어서 실행하려는 대상**이지 쓰기 대상이 아니다 —
+  // 일반 인자처럼 세면 `& … gg.py status` 를 "권한을 바꾸는 파일"로 잘못 설명한다(검토 FIX1 권고).
+  const scriptPos = words.length > 1 && isSkillScript(ops, root, words[1]) ? 1 : -1
   // 실행 파일 자리(`t[0]`)는 뺀다 — Bash 카드와 같은 범위다. 설치본 파이썬은 폴더 밖에 있고,
   // 그것을 "폴더 밖 파일을 건드린다"고 적으면 학생이 무엇을 물었는지 잘못 읽는다.
-  const args = words.slice(1).filter((w) => !w.startsWith('-') || looksLikePath(w, platform))
-  const outside = [...new Set(args.filter((a) => looksLikePath(a, platform) && relIn(ops, root, a) === null))]
-  if (outside.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${cmd}\n\n폴더 밖: ${outside.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
+  const args = words.slice(1).filter((w, i) => i + 1 !== scriptPos)
+  // 경로로 볼 조각만 골라 실제 자리로 판정한다 — `--json=…` 의 값도 경로다.
+  const pathish = [...new Set(args.flatMap(argPathPieces).filter((p) => looksLikePath(p, platform)))]
+  const outside = [...new Set(pathish.filter((p) => relInReal(ops, root, p).some((rel) => rel === null)))]
+  if (outside.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${shown}\n\n폴더 밖: ${outside.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
   // 폴더 밖이 아니면 권한 파일을 건드리는지 본다. 둘 다 걸리면 폴더 밖을 먼저 말한다.
   const guarded = [...new Set(args.filter((a) => relProtected(ops, root, a)))]
-  if (guarded.length) return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `${cmd}\n\n대상: ${guarded.join(', ')}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요.` }
+  if (guarded.length) return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `${shown}\n\n대상: ${guarded.join(', ')}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요.` }
+  // 여기까지 왔는데 걸린 것이 호출 연산자(`&`)뿐이라면, 묻는 이유는 권한 파일이 아니라
+  // "그 표기를 앱이 따라가지 못함"이다. 정상 스킬 호출을 엉뚱한 이유로 설명하지 않는다.
+  // 판정은 그대로 묻는다 — 허용 목록을 넓히지 않는다.
+  if (!parsed?.safe && scriptPos > 0 && /(^|\s)&(?=\s|$)/.test(cmd)) {
+    return { title: '앱이 읽을 수 없는 명령이에요', detail: `${shown}\n\n호출 연산자(\`&\`)로 프로그램을 부르려고 해요. 앱이 그 표기를 따라가지 못해 묻습니다. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  }
   const base = words.length ? exeName(words[0]) : ''
-  if (AI_CLI.has(base)) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${cmd}\n\n"${base}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
-  if (OUTSIDE_REACH.has(base)) return { title: '논문 폴더 밖으로 나가는 명령이에요', detail: `${cmd}\n\n"${base}" 는 네트워크·다른 앱·설치처럼 폴더 밖에 닿아요. 의도한 일이 아니면 거절해 주세요.` }
-  if (LAUNCHERS.has(base)) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${cmd}\n\n"${base}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
-  if (INTERPRETERS.test(base)) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${cmd}\n\n"${(words[1] ?? '').replace(/\\/g, '/')}" 안에 무엇이 있는지 앱이 미리 알 수 없어요. 스킬이 쓰는 스크립트가 아니면 자동으로 통과시키지 않아요. 무슨 일인지 모르겠으면 거절해 주세요.` }
-  if (!parsed?.safe || !words.length) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${cmd}\n\n변수·파이프·리다이렉트처럼 앱이 미리 따라갈 수 없는 기호가 섞여 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
-  return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${cmd}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  if (AI_CLI.has(base)) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${shown}\n\n"${base}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
+  if (OUTSIDE_REACH.has(base)) return { title: '논문 폴더 밖으로 나가는 명령이에요', detail: `${shown}\n\n"${base}" 는 네트워크·다른 앱·설치처럼 폴더 밖에 닿아요. 의도한 일이 아니면 거절해 주세요.` }
+  if (LAUNCHERS.has(base)) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${shown}\n\n"${base}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  if (INTERPRETERS.test(base)) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${shown}\n\n"${(words[1] ?? '').replace(/\\/g, '/')}" 안에 무엇이 있는지 앱이 미리 알 수 없어요. 스킬이 쓰는 스크립트가 아니면 자동으로 통과시키지 않아요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  if (!parsed?.safe || !words.length) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${shown}\n\n변수·파이프·리다이렉트처럼 앱이 미리 따라갈 수 없는 기호가 섞여 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${shown}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
 }
 
 /** 원시 JSON 대신 학생이 읽을 수 있는 한 문장. 자세한 값은 그대로 덧붙인다. */
