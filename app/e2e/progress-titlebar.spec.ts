@@ -24,6 +24,20 @@ const REAL_STEP4_CODEX_OLD = `**창업논문 진행 목록** · 7단계 중 1–
 - **다음 작업**: 전공을 받으면 전공 바인딩을 정본에 등록하고 이어갑니다.
 - **지금 확인할 것**: 아래 Q2 — 자료가 없으니 계획은 인터뷰로 세웁니다.`
 
+/**
+ * 전환 뒤 **그 공급자의 대화가 실제로 화면에 올라왔는지**를 기다린다.
+ *
+ * 계정 칩의 'ChatGPT' 표시만 기다리면, Codex 대화가 아직 로드되지 않아 이전(Claude) 대화가
+ * 남은 화면에서 4/7 을 보고 통과할 수 있다 — 그 뒤 Codex 값(2/7)이 올라오면 시험은 이미 끝나
+ * 있다(Roh 권고 ①). 신호는 Codex 답에만 있는 '다음 작업' 줄이다: `Chat.tsx` 는 진행 목록
+ * 덩어리만 감추므로 이 줄은 화면에 남는다. 같은 문구가 다른 픽스처(`REAL_STEP4`: "정본에
+ * 등록하고(전공이 없으면…")와 겹치지 않게 '이어갑니다'까지 붙여 잡는다.
+ */
+const waitCodexThread = async (page: Page): Promise<void> => {
+  await expect(page.locator('.chat-thread'), 'Codex 대화가 화면에 올라오기 전에 단정했다')
+    .toContainText('전공 바인딩을 정본에 등록하고 이어갑니다', { timeout: 30_000 })
+}
+
 test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단계(옛날) → 제목줄 4/7 유지, 저장값도 4단계', async () => {
   // 앱을 두 번 띄운다 — 기본 90초는 느린 기계에서 종료 대기만으로도 바닥난다(맥 CI 실측:
   // close 한 번에 68초). 다른 다중 실행 시험과 같은 180초를 준다. 단정은 그대로다.
@@ -81,6 +95,8 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     await expect(page.getByText(/ChatGPT는 Claude와 나눈 대화를 볼 수 없어요/)).toBeVisible({ timeout: 30_000 })
     // 대화가 Codex로 바뀌었더라도...
     await expect(page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+    // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.
+    await waitCodexThread(page)
 
     // 저장값이 4단계이므로 Codex 2단계(옛날)보다 늦지 않다 — 제목줄은 여전히 4/7
     await expect(titlebar(page), '공급자 전환 뒤 진행이 되돌아갔다').toContainText('4/7')
@@ -100,9 +116,13 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     // 앱 재시작 — 같은 userData(localStorage 유지)로 다시 켜면 제목줄이 여전히 4/7
     // provider_choice는 ChatGPT로 바뀐 채로 재시작한다 — Codex 2단계(옛날)가 대화값이라
     // 저장값(4단계)이 더 늦다는 것을 보여준다.
-    // 재시작 전 저장값이 디스크에 내려가는지에 기대지 않는다 — Chromium 의 leveldb 는 값을
-    // snappy 로 압축하므로 파일 바이트로 "내려갔다"를 확인할 수 없다(20초 대기가 헛돌았다).
-    // 대신 픽스처 시각을 고정해 재시작 뒤 고르는 값이 **결정적으로** 저장값(4단계)이 되게 한다.
+    //
+    // 이 재시작 시험이 곧 **저장 지속성 검사**다. 디스크 반영은 파일로 확인할 수 없다 —
+    // Chromium 의 leveldb 는 값을 snappy 로 압축하므로 원문 JSON 이 어떤 파일에도 없다
+    // (파일 바이트를 기다리던 20초 폴링은 헛돌았다). 그래서 "내려갔다"를 따로 보지 않고
+    // **재시작 뒤 고른 값**으로 판정한다: 저장값이 살아 있으면 4/7, 유실됐으면 대화값인
+    // Codex 2/7 이 되어 이 단정이 실패한다(Roh 대조군 확인: 저장값을 지우면 2/7).
+    // 픽스처 시각을 고정한 것은 그 판정이 매번 같은 값으로 떨어지게 하기 위해서다.
     await electronApp.close()
     const second = await launch({ env, userData })
     try {
@@ -176,6 +196,8 @@ test('U-newreply 같은 내용 새 답(새 id·20:02) — 저장 시각 갱신, 
     await page.getByTitle('이 논문의 도우미').click()
     await page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
     await expect(page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+    // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.
+    await waitCodexThread(page)
     await expect(titlebar(page), '같은 내용 새 답 후 Codex 20:01 전환에 진행이 후퇴했다').toContainText('4/7')
     await expect(titlebar(page)).toContainText('본문 Ⅰ~Ⅵ 초안')
   } finally {
@@ -451,8 +473,12 @@ test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값
     // 파일만 바꾸면 메모리 스냅샷이 안 갱신된다 — 앱을 다시 띄우면 새 파일에서 읽는다.
     // 앱을 다시 띄우면 새 파일에서 읽어 focus가 4단계로 바뀐다(고른 진행값 서명 변경).
     // 이 흐름은 file→load 경로를 그대로 확인한다.
-    // 재시작 뒤에는 파일의 4단계 덩어리를 대화값으로 다시 고른다 — 저장값이 디스크에
-    // 내려갔는지에 기대지 않는다(leveldb 압축 때문에 확인 자체가 불가능하다).
+    //
+    // 주의: 이 재시작은 **저장 지속성 검사가 아니다**. 바뀐 파일의 4단계 덩어리를 대화값으로
+    // 다시 고르기 때문이다(디스크 반영 여부와 무관하게 4가 나온다). 디스크 반영은 파일로
+    // 확인할 수도 없다 — leveldb 는 값을 snappy 로 압축해 원문이 남지 않는다.
+    // 지속성 판정은 이 시험 뒤쪽의 재시작 없는 대조, 곧 Codex 20:01(2단계) 전환에도 4/7 이고
+    // 저장값이 4 인 단정이 맡는다 — 저장값이 유실되면 그 자리에서 대화값 2/7 이 드러난다.
     await electronApp.close()
     const second = await launch({ env, userData })
     try {
@@ -468,6 +494,8 @@ test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값
       await second.page.getByTitle('이 논문의 도우미').click()
       await second.page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
       await expect(second.page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+      // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.
+      await waitCodexThread(second.page)
       await expect(titlebar(second.page), '스트리밍 갱신 후 전환에 진행이 되돌아갔다').toContainText('4/7')
       expect(await readStoredN(second.page)).toBe(4)
       await shot(second.page, 'u-stream')
