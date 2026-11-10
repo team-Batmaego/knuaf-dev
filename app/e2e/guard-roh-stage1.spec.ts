@@ -107,7 +107,8 @@ test('C5: unsigned pending note must not authorize a new injected state', () => 
   const text = 'UNAPPROVED\n'
   writeFileSync(join(e.rootReal, 'CLAUDE.md'), text)
   const next = S.putBlob(e.userData, e.folderHash, text)
-  S.writePending(e.userData, e.folderHash, { action: 'add', previousHash: state.injected as string, nextHash: next, at: 1 })
+  // 열쇠가 없으면 쪽지 자체를 못 쓴다 — 표식 없는 쪽지는 복구 근거가 아니다.
+  expect(S.writePending(e.userData, e.folderHash, { action: 'add', previousHash: state.injected as string, nextHash: next, at: 1 }, null)).toBe(false)
   const result = S.recoverPending({ ...e, state })
   expect(result.success).toBe(false)
 })
@@ -142,8 +143,7 @@ test('I1: post-crash student edit must survive recovery then T0', () => {
   C.evaluateT0({
     ...e,
     state: recovery.state,
-    acceptedLeaves: recovery.acceptedLeaves,
-    acceptedHashes: recovery.acceptedHashes,
+    accepted: recovery.accepted,
     scan: Scan.scanRoot({ root: e.rootReal, userData: e.userData })
   })
   expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('STUDENT AFTER CRASH\n')
@@ -256,7 +256,7 @@ test('16.5.5-4: recovery ② fails when the disk fingerprint is neither hash', (
   const recovery = S.recoverPending({ ...e, state })
   // ②도 ①도 아니다 — ④(죽은 뒤 학생 직접 수정)로 넘긴다. 덮어쓰지 않는다.
   expect(recovery.success).toBe(false)
-  expect(recovery.acceptedLeaves).toEqual(['CLAUDE.md'])
+  expect(recovery.accepted).toEqual([{ rel: 'CLAUDE.md', hash: S.hashContent('STUDENT AFTER CRASH\n') }])
   expect(recovery.state.injected).toBe(state.injected)
   expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('STUDENT AFTER CRASH\n')
 })

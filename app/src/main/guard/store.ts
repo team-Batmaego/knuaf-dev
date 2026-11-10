@@ -37,7 +37,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { dirname, join, resolve, sep } from 'node:path'
 import { fingerprintLeaf, sameFingerprint, type LeafFingerprint } from './scan'
 import { isInside } from './scope'
-import { mergeRules } from './rules'
+import { mergeRules, type AddedRule, type UpdateResult } from './rules'
 import { normalizeRuleText } from './instructions'
 
 /** 루트 규칙 파일의 상대 경로(§11.8). 쪽지·복구가 다루는 잎은 이것 하나뿐이다. */
@@ -429,6 +429,25 @@ export function revertLeafToStore(
   // F가 "없음"이면 성공은 "지금도 잎이 아님"이다 — 지웠는지 여부가 아니라 결과를 본다.
   const reverted = before ? sameFingerprint(before, after) : after === undefined
   return { quarantinePath, restoredFromStore, reverted }
+}
+
+/**
+ * 보류(H) 잎의 되돌림 재시도 — ⑦(T0·T2)과 ⑬(앱 저장)이 **같은 길**을 쓰게 하는 한 함수(§16.5.5 9).
+ * ⑧(디스크가 이미 보관본과 같다)이면 `null` — 되돌릴 것이 없다. 아니면 되돌림 결과를 돌려준다.
+ * **상태(`held`)는 건드리지 않는다** — 부르는 쪽이 `reverted`를 보고 보류 해제·시도 횟수를 정한다.
+ * 실패해도 격리·부분 복원이 이미 일어났을 수 있다(그것이 ⑦의 동작이다). 승격은 없다.
+ */
+export function retryHeldLeaf(
+  rootReal: string,
+  userData: string,
+  folderHash: string,
+  rel: string,
+  stored: LeafFingerprint | undefined,
+  disk: LeafFingerprint | undefined,
+  now: number
+): RevertOutcome | null {
+  if (sameFingerprint(stored, disk)) return null
+  return revertLeafToStore(rootReal, userData, folderHash, rel, stored, now)
 }
 
 function removeIfPresent(abs: string): boolean {
@@ -825,15 +844,12 @@ export function hashContent(content: string | Buffer): string {
 
 // ── 앱이 규칙을 쓰는 순서 (§11.8 '앱이 쓰는 순서' 1~8) ─────────────────────
 
-export interface RuleMutation {
-  success: boolean
-  newContent: string
-  message: string
-  sectionCreated: boolean
-  errors: string[]
-  /** 더하기 성공 시 그 규칙의 원문·시각(§16.5.4 ⓑ). 없으면 파일 글자에서 만든다(ⓒ) */
-  rule?: PendingRule
-}
+/**
+ * `mutate`가 돌려주는 모양 = `rules.ts`의 `UpdateResult` 그대로. 여기서 따로 선언하지 않는다 —
+ * 같은 모양을 두 번 적으면 `rule.timestamp`가 어긋나 호출자가 조용히 타입 오류를 맞는다.
+ * 쪽지에 적을 모양(시각 필수)으로 좁히는 자리는 `pendingRuleFrom` 하나뿐이다(§16.5.4 ⓑ).
+ */
+export type RuleMutation = UpdateResult
 
 export interface RuleWriteOutcome {
   success: boolean
@@ -870,7 +886,7 @@ export function decodeStrict(bytes: Buffer): string | null {
  * `addRuleToContent`가 돌려준 규칙 항목 → 쪽지에 적을 모양(§16.5.4 ⓑ).
  * 더하기가 아니거나 실패면 없다. `timestamp`가 비면 이 교체의 시각을 쓴다 — 시각 0은 없다.
  */
-function pendingRuleFrom(rule: PendingRule | undefined, now: number): PendingRule | undefined {
+export function pendingRuleFrom(rule: AddedRule | undefined, now: number): PendingRule | undefined {
   if (!rule) return undefined
   return {
     id: rule.id,
@@ -926,10 +942,55 @@ export function applyRuleChange(opts: {
   // 열쇠가 없으면 아무것도 쓰지 않는다 — 표식 없는 보관본은 믿을 수 없다(§4.3 기본값 끔).
   if (!key) return { ...base, message: '지금은 규칙을 저장할 수 없어요. 앱을 다시 열어 주세요.' }
 
-  const disk = readClaudeMd(rootReal)
+  let disk = readClaudeMd(rootReal)
   if (disk.state === 'link') {
     return { ...base, message: 'CLAUDE.md가 링크라서 규칙을 저장할 수 없어요. 보통 파일로 바꿔 주세요.' }
   }
+
+  // ⑬ — 보류(H) 잎은 앱 저장으로 풀리지 않는다(§16.5.2 ⑬, 3회째 C3). 2번보다 **먼저** ⑦과
+  // 같은 되돌림 재시도를 한다. 실패면 거부하고 아무것도 쓰지 않는다 — 디스크(거절했던 글)를
+  // 기준으로 삼는 아래 '질의 밖 학생 변경' 갈래로 절대 내려가지 않는다. 성공(또는 ⑧)이면
+  // 풀린 S(F)를 **한 번의 상태 교체**로 먼저 저장하고, 2번은 그 F를 기준으로 돈다.
+  let live = state
+  if (state.held[CLAUDE_MD_REL]) {
+    const outcome = retryHeldLeaf(
+      rootReal,
+      userData,
+      folderHash,
+      CLAUDE_MD_REL,
+      state.leaves[CLAUDE_MD_REL],
+      leafFor(rootReal) ?? undefined,
+      now
+    )
+    // `null` = ⑧(디스크가 이미 F다), `reverted` = 되돌린 뒤 F와 같아졌다.
+    if (outcome !== null && !outcome.reverted) {
+      return { ...base, message: '설정 파일을 아직 정리하지 못해 지금은 저장할 수 없어요.' }
+    }
+    const held = { ...state.held }
+    delete held[CLAUDE_MD_REL]
+    const stored = state.leaves[CLAUDE_MD_REL]
+    // 불변식(§16.5.1): `injected`가 null이 아니다 ⇔ S이고 디스크가 F이며 그 blob이 있다.
+    const injected = stored && hasBlob(userData, folderHash, stored.hash) ? stored.hash : null
+    let rules = state.rules
+    if (stored) {
+      const blob = getBlob(userData, folderHash, stored.hash)
+      const text = blob ? decodeStrict(blob) : null
+      if (text !== null) rules = mergeRules(text, state.rules, undefined, now)
+    }
+    const released: GuardState = { ...state, held, injected, rules, integrity: '' }
+    const { integrity: _released, ...withoutIntegrity } = released
+    if (!saveState(userData, folderHash, withoutIntegrity, key)) {
+      return { ...base, message: '규칙을 저장하지 못했어요.', errors: ['보관본을 쓰지 못했습니다.'] }
+    }
+    live = loadState(userData, folderHash, key).state
+    base.state = live
+    // 되돌림이 디스크를 바꿨을 수 있다 — 2번은 되돌린 뒤의 디스크를 봐야 한다.
+    disk = readClaudeMd(rootReal)
+    if (disk.state === 'link') {
+      return { ...base, message: 'CLAUDE.md가 링크라서 규칙을 저장할 수 없어요. 보통 파일로 바꿔 주세요.' }
+    }
+  }
+
   const diskBytes = disk.state === 'file' ? disk.content : null
   const diskHash = diskBytes ? hashContent(diskBytes) : null
 
@@ -937,27 +998,27 @@ export function applyRuleChange(opts: {
   // 없거나 지문이 안 맞으면 디스크로 대신하지 않고 실패한다(§16 차단 1·2).
   let baseline: string
   let baselineHash: string | null
-  if (state.injected === null) {
+  if (live.injected === null) {
     baseline = ''
     baselineHash = null
   } else {
-    const storedBlob = getBlob(userData, folderHash, state.injected)
+    const storedBlob = getBlob(userData, folderHash, live.injected)
     if (!storedBlob) {
-      return { ...base, message: '지금은 저장하지 못했어요. 보관본이 손상돼 있어요.' }
+      return { ...base, state: live, message: '지금은 저장하지 못했어요. 보관본이 손상돼 있어요.' }
     }
     const decoded = decodeStrict(storedBlob)
     if (decoded === null) {
-      return { ...base, message: '지금은 저장하지 못했어요. CLAUDE.md가 올바른 UTF-8이 아니에요.' }
+      return { ...base, state: live, message: '지금은 저장하지 못했어요. CLAUDE.md가 올바른 UTF-8이 아니에요.' }
     }
     baseline = decoded
-    baselineHash = state.injected
+    baselineHash = live.injected
   }
 
   let cleanedDisk = false
   let acceptedStudentChange = false
 
   if (diskHash !== baselineHash) {
-    if (state.queryOpen) {
+    if (live.queryOpen) {
       // 도우미가 건드린 것으로 보고 먼저 정리한다(격리 → 보관본 복원).
       quarantineLeaf(rootReal, 'CLAUDE.md', now)
       if (baselineHash === null) {
@@ -1026,16 +1087,16 @@ export function applyRuleChange(opts: {
   }
 
   // 7번 — 상태 파일 하나 교체(잎 목록·`injected`·**규칙 표**가 함께). 여기가 저장 성공 시점이다.
-  const leaves = { ...state.leaves }
+  const leaves = { ...live.leaves }
   const leaf = leafFor(rootReal)
   if (leaf) leaves['CLAUDE.md'] = leaf
   else delete leaves['CLAUDE.md']
   const nextState: GuardState = {
-    ...state,
+    ...live,
     leaves,
     injected: nextHash,
-    rules: mergeRules(nextText, state.rules, draft ? entryFromRule(draft, now) : undefined, now),
-    held: { ...state.held },
+    rules: mergeRules(nextText, live.rules, draft ? entryFromRule(draft, now) : undefined, now),
+    held: { ...live.held },
     integrity: ''
   }
   const { integrity: _drop, ...withoutIntegrity } = nextState
@@ -1066,13 +1127,21 @@ export interface RecoveryOutcome {
   message: string
   state: GuardState
   /**
-   * 복구 ④가 "학생 변경"으로 받아들인 잎(§16.5.3). 바로 이어지는 T0가 `queryOpen`을 이유로
-   * 되돌리지 않게 넘긴다. **`queryOpen`은 이 상태에서 바꾸지 않는다** — 내리면 같은 질의에서
-   * 바뀐 다른 보호 파일까지 다음 T0가 학생 변경으로 받아들인다(2회째 I1).
+   * 복구 ④가 "학생 변경"으로 받아들인 잎과 **그때 디스크에서 잰 지문**(§16.5.3). 바로 이어지는
+   * T0가 `queryOpen`을 이유로 되돌리지 않게 넘긴다. 지문이 함께 있어야 다음 T0가 "그 뒤에
+   * 또 바뀌었는지"를 가릴 수 있다 — 지문 없는 수용은 열려 있던 문이다(I1).
+   * **`queryOpen`은 이 상태에서 바꾸지 않는다** — 내리면 같은 질의에서 바뀐 다른 보호 파일까지
+   * 다음 T0가 학생 변경으로 받아들인다(2회째 I1).
    */
-  acceptedLeaves: string[]
-  /** 그 수용 집합의 지문(§16.5.3) — 디스크 지문이 여기 값과 같을 때만 ④다. 다르면 ③(되돌림). */
-  acceptedHashes: Record<string, string>
+  accepted: AcceptedLeaf[]
+}
+
+/** 복구가 수용한 잎 하나 — 잎 이름과 그때 디스크 지문은 **한 쌍**이다(§16.5.3). */
+export interface AcceptedLeaf {
+  /** 쪽지가 생기는 파일은 루트 `CLAUDE.md` 하나뿐이다(§16.5.3) */
+  rel: typeof CLAUDE_MD_REL
+  /** 수용 시점의 디스크 내용 sha256 */
+  hash: string
 }
 
 /**
@@ -1090,7 +1159,7 @@ export function recoverPending(opts: {
 }): RecoveryOutcome {
   const { rootReal, userData, folderHash, key, state } = opts
   const now = opts.now ?? Date.now()
-  const idle: RecoveryOutcome = { hadPending: false, success: false, message: '', state, acceptedLeaves: [], acceptedHashes: {} }
+  const idle: RecoveryOutcome = { hadPending: false, success: false, message: '', state, accepted: [] }
   // 표식 없는 쪽지로는 아무것도 하지 않는다(readPending이 지운다).
   const pending = readPending(userData, folderHash, key)
   if (!pending) return idle
@@ -1138,8 +1207,8 @@ export function recoverPending(opts: {
     success: false,
     message: '규칙을 저장하지 못했어요. 다시 눌러 주세요.',
     state,
-    acceptedLeaves: diskHash ? [CLAUDE_MD_REL] : [],
-    acceptedHashes: diskHash ? { [CLAUDE_MD_REL]: diskHash } : {}
+    // 지문을 모르면 아무것도 수용하지 않는다 — 지문 없는 ④는 없다(§16.5.5 10).
+    accepted: diskHash ? [{ rel: CLAUDE_MD_REL, hash: diskHash }] : []
   }
 }
 

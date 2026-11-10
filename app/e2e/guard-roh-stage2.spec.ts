@@ -1,10 +1,12 @@
-// §16.5 — Roh 2회째 남은 지적(C3·I1·I2)의 닫힘 시험 + 전이표 ①~⑫.
+// §16.5 — Roh가 남긴 지적(C3·I1·I2)의 닫힘 시험 + 전이표 ①~⑫.
 // 앞 4건은 `review-share/2026-11-10-v063-guard-stage1-fix/R2/guard-stage1-fix-evidence/closure-regression.mjs`
-// 의 실패 4건을 **이름 그대로** 옮긴 것이다(§16.5.6). 뒤는 §16.5.2 표를 잎 하나짜리 표 주도 시험으로 잠근다.
+// 의 실패 4건을, 그 뒤 7건은 `review-share/2026-11-11-v063-guard-stage1-fix2/r3-evidence/closure-fix2.mjs`
+// 를 **이름 그대로** 옮긴 것이다(§16.5.6). 마지막은 §16.5.2 표를 잎 하나짜리 표 주도 시험으로 잠근다.
 import { test, expect } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import ts from 'typescript'
 import * as S from '../src/main/guard/store'
 import * as R from '../src/main/guard/rules'
 import * as C from '../src/main/guard/reconcile'
@@ -90,9 +92,10 @@ test('I1 closure: recovery accepts only the student CLAUDE.md leaf, not other qu
   writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'STUDENT AFTER CRASH\n')
   const recovery = S.recoverPending({ ...e, state })
   // 집합은 루트 CLAUDE.md 하나뿐이다. `queryOpen`은 그대로다(복구는 건드리지 않는다).
-  expect(recovery.acceptedLeaves).toEqual(['CLAUDE.md'])
+  // 수용 집합은 잎 이름 + 그때 디스크 지문 한 쌍이다(§16.5.3 '지문 필수').
+  expect(recovery.accepted).toEqual([{ rel: 'CLAUDE.md', hash: S.hashContent('STUDENT AFTER CRASH\n') }])
   expect(recovery.state.queryOpen).toBe(true)
-  const t0 = C.evaluateT0({ ...e, state: recovery.state, acceptedLeaves: recovery.acceptedLeaves, scan: scanOf(e) })
+  const t0 = C.evaluateT0({ ...e, state: recovery.state, accepted: recovery.accepted, scan: scanOf(e) })
   // ④ — 학생이 고친 CLAUDE.md는 살아남는다.
   expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('STUDENT AFTER CRASH\n')
   // ③ — 같은 질의에서 바뀐 다른 잎은 되돌린다.
@@ -128,6 +131,216 @@ test('I2 closure: T0 accepted file and rules table describe the same version', (
   expect(t0.state.rules.map((x) => x.normalized)).toEqual(['Student rule.'])
   // 파일에 직접 쓴 규칙의 출처는 `file`이다(§16.5.4 ⓒ).
   expect(t0.state.rules[0].origin).toBe('file')
+})
+
+// ── 3회째 남은 지적(C3·I1)의 닫힘 시험 (§16.5.5 9~11) ────────────────────────
+// 아래 다섯 건은 `review-share/2026-11-11-v063-guard-stage1-fix2/r3-evidence/closure-fix2.mjs`
+// 를 **이름 그대로** 옮긴 것이다(앞의 C3 1건은 그중 실패한 1건). 거기서 쓰던
+// `acceptedLeaves` + `acceptedHashes` 꼴은 지문 필수가 아니었기에 `accepted: {rel, hash}[]`
+// 하나로 바뀌었다 — 실패하던 두 건도 같은 `accepted: recovery.accepted` 꼴로 적는다.
+// 뒤의 두 건(⑬)은 `applyRuleChange`가 H를 어떻게 다루는지 잠근다.
+
+/** T2 되돌리기가 실패해 H로 남은 상태(디스크는 거절했던 글, 보관본은 F 그대로). */
+function heldByFailedT2(e: Env): { state: S.GuardState; originalHash: string } {
+  const state = init(e)
+  const originalHash = state.injected as string
+  unlinkSync(join(S.blobsDir(e.userData, e.folderHash), originalHash))
+  writeFileSync(join(e.rootReal, '.knuaf-gui'), 'ordinary file blocks quarantine')
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'UNAPPROVED\n')
+  const out = C.evaluateT2({ ...e, state, scan: scanOf(e), now: 100 })
+  expect(out.state.injected).toBe(null)
+  expect(out.reverted[0].reverted).toBe(false)
+  expect(out.state.held['CLAUDE.md']).toBeDefined()
+  expect(S.saveState(e.userData, e.folderHash, out.state, key)).toBe(true)
+  return { state: S.loadState(e.userData, e.folderHash, key).state, originalHash }
+}
+
+test('C3: held CLAUDE.md may not be promoted by app rule write after failed T2', () => {
+  const e = env('c3-app-write')
+  const { state, originalHash } = heldByFailedT2(e)
+  const out = S.applyRuleChange({
+    ...e,
+    state,
+    action: 'add',
+    now: 200,
+    mutate: (baseline) => R.addRuleToContent(baseline, 'Student selected rule.', { timestamp: 200, messageId: 'msg:student' })
+  })
+  const saved = S.loadState(e.userData, e.folderHash, key).state
+  const next = C.evaluateT0({ ...e, state: saved, scan: scanOf(e), now: 300 })
+  // 실패했다면 아무것도 쓰이지 않았어야 한다 — 보관본·상태·쪽지 모두 그대로.
+  expect(out.success).toBe(false)
+  expect(out.message).toBe('설정 파일을 아직 정리하지 못해 지금은 저장할 수 없어요.')
+  expect(saved.leaves['CLAUDE.md'].hash).toBe(originalHash)
+  expect(saved.injected).toBe(null)
+  expect(saved.held['CLAUDE.md']).toBeDefined()
+  expect(saved.rules).toEqual([])
+  expect(S.getBlob(e.userData, e.folderHash, originalHash)).toBe(null)
+  expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('UNAPPROVED\n')
+  // 거절했던 글이 보관본이 되어 다음 T0의 기준이 되어서는 안 된다(3회째 C3).
+  expect(next.state.injected).toBe(null)
+})
+
+test('⑬ — 되돌림이 되는 H는 앱 저장이 ⑦과 같이 풀고, 거절했던 글은 규칙이 되지 않는다', () => {
+  const e = env('13-release')
+  const state = init(e)
+  const originalHash = state.injected as string
+  // T2가 되돌리지 못해 H가 된 모양을 그대로 만든다(디스크만 거절 글, 되돌릴 보관본은 있다).
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'UNAPPROVED\n')
+  const held: S.GuardState = {
+    ...state,
+    injected: null,
+    held: { 'CLAUDE.md': { hash: S.hashContent('UNAPPROVED\n'), since: 1, tries: 1 } }
+  }
+  expect(S.saveState(e.userData, e.folderHash, held, key)).toBe(true)
+
+  const out = S.applyRuleChange({
+    ...e,
+    state: S.loadState(e.userData, e.folderHash, key).state,
+    action: 'add',
+    now: 200,
+    mutate: (baseline) => R.addRuleToContent(baseline, 'Student selected rule.', { timestamp: 200, messageId: 'msg:student' })
+  })
+  expect(out.success).toBe(true)
+  const saved = S.loadState(e.userData, e.folderHash, key).state
+  // F로 되돌린 뒤 얹었다 — 거절 글은 어디에도 없다.
+  expect(saved.held).toEqual({})
+  expect(saved.injected).toBe(S.hashContent(out.newContent))
+  expect(out.newContent).not.toContain('UNAPPROVED')
+  expect(out.newContent).toContain('APPROVED')
+  expect(out.newContent).toContain('Student selected rule.')
+  expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe(out.newContent)
+  expect(saved.rules.map((entry) => entry.normalized)).toEqual(['Student selected rule.'])
+  expect(saved.leaves['CLAUDE.md'].hash).toBe(saved.injected)
+  expect(saved.injected).not.toBe(originalHash) // F에 규칙이 얹혔으니 새 지문이다.
+})
+
+/** Roh r3 `recoveryFourth` 그대로 — 수용 집합은 학생이 고친 `CLAUDE.md` 하나뿐이어야 한다. */
+function recoveryFourth(e: Env): S.RecoveryOutcome {
+  const state = init(e, true)
+  expect(S.writePending(e.userData, e.folderHash, { action: 'add', previousHash: state.injected, nextHash: S.hashContent('PENDING\n'), at: 1 }, key)).toBe(true)
+  writeFileSync(join(e.rootReal, '.claude/settings.json'), 'UNAPPROVED SETTINGS\n')
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'STUDENT AFTER CRASH\n')
+  const recovery = S.recoverPending({ ...e, state })
+  expect(recovery.accepted).toEqual([{ rel: 'CLAUDE.md', hash: S.hashContent('STUDENT AFTER CRASH\n') }])
+  expect(recovery.state.queryOpen).toBe(true)
+  return recovery
+}
+
+// Roh 원본은 이 두 건을 `acceptedLeaves`(지문 없음) 대 `acceptedLeaves`+`acceptedHashes`(지문 있음)
+// 로 갈랐다. 이제 수용 항목이 지문을 **필수로** 들고 있어(`accepted: {rel, hash}[]`) 두 건의 호출
+// 꼴이 같아졌다 — 남는 차이는 무엇을 함께 확인하는가다(아래 주석). 지문 없는 꼴 자체는 다음
+// 시험이 타입 오류로 잠근다.
+test('I1: acceptance without the recovered hash must fail closed after disk changes again', () => {
+  const e = env('i1-missing-hash')
+  const recovery = recoveryFourth(e)
+  // 수용한 뒤 디스크가 또 바뀌었다 — 수용 당시 지문과 다르므로 ④가 아니라 ③이어야 한다.
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'SECOND UNAPPROVED CHANGE\n')
+  // 「지문 없이 잎 이름만」 넘기는 꼴은 이제 타입이 막는다(아래 타입 시험). 그 꼴이 런타임에
+  // 뜻했던 것 — **아무 수용 근거도 없음** — 을 그대로 넣어 확인한다: 수용 집합이 비면 ③이다.
+  const t0 = C.evaluateT0({ ...e, state: recovery.state, accepted: [], scan: scanOf(e) })
+  expect(t0.accepted).toEqual([])
+  expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('APPROVED\n')
+  // 되돌린 결과가 다시 F다 — 다음 T0의 기준이 거절 글에 오염되지 않는다.
+  expect(t0.state.injected).toBe(S.hashContent('APPROVED\n'))
+  expect(t0.reverted.map((entry) => entry.rel)).toContain('CLAUDE.md')
+})
+
+test('I1 control: recovered hash prevents a later disk change from being accepted', () => {
+  const e = env('i1-with-hash')
+  const recovery = recoveryFourth(e)
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'SECOND UNAPPROVED CHANGE\n')
+  const t0 = C.evaluateT0({ ...e, state: recovery.state, accepted: recovery.accepted, scan: scanOf(e) })
+  expect(t0.accepted).toEqual([])
+  expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('APPROVED\n')
+  // 수용 집합이 `CLAUDE.md` 하나뿐이라 다른 보호 잎은 같은 질의에서 되돌려진다(2회째 I1).
+  expect(readFileSync(join(e.rootReal, '.claude/settings.json'), 'utf8')).toBe('APPROVED SETTINGS\n')
+  // 디스크가 또 바뀐 `CLAUDE.md`도 함께 ③으로 되돌린다 — 되돌림 목록에 둘 다 있다.
+  expect(t0.reverted.map((entry) => entry.rel).sort()).toEqual(['.claude/settings.json', 'CLAUDE.md'])
+})
+
+test('I1: 수용 집합에 지문이 빠진 호출은 타입 오류다', () => {
+  // e2e는 `tsconfig.node.json`(`src/main`·`src/preload`·`src/shared`)도 `tsconfig.web.json`도
+  // 검사하지 않는다 → `pnpm typecheck`이 이 꼴을 잡아 주지 않는다. 그래서 여기서 타입 검사기를
+  // 직접 돌려 §16.5.3의 '지문 필수'가 타입으로 강제되는지 잠근다(`typescript`는 devDependency,
+  // `e2e/review-baseline.spec.ts`가 이미 `ts`를 쓴다). 실제 파일은 만들지 않는다(메모리 호스트).
+  const virtual = resolve('e2e/__guard-type-probe__.ts')
+  const header = [
+    "import * as C from '../src/main/guard/reconcile'",
+    "import type { GuardState } from '../src/main/guard/store'",
+    "import type { ScanResult } from '../src/main/guard/scan'",
+    'declare const state: GuardState',
+    'declare const scan: ScanResult',
+    'declare const env: { rootReal: string; userData: string; folderHash: string }'
+  ].join('\n')
+  const options = {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    types: ['node'],
+    lib: ['lib.es2024.d.ts']
+  }
+  const diagnose = (body: string): string[] => {
+    const source = `${header}\n${body}\n`
+    const host = ts.createCompilerHost(options)
+    const getSourceFile = host.getSourceFile.bind(host)
+    host.getSourceFile = (name, languageVersion, onError, shouldCreate) =>
+      resolve(name) === virtual ? ts.createSourceFile(name, source, languageVersion, true) : getSourceFile(name, languageVersion, onError, shouldCreate)
+    const fileExists = host.fileExists.bind(host)
+    host.fileExists = (name) => (resolve(name) === virtual ? true : fileExists(name))
+    return ts
+      .getPreEmitDiagnostics(ts.createProgram([virtual], options, host))
+      .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '))
+  }
+  // 잎 이름만 넘기던 옛 꼴 — 받아들여지면 안 된다.
+  const legacy = diagnose("void C.evaluateT0({ ...env, state, scan, acceptedLeaves: ['CLAUDE.md'] })")
+  expect(legacy.some((message) => message.includes("'acceptedLeaves' does not exist"))).toBe(true)
+  // 잎 이름이 `CLAUDE.md`가 아니어도 안 된다 — 쪽지가 생기는 잎은 하나뿐이다.
+  const wrongLeaf = diagnose("void C.evaluateT0({ ...env, state, scan, accepted: [{ rel: '.claude/settings.json', hash: 'x' }] })")
+  expect(wrongLeaf.some((message) => message.includes('is not assignable to type'))).toBe(true)
+  // 지문이 있는 지금 꼴은 통과해야 한다(위 검사기가 실제로 이 파일을 보고 있다는 대조).
+  expect(diagnose("void C.evaluateT0({ ...env, state, scan, accepted: [{ rel: 'CLAUDE.md', hash: 'x' }] })")).toEqual([])
+})
+
+test('I2: recovery ② preserves authenticated original text, message id, and timestamp', () => {
+  const e = env('i2-recovery-metadata')
+  const state = init(e)
+  const raw = '  Keep this exact original.  \n'
+  const change = R.addRuleToContent('APPROVED\n', raw, { timestamp: 123456, messageId: 'msg:original' })
+  const nextHash = S.hashContent(change.newContent)
+  // 쪽지에 적히는 꼴은 저장 시각이 반드시 있는 모양이다 — 좁히는 자리는 `pendingRuleFrom` 하나뿐이다.
+  const note = S.pendingRuleFrom(change.rule, 789)
+  expect(S.writePending(e.userData, e.folderHash, { action: 'add', previousHash: state.injected, nextHash, at: 789, ...(note ? { rule: note } : {}) }, key)).toBe(true)
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), change.newContent)
+  const out = S.recoverPending({ ...e, state, now: 999 })
+  expect(out.success).toBe(true)
+  expect({ message: out.state.rules[0].message, messageId: out.state.rules[0].messageId, timestamp: out.state.rules[0].timestamp }).toEqual({
+    message: raw,
+    messageId: 'msg:original',
+    timestamp: 123456
+  })
+  expect(out.state.injected).toBe(nextHash)
+  expect(out.state.queryOpen).toBe(true)
+})
+
+test('I2: first adoption, update, preserved metadata, and deletion use the matching rules table', () => {
+  const e = env('i2-t0-table-r3')
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), I.serializeRulesSection([{ normalized: 'Student first rule.' }]))
+  let state = C.evaluateT0({ ...e, state: S.defaultState(), scan: scanOf(e), now: 1000 }).state
+  expect(state.rules.map((entry) => ({ text: entry.message, timestamp: entry.timestamp, origin: entry.origin }))).toEqual([
+    { text: 'Student first rule.', timestamp: 1000, origin: 'file' }
+  ])
+  state.queryOpen = false
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), I.serializeRulesSection([{ normalized: 'Student first rule.' }, { normalized: 'Student second rule.' }]))
+  state = C.evaluateT0({ ...e, state, scan: scanOf(e), now: 2000 }).state
+  expect(state.rules.map((entry) => entry.timestamp)).toEqual([1000, 2000])
+  state.queryOpen = false
+  unlinkSync(join(e.rootReal, 'CLAUDE.md'))
+  state = C.evaluateT0({ ...e, state, scan: scanOf(e), now: 3000 }).state
+  expect(state.injected).toBe(null)
+  expect(state.rules).toEqual([])
 })
 
 // ── 전이표 ①~⑫ (잎 하나) ────────────────────────────────────────────────────
@@ -438,10 +651,13 @@ for (const row of rows) {
     const scan = scanOf(box)
     const leaf = box.leaf
 
-    const acceptedHashes: Record<string, string> | undefined = row.accepted
-      ? { [leaf]: row.acceptedHashMismatch ? S.hashContent('SOMETHING ELSE\n') : (box.diskHash as string) }
+    // 지문은 수용 항목의 **필수** 짝이다(§16.5.3) — 잎 이름만 넘기는 옛 꼴은 타입에서 없다.
+    const accepted: S.AcceptedLeaf[] | undefined = row.accepted
+      ? [{
+          rel: 'CLAUDE.md',
+          hash: row.acceptedHashMismatch ? S.hashContent('SOMETHING ELSE\n') : (box.diskHash as string)
+        }]
       : undefined
-    const acceptedLeaves = row.accepted ? [leaf] : []
 
     const result =
       row.phase === 'T0'
@@ -451,8 +667,7 @@ for (const row of rows) {
             folderHash: box.folderHash,
             state: box.state,
             scan,
-            acceptedLeaves,
-            ...(acceptedHashes ? { acceptedHashes } : {}),
+            ...(accepted ? { accepted } : {}),
             ...(row.integrity ? { integrity: row.integrity } : {})
           })
         : C.evaluateT2({
@@ -523,7 +738,7 @@ test('전이표 ⑦: 보류 알림은 앱 실행마다 한 번만 난다', () =>
   unlinkSync(join(S.blobsDir(e.userData, e.folderHash), storedHash))
   const state: S.GuardState = {
     ...S.defaultState(),
-    leaves: { [leaf]: { kind: 'file', hash: storedHash } },
+    leaves: { [leaf]: { kind: 'file', hash: storedHash, executable: false } },
     queryOpen: true,
     held: { [leaf]: { hash: S.hashContent('{"v":2}'), since: 777, tries: 1 } }
   }

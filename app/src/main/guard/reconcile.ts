@@ -29,6 +29,8 @@ import {
   getBlob,
   hasBlob,
   revertLeafToStore,
+  retryHeldLeaf,
+  type AcceptedLeaf,
   type GuardState,
   type HeldLeaf,
   type IntegrityState,
@@ -170,11 +172,19 @@ function retryHeldInto(opts: {
 }): { released: boolean; entry: RevertEntry | null } {
   const { rootReal, userData, folderHash, rel, stored, disk, now, notes, state, heldEntry } = opts
   // ⑧ — 디스크가 이미 F와 같다(학생이 손으로 맞췄거나, F가 "없음"인데 지워져 있다).
-  if (sameFingerprint(stored, disk)) {
+  // 되돌림 자체는 ⑬(앱 저장)과 같은 함수가 한다 — `null` = ⑧.
+  const outcome = retryHeldLeaf(rootReal, userData, folderHash, rel, stored, disk, now)
+  if (outcome === null) {
     delete state.held[rel]
     return { released: true, entry: null }
   }
-  const entry = revert(rootReal, userData, folderHash, rel, stored, rel === CLAUDE_MD ? 'claude-md' : 'untrusted', now)
+  const entry: RevertEntry = {
+    rel,
+    quarantinePath: outcome.quarantinePath,
+    reason: rel === CLAUDE_MD ? 'claude-md' : 'untrusted',
+    restoredFromStore: outcome.restoredFromStore,
+    reverted: outcome.reverted
+  }
   if (entry.reverted) {
     delete state.held[rel]
     notes.push(rel === CLAUDE_MD ? CLAUDE_MD_NOTE : noteReverted(rel))
@@ -232,12 +242,11 @@ export function evaluateT0(opts: {
   state: GuardState
   scan: ScanResult
   /**
-   * 복구 ④가 "학생 변경"으로 받아들인 잎(`recoverPending().acceptedLeaves`). 강제 종료
-   * 갈래에서도 이 잎은 되돌리지 않고 그대로 보관본에 올린다(§16.5.3).
+   * 복구 ④가 "학생 변경"으로 받아들인 잎과 그때의 디스크 지문(`recoverPending().accepted`).
+   * 지문이 **지금 디스크와 같을 때만** ④다 — 다르면 그 뒤에 또 바뀐 것이므로 ③(되돌림)이다.
+   * 강제 종료 갈래에서도 이 잎만은 되돌리지 않고 그대로 보관본에 올린다(§16.5.3).
    */
-  acceptedLeaves?: readonly string[]
-  /** 그 수용 집합의 지문(§16.5.3) — 디스크 지문이 같을 때만 ④다. 다르면 ③(되돌림). */
-  acceptedHashes?: Readonly<Record<string, string>>
+  accepted?: readonly AcceptedLeaf[]
   /** `loadState().integrity` — `ok`가 아니면 ⑪(전이 없음, 아무것도 쓰지 않는다) */
   integrity?: IntegrityState
   now?: number
@@ -264,8 +273,8 @@ export function evaluateT0(opts: {
   const notes: string[] = []
   const accepted: string[] = []
   const reverted: RevertEntry[] = []
-  const acceptedSet = new Set(opts.acceptedLeaves ?? [])
-  const acceptedHashes = opts.acceptedHashes ?? {}
+  const acceptedSet = new Map<string, string>()
+  for (const entry of opts.accepted ?? []) acceptedSet.set(entry.rel, entry.hash)
   const processed = new Set<string>()
   /** 보관본에 새로 올릴 잎(수용) */
   const toAdopt = new Map<string, LeafFingerprint>()
@@ -288,12 +297,13 @@ export function evaluateT0(opts: {
     // ① — 디스크 = F(또는 둘 다 없음).
     if (sameFingerprint(stored, disk)) continue
 
-    // ②(질의 밖 변경) / ④(복구 수용 집합, 지문까지 같을 때) / ⑨(항목 없음 → F="없음").
-    // 수용 집합의 지문을 넘기지 않은 호출은 "복구가 그때 디스크를 확인했다"로 본다 —
-    // 지문을 넘긴 호출(실제 배선)은 **지문이 같을 때만** ④다(§16.5.3).
+    // ②(질의 밖 변경) / ④(복구 수용 집합, **지문까지 같을 때**) / ⑨(항목 없음 → F="없음").
+    // 지문이 함께 오지 않은 수용은 없다 — 수용 뒤 디스크가 또 바뀌었으면 ③(되돌림)이다(I1).
+    const acceptedHash = acceptedSet.get(rel)
     const acceptedHere = crashedQuery
-      && acceptedSet.has(rel)
-      && (acceptedHashes[rel] === undefined || (disk !== undefined && acceptedHashes[rel] === disk.hash))
+      && acceptedHash !== undefined
+      && disk !== undefined
+      && acceptedHash === disk.hash
     const accept = crashedQuery ? acceptedHere : true
     if (accept) {
       accepted.push(rel)
