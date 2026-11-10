@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -16,7 +17,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { scanRoot, diffLeaves, leavesEqual, type LeafFingerprint } from '../src/main/guard/scan'
 import {
@@ -286,6 +287,33 @@ test('격리: 이름을 지우고 보관하며, 격리 폴더를 다시 훑어�
 
   const rescan = scanRoot({ root })
   expect(rescan.leaves.size).toBe(0)
+})
+
+test('격리: 이름 바꾸기가 안 되면(다른 볼륨) 복사·확인 뒤 원본을 지운다', () => {
+  const { root } = sandbox()
+  write(root, '.claude/settings.json', '{"evil":true}')
+  const timestamp = 1_762_000_000_001
+  let attempts = 0
+  const exdev = (): never => {
+    attempts += 1
+    const error = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+    error.code = 'EXDEV'
+    throw error
+  }
+  const stored = quarantineLeaf(root, '.claude/settings.json', timestamp, exdev)
+
+  // 이름 바꾸기는 한 번만 시도하고 곧장 복사 길로 간다.
+  expect(attempts).toBe(1)
+  expect(stored).not.toBeNull()
+  // 확인을 마친 뒤에만 원본을 지운다.
+  expect(existsSync(join(root, '.claude/settings.json'))).toBe(false)
+  expect(readFileSync(stored!, 'utf-8')).toBe('{"evil":true}')
+  const indexPath = join(root, '.knuaf-gui', 'quarantine', String(timestamp), 'index.json')
+  const index = JSON.parse(readFileSync(indexPath, 'utf-8')) as Array<{ originalPath: string; blobHash: string }>
+  expect(index).toEqual([{ originalPath: '.claude/settings.json', blobHash: expect.any(String), kind: 'file' }])
+  // 복사에 쓴 임시 파일이 격리 폴더에 남지 않는다.
+  const blobs = readdirSync(join(root, '.knuaf-gui', 'quarantine', String(timestamp), 'blobs'))
+  expect(blobs).toEqual([stored!.split(sep).pop()])
 })
 
 test('빈 .claude 하위 폴더만 정리하고 루트 .claude는 남긴다', () => {

@@ -401,8 +401,16 @@ function streamCopyAndHash(from: string, to: string): string | null {
  * **같은 볼륨이면 이름 바꾸기가 먼저다** — 읽지도 쓰지도 않고 옮긴다. 안 될 때만
  * 청크 복사 → 지문 확인 → 원본 삭제(큰 파일에서 본체가 멈추지 않게, 정제 3.6).
  * 확인 전에는 원본을 절대 지우지 않는다.
+ *
+ * `move`는 이름 바꾸기 하나만 갈아 끼우는 자리다 — 볼륨을 넘는 경우(EXDEV)를 시험에서
+ * 실제로 돌리기 위한 것이고, 기본값은 윈도우 재시도를 붙인 `renameWithRetry`다.
  */
-export function quarantineLeaf(rootReal: string, rel: string, timestamp: number): string | null {
+export function quarantineLeaf(
+  rootReal: string,
+  rel: string,
+  timestamp: number,
+  move: (from: string, to: string) => void = renameWithRetry
+): string | null {
   const abs = join(rootReal, rel.split('/').join(sep))
   if (!isInside(rootReal, abs) || abs === rootReal) return null
   let st
@@ -434,7 +442,7 @@ export function quarantineLeaf(rootReal: string, rel: string, timestamp: number)
       // ① 같은 볼륨 — 이름 바꾸기부터. 읽지 않는다.
       let moved = false
       try {
-        renameWithRetry(abs, incoming)
+        move(abs, incoming)
         moved = true
       } catch { /* 볼륨이 다르거나 잠김 — 아래 복사 길로 */ }
       if (moved) {
