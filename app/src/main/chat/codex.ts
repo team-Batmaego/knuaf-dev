@@ -180,7 +180,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.1' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.2' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
@@ -452,7 +452,10 @@ export class CodexConnection implements AgentConnection {
   async stop() {
     this.stopped = true
     if (this.turn && this.thread && this.rpc && !this.rpc.closed) {
-      try { await this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }) } catch { /* process termination below */ }
+      // 종료 중에는 interrupt를 45s 전체 대기하지 않는다 — 짧은 예산 뒤에 kill로 넘어간다.
+      const { promise, reject } = Promise.withResolvers<void>()
+      const budget = setTimeout(() => reject(new Error('shutdown')), 3000)
+      try { await Promise.race([this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }), promise]) } catch { /* process termination below */ } finally { clearTimeout(budget) }
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
     this.fileChanges.clear(); this.pendingFileApprovals.clear()
