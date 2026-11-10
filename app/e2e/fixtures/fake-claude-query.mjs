@@ -47,7 +47,9 @@ if (args[0] === 'auth' && args[1] === 'status') {
       send({ type: 'assistant', uuid: 'answer', session_id: 'fake-session', message: {
         content: [{ type: 'text', text: '가짜 CLI 응답' }]
       } })
-      send({ type: 'result', subtype: 'success', is_error: false, session_id: 'fake-session' })
+      // 토큰 기록 시험이 result.usage 를 흉내 낼 수 있게 연다 — 기본은 필드 없음(기존 시험 불변).
+      const usage = process.env.W1_QUERY_USAGE ? { usage: JSON.parse(process.env.W1_QUERY_USAGE) } : {}
+      send({ type: 'result', subtype: 'success', is_error: false, session_id: 'fake-session', ...usage })
     }
   })
 }
