@@ -80,6 +80,8 @@ test('a temporary plan survives live jobs and ends once with afterFirst', () => 
   mkdirSync(root, { recursive: true })
   const store = new JobStore(join(base, 'jobs'))
   store.setTemporary(root, planFromRow('both-high'), 'next-student-turn')
+  // [C1-04] 승인 **뒤에** 만든 주문만 그 차례 것이다 — 이 시험의 주문도 그 뒤에 만든다.
+  const since = store.temporary(root)!.at
 
   const job = (status: JobRecord['status']): JobRecord => ({
     spec: {
@@ -87,7 +89,7 @@ test('a temporary plan survives live jobs and ends once with afterFirst', () => 
       contractVersion: 'role-v1', company: 'codex', model: 'astra', effort: null
     },
     rootJobId: `j-${status}`, root: canonical(root), owner: { id: `codex\0${canonical(root)}`, sessionId: 's', company: 'codex' },
-    authorSessionId: 'a', status, contentHash: 'h', outputs: [], createdAt: '2026-11-10T00:00:00.000Z'
+    authorSessionId: 'a', status, contentHash: 'h', outputs: [], createdAt: since
   })
 
   expect(settleTemporary(store, [job('running')], root)).toBe(false)
@@ -336,40 +338,86 @@ test('a temporary plan is cleared at the end of the bound student turn', async (
   expect(f.svc.snapshot(f.root, 'claude').messages.some(message => message.text === '차례 하나')).toBe(true)
 })
 
-// [C1-04] 이어 하기 자식이 끝난 부모 `limit` 는 미해결이 아니다 — [이번만]이 다음 차례까지 남지 않는다.
+// [C1-04] 판정서 VM 재현 3건 — [이번만]이 다음 차례까지 새지 않는다.
+//   ⓐ 같은 rootJobId 의 limit 부모 + completed 자식
+//   ⓑ [나중에]로 끝낸 limit (결과가 이미 넘어감)
+//   ⓒ 승인 전부터 있던 과거 limit
 test('fix C1-04: a limit parent whose continuation child completed does not keep the temporary plan', () => {
+  const f = tempFixture()
+  const job = f.job
+  // 판정서 재현 ⓐ.
+  f.store.setTemporary(f.root, planFromRow('codex-high'), 'next-student-turn')
+  expect(settleTemporary(f.store, [job('p0', 'limit', { at: f.laterAt }), job('c0', 'completed', { at: f.laterAt, parent: 'p0' })], f.root)).toBe(true)
+  expect(f.store.temporary(f.root)).toBeNull()
+  expect(f.store.effectivePlan(f.root)).toBeNull()
+
+  // 이어 받은 자식이 아직 도는 중이면 아직 끝난 것이 아니다.
+  // 새 [이번만] 승인은 다시 세운 시각이 기준이다 — 그 값으로 다시 읽는다.
+  f.store.setTemporary(f.root, planFromRow('codex-high'), 'next-student-turn')
+  const second = f.store.temporary(f.root)!.at
+  expect(settleTemporary(f.store, [job('p1', 'limit', { after: second }), job('c1', 'running', { after: second, parent: 'p1' })], f.root)).toBe(false)
+  expect(f.store.temporary(f.root)).not.toBeNull()
+
+  // 자식도 한도로 끝났으면 그 일은 아직 안 끝났다.
+  expect(settleTemporary(f.store, [job('p2', 'limit', { after: second }), job('c2', 'limit', { after: second, parent: 'p2' })], f.root)).toBe(false)
+  expect(f.store.temporary(f.root)).not.toBeNull()
+})
+
+test('fix C1-04: a limit the student finished with [나중에] does not keep the temporary plan', () => {
+  const f = tempFixture()
+  const late = f.job('later-job', 'limit', { at: f.laterAt })
+  // [나중에] 는 그 주문의 결과를 그대로 넘긴다 — 전달 기록이 남는다.
+  f.store.beginDelivery(late.rootJobId, f.root, late.owner.id)
+  f.store.finishDelivery(late.rootJobId)
+  expect(settleTemporary(f.store, [late], f.root)).toBe(true)
+  expect(f.store.temporary(f.root)).toBeNull()
+})
+
+test('fix C1-04: a past limit created before the approval does not keep the temporary plan', () => {
+  const f = tempFixture()
+  // 판정서 재현 ⓒ: 승인 **전에** 만들어진 채 한도로 남은 주문 하나.
+  const old = f.job('old-job', 'limit', { at: f.earlier })
+  expect(settleTemporary(f.store, [old], f.root)).toBe(true)
+  expect(f.store.temporary(f.root)).toBeNull()
+})
+
+test('fix C1-04: an undecided limit created after the approval still holds it', () => {
+  const f = tempFixture()
+  // 승인 뒤에 만든 주문이 아직 한도인 채로 아무 결정도 없으면 그것은 미해결이다.
+  expect(settleTemporary(f.store, [f.job('open-job', 'limit', { at: f.laterAt })], f.root)).toBe(false)
+  expect(f.store.temporary(f.root)).not.toBeNull()
+  // 대기·진행 주문도 마찬가지다.
+  expect(settleTemporary(f.store, [f.job('queued-job', 'queued', { at: f.laterAt })], f.root)).toBe(false)
+})
+
+/** [이번만] 승인 시각을 기준으로 만든 주문 묶음 — 승인 전/후를 시험하려면 시각이 필요하다. */
+function tempFixture() {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-temp-fix-')))
   const root = join(base, 'thesis')
   mkdirSync(root, { recursive: true })
   const store = new JobStore(join(base, 'jobs'))
   store.setTemporary(root, planFromRow('codex-high'), 'next-student-turn')
+  /** 방금 세운 [이번만]의 승인 시각. */
+  const since = store.temporary(root)!.at
+  const earlier = new Date(Date.parse(since) - 60_000).toISOString()
+  const laterAt = new Date(Date.parse(since) + 60_000).toISOString()
 
-  const job = (id: string, status: JobRecord['status'], parent?: string): JobRecord => ({
+  const job = (
+    id: string,
+    status: JobRecord['status'],
+    options: { before?: string; after?: string; parent?: string } = {}
+  ): JobRecord => ({
     spec: {
       schema: 1, id, lane: 'research', task: 't', inputs: [], outputs: ['result.md'],
       contractVersion: 'role-v1', company: 'codex', model: 'astra', effort: null,
-      ...(parent ? { parent, cause: 'student-continue-after-limit' as const } : {})
+      ...(options.parent ? { parent: options.parent, cause: 'student-continue-after-limit' as const } : {})
     },
     rootJobId: id, root: canonical(root),
     owner: { id: `codex\0${canonical(root)}`, sessionId: 's', company: 'codex' },
-    authorSessionId: 'a', status, contentHash: 'h', outputs: [], createdAt: '2026-11-10T00:00:00.000Z'
+    authorSessionId: 'a', status, contentHash: 'h', outputs: [],
+    createdAt: options.at ?? laterAt
   })
+  return { base, root, store, since, earlier, laterAt, job }
+}
 
-  // 판정서 재현: 같은 rootJobId 의 limit 부모 + completed 자식.
-  expect(settleTemporary(store, [job('p0', 'limit'), job('c0', 'completed', 'p0')], root)).toBe(true)
-  expect(store.temporary(root)).toBeNull()
-  expect(store.effectivePlan(root)).toBeNull()
-
-  // 이어 받은 자식이 아직 도는 중이면 아직 끝난 것이 아니다.
-  store.setTemporary(root, planFromRow('codex-high'), 'next-student-turn')
-  expect(settleTemporary(store, [job('p1', 'limit'), job('c1', 'running', 'p1')], root)).toBe(false)
-  expect(store.temporary(root)).not.toBeNull()
-
-  // 자식도 한도로 끝났으면 그 일은 아직 안 끝났다.
-  expect(settleTemporary(store, [job('p2', 'limit'), job('c2', 'limit', 'p2')], root)).toBe(false)
-  expect(store.temporary(root)).not.toBeNull()
-
-  // 이어 하기 없이 과거에 한도로 끝난 주문은 여전히 보수적으로 살아 있는 것으로 센다(C4 에서 차례 id 로 좁힌다).
-  expect(settleTemporary(store, [job('p3', 'limit')], root)).toBe(false)
-  expect(store.temporary(root)).not.toBeNull()
-})
+void 0
