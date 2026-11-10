@@ -331,12 +331,23 @@ export class ConversationHandoff {
   private readArchive(proposal: ConversationProposal): HandoffSource | null {
     try { return JSON.parse(readFileSync(proposal.archivePath, 'utf8')) as HandoffSource } catch { return null }
   }
-  /** Later, stop, or user conversation switch. Also invalidates an in-flight click/proposal lookup. */
+  /**
+   * Later, stop, or user conversation switch. Also invalidates an in-flight click/proposal lookup.
+   *
+   * [C1-10] **이미 넘긴 제안(`consumed`)은 건드리지 않는다** — 그건 보관 대화이고, 여기서
+   * `discarded` 로 바꾸면 보관 목록에서 사라진다. 무효화 대상은 아직 끝나지 않은 것뿐이다.
+   */
   invalidate(rootConversationId: string): void {
     this.generations.set(rootConversationId, (this.generations.get(rootConversationId) ?? 0) + 1)
     this.reservations.get(rootConversationId)?.abort()
-    for (const p of this.state.proposals) if (p.rootConversationId === rootConversationId && p.state !== 'discarded') p.state = 'discarded'
-    this.persist()
+    let changed = false
+    for (const p of this.state.proposals) {
+      if (p.rootConversationId !== rootConversationId) continue
+      if (p.state === 'discarded' || p.state === 'consumed') continue
+      p.state = 'discarded'
+      changed = true
+    }
+    if (changed) this.persist()
   }
   /**
    * 폴더 단위 무효화 — `ChatService` 는 대화 id 가 아니라 폴더를 안다. 이 폴더에서 열린 제안의

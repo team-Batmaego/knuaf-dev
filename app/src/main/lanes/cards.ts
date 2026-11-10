@@ -25,6 +25,7 @@ import { canonical } from '../chat/jobs/isolation'
 import type { JobStore, StoredCard } from '../chat/jobs/store'
 import { maskAccount, publicCard, type LaneAccountView } from './snapshot'
 import { LaneFailure } from './failure'
+import { providerOf } from './providers'
 
 /** 카드 경로 밖(핸들러·시험)도 같은 형을 쓴다 — 정의는 `./failure` 한 곳. */
 export { LaneFailure }
@@ -32,6 +33,24 @@ import { laneAccounts, recommendation, type LaneRecommendation } from './source'
 
 /** [이번만]이 묶이는 차례 — 쉬는 중에 누르면 학생이 다음에 보내는 차례다(계약 §8-10). */
 const NEXT_STUDENT_TURN = 'next-student-turn'
+
+/**
+ * 폴더 단위 직렬화 — 카드 열기·소비·끄기가 같은 폴더에서 겹치지 않는다.
+ *
+ * [C1-05] 두 카드가 같은 판(`baseVersion`)을 들고 동시에 들어오면 `beginCard` 는 둘 다 통과시키고
+ * 계정 조회 await 사이에 각자 적용된다(마지막 카드가 앞 카드의 배치를 덮는다). [C1-03] 끄기가
+ * 끝난 뒤 앞서 시작된 승인이 이어지면 철회된 배치가 되살아난다. 둘 다 "같은 폴더에서 카드 처리는
+ * 한 번에 하나"로 닫힌다 — 카드 소비는 원자였지만 **폴더 상태를 읽고 쓰는 구간**이 원자가 아니었다.
+ */
+const folderChains = new Map<string, Promise<unknown>>()
+
+function withFolderLock<T>(folder: string, run: () => Promise<T>): Promise<T> {
+  const previous = folderChains.get(folder) ?? Promise.resolve()
+  // 앞 작업이 실패해도 다음 작업은 돈다 — 잠금이 아니라 **차례**다.
+  const next = previous.then(run, run)
+  folderChains.set(folder, next.catch(() => undefined))
+  return next
+}
 
 
 /** 이 폴더의 카드를 짓고 소비하는 데 필요한 이음매. 계정 조회는 `laneAccounts` 와 같은 모양이다. */
@@ -48,6 +67,11 @@ export interface CardDeps {
    * 로 돌려준다 — **바뀌지 않았는데 "적용됨"이라고 적지 않는다**(정본 §3.1-7).
    */
   applyDesign?: (root: string, design: LaneEntry) => Promise<boolean>
+  /**
+   * 캐시를 **건너뛴** 계정 조회 — 카드 적용 직전 대조는 15초 전 값이면 안 된다(C1-06).
+   * 없으면 `account` 로 떨어진다(단위 시험·이음매 없는 호출자).
+   */
+  freshAccount?: (company: Provider) => Promise<ExecutionAccount | null>
 }
 
 // ---------------------------------------------------------------- §3 카드 짓기
@@ -63,6 +87,16 @@ export async function openCard(
   variant?: CardVariant
 ): Promise<LaneCard> {
   const folder = canonical(root)
+  return withFolderLock(folder, () => openCardLocked(deps, folder, request, variant))
+}
+
+/** 잠금 안쪽 본체 — 같은 폴더에서 다른 카드 처리가 끼어들지 않는다. */
+async function openCardLocked(
+  deps: CardDeps,
+  folder: string,
+  request: LaneRequest,
+  variant?: CardVariant
+): Promise<LaneCard> {
   const accounts = await laneAccounts(deps)
   const approved = deps.store.approvedPlan(folder)
   const recommended = recommendation(accounts.executions, deps.mainCompany, approved?.design?.model ?? null)
@@ -98,6 +132,10 @@ export async function openCard(
  */
 export async function settingsCard(deps: CardDeps, root: string, kind: 'enable' | 'revert'): Promise<LaneCard> {
   const folder = canonical(root)
+  return withFolderLock(folder, () => settingsCardLocked(deps, folder, kind))
+}
+
+async function settingsCardLocked(deps: CardDeps, folder: string, kind: 'enable' | 'revert'): Promise<LaneCard> {
   const accounts = await laneAccounts(deps)
   const approved = deps.store.approvedPlan(folder)
   if (kind === 'revert' && !approved) throw new LaneFailure('not-found', '되돌릴 배치가 없어요.')
@@ -139,16 +177,21 @@ export async function reviewModels(deps: Pick<CardDeps, 'account'>): Promise<Rev
 
 /** §3-4 고르기 — 고르는 것만으로는 적용되지 않는다. §3-2 카드(검토 줄 하나)를 연다. */
 export async function pickReview(deps: CardDeps, root: string, company: Provider, model: string): Promise<LaneCard> {
-  const account = await deps.account(company)
-  const matched = account?.account.models?.find(entry => entry.model === model)
-  if (!matched || !matched.efforts.includes(REVIEW_EFFORT)) {
-    throw new LaneFailure('not-found', '검토에 쓸 수 있는 모델이 아니에요.')
-  }
-  return openCard(deps, root, {
-    scope: 'continue',
-    quote: '',
-    lanes: { review: { company, model: matched.model, effort: REVIEW_EFFORT } }
-  }, 'change')
+  // [C1-01] 회사 값은 계정 조회(그리고 실행 파일 선택) **전에** 닫는다.
+  const provider = providerOf(company)
+  const folder = canonical(root)
+  return withFolderLock(folder, async () => {
+    const account = await deps.account(provider)
+    const matched = account?.account.models?.find(entry => entry.model === model)
+    if (!matched || !matched.efforts.includes(REVIEW_EFFORT)) {
+      throw new LaneFailure('not-found', '검토에 쓸 수 있는 모델이 아니에요.')
+    }
+    return openCardLocked(deps, folder, {
+      scope: 'continue',
+      quote: '',
+      lanes: { review: { company: provider, model: matched.model, effort: REVIEW_EFFORT } }
+    }, 'change')
+  })
 }
 
 /**
@@ -157,6 +200,10 @@ export async function pickReview(deps: CardDeps, root: string, company: Provider
  */
 export async function disable(deps: CardDeps, root: string): Promise<void> {
   const folder = canonical(root)
+  return withFolderLock(folder, () => disableLocked(deps, folder))
+}
+
+async function disableLocked(deps: CardDeps, folder: string): Promise<void> {
   const runner = deps.runner ?? null
   for (const record of runner?.records() ?? []) {
     if (record.root !== folder) continue
@@ -166,6 +213,8 @@ export async function disable(deps: CardDeps, root: string): Promise<void> {
   deps.store.revokePlan(folder)
   deps.store.clearTemporary(folder)
   deps.store.addEvent(folder, { id: randomUUID(), at: new Date().toISOString(), kind: 'lanes-declined' })
+  // 끄기는 배치를 바꾼 일이다 — 그 전에 만든 카드는 옛 판을 들고 있으므로 닫는다([C1-03]).
+  deps.store.bumpVersion(folder)
 }
 
 // ---------------------------------------------------------------- §3 카드 소비
@@ -182,6 +231,18 @@ export async function decideCard(
   action: CardAction
 ): Promise<CardDecision> {
   const folder = canonical(root)
+  // [C1-03·05] 같은 폴더에서 카드 처리는 한 번에 하나 — 계정 조회 await 사이에 다른 카드나
+  // 끄기가 끼어들면 판 검사가 무의미해진다.
+  return withFolderLock(folder, () => decideCardLocked(deps, folder, cardId, baseVersion, action))
+}
+
+async function decideCardLocked(
+  deps: CardDeps,
+  folder: string,
+  cardId: string,
+  baseVersion: number,
+  action: CardAction
+): Promise<CardDecision> {
   const stored = deps.store.card(cardId)
   if (!stored || canonical(stored.root) !== folder) throw new LaneFailure('not-found', '카드를 찾지 못했어요.')
   checkAction(stored.variant, action)
@@ -230,35 +291,55 @@ export async function decideCard(
   // 옛 파일의 카드 — 무엇을 적용할지 main 이 갖고 있지 않다. 화면 값으로 다시 짓지 않고 닫는다.
   if (!plan) return closeAsInvalid(deps, cardId, null)
 
-  // 계정 결박 대조 — 카드를 띄운 계정과 지금 계정이 하나라도 다르면 아무것도 저장하지 않는다.
+  // 계정 결박 대조 — 카드를 띄운 계정과 **지금** 계정이 하나라도 다르면 아무것도 저장하지 않는다.
+  // [C1-06] 이 대조는 권한을 바꾸기 직전이라 캐시를 건너뛴 관측을 쓴다(15초 전 값이면 A 카드가
+  // B 계정에서 적용된다). 관측 실패(`null`)도 불일치다 — 모르면 닫는다.
+  const fresh = deps.freshAccount ?? deps.account
   for (const company of ['claude', 'codex'] as const) {
     const bound = stored.boundAccounts[company]
     if (!bound) continue
-    const account = await deps.account(company)
+    const account = await fresh(company)
     if (account?.accountId === bound) continue
     return closeAsInvalid(deps, cardId, 'account-changed')
   }
 
-  // 설계 회사 전환은 실제로 바뀌었을 때만 적용으로 친다(정본 §3.1-7).
-  if (switchesDesign) {
-    const applied = await deps.applyDesign!(folder, design!)
-    if (!applied) return closeAsInvalid(deps, cardId, null)
-  }
+  // 여기까지 await 가 있었다 — 그 사이 끄기·새 카드가 폴더 상태를 바꿨을 수 있다([C1-03]).
+  // 폴더 판이 그대로이고 이 카드가 아직 적용 중일 때만 실제 적용으로 넘어간다.
+  if (deps.store.versionOf(folder) !== baseVersion) return closeAsInvalid(deps, cardId, 'base-version')
+  const live = deps.store.card(cardId)
+  if (!live || live.state.kind !== 'applying') return alreadyHandled(live ?? stored)
 
-  if (action === 'continue' || action === 'once') saveConsents(deps, stored)
   switch (action) {
     case 'continue':
-      deps.store.approve(folder, plan)
-      return settle(deps, cardId, { kind: 'applied', scope: 'continue' }, null, null)
-    case 'once':
+    case 'once': {
+      // 부작용(설계 칩 바꾸기)은 **승인 분기 안에서만** — 취소·거절은 아무것도 바꾸지 않는다(
+      // [C1-02]: 예전에는 계정 대조 뒤 action 분기보다 먼저 불렀다).
+      if (switchesDesign) {
+        const applied = await deps.applyDesign!(folder, design!)
+        if (!applied) return closeAsInvalid(deps, cardId, null)
+      }
+      saveConsents(deps, stored)
+      if (action === 'continue') {
+        deps.store.approve(folder, plan)
+        return settle(deps, cardId, { kind: 'applied', scope: 'continue' }, null, null)
+      }
       deps.store.setTemporary(folder, plan, NEXT_STUDENT_TURN)
       return settle(deps, cardId, { kind: 'applied', scope: 'once' }, null, NEXT_STUDENT_TURN)
+    }
     case 'decline':
       deps.store.addEvent(folder, { id: randomUUID(), at: new Date().toISOString(), kind: 'lanes-declined' })
       return settle(deps, cardId, { kind: 'declined' }, null, null)
     default:
       return settle(deps, cardId, { kind: 'cancelled' }, null, null)
   }
+}
+
+/** 이미 접힌 카드(두 창·중복 IPC) — 상태를 덮어쓰지 않고 그대로 알린다. */
+function alreadyHandled(card: StoredCard): CardDecision {
+  if (card.state.kind === 'superseded') {
+    return { outcome: 'invalid', reason: 'superseded', card: publicCard(card), boundTurn: null }
+  }
+  return { outcome: 'already-handled', reason: null, card: publicCard(card), boundTurn: null }
 }
 
 /** §3-5 [다시 확인] — 상태만 묻는다. 다시 적용하지 않고 아무것도 바꾸지 않는다. */

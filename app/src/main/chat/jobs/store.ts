@@ -261,12 +261,39 @@ export class JobStore {
     for (const record of Object.values(this.state.deliveries)) {
       if (record.state === 'started') { record.state = 'uncertain'; recovered = true }
     }
+    // [C1-13] 적용 중(`applying`)에 앱이 죽은 카드는 다시 소비할 수 없다(중복 적용 금지).
+    // 그렇다고 `pending` 으로 영원히 두지도 않는다 — 승인 기록이 있으면 적용된 것으로,
+    // 없으면 무효로 접는다. 판은 그대로 두어 남은 카드가 옛 판으로 밀리게 하지 않는다.
+    for (const [root, list] of Object.entries(this.state.cards)) {
+      for (const card of list) {
+        if (card.state.kind !== 'applying') continue
+        card.state = this.state.approvals[root]
+          ? { kind: 'applied', scope: 'continue' }
+          : { kind: 'invalid' }
+        recovered = true
+      }
+    }
     if (recovered) this.persist()
   }
 
   private persist(): void {
     const result = writeFileAtomic(this.file, JSON.stringify(this.state), { mode: 0o600 })
     if (!result.ok) throw result.error
+    // [C1-14] 저장이 실제로 일어났을 때만 알린다 — 화면의 `lanes:changed` 가 여기 붙는다.
+    for (const listener of this.listeners) {
+      try { listener() } catch { /* 구독자 오류가 저장을 되돌리지는 않는다 */ }
+    }
+  }
+
+  private readonly listeners = new Set<() => void>()
+
+  /**
+   * 저장소가 **바뀐 순간**을 구독한다. 화면의 줄·카드·동의가 IPC 요청 없이도 바뀌는 경로
+   * (러너의 비동기 완료, 자동 정리)를 묶음으로 밀어 보내려면 이 훅이 필요하다([C1-14]).
+   */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
   }
 
   approve(root: string, plan: LanePlan): void {

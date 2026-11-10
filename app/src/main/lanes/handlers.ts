@@ -25,6 +25,7 @@ import {
   cardStatus, decideCard, disable, pickReview, reviewModels, settingsCard, type CardDeps
 } from './cards'
 import { LaneFailure } from './failure'
+import { providerOf } from './providers'
 import { consentRows, maskAccount, type LaneAccountView } from './snapshot'
 
 /** IPC 등록 통로 — 시험에서 가짜 `ipcMain` 을 끼울 수 있게 최소만 요구한다. */
@@ -38,6 +39,14 @@ export interface LaneHandlerDeps {
   store: JobStore
   runner: JobRunner | null
   account: (company: Provider) => Promise<ExecutionAccount | null>
+  /** 캐시를 건너뛴 계정 조회([C1-06]) — 카드 적용 직전 대조가 쓴다. 없으면 `account`. */
+  freshAccount?: (company: Provider) => Promise<ExecutionAccount | null>
+  /**
+   * 허용 폴더 경계([C1-08]) — main 이 지금 열어 둔 폴더(와 그 밖의 허용 폴더)만 통과시킨다.
+   * 화면이 보낸 root 두 개를 서로 대조하는 것만으로는 **둘 다 바꿔** 다른 폴더의 저장 상태·
+   * 전달 원문을 건드릴 수 있었다. 값이 `null` 이면 아직 폴더가 없다는 뜻이라 요청을 닫는다.
+   */
+  allowed: (folder: string) => boolean
   mainCompany: Provider
   /** 설계를 다른 회사로 바꾸는 적용(칩 다시 쓰기) — `null` 이면 그런 카드는 `unavailable`. */
   applyDesign: CardDeps['applyDesign']
@@ -80,6 +89,13 @@ function folderOf(root: unknown): string {
   return folder
 }
 
+/** 폴더 해석 + 허용 경계 — 두 겹이 모두 통과해야 상태를 읽거나 쓴다. */
+function folderAllowed(deps: LaneHandlerDeps, root: unknown): string {
+  const folder = folderOf(root)
+  if (!deps.allowed(folder)) throw new LaneFailure('no-folder', '지금 열려 있지 않은 논문 폴더예요.')
+  return folder
+}
+
 /**
  * 그 주문이 이 폴더의 것인가 — 화면이 준 폴더 값과 주문의 실제 폴더를 대조한다. 러너가 이미
  * 같은 검사를 하지만, 요청이 상태를 바꾸기 **전에** 막아 두면 다른 폴더 주문 번호로도 아무 일도
@@ -104,6 +120,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
   const cards: CardDeps = {
     store: deps.store,
     account: deps.account,
+    freshAccount: deps.freshAccount,
     mainCompany: deps.mainCompany,
     runner: deps.runner ? { records: () => deps.runner!.records(), stopJob: id => deps.runner!.stopJob(id) } : null,
     applyDesign: deps.applyDesign
@@ -143,7 +160,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
    * 바깥에서 풀면 그 예외가 `LanesReply` 를 거치지 않고 IPC 밖으로 샌다.
    */
   const withFolder = <T>(root: unknown, run: (folder: string) => Promise<T> | T, touch = true): Promise<LanesReply<T>> =>
-    reply<T>(typeof root === 'string' && root ? root : null, () => run(folderOf(root)), touch)
+    reply<T>(typeof root === 'string' && root ? root : null, () => run(folderAllowed(deps, root)), touch)
 
   const consentRow = (company: Provider, accountId: string): ConsentRow => {
     const account = accounts.get(company)
@@ -161,9 +178,10 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
   }
 
   const lanes = {
-    snapshot: (root: string | null) => reply(
-      typeof root === 'string' && root ? folderOf(root) : null,
-      () => deps.hub.snapshot(typeof root === 'string' && root ? canonical(root) : null),
+    // [C1-16] 폴더 해석이 `reply` 밖에서 평가되면 그 예외가 응답을 지나쳐 IPC 로 샌다.
+    snapshot: (root: string | null) => reply<LanesSnapshot>(
+      typeof root === 'string' && root ? root : null,
+      () => deps.hub.snapshot(typeof root === 'string' && root ? folderAllowed(deps, root) : null),
       false
     ),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) => withFolder(root,
@@ -174,13 +192,17 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     settingsCard: (root: string, kind: 'enable' | 'revert') => withFolder(root,
       folder => settingsCard(cards, folder, kind)),
     disable: (root: string) => withFolder(root, async folder => { await disable(cards, folder) }),
-    reviewModels: (root: string | null) => reply(
-      typeof root === 'string' && root ? folderOf(root) : null,
-      () => reviewModels(cards),
+    reviewModels: (root: string | null) => reply<ReviewModelGroup[]>(
+      typeof root === 'string' && root ? root : null,
+      () => { if (typeof root === 'string' && root) folderAllowed(deps, root); return reviewModels(cards) },
       false
     ),
-    pickReview: (root: string, company: Provider, model: string) => withFolder(root,
-      folder => pickReview(cards, folder, company, model)),
+    // [C1-01] 회사 값은 여기서 먼저 닫는다 — 계정 조회가 실행 파일 선택으로 이어진다.
+    pickReview: (root: string, company: Provider, model: string) => {
+      let provider: Provider
+      try { provider = providerOf(company) } catch (error) { return reply(root ?? null, () => { throw error }, false) }
+      return withFolder(root, folder => pickReview(cards, folder, provider, model))
+    },
     consents: () => reply(null, async () => {
       const views = await refreshAccounts()
       return consentRows(
@@ -189,11 +211,16 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
       )
     }, false),
     setConsent: (company: Provider, accountId: string, on: boolean) => reply(null, async () => {
-      if (company !== 'claude' && company !== 'codex') throw new LaneFailure('internal', '알 수 없는 회사예요.')
+      const provider = providerOf(company)
       if (typeof accountId !== 'string' || !accountId) throw new LaneFailure('not-found', '계정을 찾지 못했어요.')
       await refreshAccounts()
-      deps.setConsent(company, accountId, on === true)
-      return consentRow(company, accountId)
+      // [C1-07] 동의는 **지금 확인된 계정**에만 켠다. 처음 보는 id 로 켜면 나중에 그 계정으로
+      // 로그인했을 때 저장값이 곧바로 "동의함"으로 읽힌다. 거두기는 과거 계정에도 허용한다.
+      if (on === true && accounts.get(provider)?.accountId !== accountId) {
+        throw new LaneFailure('not-found', '지금 로그인한 계정이 아니에요.')
+      }
+      deps.setConsent(provider, accountId, on === true)
+      return consentRow(provider, accountId)
     }),
     dismiss: (root: string, lineId: string) => withFolder(root, async folder => {
       const line = await findLine(deps, folder, lineId)

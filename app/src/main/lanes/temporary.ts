@@ -11,10 +11,36 @@ import type { JobRecord } from '../chat/jobs/types'
 import type { JobStore } from '../chat/jobs/store'
 import { canonical } from '../chat/jobs/isolation'
 
-/** 지금까지 살아 있는 주문이 있는가 — 대기·진행·한도 판정 중이면 아직 차례가 안 끝났다. */
+/**
+ * 아직 **미해결**인 주문이 있는가.
+ *
+ * [C1-04] 예전에는 `status === 'limit'` 를 그대로 살아 있는 것으로 봤다. 그래서 이어 하기 자식이
+ * `completed` 로 끝나도 부모는 `limit` 로 남아 있고, 그 폴더에 과거 한도 주문이 하나라도 있으면
+ * `[이번만]` 이 영원히 안 접혔다 — 다음 학생 차례에도 "한 번만" 배치가 유효했다.
+ *
+ * 한도로 멈춘 주문은 **그 주문서를 이어 받은 자식이 끝났으면 미해결이 아니다**(부모의 일은
+ * 자식이 마쳤다). `parent` 로 이어진 자식을 찾아 그 `rootJobId` 의 최신 기록이 끝났는지 본다.
+ *
+ * TODO(C4): 차례 id 가 생기면 "지금 차례의 주문만" 으로 더 좁힌다. 지금은 이어 하기 관계로만
+ * 좁힌 것이고, 이어 하기 없이 한도로 끝난 과거 주문은 여전히 살아 있는 것으로 센다(보수적).
+ */
 function live(records: JobRecord[], root: string): boolean {
-  return records.some(record => record.root === root &&
-    (record.status === 'queued' || record.status === 'running' || record.status === 'limit'))
+  const inFolder = records.filter(record => record.root === root)
+  const latest = new Map<string, JobRecord>()
+  for (const record of inFolder) latest.set(record.rootJobId, record)
+  const settled = (rootJobId: string): boolean => {
+    const record = latest.get(rootJobId)
+    if (!record) return true
+    if (record.status === 'queued' || record.status === 'running') return false
+    return record.status !== 'limit'
+  }
+  return inFolder.some(record => {
+    if (record.status === 'queued' || record.status === 'running') return true
+    if (record.status !== 'limit') return false
+    // 이어 받은 자식이 이 부모의 일을 마쳤으면 미해결이 아니다(자식이 아예 없으면 살아 있다).
+    const children = inFolder.filter(child => child.spec.parent === record.spec.id)
+    return children.length === 0 || !children.some(child => settled(child.rootJobId))
+  })
 }
 
 /**

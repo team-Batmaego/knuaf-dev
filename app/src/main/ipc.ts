@@ -7,6 +7,7 @@ import { insideByFileId } from './file-identity'
 import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
+import { canonical } from './chat/jobs/isolation'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
@@ -17,7 +18,7 @@ import { subscriptionEnv, type AgentOptions } from './chat/contracts'
 import { ConversationHandoff } from './chat/jobs/conversation'
 import { laneAccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
-import { LanesHub } from './lanes/hub'
+import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
@@ -656,11 +657,13 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       : new CodexRelayConnection(relayOptions(request.company, request.cwd), request),
     // 앱 값과 엔진 `availability()` 의 지문이 같아야 주문이 열린다 — 계정은 엔진과 같은
     // 생산자(`lanes/accounts.ts`)로 읽고, 동의만 앱 저장소 값으로 덮는다(service 가 한다).
-    jobAccount: company => probeAccount(company),
+    jobAccount: (company, options) => probeAccount(company, options),
     // 셸 격리는 OS 샌드박스를 실제로 걸 수 있는 플랫폼만 — 맥·리눅스. 윈도우는 아직 검증이
     // 없으므로 Bash 를 빼는 쪽(보수적)이다(발주 §③ "실기기 검증 없음").
     jobShellSandboxAvailable: process.platform !== 'win32',
-    invalidateHandoff: root => { lanesHub?.touch(root) },
+    // [C1-10] 중단·전환은 **실제 인계 제안**을 무효화해야 한다 — 묶음 다시 짓기만으로는
+    // 열린 제안·진행 예약이 살아 있다. 보관된 대화(`consumed`)는 그대로 둔다.
+    invalidateHandoff: root => { handoffSeam.invalidateRoot(canonical(root)); lanesHub?.touch(root) },
     handoff: handoffSeam
   })
   lanesHub = new LanesHub({
@@ -674,6 +677,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     extraLines: root => chat.handoffLines(root)
   }, snapshot => win()?.webContents.send(LANES_PUSH.snapshot, snapshot),
   record => console.error('[knuaf] lanes', JSON.stringify(record)))
+  // [C1-14] 저장소·러너의 **실제** 변경(비동기 완료·한도·전달·기록 줄)이 화면 묶음으로 간다.
+  // 지금은 IPC 요청 반환에서만 밀어 보내서, 이어 하기·재시도 뒤의 결과가 저절로 안 떴다.
+  connectChanges(lanesHub, [chat.lanesStore(), ...(chat.lanesRunner() ? [chat.lanesRunner()!] : [])])
   /**
    * §3·§4·§5 화면 요청 22개 — 계약 채널 이름 그대로. 상태를 바꾼 요청은 끝나면 묶음을 다시 민다.
    * 설계 회사 전환(`applyDesign`)은 앱의 **모델 칩**을 다시 쓴다(정본 §3.1 D2-03, DESIGN:502) —
@@ -685,6 +691,13 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     store: chat.lanesStore(),
     runner: chat.lanesRunner(),
     account: company => chat.laneAccount(company),
+    // [C1-06] 적용 직전 대조는 캐시를 건너뛴 관측 — 15초 전 값이면 계정이 바뀐 걸 못 본다.
+    freshAccount: company => chat.laneAccount(company, { fresh: true }),
+    // [C1-08] 화면이 보낸 폴더가 아니라 **main 이 열어 둔 폴더**만 통과시킨다.
+    allowed: folder => {
+      if (!currentRoot) return false
+      try { return canonical(currentRoot) === folder } catch { return false }
+    },
     mainCompany: loadSettings().provider_choice?.provider ?? 'claude',
     applyDesign: async (root, design) => {
       const before = loadSettings().chat_models?.[design.company] ?? null

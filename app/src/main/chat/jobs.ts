@@ -65,6 +65,18 @@ export class JobRunner {
   private persist(): void {
     const result = writeFileAtomic(this.file, JSON.stringify(this.state), { mode: 0o600 })
     if (!result.ok) throw result.error
+    // [C1-14] 원장이 바뀌면 화면 묶음도 바뀐다 — 구독자를 통해 `lanes:changed` 가 붙는다.
+    for (const listener of this.listeners) {
+      try { listener() } catch { /* 구독자 오류가 실행을 되돌리지는 않는다 */ }
+    }
+  }
+
+  private readonly listeners = new Set<() => void>()
+
+  /** 러너의 **실제** 상태 변경(실행 시작·완료·한도·전달·중지)을 구독한다. */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
   }
   records(): JobRecord[] { return structuredClone(this.state.jobs) }
   proposals(): ContinuationProposal[] { return structuredClone(this.state.proposals.filter(p => p.state === 'open')) }
@@ -381,10 +393,20 @@ export class JobRunner {
     for (const record of pending) await this.deliver(record)
   }
   private replaceOwner(root: string, owner: ConversationOwner): JobRecord[] {
-    for (const record of this.state.jobs) if (record.root === root) record.owner = structuredClone(owner)
-    // 공개 주문서도 새 소유자를 알려야 한다 — 학생(스킬)이 읽는 파일이 옛 대화를 가리키면
-    // 결과를 엉뚱한 대화로 넘기려 한다.
-    for (const record of this.state.jobs) if (record.root === root) this.publish(record)
+    const owned = this.state.jobs.filter(record => record.root === root)
+    const previous = new Map(owned.map(record => [record, structuredClone(record.owner)]))
+    for (const record of owned) record.owner = structuredClone(owner)
+    try {
+      // 공개 주문서도 새 소유자를 알려야 한다 — 학생(스킬)이 읽는 파일이 옛 대화를 가리키면
+      // 결과를 엉뚱한 대화로 넘기려 한다.
+      for (const record of owned) this.publish(record)
+    } catch (error) {
+      // [C1-11] 공개 사본 쓰기가 실패하면 **메모리 소유자도 되돌린다**. 예전에는 공개 쓰기가
+      // 던지면 activate·메모리 변경만 남고 영속·성공 반환이 없어 "닫힌 새 세션을 가리키는"
+      // 부분 커밋이 됐다. 영속(`persist`)은 이 함수 끝에서 한 번뿐이라 여기서 되돌리면 된다.
+      for (const [record, ownerBefore] of previous) record.owner = ownerBefore
+      throw error
+    }
     const latest = new Map<string, JobRecord>()
     for (const record of this.state.jobs) if (record.root === root) latest.set(record.rootJobId, record)
     const pending = [...latest.values()].filter(record => record.status === 'limit' && !this.state.delivered.includes(record.rootJobId))

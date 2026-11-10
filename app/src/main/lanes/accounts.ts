@@ -15,6 +15,7 @@ import { relayIsolation } from '../chat/jobs/isolation'
 import { ClaudeRelayConnection } from '../chat/claude'
 import { CodexRelayConnection } from '../chat/codex'
 import type { AgentOptions } from '../chat/contracts'
+import { isProvider } from './providers'
 
 /** 계정 값 캐시 수명. 짧게 — 요금제·한도는 몇 초 사이에 바뀌지 않는다. */
 const TTL_MS = 15_000
@@ -27,7 +28,11 @@ export interface AccountProbeDeps {
   binary: (company: Provider) => string | null
 }
 
-type Probe = (company: Provider) => Promise<ExecutionAccount | null>
+/**
+ * `fresh` 는 캐시를 건너뛰고 **지금** 관측한다 — 카드 적용·동의 켜기처럼 권한을 바꾸는 자리는
+ * 15초 전 값을 쓰면 안 된다(C1-06). 실패는 `null`(모름)이고, 부르는 쪽이 닫는다.
+ */
+type Probe = ((company: Provider, options?: { fresh?: boolean }) => Promise<ExecutionAccount | null>)
 
 /**
  * 회사별 계정 조회. 실행 파일이 없으면 `null`(그 회사는 쓸 수 없음). 실패도 `null` 이다 —
@@ -38,6 +43,8 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
   const inflight = new Map<Provider, Promise<ExecutionAccount | null>>()
 
   const probe = async (company: Provider): Promise<ExecutionAccount | null> => {
+    // [C1-01] 자기 방어 — 이 함수만 따로 불려도 허용 회사 밖의 이름이 실행 파일 탐색에 닿지 않는다.
+    if (!isProvider(company)) return null
     const binary = deps.binary(company)
     if (!binary) return null
     const options: AgentOptions = {
@@ -61,11 +68,14 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
     }
   }
 
-  return company => {
-    const hit = cache.get(company)
-    if (hit && Date.now() - hit.at < TTL_MS) return Promise.resolve(hit.value)
-    const running = inflight.get(company)
-    if (running) return running
+  return (company, options) => {
+    if (!isProvider(company)) return Promise.resolve(null)
+    if (!options?.fresh) {
+      const hit = cache.get(company)
+      if (hit && Date.now() - hit.at < TTL_MS) return Promise.resolve(hit.value)
+      const running = inflight.get(company)
+      if (running) return running
+    }
     const started = probe(company)
       .catch((): null => null)
       .then(value => {

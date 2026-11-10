@@ -13,6 +13,7 @@ import { JobStore, type ConsentRecord } from './jobs/store'
 import { canonical } from './jobs/isolation'
 import { settleTemporary } from '../lanes/temporary'
 import { LaneFailure } from '../lanes/failure'
+import { providerOf } from '../lanes/providers'
 import type { ConversationOwner, ExecutionAccount } from './jobs/types'
 import type {
   ConversationProposal, HandoffSource
@@ -49,6 +50,8 @@ export interface HandoffSeam {
   later(proposalId: string): boolean
   archives(root: string): ArchivedChatSummary[]
   archive(root: string, archiveId: string): ArchivedChat | null
+  /** 폴더의 열린 제안·진행 예약을 버린다(중단·전환). 보관된 대화는 그대로 둔다([C1-10]). */
+  invalidateRoot(root: string): void
 }
 
 export class ChatService {
@@ -197,8 +200,11 @@ export class ChatService {
      * 배선 A가 공급해야 한다.
      */
     jobConnectionFactory?: (request: RelayRequest) => JobConnection
-    /** 담당 회사의 구독·한도 상태. 계정이 없으면 `null`. */
-    jobAccount?: (company: Provider) => Promise<ExecutionAccount | null>
+    /**
+     * 담당 회사의 구독·한도 상태. 계정이 없으면 `null`. `fresh` 면 캐시를 건너뛴 관측 —
+     * 권한을 바꾸는 자리(카드 적용·동의 켜기)가 15초 전 값으로 판단하지 않게 한다([C1-06]).
+     */
+    jobAccount?: (company: Provider, options?: { fresh?: boolean }) => Promise<ExecutionAccount | null>
     /** 셸 격리를 실제로 걸 수 있는가(배선 A의 플랫폼 확인값). 모르면 false. */
     jobShellSandboxAvailable?: boolean
     /**
@@ -861,8 +867,8 @@ export class ChatService {
     return runner.beginOwnerTransition(root)
   }
   /** 지금 담당 회사의 계정 — `consented` 는 앱 저장소 값으로 덮인다(엔진은 그 값을 모른다). */
-  async laneAccount(company: Provider): Promise<ExecutionAccount | null> {
-    const account = await this.opts.jobAccount?.(company)
+  async laneAccount(company: Provider, options?: { fresh?: boolean }): Promise<ExecutionAccount | null> {
+    const account = await this.opts.jobAccount?.(company, options)
     if (!account) return null
     return { ...account, consented: this.store().consented(company, account.accountId) }
   }
@@ -1371,7 +1377,11 @@ export class ChatService {
   async openHandoff(request: {
     id: string; root: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal
   }): Promise<ConversationOwner> {
-    const provider = request.entry.company
+    // [C1-10] 취소는 **연결하고 기다리는 동안** 둘 다 지킨다. 이미 취소된 요청은 아무것도
+    // 열지 않고, 대기 중 취소되면 연 세션을 접는다.
+    if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
+    // [C1-01] 제안의 회사는 실행 파일 선택까지 가므로 여기서도 닫는다.
+    const provider = providerOf(request.entry.company)
     const key = this.key(request.root, provider)
     const previous = this.snapshots.get(key)
     this.handoffOpened.set(request.id, previous ? structuredClone(previous) : null)
@@ -1380,10 +1390,59 @@ export class ChatService {
     const fresh: ChatSnapshot = { root: request.root, provider, state: 'idle', messages: [] }
     this.snapshots.set(key, fresh)
     this.publish(fresh)
-    await this.send(request.root, provider, request.firstMessage, randomUUID())
-    const opened = this.snapshots.get(key)
-    if (!opened?.sessionId) throw new Error('이어 받은 대화의 세션을 열지 못했어요.')
-    return { id: request.id, sessionId: opened.sessionId, company: provider }
+    let owner: { id: string; sessionId: string; company: Provider } | null = null
+    try {
+      // [C1-12] 제안이 약속한 모델·깊이를 **실제 실행**에 적용한다. 예전에는 저장된 칩 선택을
+      // 그대로 써서, 제안은 Sol/high 인데 실제 턴은 Astra/low 로 돌고 완료 기록만 Sol/high 였다.
+      if (request.entry.model) {
+        const picked = await this.setModel(request.root, provider, {
+          model: request.entry.model, effort: request.entry.effort
+        })
+        if (!picked || picked.model !== request.entry.model) {
+          throw new Error('이어 받기 모델을 이 계정에서 쓸 수 없어요.')
+        }
+      }
+      await this.send(request.root, provider, request.firstMessage, randomUUID())
+      // [C1-09] `send` 는 세션 이벤트를 기다리지 않고 돌아온다. 세션은 **비동기**로 온다 —
+      // 즉시 검사하면 늦게 오는 정상 세션을 실패로 만들고, 그 실패가 이전 기록까지 지운 뒤
+      // 새 실행만 남긴다. 그래서 세션이 올 때까지(또는 실행이 끝날 때까지) 기다린다.
+      const sessionId = await this.awaitSession(key, request.signal)
+      if (!sessionId) throw new Error('이어 받은 대화의 세션을 열지 못했어요.')
+      if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
+      owner = { id: request.id, sessionId, company: provider }
+      return owner
+    } catch (error) {
+      // 열다 만 대화는 여기서 접는다 — 넘기지 못했으므로 이전 기록으로 되돌린다([C1-09]).
+      await this.closeHandoff({ id: request.id, sessionId: '', company: provider })
+      throw error
+    }
+  }
+  /**
+   * 새 대화의 세션 id 가 올 때까지 기다린다 — `send` 는 턴을 시작만 하고 돌아오므로
+   * 스냅샷의 `sessionId` 는 곧바로 채워지지 않는다. 실행이 끝났는데 세션이 없으면 실패다.
+   */
+  private awaitSession(key: string, signal: AbortSignal): Promise<string | null> {
+    const current = this.snapshots.get(key)
+    if (current?.sessionId) return Promise.resolve(current.sessionId)
+    const { promise, resolve } = Promise.withResolvers<string | null>()
+    let settled = false
+    const done = (value: string | null): void => {
+      if (settled) return
+      settled = true
+      clearInterval(poll)
+      signal.removeEventListener('abort', aborted)
+      resolve(value)
+    }
+    const check = (): void => {
+      const sessionId = this.snapshots.get(key)?.sessionId
+      if (sessionId) done(sessionId)
+      else if (!this.runs.has(key)) done(null)
+    }
+    const aborted = (): void => done(null)
+    const poll = setInterval(check, 25)
+    signal.addEventListener('abort', aborted, { once: true })
+    check()
+    return promise
   }
   /** 넘기지 못한 새 대화를 접는다 — 대화 칸을 넘기기 전 기록으로 되돌린다. */
   async closeHandoff(owner: ConversationOwner): Promise<void> {

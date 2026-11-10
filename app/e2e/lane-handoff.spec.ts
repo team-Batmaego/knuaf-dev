@@ -226,6 +226,11 @@ function serviceFixture(options: { proposals?: unknown[] } = {}) {
     login: async () => {},
     respond: () => {},
     prepare: async () => {},
+    // [C1-12] 인계는 제안의 모델을 실제 실행에 적용한다 — 그 검증이 쓸 목록을 준다.
+    models: async () => [
+      { model: 'sol', name: 'Sol', description: '', efforts: ['low', 'high'] },
+      { model: 'opus', name: 'Opus', description: '', efforts: ['low', 'high'] }
+    ] as never,
     run: async (text, _sessionId, events) => {
       mainRuns.push({ root, text })
       events.session(`session-${mainRuns.length}`)
@@ -248,7 +253,8 @@ function serviceFixture(options: { proposals?: unknown[] } = {}) {
     },
     later: () => true,
     archives: () => [],
-    archive: () => null
+    archive: () => null,
+    invalidateRoot: () => {}
   }
   svc = new ChatService({
     skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
@@ -328,4 +334,42 @@ test('a temporary plan is cleared at the end of the bound student turn', async (
   await until(() => store.temporary(f.root) === null)
   expect(store.events(f.root).map(event => event.kind)).toEqual(['once-ended'])
   expect(f.svc.snapshot(f.root, 'claude').messages.some(message => message.text === '차례 하나')).toBe(true)
+})
+
+// [C1-04] 이어 하기 자식이 끝난 부모 `limit` 는 미해결이 아니다 — [이번만]이 다음 차례까지 남지 않는다.
+test('fix C1-04: a limit parent whose continuation child completed does not keep the temporary plan', () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-temp-fix-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const store = new JobStore(join(base, 'jobs'))
+  store.setTemporary(root, planFromRow('codex-high'), 'next-student-turn')
+
+  const job = (id: string, status: JobRecord['status'], parent?: string): JobRecord => ({
+    spec: {
+      schema: 1, id, lane: 'research', task: 't', inputs: [], outputs: ['result.md'],
+      contractVersion: 'role-v1', company: 'codex', model: 'astra', effort: null,
+      ...(parent ? { parent, cause: 'student-continue-after-limit' as const } : {})
+    },
+    rootJobId: id, root: canonical(root),
+    owner: { id: `codex\0${canonical(root)}`, sessionId: 's', company: 'codex' },
+    authorSessionId: 'a', status, contentHash: 'h', outputs: [], createdAt: '2026-11-10T00:00:00.000Z'
+  })
+
+  // 판정서 재현: 같은 rootJobId 의 limit 부모 + completed 자식.
+  expect(settleTemporary(store, [job('p0', 'limit'), job('c0', 'completed', 'p0')], root)).toBe(true)
+  expect(store.temporary(root)).toBeNull()
+  expect(store.effectivePlan(root)).toBeNull()
+
+  // 이어 받은 자식이 아직 도는 중이면 아직 끝난 것이 아니다.
+  store.setTemporary(root, planFromRow('codex-high'), 'next-student-turn')
+  expect(settleTemporary(store, [job('p1', 'limit'), job('c1', 'running', 'p1')], root)).toBe(false)
+  expect(store.temporary(root)).not.toBeNull()
+
+  // 자식도 한도로 끝났으면 그 일은 아직 안 끝났다.
+  expect(settleTemporary(store, [job('p2', 'limit'), job('c2', 'limit', 'p2')], root)).toBe(false)
+  expect(store.temporary(root)).not.toBeNull()
+
+  // 이어 하기 없이 과거에 한도로 끝난 주문은 여전히 보수적으로 살아 있는 것으로 센다(C4 에서 차례 id 로 좁힌다).
+  expect(settleTemporary(store, [job('p3', 'limit')], root)).toBe(false)
+  expect(store.temporary(root)).not.toBeNull()
 })

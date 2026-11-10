@@ -67,6 +67,8 @@ function setup(options: { mainCompany?: Provider; accounts?: Accounts } = {}) {
 
   const records: JobRecord[] = []
   const stopped: string[] = []
+  /** [C1-06] 캐시를 건너뛴 대조를 시험하려면 실제 관측을 따로 센다. */
+  const freshReads: string[] = []
   const runner = {
     records: () => structuredClone(records),
     stopJob: async (jobId: string) => {
@@ -76,8 +78,17 @@ function setup(options: { mainCompany?: Provider; accounts?: Accounts } = {}) {
       return structuredClone(found)
     }
   }
-  const deps: CardDeps = { store, account, mainCompany: options.mainCompany ?? 'claude', runner }
-  return { base, root, store, deps, records, stopped, accountIds }
+  const deps: CardDeps = {
+    store,
+    account,
+    mainCompany: options.mainCompany ?? 'claude',
+    runner,
+    freshAccount: async company => {
+      freshReads.push(company)
+      return account(company)
+    }
+  }
+  return { base, root, store, deps, records, stopped, accountIds, freshReads }
 }
 
 function record(root: string, id: string, status: JobRecord['status']): JobRecord {
@@ -419,4 +430,116 @@ test('card: disable stops only this folder\'s live jobs and revokes the plan', a
   // 끄기는 요금 동의를 건드리지 않는다 — 동의는 계정 단위다.
   expect(f.store.consent('claude', 'claude-account')).toMatchObject({ state: 'agreed' })
   expect((await snapshot(f)).settings.mode).toBe('off')
+})
+
+// ---------------------------------------------------------------------------------
+// 독립검토 1회째(REVIEW-C1-MAIN) 재현 — 고침을 빼면 실패하는 시험들.
+// ---------------------------------------------------------------------------------
+
+// [C1-02] 취소·거절한 카드는 설계 칩을 건드리지 않는다(부작용은 승인 분기 안에서만).
+for (const action of ['cancel', 'decline'] as const) {
+  test(`card fix: [${action}] never runs the design switch`, async () => {
+    const f = setup()
+    const designCalls: string[] = []
+    const deps: CardDeps = {
+      ...f.deps,
+      applyDesign: async (_root, design) => { designCalls.push(`${design.company}:${design.model}`); return true }
+    }
+    const opened = await openCard(deps, f.root, request({ design: { company: 'codex', model: 'gpt-6.1-sol' } }))
+    expect(opened.rows[0]).toMatchObject({ lane: 'design', designSwitchTo: 'codex' })
+    const decision = await decideCard(deps, f.root, opened.cardId, opened.baseVersion, action)
+    expect(decision.card.state.kind).toBe(action === 'cancel' ? 'cancelled' : 'declined')
+    expect(designCalls).toEqual([])
+    expect(f.store.approvedPlan(f.root)).toBeNull()
+  })
+}
+
+test('card fix: [계속] is the only action that runs the design switch', async () => {
+  const f = setup()
+  const designCalls: string[] = []
+  const opened = await openCard({
+    ...f.deps, applyDesign: async (_root, design) => { designCalls.push(`${design.company}:${design.model}`); return true }
+  }, f.root, request({ design: { company: 'codex', model: 'gpt-6.1-sol' } }))
+  const decision = await decideCard({
+    ...f.deps, applyDesign: async (_root, design) => { designCalls.push(`${design.company}:${design.model}`); return true }
+  }, f.root, opened.cardId, opened.baseVersion, 'continue')
+  expect(decision.outcome).toBe('applied')
+  expect(designCalls).toEqual(['codex:gpt-6.1-sol'])
+})
+
+// [C1-03] 끄기가 끝난 뒤 앞서 시작된 승인이 이어지면 배치를 되살리지 않는다.
+// 폴더 단위 직렬화로 두 순서 모두 안전하다: 끄기가 먼저면 승인은 옛 판이라 무효,
+// 승인이 먼저면 끄기가 그 뒤에 철회한다. 어느 쪽도 "철회됨 + 승인됨" 이 동시에 남지 않는다.
+test('card fix: a disable that lands before a stale approval cannot be undone by it', async () => {
+  const f = setup()
+  const opened = await openCard(f.deps, f.root, writingToClaude)
+  await disable(f.deps, f.root)
+  // 끄기 전에 뜬 카드를 그대로 누른다 — 화면이 늦게 보낸 단추.
+  const decision = await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
+  expect(decision.outcome).toBe('invalid')
+  expect(decision.reason).toBe('base-version')
+  expect(f.store.approvedPlan(f.root)).toBeNull()
+  expect(f.store.events(f.root).map(event => event.kind)).toEqual(['lanes-declined'])
+})
+
+test('card fix: an approval and a disable never both win in the same folder', async () => {
+  const f = setup()
+  const opened = await openCard(f.deps, f.root, writingToClaude)
+  const [decision] = await Promise.all([
+    decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue'),
+    disable(f.deps, f.root)
+  ])
+  // 끄기는 언제나 마지막 손이라는 규칙은 없다 — 순서는 직렬화가 정한다. 어느 쪽이든
+  // "철회 기록이 있는데 승인 배치가 살아 있는" 상태는 나오지 않는다.
+  expect(decision.outcome === 'applied' || decision.outcome === 'invalid').toBe(true)
+  const declined = f.store.events(f.root).some(event => event.kind === 'lanes-declined')
+  if (declined) expect(f.store.approvedPlan(f.root)).toBeNull()
+})
+
+// [C1-05] 같은 판을 들고 동시에 들어온 두 카드는 하나만 적용된다.
+test('card fix: two cards of the same version never both apply', async () => {
+  const f = setup()
+  const conversation = await openCard(f.deps, f.root, writingToClaude)
+  const settings = await settingsCard(f.deps, f.root, 'enable')
+  expect(conversation.baseVersion).toBe(settings.baseVersion)
+
+  const results = await Promise.all([
+    decideCard(f.deps, f.root, conversation.cardId, conversation.baseVersion, 'continue'),
+    decideCard(f.deps, f.root, settings.cardId, settings.baseVersion, 'continue')
+  ])
+  expect(results.filter(result => result.outcome === 'applied')).toHaveLength(1)
+  expect(results.filter(result => result.outcome === 'invalid')).toHaveLength(1)
+  // 마지막 카드가 앞 카드의 배치를 덮어쓰지 않는다 — 적용된 하나의 배치만 남는다.
+  const approved = f.store.approvedPlan(f.root)!
+  expect(approved.writing.company).toBe('claude')
+  expect(approved.review?.company).toBe('codex')
+})
+
+// [C1-13] 적용 중에 앱이 죽은 카드는 재시작 뒤 `pending` 으로 남지 않는다.
+test('card fix: a card interrupted while applying never stays pending after restart', async () => {
+  const f = setup()
+  const opened = await openCard(f.deps, f.root, writingToClaude)
+  f.store.beginCard(opened.cardId, opened.baseVersion)
+  f.store.approve(f.root, f.store.cardPlan(opened.cardId)!)
+  const reopened = new JobStore(join(f.base, 'jobs'))
+  const status = cardStatus({ store: reopened }, f.root, opened.cardId)
+  expect(status.outcome).not.toBe('pending')
+  // 승인 기록이 있는 카드는 적용된 것으로 복구된다 — 아직 안 한 일을 했다고 하지 않는다.
+  expect(status.card.state).toEqual({ kind: 'applied', scope: 'continue' })
+  // 승인 기록이 없으면 무효로 접는다.
+  const g = setup()
+  const other = await openCard(g.deps, g.root, writingToClaude)
+  g.store.beginCard(other.cardId, other.baseVersion)
+  const reopenedAgain = new JobStore(join(g.base, 'jobs'))
+  expect(cardStatus({ store: reopenedAgain }, g.root, other.cardId).card.state).toEqual({ kind: 'invalid' })
+})
+
+// [C1-06] 적용 직전 계정 대조는 캐시가 아니라 **지금** 관측을 쓴다.
+test('card fix: apply re-reads the account instead of trusting a cached probe', async () => {
+  const f = setup()
+  const opened = await openCard(f.deps, f.root, writingToClaude)
+  f.freshReads.length = 0
+  await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
+  // 카드가 묶은 두 회사 중 하나라도 캐시를 건너뛰지 않으면 15초 동안 계정 변경을 못 본다.
+  expect(f.freshReads).toEqual(['claude', 'codex'])
 })
