@@ -8,7 +8,7 @@ import { JobStore } from '../src/main/chat/jobs/store'
 import { JobRunner } from '../src/main/chat/jobs'
 import { canonical } from '../src/main/chat/jobs/isolation'
 import { registerLaneHandlers, type LaneIpcChannel } from '../src/main/lanes/handlers'
-import { LanesHub } from '../src/main/lanes/hub'
+import { LanesHub, connectChanges } from '../src/main/lanes/hub'
 import type { JobRecord, ExecutionAccount, JobConnection, RelayRequest } from '../src/main/chat/jobs/types'
 import type { Provider } from '../src/shared/chat'
 import { planFromRow } from '../src/shared/lanes'
@@ -113,6 +113,8 @@ function fixture() {
     ipc, hub, store, runner,
     account,
     mainCompany: 'claude',
+    // [C1-08] 허용 폴더 경계 — 이 시험은 한 폴더만 연다.
+    allowed: folder => folder === root,
     applyDesign: undefined,
     setConsent: (company, accountId, on) => store.setConsent(company, accountId, on),
     handoff: {
@@ -182,11 +184,12 @@ test('snapshot answers directly; state changes push a fresh lanes:changed bundle
 test('requests from another folder are refused without touching state', async () => {
   const f = fixture()
   const card = resultOf(await f.ipc.call(LANES_INVOKE.settingsCard, f.root, 'enable') as LanesReply<{ cardId: string; baseVersion: number }>)
+  // [C1-08] 열려 있지 않은 폴더는 폴더 경계에서 먼저 닫힌다(그 전에는 저장소까지 갔다).
   expect(errorOf(await f.ipc.call(LANES_INVOKE.decideCard, f.elsewhere, card.cardId, card.baseVersion, 'continue') as LanesReply<unknown>).code)
-    .toBe('not-found')
+    .toBe('no-folder')
   expect(f.store.approvedPlan(f.root)).toBeNull()
   expect(errorOf(await f.ipc.call(LANES_INVOKE.dismiss, f.elsewhere, 'job:missing:interrupted') as LanesReply<unknown>).code)
-    .toBe('not-found')
+    .toBe('no-folder')
   // 폴더가 없으면 `no-folder` — 가짜 성공을 만들지 않는다.
   expect(errorOf(await f.ipc.call(LANES_INVOKE.decideCard, join(f.root, 'nope'), card.cardId, 0, 'continue') as LanesReply<unknown>).code)
     .toBe('no-folder')
@@ -241,7 +244,7 @@ test('job channels route through the service seams and keep folder guards', asyn
   // 없는 주문의 원문은 `not-found` — 빈 문자열로 성공을 만들지 않는다.
   expect(errorOf(await f.ipc.call(JOBS_INVOKE.deliveryText, f.root, 'job-none') as LanesReply<unknown>).code).toBe('not-found')
 
-  expect(errorOf(await f.ipc.call(JOBS_INVOKE.stopOne, f.elsewhere, 'job-a') as LanesReply<unknown>).code).toBe('not-found')
+  expect(errorOf(await f.ipc.call(JOBS_INVOKE.stopOne, f.elsewhere, 'job-a') as LanesReply<unknown>).code).toBe('no-folder')
 })
 
 // ⑦ 이음매가 없으면 `unavailable` — 가짜 성공을 만들지 않는다.
@@ -287,4 +290,161 @@ test('read-only requests never push a bundle', async () => {
   resultOf(await f.ipc.call(LANES_INVOKE.archives, f.root) as LanesReply<unknown[]>)
   resultOf(await f.ipc.call(JOBS_INVOKE.deliveryText, f.root, 'job-a') as LanesReply<unknown>)
   expect(f.sent).toEqual([])
+})
+
+// [C1-08] root 와 주문 id 를 **함께** 바꿔도 다른 폴더의 상태·전달 원문에 닿지 않는다.
+test('fix C1-08: a root and job id swapped together never reach another folder', async () => {
+  const f = fixture()
+  // 그 폴더에 실제 주문이 있고 전달 원문도 있다 — 화면이 그 id 를 알고 있다고 가정한다.
+  f.store.saveDeliveryText('other-job', 'raw other-folder delivery')
+  const card = resultOf(await f.ipc.call(LANES_INVOKE.settingsCard, f.root, 'enable') as LanesReply<{ cardId: string }>)
+  expect(card.cardId).toEqual(expect.any(String))
+  for (const [channel, args] of [
+    [JOBS_INVOKE.deliveryText, [f.elsewhere, 'other-job']],
+    [JOBS_INVOKE.stopOne, [f.elsewhere, 'other-job']],
+    [JOBS_INVOKE.discard, [f.elsewhere, 'other-job']],
+    [LANES_INVOKE.settingsCard, [f.elsewhere, 'enable']],
+    [LANES_INVOKE.snapshot, [f.elsewhere]]
+  ] as const) {
+    const reply = await f.ipc.call(channel, ...(args as unknown[])) as LanesReply<unknown>
+    expect(errorOf(reply).code).toBe('no-folder')
+  }
+  // 열린 폴더의 저장 상태는 그대로다.
+  expect(f.store.approvedPlan(f.root)).toBeNull()
+  expect(f.store.deliveryTextOf('other-job')).toContain('raw other-folder')
+})
+
+// [C1-15] 전역 동의 변경은 **보이는 폴더를 바꾸지 않는다** — 폴더 없는 알림은 같은 폴더를 다시 짓는다.
+test('fix C1-15: a folder-less change never resets the viewed folder', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-hub-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const store = new JobStore(join(base, 'jobs'))
+  const sent: { root: string | null; seq: number }[] = []
+  const hub = new LanesHub({
+    store, runner: null, mainCompany: 'claude', account: async () => null
+  }, snapshot => sent.push({ root: snapshot.root, seq: snapshot.seq }))
+
+  await hub.snapshot(root)
+  expect(hub.root()).toBe(root)
+  // 전역 변경(동의) — 폴더를 모르는 알림.
+  hub.nudge()
+  await new Promise<void>(resolve => setTimeout(resolve, 80))
+  expect(hub.root()).toBe(root)
+  expect(sent.map(entry => entry.root)).toEqual([root, root])
+  hub.dispose()
+})
+
+// [C1-17] 조립이 느린 옛 폴더의 묶음은 새 폴더 뒤에 보내지 않는다.
+test('fix C1-17: a late bundle from the previous folder is not sent', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-hub2-')))
+  const a = join(base, 'a'), b = join(base, 'b')
+  mkdirSync(a, { recursive: true }); mkdirSync(b, { recursive: true })
+  const store = new JobStore(join(base, 'jobs'))
+  const sent: { root: string | null; seq: number }[] = []
+  const gate = Promise.withResolvers<void>()
+  let first = true
+  const hub = new LanesHub({
+    store, runner: null, mainCompany: 'claude',
+    // A 의 조회만 붙잡는다.
+    account: async () => { if (first) { first = false; await gate.promise }; return null }
+  }, snapshot => sent.push({ root: snapshot.root, seq: snapshot.seq }))
+
+  const slow = hub.snapshot(a)
+  await hub.snapshot(b)
+  gate.resolve()
+  const late = await slow
+  // 늦게 완성된 A 묶음은 **보내지 않는다** — 화면은 B 에 그대로 있다(돌려주는 값은 그대로다).
+  expect(late.root).toBe(a)
+  expect(sent.map(entry => entry.root)).toEqual([b])
+  expect(hub.root()).toBe(b)
+  // 이후 변경도 B 만 짓는다.
+  hub.nudge()
+  await new Promise<void>(resolve => setTimeout(resolve, 80))
+  expect(sent.map(entry => entry.root)).toEqual([b, b])
+  hub.dispose()
+})
+
+// [C1-14] 저장소의 실제 변경이 묶음을 다시 짓게 한다(IPC 요청과 무관하게).
+test('fix C1-14: a store change nudges the bundle without any IPC request', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-hub3-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const store = new JobStore(join(base, 'jobs'))
+  const sent: { events: number }[] = []
+  const hub = new LanesHub({
+    store, runner: null, mainCompany: 'claude', account: async () => null
+  }, snapshot => sent.push({ events: snapshot.events.length }))
+  // 배선의 정본 함수를 그대로 쓴다 — `ipc.ts` 도 이 함수를 부른다.
+  const disconnect = connectChanges(hub, [store])
+
+  await hub.snapshot(root)
+  expect(sent.at(-1)!.events).toBe(0)
+  store.addEvent(root, { id: 'e1', at: '2026-11-10T00:00:00.000Z', kind: 'lanes-declined' })
+  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  expect(sent.at(-1)!.events).toBe(1)
+  // 연결을 끊으면 더 이상 밀지 않는다.
+  disconnect()
+  store.addEvent(root, { id: 'e2', at: '2026-11-10T00:01:00.000Z', kind: 'lanes-declined' })
+  await new Promise<void>(resolve => setTimeout(resolve, 120))
+  expect(sent.at(-1)!.events).toBe(1)
+  hub.dispose()
+})
+
+// [C1-01] 회사 문자열은 실행 파일 선택 **전에** 닫힌다 — 계정 조회조차 부르지 않는다.
+test('fix C1-01: an unknown company never reaches the account probe', async () => {
+  const f = fixture()
+  const probed: unknown[] = []
+  const ipc = fakeIpc()
+  const hub = new LanesHub({
+    store: f.store, runner: null, mainCompany: 'claude', account: async () => null
+  }, () => {})
+  registerLaneHandlers({
+    ipc, hub, store: f.store, runner: null,
+    account: async company => { probed.push(company); return null },
+    allowed: folder => folder === f.root,
+    mainCompany: 'claude', applyDesign: undefined,
+    setConsent: () => ({ state: 'withdrawn', at: null }),
+    handoff: { continue: async () => {}, later: () => {}, archives: () => [], archive: () => null, invalidateRoot: () => {} },
+    jobs: {
+      stopOne: async () => {}, continue: async () => {}, later: async () => {},
+      retry: () => { throw new Error('unused') }, discard: () => { throw new Error('unused') },
+      redeliver: async () => {}, authLater: async () => {}, deliveryText: () => null
+    }
+  })
+  for (const company of ['node', '', 'Claude', 'codex\n', '../codex']) {
+    const reply = await ipc.call(LANES_INVOKE.pickReview, f.root, company, 'opus') as LanesReply<unknown>
+    expect(errorOf(reply).code).toBe('internal')
+  }
+  // 동의 켜기도 같은 검사를 지난다.
+  expect(errorOf(await ipc.call(LANES_INVOKE.setConsent, 'node', 'x', true) as LanesReply<unknown>).code).toBe('internal')
+  // 계정 조회(→ 실행 파일 선택)는 한 번도 불리지 않았다.
+  expect(probed).toEqual([])
+  hub.dispose()
+})
+
+// [C1-07] 동의 켜기는 **지금 확인된 계정**에만 — 처음 보는 id 로는 저장하지 않는다.
+test('fix C1-07: consent cannot be granted to an account that is not logged in', async () => {
+  const f = fixture()
+  const reply = await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'never-seen-account', true) as LanesReply<unknown>
+  expect(errorOf(reply).code).toBe('not-found')
+  expect(f.store.consent('codex', 'never-seen-account')).toBeNull()
+  // 거두기는 과거 계정에도 허용한다 — 지난 동의를 되돌릴 길을 막지 않는다.
+  f.store.setConsent('codex', 'past-account', true)
+  const revoked = resultOf(await f.ipc.call(
+    LANES_INVOKE.setConsent, 'codex', 'past-account', false
+  ) as LanesReply<{ state: string }>)
+  expect(revoked.state).toBe('withdrawn')
+})
+
+// [C1-16] 없는 폴더의 조회는 **응답**(`LanesReply`)으로 돌아온다 — 예외로 IPC 밖에 새지 않는다.
+test('fix C1-16: a missing folder on read-only requests answers instead of throwing', async () => {
+  const f = fixture()
+  for (const channel of [LANES_INVOKE.snapshot, LANES_INVOKE.reviewModels, LANES_INVOKE.archives] as const) {
+    const reply = await f.ipc.call(channel, join(f.root, 'absent')) as LanesReply<unknown>
+    expect(errorOf(reply).code).toBe('no-folder')
+  }
+  // 폴더가 아예 없어도 마찬가지다.
+  const empty = await f.ipc.call(LANES_INVOKE.snapshot, '') as LanesReply<unknown>
+  expect('result' in empty).toBe(true)
 })

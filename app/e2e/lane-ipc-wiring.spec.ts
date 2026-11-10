@@ -5,6 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
+import { ConversationHandoff } from '../src/main/chat/jobs/conversation'
+import { JobRunner } from '../src/main/chat/jobs'
 import { canonical, sha256 } from '../src/main/chat/jobs/isolation'
 import { LanesHub } from '../src/main/lanes/hub'
 import { registerLaneHandlers, type LaneIpcChannel } from '../src/main/lanes/handlers'
@@ -109,6 +111,11 @@ function wiring() {
   const main: AgentConnection = {
     status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
     login: async () => {}, respond: () => {}, prepare: async () => {},
+    // [C1-12] 인계가 제안의 모델을 실제 실행에 적용한다 — 그 검증에 쓸 목록.
+    models: async () => [
+      { model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] },
+      { model: 'opus', name: 'Opus', description: '', efforts: ['low', 'high'] }
+    ] as never,
     run: async (text, _sessionId, events) => {
       mainRuns.push({ provider: 'claude', text })
       events.session('claude-session')
@@ -154,7 +161,8 @@ function wiring() {
     },
     later: () => true,
     archives: () => [],
-    archive: () => null
+    archive: () => null,
+    invalidateRoot: () => {}
   }
 
   svc = new ChatService({
@@ -180,6 +188,7 @@ function wiring() {
     runner: svc.lanesRunner(),
     account: company => svc.laneAccount(company),
     mainCompany: 'claude',
+    allowed: folder => folder === root,
     applyDesign: undefined,
     setConsent: (company, accountId, on) => svc.setConsent(company, accountId, on),
     handoff: {
@@ -338,4 +347,222 @@ test('continue/later/redeliver/authLater refuse unknown ids without touching sta
   expect(w.jobRuns).toEqual([])
   expect(w.svc.lanesStore().events(w.root)).toEqual([])
   await w.svc.close()
+})
+
+// ⑨ [C1-09] 인계 세션이 **늦게** 열려도 실패하지 않고, 실패하면 이전 기록이 돌아온다.
+// 기존 시험의 동기 `session` 대역이 이 경우를 가렸다(판정서 지적) — 여기서는 비동기로 준다.
+test('fix C1-09: a handoff whose session arrives late still succeeds', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-late-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-late-ud-'))
+  const runs: string[] = []
+  const main: AgentConnection = {
+    status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+    login: async () => {}, respond: () => {}, prepare: async () => {},
+    models: async () => [
+      { model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] }
+    ] as never,
+    // [C1-09] 세션은 턴이 끝난 **뒤에** 온다 — `send` 는 그 전에 돌아간다.
+    run: async (_text, _sessionId, events) => {
+      runs.push('run')
+      await new Promise<void>(resolve => setTimeout(resolve, 60))
+      events.session('late-session')
+    },
+    stop: async () => {}
+  }
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main
+  })
+  // 이전 기록을 먼저 만든다 — 그 차례가 **끝난 뒤**에 넘긴다(넘기기는 학생 차례 밖에서 온다).
+  await svc.send(root, 'codex', '예전 학생 글', 'req-1')
+  await until(() => !svc.busy(root))
+  expect(svc.snapshot(root, 'codex').messages.map(message => message.text)).toEqual(['예전 학생 글'])
+  const owner = await svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: null, how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: new AbortController().signal
+  })
+  expect(owner.sessionId).toBe('late-session')
+  expect(svc.snapshot(root, 'codex').messages.map(message => message.text)).toEqual(['앞 대화를 이어 받았어요'])
+  await svc.close()
+})
+
+test('fix C1-09: a handoff that fails to open puts the previous transcript back', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-latefail-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-latefail-ud-'))
+  // 세션을 **끝내 주지 않는** 연결 — 실패 경로를 만든다.
+  const main: AgentConnection = {
+    status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+    login: async () => {}, respond: () => {}, prepare: async () => {},
+    models: async () => [
+      { model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] }
+    ] as never,
+    run: async () => {}, stop: async () => {}
+  }
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main
+  })
+  svc.snapshots.set(svc.key(root, 'codex'), {
+    root, provider: 'codex', state: 'idle', sessionId: 'old',
+    messages: [{ id: 'm1', role: 'user', text: '예전 학생 글', at: '2026-11-10T00:00:00.000Z' }]
+  })
+  await expect(svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: null, how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: new AbortController().signal
+  })).rejects.toThrow(/세션/)
+  expect(svc.snapshot(root, 'codex').messages.map(message => message.text)).toEqual(['예전 학생 글'])
+  await svc.close()
+})
+
+// ⑩ [C1-10] 이미 취소된 인계 요청은 세션을 열지 않는다.
+test('fix C1-10: an already-aborted handoff request opens nothing', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-abort-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-abort-ud-'))
+  const runs: string[] = []
+  const main: AgentConnection = {
+    status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+    login: async () => {}, respond: () => {}, prepare: async () => {},
+    models: async () => [
+      { model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] }
+    ] as never,
+    run: async (_text, _sessionId, events) => { runs.push('run'); events.session('new-session') },
+    stop: async () => {}
+  }
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main
+  })
+  const controller = new AbortController()
+  controller.abort()
+  await expect(svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: null, how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: controller.signal
+  })).rejects.toThrow(/취소/)
+  expect(runs).toEqual([])
+  await svc.close()
+})
+
+// ⑪ [C1-10] 중단·전환은 **실제 제안**을 무효화하고 보관된 대화는 건드리지 않는다.
+test('fix C1-10: invalidating a folder drops open proposals but keeps archives', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'kd-inv-'))
+  const account: ExecutionAccount = {
+    accountId: 'codex-subscription', connected: true, consented: false, usage: 'allowed',
+    account: { company: 'codex', accountType: 'chatgpt',
+      models: [{ model: 'gpt-6.1-sol', name: 'Sol', efforts: ['high'] }] }
+  }
+  const source = {
+    rootConversationId: 'claude\0/thesis', owner: { id: 'claude\0/thesis', sessionId: 'old', company: 'claude' as const },
+    root: '/thesis', entry: { company: 'claude' as const, model: 'opus', effort: null, how: 'main' as const },
+    reason: 'limit' as const, students: [{ text: '학생 글', attachments: [] }], lastAssistant: null,
+    beforeHashes: {}, afterHashes: {}, approvedPlan: null, jobs: [], skillVersion: 'v1', sourceLocation: '/p'
+  }
+  const handoff = new ConversationHandoff({
+    stateDir, maxBytes: 10_000,
+    account: async () => structuredClone(account),
+    open: async request => ({ id: request.id, sessionId: `s-${request.id}`, company: 'codex' as const }),
+    close: async () => {}, prepareActivation: async () => () => {},
+    beginTransition: () => ({ ready: async () => {}, commit: () => true, cancel: () => {}, flush: async () => {} }),
+    audit: () => {}, mintId: (root, company) => `${company}\0${root}`
+  })
+  const done = (await handoff.propose(source))!
+  await handoff.continue(done.proposalId)
+  expect(handoff.archives('/thesis')).toHaveLength(1)
+
+  handoff.invalidate('/thesis')
+  // 보관은 그대로 — 무효화가 넘긴 대화를 지우지 않는다.
+  expect(handoff.archives('/thesis')).toHaveLength(1)
+  expect(handoff.archive('/thesis', done.proposalId)).not.toBeNull()
+})
+
+// ⑫ [C1-12] 인계 제안의 모델·깊이가 **실제 실행**에 적용된다(완료 기록만이 아니라).
+test('fix C1-12: the proposed model and effort reach the real turn', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-effort-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-effort-ud-'))
+  const choices: ({ model: string; effort: string | null } | null)[] = []
+  let stored: { model: string; effort: string | null } | null = { model: 'gpt-6.1-astra', effort: 'low' }
+  const main: AgentConnection = {
+    status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+    login: async () => {}, respond: () => {}, prepare: async () => {},
+    models: async () => [
+      { model: 'gpt-6.1-astra', name: 'Astra', efforts: ['low', 'high'] },
+      { model: 'gpt-6.1-sol', name: 'Sol', efforts: ['low', 'high'] }
+    ].map(model => ({ ...model, description: '' })) as never,
+    run: async (_text, _sessionId, events) => { choices.push(stored); events.session('s') },
+    stop: async () => {}
+  }
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main,
+    modelChoice: () => stored,
+    modelChosen: () => true,
+    storeModelChoice: (_provider, choice) => { stored = choice }
+  })
+  await svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: 'high', how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: new AbortController().signal
+  })
+  // 실행에 쓰인 선택이 제안과 같다 — 저장된 옛 칩(Astra/low)이 아니다.
+  expect(choices).toEqual([{ model: 'gpt-6.1-sol', effort: 'high' }])
+  await svc.close()
+})
+
+// ⑬ [C1-11] 소유자 이전 중 공개 주문서 저장이 실패하면 소유자가 부분 커밋되지 않는다.
+test('fix C1-11: a failed public manifest write leaves the owner untouched', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-owner-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'project.json'), '{"original":true}')
+  const stateDir = join(base, 'private')
+  const plan = planFromRow('both-high')
+  const account: ExecutionAccount = {
+    accountId: 'codex-account', connected: true, consented: true, usage: 'allowed',
+    account: { company: 'codex', accountType: 'chatgpt',
+      models: [{ model: 'gpt-6.1-astra', name: 'astra', efforts: ['high'] }] }
+  }
+  const owner: ConversationOwner = { id: `claude\0${root}`, sessionId: 'main', company: 'claude' }
+  const runner = new JobRunner({
+    stateDir, approvedPlan: () => plan, account: async () => structuredClone(account),
+    // 주문서(`order()`)는 `role-v1` 로 만든다 — 스킬 선언도 같아야 한다.
+    skill: () => ({ path: '/fake', schema: 1, contractVersion: 'role-v1' }), supportedSchemas: [1],
+    connectionFactory: (): JobConnection => ({
+      relayProtocol: 1,
+      status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+      login: async () => {}, respond: () => {}, run: async () => { throw new Error('relay') },
+      availability: async () => structuredClone(account),
+      runJob: async () => {}, stop: async () => {}
+    }),
+    deliver: async () => {}, stopMain: async () => {}, diagnostic: () => {}, shellSandboxAvailable: false
+  })
+  const spec = order(root, 'owner-job')
+  runner.enqueue(root, spec as never, owner, 'author')
+  // 공개 주문서 쓰기를 실패시킨다 — 원장 영속 전에 예외가 난다.
+  const target = join(root, '.knuaf-gui', 'jobs', 'owner-job.json')
+  ;(runner as unknown as { publish: (record: unknown) => void }).publish = () => { throw new Error('read-only public manifest') }
+
+  const transition = runner.beginOwnerTransition(root)
+  await transition.ready()
+  let activated = false
+  const next: ConversationOwner = { id: `codex\0${root}`, sessionId: 'new', company: 'codex' }
+  expect(() => transition.commit(next, () => { activated = true })).toThrow('read-only public manifest')
+  // activate 는 이미 불렸지만 어떤 주문도 새 소유자를 들고 남지 않는다.
+  expect(activated).toBe(true)
+  expect(runner.records().every(record => record.owner.id === owner.id)).toBe(true)
+  expect(readFileSync(target, 'utf8')).toContain(`claude`)
+  await transition.flush()
 })
