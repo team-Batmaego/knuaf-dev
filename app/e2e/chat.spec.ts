@@ -480,6 +480,24 @@ test('a sidecar write in progress rejects send without touching messages', async
   await svc.close()
 })
 
+test('close() 는 끝나지 않는 턴 앞에서도 상한 안에 끝난다 (RT2)', async () => {
+  // 윈도우 CI(codex-relogin, 2026-11-10): 앱을 닫을 때 정리 약속이 하나라도 안 끝나면
+  // `electronApp.close()` 가 44초 멈췄다. `close()` 의 `await Promise.all(this.runs.values())`
+  // 는 그 상한 없는 대기였다 — 지금은 마감이 있고, 남은 턴은 로그로만 남긴다.
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const hung = Promise.withResolvers<void>()
+  const svc = service(fake({ run: () => hung.promise }))
+  await svc.send(root, 'codex', '끝나지 않을 턴', 'req-hang')
+  const started = Date.now()
+  await svc.close()
+  // 마감은 5초(CLOSE_RUN_DEADLINE_MS) — 그보다 훨씬 넉넉한 10초로 잠근다.
+  const elapsed = Date.now() - started
+  expect(elapsed, 'close 가 마감을 넘겨 매달렸다').toBeLessThan(10_000)
+  // 연결은 여전히 정리된다(진행 중 턴만 넘긴다).
+  expect(svc.snapshot(root, 'codex').state).toBe('running')
+  hung.resolve()
+})
+
 test('답장이 시작되면 전송 중 표시가 풀린다', async () => {
   // 예전에는 run() 이 끝나야 'sent' 로 바꿨다. 에이전트 턴은 몇 분씩 가므로 도우미가
   // 눈앞에서 말하는 내내 학생 메시지에 "전송 중"이 붙어 있었다 — live 스모크가 이걸
