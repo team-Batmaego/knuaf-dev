@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createContext, runInContext } from 'node:vm'
-import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react'
-import { JsxEmit, ScriptTarget, transpileModule } from 'typescript'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { ChatMarkdown } from '../src/renderer/src/components/ChatMarkdown'
 import { launch, navTo, openProject, settleWorkspace, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 
@@ -90,35 +90,39 @@ test('UI-P03: 프로젝트 내부 절대경로 링크를 짧게 보여 주고 �
   } finally { await electronApp.close() }
 })
 
-/** Exercise the production renderer with Windows paths without a Windows host. */
-function renderChatLinks(text: string, root: string, platform = 'win32'): ReactNode {
-  const source = readFileSync('src/renderer/src/screens/Chat.tsx', 'utf-8')
-  const start = source.indexOf('const INSIDE_PATH')
-  const end = source.indexOf('\n/**', source.indexOf('function withLinks'))
-  const sandbox = { window: { knuaf: { platform } }, React: { createElement } }
-  createContext(sandbox)
-  runInContext(transpileModule(source.slice(start, end), {
-    compilerOptions: { jsx: JsxEmit.React, target: ScriptTarget.ES2022 }
-  }).outputText, sandbox)
-  const helpers = sandbox as typeof sandbox & {
-    withLinks: (text: string, root: string | null, onGo: () => void) => ReactNode
+/**
+ * Windows 경로를 윈도우 호스트 없이 실제 부품으로 그려 본다. 링크 해석은 화면과 같은
+ * `ChatMarkdown` 한 곳에 있으므로(예전 `Chat.tsx` 의 `withLinks` 는 지웠다) 여기서 그 부품을
+ * 그대로 부른다. `relativeProjectPath` 가 `window.knuaf.platform` 을 읽으므로 그 값만 스텁한다.
+ */
+function renderChat(text: string, root: string, platform = 'win32'): string {
+  const key = 'window'
+  const had = Object.prototype.hasOwnProperty.call(globalThis, key)
+  const prev = (globalThis as Record<string, unknown>)[key]
+  ;(globalThis as Record<string, unknown>)[key] = { knuaf: { platform } }
+  try {
+    return renderToStaticMarkup(createElement(ChatMarkdown, { text, root, messageId: 'a1', onFile: () => {} }))
+  } finally {
+    if (had) (globalThis as Record<string, unknown>)[key] = prev
+    else delete (globalThis as Record<string, unknown>)[key]
   }
-  return helpers.withLinks(text, root, () => {})
 }
 
-function isLinkButton(node: ReactNode): node is ReactElement<{ className?: string; title?: string; children?: ReactNode }> {
-  return isValidElement<{ className?: string; title?: string; children?: ReactNode }>(node) && node.type === 'button'
+/** 그려진 파일 단추 하나를 꺼낸다. 단추가 없으면 null. */
+function linkButton(html: string): { attrs: string; label: string; full: string } | null {
+  const found = /<button class="lk"([^>]*)>([^<]*)<\/button>/.exec(html)
+  return found ? { attrs: found[1], label: found[2], full: found[0] } : null
 }
 
 function expectLink(text: string, root: string, platform: string, label: string, title: string | undefined, suffix: string): void {
-  const parts = Children.toArray(renderChatLinks(text, root, platform))
-  const buttons = parts.filter(isLinkButton)
-  expect(buttons).toHaveLength(1)
-  const button = buttons[0]!
-  expect(button.props.className).toBe('lk')
-  expect(button.props.title).toBe(title)
-  expect(button.props.children).toBe(label)
-  expect(parts.filter((part) => part !== button).join('')).toBe(suffix)
+  const html = renderChat(text, root, platform)
+  const button = linkButton(html)
+  expect(button, html).not.toBeNull()
+  expect(button!.label).toBe(label)
+  expect(/title="([^"]*)"/.exec(button!.attrs)?.[1]).toBe(title)
+  expect(button!.attrs).toContain('data-focus-key="chat-link:a1:')
+  // 단추 바깥의 글(문장·구두점)은 잘리지 않고 그대로 남는다.
+  expect(html.replace(button!.full, '')).toBe(`<div class="chat-md"><p>${suffix}</p></div>`)
 }
 
 test('UI-P03 B1-01: 경계가 불확실한 Windows 괄호 경로 네 건은 전부 원문 보존한다', () => {
@@ -131,7 +135,9 @@ test('UI-P03 B1-01: 경계가 불확실한 Windows 괄호 경로 네 건은 전�
   ]
   for (const target of targets) {
     const markdown = `[문서](${target})`
-    expect(renderChatLinks(markdown, root), target).toBe(markdown)
+    const html = renderChat(markdown, root)
+    expect(linkButton(html), target).toBeNull()
+    expect(html, target).toContain(markdown)
   }
 })
 
@@ -159,13 +165,22 @@ test('UI-P03 B1-01: 명시적 괄호 경로·macOS·상대경로·외부 링크 
   expectLink('[초안](build/draft (1).md).', '/Users/student/Thesis', 'darwin', '초안', undefined, '.')
   expectLink('[build/a.md](build/a.md).', String.raw`C:\Thesis`, 'win32', 'build/a.md', undefined, '.')
 
+  // 폴더 밖·형제 폴더·상위 경로는 단추가 되지 않고 원문이 그대로 남는다.
   for (const text of [
     '[외부](C:/Thesis/build/../../outside/a.md)입니다.',
     '[형제](C:/Thesis-other/a.md).',
-    '[상위](../outside/a.md).',
-    '[웹](https://example.invalid/a.md).'
-  ])
-    expect(renderChatLinks(text, String.raw`C:\Thesis`), text).toBe(text)
+    '[상위](../outside/a.md).'
+  ]) {
+    const html = renderChat(text, String.raw`C:\Thesis`)
+    expect(linkButton(html), text).toBeNull()
+    expect(html, text).toContain(text)
+  }
+  // 주소는 누를 수 없지만 주소 글자 자체는 지우지 않는다(GUI-12) — 예전 `withLinks` 는 원문을
+  // 그대로 뒀고, 부품은 여기에 "무엇을 눌렀어야 하는지"를 보여 주는 주소를 더한다.
+  const web = renderChat('[웹](https://example.invalid/a.md).', String.raw`C:\Thesis`)
+  expect(linkButton(web)).toBeNull()
+  expect(web).toContain('웹')
+  expect(web).toContain('example.invalid/a.md')
 })
 
 
