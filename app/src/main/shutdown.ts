@@ -12,6 +12,8 @@
  *    막는 동기 호출이 있으면 실제 경과는 마감보다 길다. 그 사실을 숫자로 남긴다 —
  *    "마감이 지켜졌다"고 코드만 보고 말하지 않게.
  */
+import { killTree } from './win'
+
 export interface ShutdownTask {
   /** 로그에 남길 짧은 이름 — `sidecar.stop`·`chat.close` 처럼 어느 정리가 남았는지. */
   name: string
@@ -80,17 +82,25 @@ const delay = (ms: number): Promise<void> => {
 
 /**
  * pid 들을 트리째 끝내고 `deadlineMs` 동안 회수를 관측한다. 던지지 않는다.
- * `kill` 은 호출자가 넘긴다(`win.ts` 의 `killTree`) — 이 파일이 프로세스 구현을 알 필요는 없다.
+ *
+ * 종료 시도는 **플랫폼별 실제 경로**로 간다(검토 RT2-03): 윈도우는 `killTree` 가 `taskkill /T /F`
+ * (절대 경로·비동기)를 쓰고, 맥·리눅스는 `process.kill(SIGKILL)` 이다. 예전처럼
+ * `kill: () => false` 같은 **아무 신호도 보내지 않는 콜백**을 넘기면 회수 시도가 무동작인 채
+ * "살아 있음"만 남는다 — 그건 OS 한계가 아니라 배선 결함이었다.
+ *
+ * 시그널은 프로세스에 직접 간다(트리 단위는 윈도우 `taskkill /T` 만). 손자는 이 목록에 없으므로
+ * 관측 범위는 **우리가 아는 pid** 까지다 — 그 사실을 호출자가 로그에 남긴다.
  */
 export async function reclaimChildren(
   pids: readonly number[],
-  kill: (pid: number) => void,
   deadlineMs = 1_500
 ): Promise<ReclaimOutcome> {
   const unique = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))]
   const outcome: ReclaimOutcome = { pids: unique, alive: [], unknown: [] }
   if (!unique.length) return outcome
-  for (const pid of unique) { try { kill(pid) } catch { /* 아래 관측이 사실을 말한다 */ } }
+  for (const pid of unique) {
+    try { killTree({ pid, kill: (signal) => { try { process.kill(pid, signal ?? 'SIGKILL'); return true } catch { return false } } }, 'SIGKILL') } catch { /* 아래 관측이 사실을 말한다 */ }
+  }
   const end = Date.now() + Math.max(0, deadlineMs)
   let remaining = unique
   for (;;) {
@@ -135,4 +145,20 @@ export async function shutdownWithin(tasks: readonly ShutdownTask[], deadlineMs:
     outcome.elapsedMs = Date.now() - startedAt
   }
   return outcome
+}
+
+/**
+ * 마감 결과가 **강제 종료 경로**를 타야 하는가.
+ *
+ * 검토 RT2-03 재현: 예전 index 는 `pending` 이 비었는지만 보고 "정리 완료 → app.quit" 으로 갔다.
+ * 그래서 sidecar stop 이 **실패로 정착**하면(=`failed`, `pending` 없음) 회수 시도를 건너뛰었다 —
+ * 실패를 잘 드러낼수록 그 실패가 정상 완료 분기로 들어가는 모순이었다.
+ *
+ * 강제 경로는 둘 중 하나면 탄다:
+ *  - 끝나지 않은 정리가 있다(`pending`) — 마감을 넘겼다.
+ *  - 거절한 정리가 있다(`failed`) — 정리는 끝났지만 **성공하지 않았다**. 자식이 남았을 수 있다.
+ * 순수 함수라 시험이 분기를 직접 고정한다.
+ */
+export function needsReclaim(outcome: Pick<ShutdownOutcome, 'pending' | 'failed'>): boolean {
+  return outcome.pending.length > 0 || outcome.failed.length > 0
 }

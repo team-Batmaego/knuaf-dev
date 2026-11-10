@@ -86,7 +86,6 @@ export class Sidecar extends EventEmitter {
     const pid = this.owner?.child.pid
     return typeof pid === 'number' && pid > 0 ? [pid] : []
   }
-
   private async configureNow(projectRoot: string | null, override: string | null, version: number): Promise<SidecarInfo> {
     if (version !== this.stopVersion) throw START_CANCELLED
     this.projectRoot = projectRoot

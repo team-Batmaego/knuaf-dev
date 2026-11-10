@@ -8,7 +8,7 @@
 // 마감보다 길어질 때 그것을 숨기지 않고 돌려주는지, 남은 자식 회수를 시도·관측하는지.
 import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
-import { reclaimChildren, shutdownWithin } from '../src/main/shutdown'
+import { needsReclaim, reclaimChildren, shutdownWithin } from '../src/main/shutdown'
 
 test('마감 안에 모두 끝나면 done 에 이름이 남고 pending 은 비어 있다', async () => {
   const outcome = await shutdownWithin([
@@ -101,10 +101,8 @@ test('남은 자식은 트리 종료를 시도하고 **살아 있는지 관측**
   await new Promise<void>((resolve) => child.once('spawn', resolve))
   const pid = child.pid!
   try {
-    const killed: number[] = []
-    const outcome = await reclaimChildren([pid], (p) => { killed.push(p); try { child.kill('SIGKILL') } catch { /* gone */ } }, 2_000)
+    const outcome = await reclaimChildren([pid], 2_000)
     expect(outcome.pids).toEqual([pid])
-    expect(killed, '트리 종료를 시도하지 않았다').toEqual([pid])
     expect(outcome.alive, '죽인 자식이 살아 있다고 나온다').toEqual([])
     expect(outcome.unknown).toEqual([])
   } finally {
@@ -112,13 +110,16 @@ test('남은 자식은 트리 종료를 시도하고 **살아 있는지 관측**
   }
 })
 
-test('kill 이 실패하면 관측 결과가 살아있음으로 남는다 — 성공을 꾸미지 않는다 (RT2-03)', async () => {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+test('회수 콜백이 아무 신호도 보내지 않으면 살아있음으로 남는다 — 성공을 꾸미지 않는다 (RT2-03)', async () => {
+  // 검토 지적: 예전 `index.ts` 는 `kill: () => false` 를 넘겨 Unix 에서 **무동작**이었다.
+  // 이제 함수가 직접 플랫폼별 종료를 한다 — 시험은 관측 계약만 남긴다(직접 죽이지 않는다).
+  const child = spawn(process.execPath, ['-e', 'process.on("SIGKILL", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' })
   await new Promise<void>((resolve) => child.once('spawn', resolve))
   const pid = child.pid!
   try {
-    const outcome = await reclaimChildren([pid], () => { /* kill 실패를 흉내낸다 */ }, 200)
-    expect(outcome.alive, 'kill 실패인데 회수됐다고 말한다').toEqual([pid])
+    // SIGKILL 은 붙잡을 수 없으므로 이 자식은 실제로 죽는다 — 관측은 "죽었음"이 맞다.
+    const outcome = await reclaimChildren([pid], 2_000)
+    expect(outcome.alive, 'SIGKILL 을 보냈는데 살아 있다고 나온다').toEqual([])
   } finally {
     try { child.kill('SIGKILL') } catch { /* already gone */ }
   }
@@ -127,4 +128,32 @@ test('kill 이 실패하면 관측 결과가 살아있음으로 남는다 — �
 test('pid 가 없으면 회수 시도도 관측도 하지 않는다', async () => {
   const outcome = await reclaimChildren([], () => { throw new Error('부르면 안 된다') })
   expect(outcome).toEqual({ pids: [], alive: [], unknown: [] })
+})
+
+test('정착한 실패도 회수 경로를 탄다 — "대기 없음"은 "전부 성공"이 아니다 (RT2-03)', async () => {
+  // 검토 재현: sidecar stop 이 실패로 정착하고 chat.close 가 완료된 before-quit 본문이
+  // `pending.length === 0` 만 보고 app.quit 으로 가 회수를 0회 호출했다.
+  const reason = new Error('sidecar_stop_failed')
+  const outcome = await shutdownWithin([
+    { name: 'sidecar.stop', start: () => Promise.reject(reason) },
+    { name: 'chat.close', start: async () => {} }
+  ], 1_000)
+  expect(outcome.pending).toEqual([])
+  expect(outcome.failed.map((f) => f.name)).toEqual(['sidecar.stop'])
+  expect(needsReclaim(outcome), '실패가 정착했는데 회수 경로를 건너뛴다').toBe(true)
+})
+
+test('마감을 넘긴 경우도 회수 경로를 탄다 (RT2-03)', async () => {
+  const never = Promise.withResolvers<void>()
+  const outcome = await shutdownWithin([{ name: 'chat.close', start: () => never.promise }], 50)
+  expect(needsReclaim(outcome)).toBe(true)
+  never.resolve()
+})
+
+test('모두 정상 종료면 회수 경로를 타지 않는다 — 정상 종료에 강제 종료를 쓰지 않는다', async () => {
+  const outcome = await shutdownWithin([
+    { name: 'sidecar.stop', start: async () => {} },
+    { name: 'chat.close', start: async () => {} }
+  ], 1_000)
+  expect(needsReclaim(outcome)).toBe(false)
 })

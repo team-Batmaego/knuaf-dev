@@ -33,6 +33,8 @@ export interface AgentConnection {
   prepare?(sessionId: string | undefined): Promise<void>
   respond(id: string, allow: boolean): void
   stop(): Promise<void>
+  /** 앱이 띄운 자식 pid — 종료 마감 뒤 회수 대상(검토 RT2-03). 모르면 생략한다. */
+  ownedPids?(): number[]
 }
 export interface AgentOptions {
   binary: string; root: string; skill: string; env: NodeJS.ProcessEnv

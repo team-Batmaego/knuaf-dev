@@ -43,6 +43,17 @@ export class ChatService {
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
   hasPendingLogin(): boolean { return this.pendingLogins.size > 0 }
+  /**
+   * 앱이 띄운 엔진 자식 pid — 종료 마감 뒤 회수 대상(검토 RT2-03).
+   * 연결이 스스로 아는 것만 돌려준다(`Connection.ownedPids` 선택 메서드). 없으면 빈 배열이다.
+   */
+  ownedPids(): number[] {
+    const pids: number[] = []
+    for (const connection of new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])) {
+      if (typeof connection.ownedPids === 'function') pids.push(...connection.ownedPids())
+    }
+    return pids
+  }
   suspend(): void { agentActivity.suspend() }
   resume(): void { agentActivity.resume() }
   private async checkedStatus(provider: Provider, connection: AgentConnection): Promise<ConnectionStatus> {

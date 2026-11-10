@@ -10,8 +10,7 @@ import { installMenu, type MenuAction } from './menu'
 import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { defaultWindowSize } from '../shared/window'
-import { killTree } from './win'
-import { openHandles, reclaimChildren, shutdownWithin } from './shutdown'
+import { needsReclaim, openHandles, reclaimChildren, shutdownWithin } from './shutdown'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
@@ -151,13 +150,29 @@ else {
        * `sidecar.stop()` 이 아니라 `stopForExit()` 를 쓴다: 큐 뒤에 줄 서면 실제 종료 실패가
        * `pending` 으로 가려진다(검토 RT2-03).
        */
-      const ownedPids = sidecar.ownedPids()
+      /**
+       * 회수 대상은 **우리가 아는 pid** 전부다. 사이드카만 모으면 Codex/Claude 엔진 자식은
+       * 목록에 없어서 "고아 0"으로 읽힐 수 있다(검토 RT2-03). 범위를 로그에 그대로 적는다.
+       */
+      const knownPids = (): number[] => [...new Set([...sidecar.ownedPids(), ...(chat?.ownedPids() ?? [])])]
+      /**
+       * 시험 전용 이음매 — 정리가 마감을 넘기는 상황을 결정적으로 만든다(`KNUAF_E2E_QUIT_STALL=1`).
+       * 실제 결함을 재현하려고 앱을 멈추게 하는 대신, 이 스위치가 켜졌을 때만 sidecar 정리를
+       * 정착하지 않는 약속으로 바꾼다. 기본값(미설정)에서는 이 줄이 없다 — 동작 불변.
+       */
+      const stalled = process.env.KNUAF_E2E_QUIT_STALL === '1'
       void shutdownWithin([
-        { name: 'sidecar.stop', start: () => sidecar.stopForExit() },
+        { name: 'sidecar.stop', start: () => stalled ? Promise.withResolvers<void>().promise : sidecar.stopForExit() },
         { name: 'chat.close', start: () => chat?.close() ?? Promise.resolve() }
       ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
         for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, failure.reason)
-        if (!outcome.pending.length) {
+        /**
+         * **정착한 실패도 회수 대상이다**(검토 RT2-03). 예전에는 `pending` 이 비었는지만 보고
+         * "정리 완료 → app.quit" 으로 갔으므로, sidecar stop 이 실패로 정착해도 회수 시도를
+         * 건너뛰었다. 이제 실패가 하나라도 있으면 회수 경로를 탄다.
+         */
+        const forced = needsReclaim(outcome)
+        if (!forced) {
           // 정상 종료도 한 줄 남긴다 — 이 줄이 없으면 before-quit 배선/마감이 아예 돌지 않은 것이다.
           console.error(`[shutdown] 정리 완료 ${outcome.elapsedMs}ms (${outcome.done.join(', ') || '없음'})`)
           if (outcome.elapsedMs > SHUTDOWN_DEADLINE_MS) {
@@ -166,19 +181,18 @@ else {
           app.quit()
           return
         }
-        console.error(`[shutdown] ${SHUTDOWN_DEADLINE_MS}ms 안에 끝나지 않은 정리: ${outcome.pending.join(', ')} (경과 ${outcome.elapsedMs}ms)`)
+        if (outcome.pending.length) console.error(`[shutdown] ${SHUTDOWN_DEADLINE_MS}ms 안에 끝나지 않은 정리: ${outcome.pending.join(', ')} (경과 ${outcome.elapsedMs}ms)`)
         /**
          * 강제 종료는 **우리 몫의 정리**에만 쓴다. 다른 청취자가 before-quit 에 걸려 있으면
          * (`listenerCount > 1` — 진단·시험이 종료를 일부러 붙잡는 자리) 그 veto 를 무시하지 않고
          * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
          */
         if (app.listenerCount('before-quit') !== 1) { app.quit(); return }
-        // 남은 자식을 먼저 한 번 더 트리째 끝내고, 살아 있는지 **관측**한다. OS 회수를 가정하지 않는다.
-        const reclaim = await reclaimChildren(ownedPids, (pid) => killTree({ pid, kill: () => false }))
+        const pids = knownPids()
+        // 아는 자식을 한 번 더 트리째 끝내고, 살아 있는지 **관측**한다. OS 회수를 가정하지 않는다.
+        const reclaim = await reclaimChildren(pids)
         console.error(`[shutdown] 남은 핸들: ${openHandles() || '(없음)'}`)
-        if (reclaim.pids.length) {
-          console.error(`[shutdown] 자식 회수 시도 pid=${reclaim.pids.join(',')} 살아있음=${reclaim.alive.join(',') || '없음'} 확인못함=${reclaim.unknown.join(',') || '없음'}`)
-        }
+        console.error(`[shutdown] 자식 회수 시도 pid=${reclaim.pids.join(',') || '없음'} 살아있음=${reclaim.alive.join(',') || '없음'} 확인못함=${reclaim.unknown.join(',') || '없음'} (앱이 아는 pid 만 — 손자는 관측 밖)`)
         app.exit(0)
       })
     }
