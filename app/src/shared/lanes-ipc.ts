@@ -85,7 +85,12 @@ export const JOBS_INVOKE = {
   /** §2-1·§8-2 넘기기 실패 [다시 넘기기]. */
   redeliver: 'jobs:redeliver',
   /** §2-1 인증 문제 [나중에] — 그 주문은 `auth` 미실행으로 도우미에게 넘어간다. */
-  authLater: 'jobs:auth-later'
+  authLater: 'jobs:auth-later',
+  /**
+   * [Roh 중요 1] §2-2·§8-1 기록 줄·전달 줄 [자세히] — 도우미에게 넘긴(넘기려던) 전달문 원문.
+   * 원문은 묶음(`events`)에 싣지 않고 **학생이 누를 때만** 이 요청으로 가져온다.
+   */
+  deliveryText: 'jobs:delivery-text'
 } as const
 
 /** main → 화면 밀어 보내기(`webContents.send`). 상태가 바뀔 때마다 묶음 전체. */
@@ -241,10 +246,24 @@ export type LaneLine =
    * §4-1 본대화 한도 (종류 2) — 기존 대화 오류 줄을 **대신**한다. 확인된 한도 + 제안일 때만.
    * `tooLong`이면 [이어서 하기] 대신 "앞 대화가 너무 길어…" + [새 대화로 시작].
    */
-  | (LineBase & { kind: 'main-limit-offer'; tier: 2; proposalId: string; to: ModelRef; tooLong: boolean })
+  | (LineBase & {
+      kind: 'main-limit-offer'
+      tier: 2
+      proposalId: string
+      to: ModelRef
+      tooLong: boolean
+      /**
+       * [Roh 중요 4] 크기 제한 때문에 묶음을 줄였으면 true(`HandoffBundle.truncated`가 비어 있지 않음).
+       * true면 화면은 "내가 쓴 글 전부"라고 말하지 않고 줄인 문구를 쓴다.
+       */
+      trimmed: boolean
+    })
   // [F6] "넘겨요 ▸" 펼침은 **고정 설명문**(copy-lanes.ts 상수)이다: 이어 받기 묶음 ①~⑤(내가 쓴 글
-  //      전부·마지막 AI 답·이 대화 동안 바뀐 파일 이름·작업 분담·주문 상태·스킬 판). 개수 같은 값
-  //      필드는 두지 않는다 — 화면은 `to.company` 이름만 끼운다.
+  //      ·마지막 AI 답·이 대화 동안 바뀐 파일 이름·작업 분담·주문 상태·스킬 판). 줄였는지는 `trimmed`
+  //      하나로만 갈린다 — 개수 같은 값 필드는 두지 않는다. 화면은 `to.company` 이름만 끼운다.
+  // [Roh 중요 4] **학생 글이 하나도 실리지 않는 묶음은 인계 성공이 아니다.** main은 그런 묶음으로
+  //      새 대화를 열지 않고 `tooLong:true`(새 대화로 시작)로 보인다. 누른 뒤에 알게 되면
+  //      `handoff-failed`로 돌린다 — `handoff-done`을 남기지 않는다.
   /** §4-1 "{회사}로 넘기는 중…" (종류 3). */
   | (LineBase & { kind: 'handoff-running'; tier: 3; to: ModelRef })
   /** §4-1 넘기지 못함 (종류 2) [다시 하기] [나중에]. */
@@ -344,6 +363,14 @@ export type CardState =
   /** §3-5·U6-04 더 새 카드로 밀려남 — "새 카드로 바뀌었어요". */
   | { kind: 'superseded'; by: string }
 
+/**
+ * [Roh 중요 3] 계정 결박 — 동의·계정 경계.
+ * - main은 카드를 만들 때 카드에 끼는 회사마다 **로그인 계정 id를 고정**해 main 쪽 카드 저장에 둔다
+ *   (`fees[].accountLabel`은 그 계정의 가린 표시일 뿐 근거가 아니다).
+ * - `decideCard` 적용 **직전** main이 지금 로그인 계정과 다시 비교한다. 하나라도 다르면 적용·동의
+ *   저장을 하지 않고 `outcome:'invalid'`, `reason:'account-changed'`로 돌려준다.
+ * - 화면은 계정 id·이메일·동의 값을 **보내지 않는다**. `decideCard`의 인자는 카드 id·판·단추뿐이다.
+ */
 export interface LaneCard {
   /** §8-4 main이 카드 id 단위로 열림→소비됨을 한 번에 바꾼다. */
   cardId: string
@@ -371,6 +398,9 @@ export interface LaneCard {
 /** 카드 단추. `decline`=§3-1 [나눠 맡기지 않기], `cancel`=§3-2 [취소], `ack`=모두 거절일 때 [확인]. */
 export type CardAction = 'continue' | 'once' | 'decline' | 'cancel' | 'ack'
 
+/** 카드를 쓸 수 없는 사유. `account-changed`는 [Roh 중요 3]. */
+export type CardInvalidReason = 'base-version' | 'superseded' | 'account-changed'
+
 /** `decideCard`·`cardStatus` 결과. */
 export interface CardDecision {
   outcome:
@@ -378,10 +408,14 @@ export interface CardDecision {
     | 'applied'
     /** §8-4 이미 처리됨(두 창·중복 IPC) — 두 번째부터. */
     | 'already-handled'
-    /** §3-5 `baseVersion` 불일치·밀려남. */
+    /** §3-5 쓸 수 없음 — 사유는 `reason`. */
     | 'invalid'
-    /** `cardStatus` 전용: 아직 처리 중. */
+    /** [Roh 권고 1] `cardStatus` 전용: 아직 아무 단추도 접수되지 않음(`card.state.kind === 'open'`). */
+    | 'open'
+    /** `cardStatus` 전용: 접수됐고 처리 중(`card.state.kind === 'applying'`). */
     | 'pending'
+  /** `invalid`일 때만 값. 그 밖에는 null. */
+  reason: CardInvalidReason | null
   card: LaneCard
   /**
    * §8-10 [이번만]이 묶인 차례. 도우미가 답하는 중이면 그 차례 id, 쉬는 중이면
@@ -414,8 +448,12 @@ export interface LanesSettingsView {
   rows: SettingsRow[]
   /** [추천으로 되돌리기] 활성 — 추천과 다를 때만. */
   differsFromRecommendation: boolean
-  /** "지금 이번 차례만: …" — [이번만]·이어 하기로 다른 값이 돌고 있을 때만. */
-  temporary: { lane: JobLane; entry: ModelRef }[]
+  /**
+   * "지금 이번 차례만: …" — [이번만]·이어 하기로 다른 값이 돌고 있을 때만.
+   * [Roh 중요 2] `LaneEntry`라 "도우미가 직접"(`how:'main'`, `model:null`)도 담긴다 — lanes.ts
+   * `proposeLaneRequest`가 만든 값을 그대로 넣는다.
+   */
+  temporary: { lane: JobLane; entry: LaneEntry }[]
   /** [F2] §5 설계 줄 "아래 칩에서 골라요 (추천 {회사 모델})". 설계 줄은 `rows`에 없다. */
   recommendedDesign: ModelRef | null
   /** "다음 메시지부터: 설계 {회사}" — 없으면 null. */
@@ -526,6 +564,12 @@ export interface JobsApi {
   redeliver(root: string, jobId: string): Promise<LanesReply<void>>
   /** §2-1 인증 [나중에]. */
   authLater(root: string, jobId: string): Promise<LanesReply<void>>
+  /**
+   * [Roh 중요 1] 전달문 원문. `delivered`·`not-run` 기록 줄과 `deliver-failed`·`deliver-uncertain`·
+   * `folder-changed` 줄의 [자세히]에서 부른다. 아직 전달문이 만들어지지 않았으면 `text: null`.
+   * 읽기만 한다 — 다시 넘기지 않는다.
+   */
+  deliveryText(root: string, jobId: string): Promise<LanesReply<{ text: string | null }>>
 }
 
 // =====================================================================================
