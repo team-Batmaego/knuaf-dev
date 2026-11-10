@@ -18,7 +18,7 @@ function fixture() {
     codex: { accountId: 'codex-account', connected: true, consented: true, usage: 'allowed', account: { company: 'codex', accountType: 'chatgpt', models: models(['gpt-6.1-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna']) } }
   }
   const plan = planFromRow('both-high'), requests: RelayRequest[] = [], deliveries: { owner: ConversationOwner; result: JobResult }[] = [], diagnostics: object[] = []
-  let stops = 0, mainStops = 0
+  let stops = 0, mainStops = 0, runJobs = 0
   let behavior = async (request: RelayRequest, events: JobEvents) => {
     events.session(`session-${request.jobId}`)
     writeFileSync(join(request.cwd, 'result.md'), 'actual result')
@@ -32,7 +32,7 @@ function fixture() {
       return { relayProtocol: 1, status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
         availability: async () => structuredClone(accounts[request.company]), login: async () => {}, respond: () => {},
         run: async () => { throw new Error('Ordinary run must not execute relay') },
-        runJob: async (_text, events) => behavior(request, events), stop: async () => { stops++ } }
+        runJob: async (_text, events) => { runJobs++; return behavior(request, events) }, stop: async () => { stops++ } }
     },
     deliver: async (target: ConversationOwner, result: JobResult) => { deliveries.push({ owner: target, result }) },
     stopMain: async () => { mainStops++ }, diagnostic: (data: object) => { diagnostics.push(data) }, shellSandboxAvailable: true
@@ -43,7 +43,7 @@ function fixture() {
     ...(lane === 'research' ? { research: { research_type: '생산량', questions: [{ id: 'Q1', target: '생산량', acceptance: '공식 통계' }],
       routes: [{ doc: 'research-sources.md', id_or_name: 'KOSIS', url: 'https://kosis.kr/' }], keywords: ['생산량'], output_file: 'result.md' } } : {}),
     outputs: ['result.md'], contractVersion: 'role-v1', company: plan[lane]!.company, model: plan[lane]!.model!, effort: plan[lane]!.effort })
-  return { root, stateDir, accounts, plan, requests, deliveries, diagnostics, options, runner, spec,
+  return { root, stateDir, accounts, plan, requests, deliveries, diagnostics, options, runner, spec, runJobs: () => runJobs,
     behavior: (fn: typeof behavior) => { behavior = fn }, accountRead: (fn: typeof accountRead) => { accountRead = fn },
     stops: () => ({ stops, mainStops }) }
 }
@@ -149,10 +149,11 @@ for (const state of ['limit', 'unknown', 'auth'] as const) test(`start gate dist
   const f = fixture(); f.accounts.codex.usage = state
   f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
   expect(f.runner.records()[0].status).toBe(state)
-  // NEW: the new contract calls connectionFactory once then re-judges inside execute().
-  // The old expectation of "no call on unknown" no longer holds — the runner creates
-  // the connection, then the in-turn availability check (gateInTurn) decides the status.
-  // We only assert on status/proposals/deliveries which capture the gate behavior.
+  // ㉠(형님 결정 ts 1794242990): unknown 은 1차 판정에서 바로 닫지 않고 연결을 만든 뒤 2차 판정에서
+  // 닫는다(이 연결은 gateInTurn 을 선언하지 않았다). 그래서 '연결 생성'과 '담당 실행'을 나눠 본다 —
+  // 연결은 unknown 에서만 1번 생기고, 어느 상태에서도 runJob(실행)은 0번이다(Roh AG 중요 1).
+  expect(f.requests.length).toBe(state === 'unknown' ? 1 : 0)
+  expect(f.runJobs()).toBe(0)
   expect(f.runner.proposals().length).toBe(state === 'limit' ? 1 : 0)
   expect(f.deliveries.map(d => d.result.status)).toEqual(state === 'limit' ? [] : [state])
 })
