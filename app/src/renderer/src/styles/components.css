@@ -722,3 +722,35 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .chat-md .chat-md-alt { color: var(--muted); font-style: italic; }
 /* 대화 칸의 `button { margin-top }` 은 블록 단추용이다 — 문단 안 파일 링크는 줄에 붙인다. */
 .chat-md button.lk { margin-top: 0; }
+
+/* ---- 재무 양식 알림 말풍선 (v0.6.4 1묶음 — 부품만, 아직 붙이지 않음) ----
+   형님 화면 규칙: 왼쪽 색선·세로 캡슐·1px 넘는 border-left·왼쪽 안쪽 그림자로 상태를 말하지 않는다.
+   상태는 **전체 바탕 + 전체 둘레선 + 아이콘 + 굵기**로만 말한다. 허락 카드와 같은 아이스 그레이 계열을 쓴다. */
+.notice-card { border: var(--hairline) solid var(--alert-border); border-radius: var(--r-xl); background: var(--alert-bg);
+  padding: var(--sp-3) var(--sp-4); margin-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.notice-head { display: flex; align-items: flex-start; gap: var(--sp-2); }
+.notice-ic { flex: none; display: flex; color: var(--accent); padding-top: 2px; }
+/* 한 줄 = 도구가 완성한 문장. 자르지 않고 접되, 줄 수만 묶어 두어 대화를 밀어내지 않는다. */
+.notice-title { flex: 1; min-width: 0; margin: 0; font-size: 14.5px; line-height: 1.55; font-weight: 600; color: var(--ink);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.notice-x { flex: none; width: 26px; height: 26px; padding: 0; display: grid; place-items: center; border: 0; background: none;
+  color: var(--muted); border-radius: 50%; cursor: pointer; margin: -2px -4px 0 0; }
+.notice-x:hover { background: var(--line); color: var(--ink); }
+.notice-note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+/* 선택 단추 — 알림 한 건에 한 번. 고르면 사라지므로 여기에 잠금 표시를 따로 두지 않는다. */
+.notice-choice { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.notice-choice button { flex: 1 1 auto; min-width: 0; padding: 7px 12px; font-size: 13px; font-weight: 500;
+  background: var(--panel); border-color: var(--line-strong); border-radius: var(--r-md); }
+.notice-choice button:hover { background: var(--btn-bg); border-color: var(--btn-border); color: var(--btn-ink); }
+.notice-failed { margin: 0; font-size: 12.5px; color: var(--bad); }
+.notice-foot { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); }
+.notice-foot button { flex: none; font-size: 12.5px; padding: 4px 10px; }
+/* [자세히] — 펼치면 목록. 높이를 묶고 안에서만 굴린다(SKE-08). */
+.notice-more { margin-top: 2px; }
+.notice-more > summary { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); padding: 2px 0; }
+.notice-more > summary svg { transition: transform 200ms ease-out; }
+.notice-more[open] > summary svg { transform: rotate(180deg); }
+.notice-items { margin: var(--sp-1) 0 0; padding: 0 0 0 var(--sp-4); max-height: min(38vh, 240px); overflow-y: auto; scrollbar-width: thin;
+  font-size: 12.5px; line-height: 1.6; color: var(--ink-2); }
+.notice-items li { overflow-wrap: anywhere; }
+.notice-omitted { margin: var(--sp-1) 0 0; font-size: 12px; color: var(--muted); }

@@ -1,0 +1,74 @@
+{
+  "schema": "knuaf.notices/1",
+  "written_at": "2026-11-10T15:41:55.387488+00:00",
+  "project_id": "sample-fruit-fy1",
+  "notices": [
+    {
+      "check_id": "finance_workbook_notice",
+      "target": "xlsx",
+      "status": "check_needed",
+      "severity": "info",
+      "reason": "학교 재무 양식의 수식 오류 21곳을 바로잡았어요",
+      "evidence": [],
+      "owner": "skill",
+      "required_for": [],
+      "input_revision": 1,
+      "checker_version": "1.0",
+      "title": "학교 재무 양식의 수식 오류 21곳을 바로잡았어요",
+      "items": [
+        {
+          "key": "fy1_year_basis",
+          "kind": "typo",
+          "what": "경비계획 연도칸이 2025로 박혀 있어서 창업 첫해를 보도록 고쳤어요",
+          "cells": [
+            "9.경비계획!B12"
+          ],
+          "source": "fruit_fy1",
+          "in_school_form": true
+        },
+        {
+          "key": "fy1_price_index_basis",
+          "kind": "typo",
+          "what": "물가 지수가 2020년 기준으로 계산되어 있어서 창업 첫해 기준으로 고쳤어요",
+          "cells": [
+            "9.경비계획!J15",
+            "9.경비계획!J16",
+            "9.경비계획!J26",
+            "9.경비계획!J27",
+            "9.경비계획!J37",
+            "9.경비계획!J38",
+            "9.경비계획!J48",
+            "9.경비계획!J49",
+            "9.경비계획!K15",
+            "9.경비계획!K16",
+            "9.경비계획!K26",
+            "9.경비계획!K27",
+            "9.경비계획!K37",
+            "9.경비계획!K38",
+            "9.경비계획!K48",
+            "9.경비계획!K49",
+            "9.경비계획!L15",
+            "9.경비계획!L16",
+            "9.경비계획!L26",
+            "9.경비계획!L27"
+          ],
+          "source": "fruit_fy1",
+          "in_school_form": true
+        }
+      ],
+      "notice_identity": "004e3d584694e7a1e6f62a423b692c851cb1d3a2a7eee0000c452d5114df4025",
+      "receipt_path": "out/receipt.json",
+      "record_refs": [
+        {
+          "collection": "outputs",
+          "id": "wb1"
+        }
+      ],
+      "typo_count": 21,
+      "method_count": 0,
+      "dismissible": true,
+      "redisplay_rule": "identity_changed",
+      "project_id": "sample-fruit-fy1"
+    }
+  ]
+}
