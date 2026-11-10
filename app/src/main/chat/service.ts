@@ -11,8 +11,14 @@ import { chatConnectionKey } from './jobs/key'
 import { JobRunner, type JobConnection, type JobRecord, type JobResult, type JobSpec, type RelayRequest } from './jobs'
 import { JobStore, type ConsentRecord } from './jobs/store'
 import { canonical } from './jobs/isolation'
+import { settleTemporary } from '../lanes/temporary'
 import type { ConversationOwner, ExecutionAccount } from './jobs/types'
-import type { LanePlan } from '../../shared/lanes'
+import type {
+  ConversationProposal, HandoffSource
+} from './jobs/conversation'
+import type { ArchivedChat, ArchivedChatSummary, LaneLine } from '../../shared/lanes-ipc'
+import { handoffLines } from '../lanes/handoff'
+import type { LaneEntry, LanePlan } from '../../shared/lanes'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
@@ -29,6 +35,19 @@ const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AU
 // 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
+
+/**
+ * §4-1·§4-2 인계 이음매 — `ConversationHandoff` 가 그대로 만족한다. 대화를 여는 일은 앱의
+ * 대화 통로(`ChatService`)가 알고, 묶음을 짓는 일은 러너 쪽(`conversation.ts`)이 안다.
+ */
+export interface HandoffSeam {
+  visible(): ConversationProposal[]
+  propose(source: HandoffSource): Promise<ConversationProposal | null>
+  continue(proposalId: string): Promise<ConversationOwner | null>
+  later(proposalId: string): boolean
+  archives(root: string): ArchivedChatSummary[]
+  archive(root: string, archiveId: string): ArchivedChat | null
+}
 
 export class ChatService {
   private snapshots = new Map<string, ChatSnapshot>()
@@ -135,6 +154,11 @@ export class ChatService {
   private pendingTimer: ReturnType<typeof setTimeout> | null = null
   /** 주문 수집 직렬화 — 러너의 `skill()` 이 폴더 인자를 받지 않는 계약 때문이다. */
   private collectChain: Promise<void> = Promise.resolve()
+  /**
+   * 이어 받기로 연 대화의 **이전** 기록. 넘기지 못해 새 대화를 접을 때 되돌린다 —
+   * 넘기지 않은 대화가 그 폴더의 대화인 척 남으면 학생 글·세션이 사라진다.
+   */
+  private handoffOpened = new Map<string, ChatSnapshot | null>()
   constructor(private opts: {
     skillSource: () => string; userData: string; env?: NodeJS.ProcessEnv
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
@@ -180,6 +204,12 @@ export class ChatService {
      * 실제 인스턴스는 ipc.ts가 쥐고 있어 이 단위에서는 연결할 수 없다 — 통합 몫.
      */
     invalidateHandoff?: (root: string) => void | Promise<void>
+    /**
+     * §4-1·§4-2 본대화 인계 — `ConversationHandoff` 인스턴스의 이음매. 없으면 인계 기능이
+     * 꺼진다(가짜 기본값 금지). 묶음을 짓는 일(`HandoffSource`)은 이 서비스가 하고, 넘기는
+     * 일(새 대화 열기·전환 확정)은 인스턴스가 한다.
+     */
+    handoff?: HandoffSeam
   }) {}
   private get writeFs(): SafeWriteFs { return this.opts.fs ?? { writeFileSync, renameSync, unlinkSync, readFileSync: (p) => readFileSync(p, 'utf8') } }
   /** PATH 앞자리에 둘 인터프리터 bin 경로 — 프로젝트 .venv 가 번들보다 우선한다. */
@@ -669,10 +699,25 @@ export class ChatService {
         this.runs.delete(this.key(root, provider))
         // 본대화 차례가 끝난 뒤에만 주문을 줍는다(설계 §3.3). 전달 차례는 주문을 줍지
         // 않는다 — 전달이 남긴 주문은 다음 학생 차례가 끝날 때 수집된다.
-        void this.collectJobs(s)
+        void this.collectJobs(s).then(() => this.settleTemporary(s.root))
       })
       return structuredClone(s)
     } catch (e) { release(); throw e }
+  }
+  /**
+   * §3 [이번만] 차례 끝(Q5) — `lanes/temporary.ts` 가 판정하고, 접었을 때만 기록이 남는다.
+   * 승인 배치(계정 단위가 아닌 폴더 단위)는 건드리지 않는다.
+   */
+  private settleTemporary(root: string): void {
+    const store = this.jobStoreInstance
+    if (!store) return
+    let records: JobRecord[] = []
+    try { records = this.jobRunner?.records() ?? [] } catch (error) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'temporary-scan', error: error instanceof Error ? error.message : String(error) }))
+    }
+    try { settleTemporary(store, records, root) } catch (error) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'temporary-settle', error: error instanceof Error ? error.message : String(error) }))
+    }
   }
   private async execute(s: ChatSnapshot, connection: AgentConnection, text: string, requestId: string) {
     const key = this.key(s.root, s.provider)
@@ -847,7 +892,7 @@ export class ChatService {
     const store = this.store()
     this.jobRunner = new JobRunner({
       stateDir: join(this.opts.userData, 'jobs'),
-      approvedPlan: root => store.approvedPlan(root),
+      approvedPlan: root => store.effectivePlan(root),
       // 동의는 앱 저장소가 정본이다 — 엔진이 준 계정 값 위에 앱의 동의만 얹는다.
       account: async company => {
         const account = await this.opts.jobAccount!(company)
@@ -1210,6 +1255,99 @@ export class ChatService {
     this.jobRoots.add(canonical(root))
     try { await this.jobRunner?.switchOwner(root, owner) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'switch-owner', error: error instanceof Error ? error.message : String(error) })) }
     await this.invalidate(root)
+  }
+
+  // ---------------------------------------------------------------- §4 본대화 인계
+
+  /** §4-1 줄에 쓸 제안 — 열린 것·넘기는 중·넘기지 못한 것. 이음매가 없으면 빈 배열. */
+  handoffLines(root: string): LaneLine[] {
+    const seam = this.opts.handoff
+    if (!seam) return []
+    try { return handoffLines(canonical(root), seam.visible()) } catch (error) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'handoff-lines', error: error instanceof Error ? error.message : String(error) }))
+      return []
+    }
+  }
+  /**
+   * §4-2 보관 대화 — 이 폴더에서 한도로 멈춰 **실제로 이어 받은** 것만. 읽기 전용.
+   * 이음매가 없으면 빈 배열(인계 기능 자체가 꺼져 있다).
+   */
+  handoffArchives(root: string): ArchivedChatSummary[] {
+    try { return this.opts.handoff?.archives(canonical(root)) ?? [] } catch (error) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'handoff-archives', error: error instanceof Error ? error.message : String(error) }))
+      return []
+    }
+  }
+  /** §4-2 보관 대화 한 개. 없으면 `null` — 화면은 "찾지 못했어요" 한 줄이다. */
+  handoffArchive(root: string, archiveId: string): ArchivedChat | null {
+    return this.opts.handoff?.archive(canonical(root), archiveId) ?? null
+  }
+  /**
+   * §4-1 [이어서 하기] — 실제로 넘겼을 때만 소유자가 바뀐다(전환 시작 → 주문 이전 → 소유자
+   * 교체는 `ConversationHandoff`·러너가 한다). 넘긴 뒤 `handoff-done` 기록을 남긴다.
+   */
+  async handoffContinue(root: string, proposalId: string): Promise<void> {
+    const seam = this.opts.handoff
+    if (!seam) throw new Error('이어 받기가 아직 앱에 이어지지 않았어요.')
+    const proposal = seam.visible().find(entry => entry.proposalId === proposalId && entry.root === canonical(root))
+    if (!proposal) throw new Error('이어 받을 대화를 찾지 못했어요.')
+    const owner = await seam.continue(proposalId)
+    if (!owner) throw new Error('지금은 이어 받을 수 없어요 — 상황이 바뀌었어요.')
+    await this.switchOwner(root, owner)
+    this.store().addEvent(root, {
+      id: randomUUID(), at: new Date().toISOString(), kind: 'handoff-done',
+      from: proposal.from,
+      to: { company: proposal.entry.company, model: proposal.entry.model ?? '', effort: proposal.entry.effort },
+      archiveId: proposal.proposalId
+    })
+  }
+  /** §4-1 [나중에] — 제안을 접는다. 기존 대화 오류 줄이 그대로 남는다. */
+  handoffLater(root: string, proposalId: string): void {
+    const seam = this.opts.handoff
+    if (!seam) throw new Error('이어 받기가 아직 앱에 이어지지 않았어요.')
+    if (!seam.visible().some(entry => entry.proposalId === proposalId && entry.root === canonical(root))) {
+      throw new Error('이어 받을 대화를 찾지 못했어요.')
+    }
+    seam.later(proposalId)
+  }
+  /**
+   * 이어 받을 대화를 **앱의 새 대화로** 연다 — 대상 회사의 그 폴더 대화 칸을 비우고 첫 차례를
+   * 보낸다(옛 대화 기록은 보관 묶음이 맡는다). 넘기지 못하면(`closeHandoff`) 비우기 전 상태로
+   * 되돌린다 — 넘기지 않은 대화가 그 폴더의 대화인 척 남지 않게.
+   */
+  async openHandoff(request: {
+    id: string; root: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal
+  }): Promise<ConversationOwner> {
+    const provider = request.entry.company
+    const key = this.key(request.root, provider)
+    const previous = this.snapshots.get(key)
+    this.handoffOpened.set(request.id, previous ? structuredClone(previous) : null)
+    await this.connections.get(key)?.stop()
+    this.connections.delete(key)
+    const fresh: ChatSnapshot = { root: request.root, provider, state: 'idle', messages: [] }
+    this.snapshots.set(key, fresh)
+    this.publish(fresh)
+    await this.send(request.root, provider, request.firstMessage, randomUUID())
+    const opened = this.snapshots.get(key)
+    if (!opened?.sessionId) throw new Error('이어 받은 대화의 세션을 열지 못했어요.')
+    return { id: request.id, sessionId: opened.sessionId, company: provider }
+  }
+  /** 넘기지 못한 새 대화를 접는다 — 대화 칸을 넘기기 전 기록으로 되돌린다. */
+  async closeHandoff(owner: ConversationOwner): Promise<void> {
+    const parsed = this.ownerOf(owner)
+    if (!parsed) return
+    const key = this.key(parsed.root, parsed.provider)
+    await this.connections.get(key)?.stop()
+    this.connections.delete(key)
+    const previous = this.handoffOpened.get(owner.id)
+    this.handoffOpened.delete(owner.id)
+    this.runs.delete(key)
+    if (previous) {
+      this.snapshots.set(key, previous)
+      this.publish(previous)
+    } else {
+      this.snapshots.delete(key)
+    }
   }
   /** 본대화만 멈춘다. `JobRunner.stop` 이 이 자리를 부르므로 러너로 되돌아가지 않는다. */
   private async stopMain(root: string, provider: Provider) {

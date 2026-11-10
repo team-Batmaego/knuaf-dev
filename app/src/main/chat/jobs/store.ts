@@ -283,6 +283,14 @@ export class JobStore {
     return plan ? structuredClone(plan) : null
   }
 
+  /**
+   * 주문 판정에 쓰는 지금 배치 — [이번만]이 있으면 그 값, 없으면 승인 배치. 승인 기록은
+   * 건드리지 않는다(Q5): [이번만]이 끝나면 이 함수가 다시 승인 배치를 돌려준다.
+   */
+  effectivePlan(root: string): LanePlan | null {
+    return this.temporary(root)?.plan ?? this.approvedPlan(root)
+  }
+
   revokePlan(root: string): void {
     const key = canonical(root)
     if (this.state.approvals[key]) {

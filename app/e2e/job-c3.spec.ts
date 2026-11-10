@@ -38,7 +38,9 @@ function fixture() {
     handoff: (patch: Partial<ConversationHandoffOptions> = {}) => {
       const opened: ConversationOwner[] = [], closed: ConversationOwner[] = [], activated: ConversationOwner[] = []
       const source: HandoffSource = { rootConversationId: 'root-conv', owner, root,
-        entry: { company: 'claude', model: 'opus', effort: null, how: 'main' }, reason: 'limit', students: [], lastAssistant: null,
+        entry: { company: 'claude', model: 'opus', effort: null, how: 'main' }, reason: 'limit',
+        // 학생 글이 0건인 묶음은 인계가 아니다(REVIEW-C0 중요 4) — 픽스처도 한 건을 싣는다.
+        students: [{ text: '앞 대화의 마지막 학생 차례', attachments: [] }], lastAssistant: null,
         beforeHashes: {}, afterHashes: {}, approvedPlan: plan, jobs: [], skillVersion: 'v1', sourceLocation: '/private/chat' }
       const options: ConversationHandoffOptions = { stateDir: join(base, 'handoff'), maxBytes: 10000,
         account: company => account(company), open: async request => { const target: ConversationOwner = { id: request.id, sessionId: `s-${request.id}`, company: request.entry.company }; opened.push(target); return target },

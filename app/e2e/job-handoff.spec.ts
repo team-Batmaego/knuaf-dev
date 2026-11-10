@@ -59,14 +59,15 @@ for (const reason of ['unknown', 'auth'] as const) test(`main ${reason} never of
   expect(await f.handoff.propose(f.source)).toBeNull(); expect(f.opened).toEqual([])
 })
 
-test('mechanical packet shrinks in documented order and keeps full archive reference and immutable metadata', () => {
+test('mechanical packet shrinks in documented order, keeps the last student message, and keeps full archive reference', () => {
   const f = fixture()
   f.source.students[0].text = 'OLD'.repeat(5000)
-  f.source.students[1].text = 'NEW'.repeat(5000)
+  f.source.students[1].text = 'NEW'
   f.source.lastAssistant!.text = 'BEGIN' + 'middle'.repeat(3000) + 'END'
   const bundle = buildHandoffBundle(f.source, '/private/archive.json', 1600)!
   expect(Buffer.byteLength(JSON.stringify(bundle))).toBeLessThanOrEqual(1600)
-  expect(bundle.students).toEqual([])
+  // 오래된 학생 글만 빠지고 마지막 한 건은 남는다 — 0건 묶음은 인계가 아니다.
+  expect(bundle.students).toEqual([{ text: 'NEW', attachments: [] }])
   expect(bundle.truncated).toEqual(['students', 'lastAssistant'])
   expect(bundle.lastAssistant!.text.startsWith('BEGIN')).toBe(true)
   expect(bundle.lastAssistant!.text.endsWith('END')).toBe(true)
@@ -75,9 +76,18 @@ test('mechanical packet shrinks in documented order and keeps full archive refer
   expect(buildHandoffBundle(f.source, '/private/archive.json', 50)).toBeNull()
 })
 
-test('oversize packet does not open a new conversation; full archive remains', async () => {
+test('a packet with zero student messages is never a successful handoff', () => {
+  const f = fixture()
+  f.source.students = []
+  expect(buildHandoffBundle(f.source, '/private/archive.json', 10_000)).toBeNull()
+})
+
+test('oversize packet offers [새 대화로 시작] instead of continuation; full archive remains', async () => {
   const f = fixture(); f.options.maxBytes = 10
-  await expect(f.handoff.propose(f.source)).rejects.toThrow('너무 길어')
+  const p = (await f.handoff.propose(f.source))!
+  expect(p.tooLong).toBe(true)
+  expect(p.bundlePath).toBeNull(); expect(p.bundleHash).toBeNull()
+  expect(await f.handoff.continue(p.proposalId)).toBeNull()
   expect(f.opened).toEqual([])
 })
 
@@ -87,7 +97,7 @@ test('account change invalidates displayed choice and refreshes; packet modifica
   expect(await f.handoff.continue(p.proposalId)).toBeNull()
   const replacement = f.handoff.proposals()[0]
   expect(replacement.accountId).toBe('replacement'); expect(f.opened).toEqual([])
-  writeFileSync(replacement.bundlePath, 'changed')
+  writeFileSync(replacement.bundlePath!, 'changed')
   await expect(f.handoff.continue(replacement.proposalId)).rejects.toThrow('묶음이 바뀌었어요')
   expect(f.opened).toEqual([])
 })
