@@ -215,16 +215,14 @@ export const useConnect = create<ConnectState>((set, get) => ({
     stopPoll(provider)
     clearPoll(globalPolls, provider)
     set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: true } }))
-    const r = await window.knuaf.connect.login(provider) as Reply<true>
-    // 그 사이에 이 공급자를 취소했거나 새 시도가 시작됐으면 이 응답은 지금 화면의 것이 아니다 —
-    // 상태를 바꾸지도, 폴링을 다시 만들지도 않는다(P2-R1-04).
-    if (!loginAttemptLive(provider, mine)) return
-    if ('error' in r) {
-      set({ loggingIn: { ...get().loggingIn, [provider]: false } })
-      set(one(provider, { state: 'failed', detail: r.error?.message ?? '', version: null }))
-      return
-    }
-    // 로그인이 끝나면 기다림 표시도 내린다.
+    /**
+     * 완료 감시는 **로그인 IPC 응답을 기다리지 않고** 여기서 시작한다. `connect:login` 은
+     * main 이 브라우저를 여는 일(`shell.openExternal`)까지 기다리는데, 그 왕복이 늦으면
+     * (윈도우 CI 에서 관측) 감시가 아예 없어서 `loggingIn` 이 풀리지 않는다 — 화면은
+     * "로그인 중"인데 아무도 다시 묻지 않는다. 감시를 먼저 두면 로그인 서버가 완료를
+     * 알린 순간 다음 tick 이 집어 간다(윈도우 codex-relogin 멈춤, RT2).
+     * 중복 tick 은 `inFlight` 가드가 막고, 취소·새 시도는 이 타이머를 지운다.
+     */
     poll(globalPolls, provider, async () => {
       if (!loginAttemptLive(provider, mine)) return true
       await get().refresh(provider)
@@ -233,6 +231,25 @@ export const useConnect = create<ConnectState>((set, get) => ({
       if (done) set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: false } }))
       return done
     })
+    let r: Reply<true>
+    try { r = await window.knuaf.connect.login(provider) as Reply<true> }
+    catch (error) {
+      // IPC 자체가 거절했다(창이 닫히는 중 등) — 감시를 남기면 표시가 안 내려간다.
+      if (loginAttemptLive(provider, mine)) {
+        clearPoll(globalPolls, provider)
+        set({ loggingIn: { ...get().loggingIn, [provider]: false } })
+      }
+      throw error
+    }
+    // 그 사이에 이 공급자를 취소했거나 새 시도가 시작됐으면 이 응답은 지금 화면의 것이 아니다 —
+    // 상태를 바꾸지도, 폴링을 다시 만들지도 않는다(P2-R1-04).
+    if (!loginAttemptLive(provider, mine)) return
+    if ('error' in r) {
+      // 로그인 자체가 실패했으면 감시할 것도 없다.
+      clearPoll(globalPolls, provider)
+      set({ loggingIn: { ...get().loggingIn, [provider]: false } })
+      set(one(provider, { state: 'failed', detail: r.error?.message ?? '', version: null }))
+    }
   },
   cancel: async (provider) => {
     invalidateLoginAttempt(provider)   // 이 공급자의 진행 중 로그인 응답을 무효로 만든다
