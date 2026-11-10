@@ -22,9 +22,9 @@ import { canonical } from '../chat/jobs/isolation'
 import type { JobStore } from '../chat/jobs/store'
 import type { ExecutionAccount, JobRecord } from '../chat/jobs/types'
 import {
-  LaneFailure, cardStatus, decideCard, disable, pickReview, reviewModels, settingsCard,
-  type CardDeps
+  cardStatus, decideCard, disable, pickReview, reviewModels, settingsCard, type CardDeps
 } from './cards'
+import { LaneFailure } from './failure'
 import { consentRows, maskAccount, type LaneAccountView } from './snapshot'
 
 /** IPC 등록 통로 — 시험에서 가짜 `ipcMain` 을 끼울 수 있게 최소만 요구한다. */

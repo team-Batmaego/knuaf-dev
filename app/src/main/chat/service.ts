@@ -12,6 +12,7 @@ import { JobRunner, type JobConnection, type JobRecord, type JobResult, type Job
 import { JobStore, type ConsentRecord } from './jobs/store'
 import { canonical } from './jobs/isolation'
 import { settleTemporary } from '../lanes/temporary'
+import { LaneFailure } from '../lanes/failure'
 import type { ConversationOwner, ExecutionAccount } from './jobs/types'
 import type {
   ConversationProposal, HandoffSource
@@ -1340,11 +1341,11 @@ export class ChatService {
    */
   async handoffContinue(root: string, proposalId: string): Promise<void> {
     const seam = this.opts.handoff
-    if (!seam) throw new Error('이어 받기가 아직 앱에 이어지지 않았어요.')
+    if (!seam) throw new LaneFailure('unavailable', '이어 받기가 아직 앱에 이어지지 않았어요.')
     const proposal = seam.visible().find(entry => entry.proposalId === proposalId && entry.root === canonical(root))
-    if (!proposal) throw new Error('이어 받을 대화를 찾지 못했어요.')
+    if (!proposal) throw new LaneFailure('not-found', '이어 받을 대화를 찾지 못했어요.')
     const owner = await seam.continue(proposalId)
-    if (!owner) throw new Error('지금은 이어 받을 수 없어요 — 상황이 바뀌었어요.')
+    if (!owner) throw new LaneFailure('unavailable', '지금은 이어 받을 수 없어요 — 상황이 바뀌었어요.')
     await this.switchOwner(root, owner)
     this.store().addEvent(root, {
       id: randomUUID(), at: new Date().toISOString(), kind: 'handoff-done',
@@ -1356,9 +1357,9 @@ export class ChatService {
   /** §4-1 [나중에] — 제안을 접는다. 기존 대화 오류 줄이 그대로 남는다. */
   handoffLater(root: string, proposalId: string): void {
     const seam = this.opts.handoff
-    if (!seam) throw new Error('이어 받기가 아직 앱에 이어지지 않았어요.')
+    if (!seam) throw new LaneFailure('unavailable', '이어 받기가 아직 앱에 이어지지 않았어요.')
     if (!seam.visible().some(entry => entry.proposalId === proposalId && entry.root === canonical(root))) {
-      throw new Error('이어 받을 대화를 찾지 못했어요.')
+      throw new LaneFailure('not-found', '이어 받을 대화를 찾지 못했어요.')
     }
     seam.later(proposalId)
   }

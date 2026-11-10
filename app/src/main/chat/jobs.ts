@@ -382,6 +382,9 @@ export class JobRunner {
   }
   private replaceOwner(root: string, owner: ConversationOwner): JobRecord[] {
     for (const record of this.state.jobs) if (record.root === root) record.owner = structuredClone(owner)
+    // 공개 주문서도 새 소유자를 알려야 한다 — 학생(스킬)이 읽는 파일이 옛 대화를 가리키면
+    // 결과를 엉뚱한 대화로 넘기려 한다.
+    for (const record of this.state.jobs) if (record.root === root) this.publish(record)
     const latest = new Map<string, JobRecord>()
     for (const record of this.state.jobs) if (record.root === root) latest.set(record.rootJobId, record)
     const pending = [...latest.values()].filter(record => record.status === 'limit' && !this.state.delivered.includes(record.rootJobId))

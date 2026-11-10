@@ -17,25 +17,22 @@ import type {
 import { REVIEW_EFFORT, WORK_LANES, isCrossProviderModelId, judgePlan, proposeLaneRequest, type LaneProposal } from '../../shared/lanes'
 import type {
   CardAction, CardDecision, CardInvalidReason, CardRow, CardState, CardVariant, FeeNotice, LaneCard,
-  LanesErrorCode, ModelRef, ReviewModelGroup
+  ModelRef, ReviewModelGroup
 } from '../../shared/lanes-ipc'
 import type { JobRunner } from '../chat/jobs'
 import type { ExecutionAccount } from '../chat/jobs/types'
 import { canonical } from '../chat/jobs/isolation'
 import type { JobStore, StoredCard } from '../chat/jobs/store'
 import { maskAccount, publicCard, type LaneAccountView } from './snapshot'
+import { LaneFailure } from './failure'
+
+/** 카드 경로 밖(핸들러·시험)도 같은 형을 쓴다 — 정의는 `./failure` 한 곳. */
+export { LaneFailure }
 import { laneAccounts, recommendation, type LaneRecommendation } from './source'
 
 /** [이번만]이 묶이는 차례 — 쉬는 중에 누르면 학생이 다음에 보내는 차례다(계약 §8-10). */
 const NEXT_STUDENT_TURN = 'next-student-turn'
 
-/** 카드 경로가 계약의 `LanesReply` 오류로 돌려줄 실패. 화면 값이 틀린 경우도 여기로 온다. */
-export class LaneFailure extends Error {
-  constructor(readonly code: LanesErrorCode, message: string) {
-    super(message)
-    this.name = 'LaneFailure'
-  }
-}
 
 /** 이 폴더의 카드를 짓고 소비하는 데 필요한 이음매. 계정 조회는 `laneAccounts` 와 같은 모양이다. */
 export interface CardDeps {

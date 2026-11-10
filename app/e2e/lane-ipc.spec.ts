@@ -256,3 +256,35 @@ test('a missing design seam reports unavailable and leaves the card open', async
   expect(f.store.approvedPlan(f.root)).toBeNull()
   expect(card.cardId).toEqual(expect.any(String))
 })
+
+// ⑧ 동의 거두기는 저장과 응답에 그대로 남는다 — 주문 정지까지의 연결은 `lane-ipc-wiring` 이 본다.
+test('revoking consent keeps the record and reports withdrawn through IPC', async () => {
+  const f = fixture()
+  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-account-id', true) as LanesReply<{ state: string }>)
+  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-account-id', false) as LanesReply<{ state: string }>)
+  const row = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ accountId: string; state: string }[]>)
+  expect(row.find(entry => entry.accountId === 'codex-account-id')?.state).toBe('withdrawn')
+  // 동의 기록은 지우지 않는다 — 거둠도 날짜와 함께 남는다(Q4).
+  expect(f.store.consent('codex', 'codex-account-id')?.at).toEqual(expect.any(String))
+})
+
+// ⑨ 전달 원문은 요청할 때만 나간다 — 묶음(`LanesSnapshot`)에는 원문이 없다.
+test('the bundle never carries the delivery text; only the explicit request returns it', async () => {
+  const f = fixture()
+  f.store.saveDeliveryText('job-a', '자료 담당(ChatGPT·astra·기본) 작업 끝 — 출력 `jobs/job-a/out/result.md`')
+  const bundle = resultOf(await f.ipc.call(LANES_INVOKE.snapshot, f.root) as LanesReply<{ events: unknown[]; lines: unknown[] }>)
+  expect(JSON.stringify(bundle)).not.toContain('출력 `jobs/job-a/out/result.md`')
+  const detail = resultOf(await f.ipc.call(JOBS_INVOKE.deliveryText, f.root, 'job-a') as LanesReply<{ text: string | null }>)
+  expect(detail.text).toContain('출력 `jobs/job-a/out/result.md`')
+})
+
+// ⑩ [다시 확인]·[나중에] 같은 읽기·무상태 요청은 묶음을 다시 지어 보내지 않는다.
+test('read-only requests never push a bundle', async () => {
+  const f = fixture()
+  f.sent.length = 0
+  resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<unknown[]>)
+  resultOf(await f.ipc.call(LANES_INVOKE.reviewModels, f.root) as LanesReply<unknown[]>)
+  resultOf(await f.ipc.call(LANES_INVOKE.archives, f.root) as LanesReply<unknown[]>)
+  resultOf(await f.ipc.call(JOBS_INVOKE.deliveryText, f.root, 'job-a') as LanesReply<unknown>)
+  expect(f.sent).toEqual([])
+})
