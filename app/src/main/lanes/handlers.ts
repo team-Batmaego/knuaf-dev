@@ -232,12 +232,25 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     setConsent: (company: Provider, accountId: string, on: boolean) => reply(null, async () => {
       const provider = providerOf(company)
       if (typeof accountId !== 'string' || !accountId) throw new LaneFailure('not-found', '계정을 찾지 못했어요.')
-      await refreshAccounts()
-      // [C1-07] 동의는 **지금 확인된 계정**에만 켠다. 처음 보는 id 로 켜면 나중에 그 계정으로
-      // 로그인했을 때 저장값이 곧바로 "동의함"으로 읽힌다. 거두기는 과거 계정에도 허용한다.
-      if (on === true && accounts.get(provider)?.accountId !== accountId) {
-        throw new LaneFailure('not-found', '지금 로그인한 계정이 아니에요.')
+      // [C1-07] 동의를 켜는 자리는 **권한을 새로 주는** 자리다 — 카드 적용(C1-06)과 같은 기준을
+      // 쓴다. 예전에는 15초 캐시와 id 일치만 봐서, 실제 계정이 B 로 바뀐 뒤에도 캐시된 A 의
+      // 동의가 저장됐고 연결되지 않은 API 계정에도 성공 응답이 나갔다. 세 가지를 **지금** 본다:
+      // ① 캐시를 건너뛴 관측(모르면 닫는다) ② 실제로 연결됨 ③ 그 계정 요금제로 맡길 수 있음.
+      const observe = deps.freshAccount ?? deps.account
+      const observed = await observe(provider)
+      if (observed) accounts.set(provider, observed)
+      else accounts.delete(provider)
+      if (on === true) {
+        if (!observed) throw new LaneFailure('not-found', '지금 로그인한 계정을 확인하지 못했어요.')
+        if (!observed.connected) throw new LaneFailure('not-found', '지금 로그인한 계정이 아니에요.')
+        if (observed.accountId !== accountId) throw new LaneFailure('not-found', '지금 로그인한 계정이 아니에요.')
+        // 구독이 아닌 경로(Claude API 키 등)로는 맡기지 않는다 — 동의만 남으면 화면이 "동의함"을
+        // 그리는데 주문은 열리지 않는다(`judgePlan` 이 주문 판정의 정본과 같은 함수다).
+        if (!judgePlan(observed.account).usable) {
+          throw new LaneFailure('unavailable', '이 계정의 요금제로는 작업을 맡길 수 없어요.')
+        }
       }
+      // 거두기는 과거 계정에도 허용한다 — 지난 동의를 되돌릴 길을 막으면 안 된다.
       deps.setConsent(provider, accountId, on === true)
       return consentRow(provider, accountId)
     }),

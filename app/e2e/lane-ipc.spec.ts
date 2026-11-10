@@ -39,16 +39,39 @@ function fixture() {
   const userData = mkdtempSync(join(tmpdir(), 'kd-ipc-ud-'))
   const store = new JobStore(join(userData, 'jobs'))
   const accountIds: Record<Provider, string> = { claude: 'claude-account-id', codex: 'codex-account-id' }
-  const account = async (company: Provider): Promise<ExecutionAccount> => ({
-    accountId: accountIds[company],
+  /**
+   * [C1-07] 캐시된 A 와 실제 B 를 갈라 놓기 위한 손잡이.
+   * `cached` 는 15초 캐시가 돌려주는 값, `observed` 는 캐시를 건너뛴 관측이다.
+   */
+  const state = {
+    observed: {
+      claude: { connected: true, usable: true },
+      codex: { connected: true, usable: true }
+    } as Record<Provider, { connected: boolean; usable: boolean }>,
+    /** 지금 관측되는 계정 id — 처음에는 로그인한 계정과 같다. */
+    observedId: { ...accountIds } as Record<Provider, string>
+  }
+  const snapshotOf = (company: Provider, accountId: string, usable: boolean): ExecutionAccount => ({
+    accountId,
     connected: true,
     account: company === 'claude'
-      ? { company: 'claude', apiKeySource: 'none', subscriptionType: 'max',
-        models: ['opus', 'sonnet'].map(model => ({ model, name: model, efforts: ['low', 'high'] })) }
-      : { company: 'codex', accountType: 'chatgpt',
-        models: ['gpt-6.1-astra', 'gpt-6.1-sol', 'gpt-6.1-terra'].map(model => ({ model, name: model, efforts: ['low', 'high'] })) },
+      ? {
+        company: 'claude', apiKeySource: usable ? 'none' : 'ANTHROPIC_API_KEY', subscriptionType: 'max',
+        models: ['opus', 'sonnet'].map(model => ({ model, name: model, efforts: ['low', 'high'] }))
+      }
+      : {
+        company: 'codex', accountType: usable ? 'chatgpt' : 'apikey',
+        models: ['gpt-6.1-astra', 'gpt-6.1-sol', 'gpt-6.1-terra'].map(model => ({ model, name: model, efforts: ['low', 'high'] }))
+      },
     consented: false,
     usage: 'allowed'
+  })
+  const account = async (company: Provider): Promise<ExecutionAccount> =>
+    snapshotOf(company, accountIds[company], true)
+  /** 캐시를 건너뛴 관측 — `state.observed` 를 따른다. */
+  const freshAccount = async (company: Provider): Promise<ExecutionAccount> => ({
+    ...snapshotOf(company, state.observedId[company], state.observed[company].usable),
+    connected: state.observed[company].connected
   })
   const records: JobRecord[] = []
   const stopped: string[] = []
@@ -112,6 +135,7 @@ function fixture() {
   const handlers = registerLaneHandlers({
     ipc, hub, store, runner,
     account,
+    freshAccount,
     mainCompany: 'claude',
     // [C1-08] 허용 폴더 경계 — 이 시험은 한 폴더만 연다.
     allowed: folder => folder === root,
@@ -131,7 +155,7 @@ function fixture() {
       deliveryText: (_root, jobId) => store.deliveryTextOf(jobId)
     }
   })
-  return { ipc, handlers, store, root, elsewhere, sent, stopped, records, retried: () => retried, accountIds, hub }
+  return { ipc, handlers, store, root, elsewhere, sent, stopped, records, retried: () => retried, accountIds, hub, state }
 }
 
 const resultOf = <T,>(reply: LanesReply<T>): T => {
@@ -441,7 +465,7 @@ test('fix C1-01: an unknown company never reaches the account probe', async () =
   hub.dispose()
 })
 
-// [C1-07] 동의 켜기는 **지금 확인된 계정**에만 — 처음 보는 id 로는 저장하지 않는다.
+// [C1-07] 동의 켜기는 **지금 확인된 계정**에만 — 캐시된 값·미연결·비구독이면 저장하지 않는다.
 test('fix C1-07: consent cannot be granted to an account that is not logged in', async () => {
   const f = fixture()
   const reply = await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'never-seen-account', true) as LanesReply<unknown>
@@ -453,6 +477,38 @@ test('fix C1-07: consent cannot be granted to an account that is not logged in',
     LANES_INVOKE.setConsent, 'codex', 'past-account', false
   ) as LanesReply<{ state: string }>)
   expect(revoked.state).toBe('withdrawn')
+})
+
+// [C1-07] 판정서 재현: 캐시는 A, 실제 계정은 B. 예전에는 캐시된 A 의 동의가 저장됐다.
+test('fix C1-07: a stale cached account cannot authorize consent for the account that replaced it', async () => {
+  const f = fixture()
+  // 캐시(account)는 계속 A 를 말하지만, 캐시를 건너뛴 관측은 B 다.
+  f.state.observedId.claude = 'replaced-account'
+  const bogus = await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true) as LanesReply<unknown>
+  expect(errorOf(bogus).code).toBe('not-found')
+  expect(f.store.consent('claude', 'claude-account-id')).toBeNull()
+  // 새 계정(B)에는 켤 수 있다 — 다만 관측이 그것을 확인해 줄 때만.
+  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'replaced-account', true) as LanesReply<unknown>)
+  expect(f.store.consent('claude', 'replaced-account')?.state).toBe('agreed')
+})
+
+// [C1-07] 판정서 재현: 연결되지 않았거나 구독이 아닌 경로(API 키)에는 동의가 저장되지 않는다.
+test('fix C1-07: consent is refused for a disconnected account and for a non-subscription login', async () => {
+  const f = fixture()
+  f.state.observed.claude = { connected: false, usable: true }
+  expect(errorOf(await f.ipc.call(
+    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true
+  ) as LanesReply<unknown>).code).toBe('not-found')
+  f.state.observed.claude = { connected: true, usable: false }
+  expect(errorOf(await f.ipc.call(
+    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true
+  ) as LanesReply<unknown>).code).toBe('unavailable')
+  expect(f.store.consents()).toEqual([])
+  // 거두기는 여전히 열려 있다 — 권한을 주는 길만 닫는다.
+  f.store.setConsent('claude', 'claude-account-id', true)
+  expect(resultOf(await f.ipc.call(
+    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', false
+  ) as LanesReply<{ state: string }>).state).toBe('withdrawn')
 })
 
 // [C1-16] 없는 폴더의 조회는 **응답**(`LanesReply`)으로 돌아온다 — 예외로 IPC 밖에 새지 않는다.
