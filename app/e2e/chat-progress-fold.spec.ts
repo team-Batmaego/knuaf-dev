@@ -74,6 +74,49 @@ test('한 턴의 중간말을 접고, 펼치면 원문이 전부 보인다', asy
 })
 
 /**
+ * Roh v0.6.2 권고1 — 시스템 알림이 낀 턴에서 묶음이 하나면 B 가 알림보다 먼저 보인다.
+ * 묶음을 알림에서 끊으면 대화 줄 순서가 A → 알림 → B → 최종 답 그대로 선다.
+ */
+test('시스템 알림 앞뒤의 중간말은 각자의 자리에서 접혀 알림을 사이에 둔다', async () => {
+  const dir = scratch()
+  const root = questionProject()
+  seedChat(root, [
+    { id: 'u1', role: 'user', text: '전공은 원예환경시스템전공이에요', at: at(1), delivery: 'sent' },
+    { id: 'a1', role: 'assistant', text: '전공 바인딩을 등록했습니다.', at: at(2) },
+    { id: 's1', role: 'system', text: '규칙집이 갱신됐어요.', at: at(3) },
+    { id: 'a2', role: 'assistant', text: '지원 범위를 다시 읽겠습니다.', at: at(4) },
+    { id: 'a3', role: 'assistant', text: '조사 결과입니다. 작목을 골라 주세요.', at: at(5) }
+  ])
+  const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
+  try {
+    await openProject(page, root, splitReady)
+    await expect(page.locator('.progress-fold'), '묶음이 둘로 갈리지 않았다').toHaveCount(2, { timeout: 30_000 })
+    const rows = await page.locator('.chat-thread > .progress-fold, .chat-thread > .chat-msg').evaluateAll((els) =>
+      els.map((e) => ({
+        kind: e.classList.contains('progress-fold') ? 'fold'
+          : e.classList.contains('assistant') ? 'assistant'
+            : e.classList.contains('system') ? 'system' : 'user',
+        text: (e.textContent ?? '').replace(/\s+/g, ' ').trim()
+      })))
+    // 예전에는 A·B 가 한 묶음으로 A 자리에 서서 B 가 알림보다 먼저 보였다.
+    expect(rows.map((r) => r.kind)).toEqual(['user', 'fold', 'system', 'fold', 'assistant'])
+    expect(rows[2].text).toContain('규칙집이 갱신됐어요.')
+    await shot(page, 'system-boundary-closed')
+
+    const heads = page.locator('.progress-fold-head')
+    await heads.nth(0).click()
+    await expect(page.locator('.progress-fold').nth(0)).toContainText('전공 바인딩을 등록했습니다.')
+    await expect(page.locator('.progress-fold').nth(0)).not.toContainText('지원 범위를 다시 읽겠습니다.')
+    await heads.nth(1).click()
+    await expect(page.locator('.progress-fold').nth(1)).toContainText('지원 범위를 다시 읽겠습니다.')
+    await expect(page.locator('.progress-fold').nth(1)).not.toContainText('전공 바인딩을 등록했습니다.')
+    await shot(page, 'system-boundary-open')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+/**
  * 형님 화면의 실제 실패 모양 — 2,000자 넘는 최종 답(표·`###` 포함)이 "더 보기"로 잘리고,
  * 그 안 1,400자쯤에 `[Q3]` 질문 블록이 있다. 예전 코드는 이 말을 `zone.kind === 'question'`
  * 으로만 접어서 형식 질문이 잘린 본문과 카드에 두 번 보였다.

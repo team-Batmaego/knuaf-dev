@@ -47,6 +47,42 @@ test('학생 말 없이 이어진 대화는 아무것도 접지 않는다', () =
   expect(progressGroups([msg('a1', 'assistant', '', 1), msg('a2', 'assistant', '', 2)])).toEqual([])
 })
 
+test('시스템 알림을 사이에 둔 앞말·뒤말은 묶음을 가르고, 시간순이 A → 알림 → B 로 선다', () => {
+  // Roh 권고1 반례: 학생 → A → 시스템(규칙집 갱신) → B → 최종 답.
+  // 한 묶음이면 묶음이 A 의 시각에 서서, 펼쳤을 때 B 가 알림보다 먼저 보인다.
+  const messages = [
+    msg('u1', 'user', '질문', 1),
+    msg('a1', 'assistant', 'A: 살펴볼게요', 2),
+    msg('s1', 'system', '규칙집이 갱신됐어요', 3),
+    msg('a2', 'assistant', 'B: 이어서 볼게요', 4),
+    msg('a3', 'assistant', '최종 답', 5)
+  ]
+  const groups = progressGroups(messages)
+  expect(groups).toHaveLength(2)
+  expect([...groups[0].ids]).toEqual(['a1'])
+  expect(groups[0].at).toBe(Date.parse(at(2)))
+  expect([...groups[1].ids]).toEqual(['a2'])
+  expect(groups[1].at).toBe(Date.parse(at(4)))
+  // 화면(`Chat.tsx`)은 묶음과 시스템 줄을 각자의 at 으로 정렬한다.
+  const rows = [
+    ...groups.map((g) => ({ id: [...g.ids][0], t: g.at })),
+    { id: 's1', t: Date.parse(at(3)) },
+    { id: 'a3', t: Date.parse(at(5)) }
+  ]
+  expect(rows.sort((x, y) => x.t - y.t).map((r) => r.id)).toEqual(['a1', 's1', 'a2', 'a3'])
+})
+
+test('알림 뒤에 답 하나만 와도 그 답은 펴고 앞말만 접는다', () => {
+  const groups = progressGroups([
+    msg('u1', 'user', '질문', 1),
+    msg('a1', 'assistant', 'A', 2),
+    msg('s1', 'system', '알림', 3),
+    msg('a2', 'assistant', '최종 답', 4)
+  ])
+  expect(groups).toHaveLength(1)
+  expect([...groups[0].ids]).toEqual(['a1'])
+})
+
 const FORM = `앞 설명 문장입니다.
 
 [Q2] 기본 계획
@@ -145,4 +181,35 @@ test('표가 한도 뒤에 있으면 문단 경계에서 자르고, 한 줄이 �
   const fenced = cutAtLine(fence, 1000)
   expect(fenced.length).toBeLessThanOrEqual(1000)
   expect(fenced).toContain('```py')
+})
+
+test('한도가 코드 블록 한가운데에 걸리면 완전한 코드 줄에서 자르고 펜스를 닫는다', () => {
+  // Roh 권고2 반례: 첫 글자부터 펜스인 긴 코드 — 한도에서 그냥 자르면 명령이 한가운데서 끊긴다.
+  const body = Array.from({ length: 400 }, (_, i) => `print("줄 ${i}")`)
+  const text = ['```bash', ...body, '```'].join('\n')
+  expect(text.length).toBeGreaterThan(2000)
+
+  const cut = cutAtLine(text, 2000)
+  expect(cut.length).toBeLessThanOrEqual(2000)
+  const lines = cut.split('\n')
+  expect(lines[0]).toBe('```bash')
+  // 잘린 마지막 코드 줄은 온전한 명령이다 — 반쯤 잘린 `print("줄 1` 같은 조각이 없다.
+  const lastCode = lines[lines.length - 3]
+  expect(lastCode).toMatch(/^print\("줄 \d+"\)$/)
+  // 닫는 펜스 + 미완성 표시.
+  expect(lines[lines.length - 2]).toBe('```')
+  expect(cut).toContain('더 보기')
+  // 원문에서 이 줄까지의 접두다(내용을 지어내지 않는다).
+  expect(text.startsWith(lines.slice(0, -3).join('\n'))).toBe(true)
+  // 코드 한 줄이 한도보다 길면 반쪽 명령도 빈 펜스도 남기지 않고, 잘렸음만 밝힌다.
+  const wide = cutAtLine('```bash\n' + 'y'.repeat(4000), 2000)
+  expect(wide.length).toBeLessThanOrEqual(2000)
+  expect(wide).toBe('… (이하 더 보기)')
+  // 한도가 코드 줄 경계에 딱 맞아도 열린 펜스를 남기지 않는다.
+  const tight = Array.from({ length: 60 }, (_, i) => `print("줄 ${i}")`)
+  const tightText = ['```bash', ...tight, '```'].join('\n')
+  const tightEnd = tightText.split('\n').slice(0, 20).join('\n').length
+  const tightCut = cutAtLine(tightText, tightEnd)
+  expect(tightCut.length).toBeLessThanOrEqual(tightEnd)
+  expect(tightCut.endsWith('```\n… (이하 더 보기)')).toBe(true)
 })
