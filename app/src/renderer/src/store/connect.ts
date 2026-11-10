@@ -52,9 +52,20 @@ type Reply<T> = { result: T } | { error: { code: string; message: string } }
 /** 로그인 왕복은 브라우저에서 오래 걸린다 — 3초마다, 3분까지. */
 const POLL_MS = 3_000
 const POLL_LIMIT_MS = 180_000
+/**
+ * 한 tick 이 매달릴 수 있는 시간. 상태 조회 IPC 가 영영 안 끝나도 감시 전체를 잠그지 않는다 —
+ * 이 상한을 넘긴 tick 은 버리고 다음 간격에 새로 묻는다(그 사이 이미 나간 요청은 취소할 수
+ * 없으므로 잠시 겹칠 수 있다. 겹침보다 "영영 안 묻는 것"이 훨씬 나쁘다).
+ */
+const POLL_TICK_LIMIT_MS = 15_000
 
 /** 로그인 감시 타이머 핸들 — 런타임(DOM/Node)에 따라 모양이 달라 이름을 한 번만 붙인다. */
-type PollTimer = { interval: ReturnType<typeof setInterval>; deadline: ReturnType<typeof setTimeout> }
+type PollTimer = {
+  interval?: ReturnType<typeof setInterval>
+  deadline?: ReturnType<typeof setTimeout>
+  /** 지금 돌고 있는 tick 의 안전 타이머 — 감시를 지울 때 함께 지운다. */
+  guard?: ReturnType<typeof setTimeout>
+}
 
 /**
  * 폴더 대화의 감시와 전역 계정 감시는 수명이 다르다. 폴더를 바꿀 때 `useChat.load`
@@ -62,41 +73,55 @@ type PollTimer = { interval: ReturnType<typeof setInterval>; deadline: ReturnTyp
  */
 const polls = new Map<Provider, PollTimer>()
 const globalPolls = new Map<Provider, PollTimer>()
-// A replaced poll cannot cancel an IPC already in flight; do not overlap it with the next poll.
-const pendingPolls = new WeakMap<Map<Provider, PollTimer>, Set<Provider>>()
 
 function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
   if (provider) {
     const timer = map.get(provider)
-    if (timer) { clearInterval(timer.interval); clearTimeout(timer.deadline); map.delete(provider) }
+    if (timer) { clearInterval(timer.interval); clearTimeout(timer.deadline); clearTimeout(timer.guard); map.delete(provider) }
     return
   }
-  for (const timer of map.values()) { clearInterval(timer.interval); clearTimeout(timer.deadline) }
+  for (const timer of map.values()) { clearInterval(timer.interval); clearTimeout(timer.deadline); clearTimeout(timer.guard) }
   map.clear()
 }
 
-function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>): void {
+/**
+ * 감시 하나를 건다. `onExpire` 는 감시가 끝까지(3분) 확인하지 못했을 때 **표시를 내리는**
+ * 몫이다 — 예전에는 타이머만 지워서 화면이 "로그인 중"에 영원히 머물렀다(검토 RT2-01).
+ *
+ * 진행 중 표시(`running`)는 **이 감시 세대 안에만** 있다. 예전에는 Map 에 귀속된 Set 이라
+ * 한 번 매달린 tick 이 취소 뒤 **새 로그인**까지 영영 막았다.
+ */
+function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void {
   clearPoll(map, provider)
-  let pending = pendingPolls.get(map)
-  if (!pending) { pending = new Set<Provider>(); pendingPolls.set(map, pending) }
-  const inFlight = pending
-  const timer: PollTimer = {
-    interval: setInterval(() => {
-      if (inFlight.has(provider) || map.get(provider) !== timer) return
-      inFlight.add(provider)
-      void tick().then(done => {
-        if (done && map.get(provider) === timer) clearPoll(map, provider)
-      }).finally(() => { inFlight.delete(provider) })
-    }, POLL_MS),
-    deadline: setTimeout(() => {
-      if (map.get(provider) === timer) clearPoll(map, provider)
-    }, POLL_LIMIT_MS)
+  /** 지금 돌고 있는 tick 의 번호. 늦게 끝난 옛 tick 이 새 tick 의 잠금을 풀지 않게 한다. */
+  let tickSeq = 0
+  let running = false
+  const timer: PollTimer = {}
+  const stop = (expired: boolean): void => {
+    if (map.get(provider) !== timer) return
+    clearPoll(map, provider)
+    if (expired) onExpire?.()
   }
+  timer.interval = setInterval(() => {
+    if (running || map.get(provider) !== timer) return
+    const mine = ++tickSeq
+    running = true
+    timer.guard = setTimeout(() => { if (mine === tickSeq) running = false }, POLL_TICK_LIMIT_MS)
+    void tick()
+      .then(done => { if (done) stop(false) })
+      .catch(() => { /* tick 실패는 상태(`failed`·`unknown`)로만 드러난다 — 감시는 계속한다 */ })
+      .finally(() => {
+        if (mine !== tickSeq) return
+        clearTimeout(timer.guard)
+        running = false
+      })
+  }, POLL_MS)
+  timer.deadline = setTimeout(() => stop(true), POLL_LIMIT_MS)
   map.set(provider, timer)
 }
 
 export function stopPoll(provider?: Provider): void { clearPoll(polls, provider) }
-export function startPoll(provider: Provider, tick: () => Promise<boolean>): void { poll(polls, provider, tick) }
+export function startPoll(provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void { poll(polls, provider, tick, onExpire) }
 
 /**
  * 로그인 시도 번호 — **공급자마다**. 취소·새 시도가 그 공급자의 번호를 올리면, **이미 진행
@@ -230,6 +255,15 @@ export const useConnect = create<ConnectState>((set, get) => ({
       const done = get()[provider].state === 'connected'
       if (done) set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: false } }))
       return done
+    }, () => {
+      /**
+       * 3분 동안 확인하지 못했다. 예전에는 타이머만 지워서 **화면은 영원히 '로그인 중'** 이었다
+       * (검토 RT2-01). 표시를 내리고 '확인 실패'로 말한다 — 그 행에는 기존 '다시 확인' 단추가
+       * 붙어 학생이 스스로 다시 시도할 수 있다(새 문구를 만들지 않는다).
+       */
+      if (!loginAttemptLive(provider, mine)) return
+      set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: false } }))
+      if (get()[provider].state !== 'connected') set(one(provider, { state: 'failed', detail: '', version: null }))
     })
     let r: Reply<true>
     try { r = await window.knuaf.connect.login(provider) as Reply<true> }
