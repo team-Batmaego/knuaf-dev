@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test'
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { ClaudeRelayConnection, claudeExecutionAccount, prepareRelayPlugin } from '../src/main/chat/claude'
+import { ClaudeRelayConnection, claudeExecutionAccount, prepareRelayPlugin, removeRelayPlugin, sweepRelayPlugins } from '../src/main/chat/claude'
 import { CodexRelayConnection, codexExecutionAccount, codexThreadParams } from '../src/main/chat/codex'
 import { JobRunner } from '../src/main/chat/jobs'
 import { canonical, relayIsolation, sha256 } from '../src/main/chat/jobs/isolation'
@@ -50,102 +50,76 @@ function recorder() {
 }
 
 /**
- * [차단 1] plugin 폴더를 만들기 전에 심볼릭 링크를 확인해야 한다.
+ * [차단 1 · 3회차] relay 플러그인은 **학생 폴더에 아무것도 만들지 않는다**.
  *
- * 반례: `<root>/.knuaf-gui/relay-plugin` 을 작업 폴더 밖 디렉터리로 링크해 두면, SDK 격리가
- * 시작되기 전에 앱이 그 바깥에 `plugin.json`·`SKILL.md` 를 쓴다. 그래서 폴더 조립을
- * `prepareRelayPlugin()` 하나로 모으고, 링크·경로 탈출이면 **아무것도 쓰기 전에** 던진다.
+ * 1·2회차는 학생 폴더 안 경로를 검사하며 링크를 막았지만, 검사한 부모와 실제로 쓰는 대상이
+ * 경로 문자열 재해석으로 갈라질 수 있었다(검토 3회차, 정적 분석). 링크를 하나씩 막는 대신
+ * **위치를 앱 전용 자리로 옮겨** 그 경합 자체를 없앤다. 학생 폴더에는 쓸 경로가 없으므로
+ * 그 안에 어떤 링크가 있어도 무관하다.
  */
-test('[차단 1] 담당 플러그인 폴더가 작업 폴더 밖을 가리키면 쓰지 않는다', () => {
-  const { root, out, skill } = fixtureRoot('plugin')
-  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-')))
-  const pluginRoot = join(root, '.knuaf-gui', 'relay-plugin')
-  mkdirSync(dirname(pluginRoot), { recursive: true })
-  symlinkSync(outside, pluginRoot)
-  expect(() => prepareRelayPlugin(root, 'j1', skill)).toThrow()
-  // 바깥에 아무것도 만들어지지 않았어야 한다.
-  expect(existsSync(join(outside, 'j1'))).toBe(false)
-})
-
-/** 링크가 없으면 정상 생성되고, 경로가 작업 폴더 안에 있다. */
-test('[차단 1] 링크가 없으면 플러그인 폴더를 작업 폴더 안에 만든다', () => {
-  const { root, skill } = fixtureRoot('plugin-ok')
-  const dir = prepareRelayPlugin(root, 'j1', skill)
-  expect(realpathSync(dir).startsWith(realpathSync(root))).toBe(true)
+test('[차단 1·3회차] relay 플러그인은 학생 폴더 밖 앱 자리에 만들어진다', () => {
+  const { root, skill } = fixtureRoot('plugin-outside')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay-')))
+  const dir = prepareRelayPlugin(appDir, 'j1', skill)
+  // ① 플러그인은 앱 자리 안에 있다.
+  expect(realpathSync(dirname(dir))).toBe(realpathSync(join(appDir, 'relay-plugin')))
   expect(existsSync(join(dir, '.claude-plugin', 'plugin.json'))).toBe(true)
   expect(existsSync(join(dir, 'skills', 'knuaf-dev', 'SKILL.md'))).toBe(true)
+  // ② 학생 폴더에는 relay 가 만든 플러그인 경로가 없다(`.knuaf-gui/jobs` 는 픽스처가 만든 것).
+  expect(existsSync(join(root, '.knuaf-gui', 'relay-plugin'))).toBe(false)
 })
 
-/**
- * [차단 1 · 2회차] **파일 자체**가 링크인 경우까지 막는다.
- *
- * 반례(2회차 검토): 상위 폴더 검사만으로는 부족하다. `.claude-plugin/plugin.json` **파일**이
- * 작업 폴더 밖 파일을 가리키는 링크면 `writeFileSync` 가 그 링크를 따라가 바깥 파일을 덮어쓴다.
- * 같은 방식으로 쓰는 SKILL.md·스킬 폴더도 같다.
- *
- * 처방: 링크를 따라가지 않는 쓰기 — 임시 폴더에 다 쓰고 `rename` 으로 통째로 바꾼다.
- * `rename` 은 대상이 링크여도 **링크 자체**를 교체하며 링크를 따라가지 않는다.
- */
-test('[차단 1·2회차] plugin.json 파일이 링크면 작업 폴더 밖 파일을 덮어쓰지 않는다', () => {
-  const { root, skill } = fixtureRoot('file-link-manifest')
-  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-file-')))
-  const victim = join(outside, 'victim.json')
-  writeFileSync(victim, 'ORIGINAL')
-  const dir = join(root, '.knuaf-gui', 'relay-plugin', 'j1', '.claude-plugin')
-  mkdirSync(dir, { recursive: true })
-  symlinkSync(victim, join(dir, 'plugin.json'))
-  // 성공하든 거절하든 **바깥 파일은 그대로**여야 한다. 이 앱은 주문 폴더를 통째로 새로 만들고
-  // rename 으로 교체하므로 성공 쪽이 정상이다(링크는 따라가지 않고 링크 자체가 사라진다).
-  prepareRelayPlugin(root, 'j1', skill)
-  expect(readFileSync(victim, 'utf8')).toBe('ORIGINAL')
-  expect(lstatSync(join(dir, 'plugin.json')).isSymbolicLink()).toBe(false)
-})
-
-test('[차단 1·2회차] 스킬 폴더나 SKILL.md 가 링크면 그 링크를 따라 쓰지 않는다', () => {
-  const { root, skill } = fixtureRoot('file-link-skill')
-  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-skill-')))
+/** 학생 폴더 안에 링크가 미리 놓여 있어도 relay 는 그 링크를 건드리지 않는다(위치가 다르므로). */
+test('[차단 1·3회차] 학생 폴더의 링크는 무관하다', () => {
+  const { root, skill } = fixtureRoot('plugin-root-links')
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-link-')))
   writeFileSync(join(outside, 'SKILL.md'), 'ORIGINAL')
-  const skillsDir = join(root, '.knuaf-gui', 'relay-plugin', 'j1', 'skills')
-  mkdirSync(skillsDir, { recursive: true })
-  // 스킬 폴더 자체를 바깥으로 링크.
-  symlinkSync(outside, join(skillsDir, 'knuaf-dev'))
-  prepareRelayPlugin(root, 'j1', skill)
-  // 바깥 폴더는 그대로이고, 안쪽 스킬 사본은 링크가 아닌 실제 폴더다.
-  expect(readFileSync(join(outside, 'SKILL.md'), 'utf8')).toBe('ORIGINAL')
+  const bait = join(root, '.knuaf-gui', 'relay-plugin')
+  mkdirSync(dirname(bait), { recursive: true })
+  symlinkSync(outside, bait)
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay2-')))
+  const dir = prepareRelayPlugin(appDir, 'j1', skill)
+  expect(dir.startsWith(realpathSync(appDir))).toBe(true)
+  // 바깥 원본은 그대로이고, 링크도 그대로다(우리가 만든 것이 아니다).
   expect(readdirSync(outside)).toEqual(['SKILL.md'])
-  expect(lstatSync(join(skillsDir, 'knuaf-dev')).isSymbolicLink()).toBe(false)
+  expect(readFileSync(join(outside, 'SKILL.md'), 'utf8')).toBe('ORIGINAL')
+  expect(lstatSync(bait).isSymbolicLink()).toBe(true)
 })
 
-test('[차단 1·2회차] 이미 있는 plugin.json 링크도 결과적으로 링크가 아닌 실제 파일이 된다', () => {
-  const { root, skill } = fixtureRoot('file-link-replace')
-  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'kd-fix-outside-replace-')))
-  const victim = join(outside, 'victim.json')
-  writeFileSync(victim, 'ORIGINAL')
-  const dir = join(root, '.knuaf-gui', 'relay-plugin', 'j1', '.claude-plugin')
-  mkdirSync(dir, { recursive: true })
-  symlinkSync(victim, join(dir, 'plugin.json'))
-  // 고침 뒤에는 링크가 실제 파일로 **교체**되고 바깥은 그대로다.
-  let failed = false
-  try { prepareRelayPlugin(root, 'j1', skill) } catch { failed = true }
-  expect(readFileSync(victim, 'utf8')).toBe('ORIGINAL')
-  if (!failed) {
-    const saved = lstatSync(join(dir, 'plugin.json'))
-    expect(saved.isSymbolicLink()).toBe(false)
-    expect(JSON.parse(readFileSync(join(dir, 'plugin.json'), 'utf8')).name).toBe('knuaf')
-  }
+/** 주문이 끝나면(성공·실패·중단 모두) 그 주문 전용 폴더를 지운다. */
+test('[차단 1·3회차] 주문이 끝나면 플러그인 폴더를 지운다', () => {
+  const { skill } = fixtureRoot('plugin-cleanup')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay3-')))
+  const dir = prepareRelayPlugin(appDir, 'j1', skill)
+  expect(existsSync(dir)).toBe(true)
+  removeRelayPlugin(appDir, 'j1')
+  expect(existsSync(dir)).toBe(false)
+  // 지울 것이 없어도 조용히 넘어간다(실패 경로에서 두 번 불릴 수 있다).
+  expect(() => removeRelayPlugin(appDir, 'j1')).not.toThrow()
 })
 
-/** 같은 주문을 두 번 조립해도 안전하고(기존 폴더 교체) 임시 폴더가 남지 않는다. */
-test('[차단 1·2회차] 같은 주문을 다시 조립해도 임시 폴더가 남지 않는다', () => {
-  const { root, skill } = fixtureRoot('relay-rebuild')
-  const first = prepareRelayPlugin(root, 'j1', skill)
-  const second = prepareRelayPlugin(root, 'j1', skill)
-  expect(second).toBe(first)
-  expect(JSON.parse(readFileSync(join(second, '.claude-plugin', 'plugin.json'), 'utf8')).name).toBe('knuaf')
-  expect(readFileSync(join(second, 'skills', 'knuaf-dev', 'SKILL.md'), 'utf8')).toContain('FIX-SPEC')
-  // 작업 폴더 안 임시·물림 폴더가 남지 않았어야 한다.
-  const base = join(root, '.knuaf-gui', 'relay-plugin')
-  expect(readdirSync(base).filter(name => name.startsWith('.staging-') || name.startsWith('.retired-'))).toEqual([])
+/** 앱 시작 때 남은 것을 치운다 — 지난 실행이 중간에 죽어 남긴 폴더. */
+test('[차단 1·3회차] 앱 시작 정리가 지난 실행의 잔여 폴더를 지운다', () => {
+  const { skill } = fixtureRoot('plugin-sweep')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay4-')))
+  const stale = prepareRelayPlugin(appDir, 'old-job', skill)
+  expect(existsSync(stale)).toBe(true)
+  sweepRelayPlugins(appDir)
+  expect(existsSync(join(appDir, 'relay-plugin', 'old-job'))).toBe(false)
+  expect(existsSync(join(appDir, 'relay-plugin'))).toBe(true)
+})
+
+/** SDK 에 넘어가는 `plugins` 경로가 앱 전용 자리다 — 실제 연결 옵션으로 확인한다. */
+test('[차단 1·3회차] SDK 에 넘기는 plugins 경로는 앱 자리다', async () => {
+  const { root, out, skill } = fixtureRoot('plugin-options')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay5-')))
+  const connection = new ClaudeRelayConnection(agentOptions('/fake/claude', root, skill), relayRequest(root, out, skill), appDir)
+  const options = connection.debugQueryOptions()
+  const plugins = (options as { plugins?: { path: string }[] }).plugins ?? []
+  expect(plugins.length).toBe(1)
+  // 경로만 계산하므로 아직 없을 수 있다 — 문자열 기준으로 앱 자리 안인지만 본다(실체 생성은 위 시험들).
+  expect(plugins[0].path).toBe(join(appDir, 'relay-plugin', 'j1'))
+  expect(plugins[0].path.startsWith(root)).toBe(false)
 })
 
 /**

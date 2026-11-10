@@ -41,6 +41,8 @@ function systemCodex(): string | null {
   return null
 }
 
+function appDir(tag: string): string { return realpathSync(mkdtempSync(join(tmpdir(), `kd-app-${tag}-`))) }
+
 function fixtureRoot(tag: string): { root: string; out: string; skill: string } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `kd-relay-${tag}-`)))
   const out = join(root, '.knuaf-gui', 'jobs', 'j1', 'out')
@@ -173,7 +175,7 @@ test('relay 요청·토큰 변환이 계약 모양을 지킨다', () => {
 
 test('담당 연결은 본대화 동작을 거절하고 러너 계약만 받는다', async () => {
   const { root, out, skill } = fixtureRoot('contract')
-  const claude = new ClaudeRelayConnection(agentOptions('/fake/claude', root, skill), request(root, out, skill))
+  const claude = new ClaudeRelayConnection(agentOptions('/fake/claude', root, skill), request(root, out, skill), appDir('contract'))
   const codex = new CodexRelayConnection(agentOptions('/fake/codex', root, skill), request(root, out, skill, { company: 'codex' }))
   for (const connection of [claude, codex]) {
     expect(connection.relayProtocol).toBe(1)
@@ -253,15 +255,16 @@ async function claudeRelayFixture(opts: { escapes: boolean; rate: ClaudeRate }) 
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${fake.port}`,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_AUTOUPDATER: '1'
   })
-  const connection = new ClaudeRelayConnection(options, request(root, out, skill))
+  const app = appDir('claude-run')
+  const connection = new ClaudeRelayConnection(options, request(root, out, skill), app)
   const log = recorder()
-  return { root, out, skill, connection, log, messages, close: () => fake.close() }
+  return { root, out, skill, app, connection, log, messages, close: () => fake.close() }
 }
 
 test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', { timeout: 180_000 }, async () => {
   const harness = await claudeRelayFixture({ rate: 'allowed', escapes: true })
   if (!harness) test.skip(true, '동봉 Claude CLI 가 없어 건너뜁니다')
-  const { root, out, connection, log, messages, close } = harness
+  const { root, out, app, connection, log, messages, close } = harness
   try {
     const account = await connection.availability()
     // A 는 턴 밖에서 관측할 수 없다 — 지어내지 않고 모름으로 둔다(설계 §3.5 '시운전 확인거리').
@@ -286,6 +289,8 @@ test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', {
     expect(readFileSync(join(out, 'result.md'), 'utf8')).toBe('relay result')
     expect(existsSync(join(root, 'escaped.md'))).toBe(false)
     expect(messages.some(m => m.startsWith('POST /v1/messages'))).toBe(true)
+    // 주문이 끝나면 그 주문의 플러그인 폴더가 남지 않는다(3회차: 앱 전용 자리 + 수명).
+    expect(existsSync(join(app, 'relay-plugin', 'j1'))).toBe(false)
   } finally {
     await connection.stop(); await close()
   }

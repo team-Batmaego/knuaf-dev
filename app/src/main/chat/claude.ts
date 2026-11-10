@@ -1,15 +1,14 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, cpSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join, resolve, sep } from 'node:path'
 import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import { claudeTokens } from './jobs/tokens'
-import { canonical as canonicalPath } from './jobs/isolation'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 import type { ChatModelInfo, ConnectionStatus } from '../../shared/chat'
 import type { ModelCatalogEntry } from '../../shared/lanes'
@@ -956,126 +955,58 @@ export function claudeExecutionAccount(options: AgentOptions, models: readonly M
 const RELAY_SYSTEM_APPEND = `${CLAUDE_SYSTEM_APPEND} 이 세션은 앱이 연 담당(relay)입니다. 결과는 주문서가 정한 출력 칸에만 쓰고, 그 밖의 파일은 만들지도 고치지도 마세요. 학생에게 직접 묻지 말고, 판단이 필요하면 주문서의 조건 칸에 적으세요.`
 
 /**
- * 이 주문 전용 플러그인 폴더를 만든다 — `<root>/.knuaf-gui/relay-plugin/<jobId>`.
+ * 이 주문 전용 플러그인 폴더를 만든다 — **앱 전용 자리** 아래 `relay-plugin/<jobId>`.
  *
- * 왜 앱이 직접 만드나: `settingSources: []`(SDK 격리 모드)는 `.claude/skills` 발견을 끊는다.
- * 그래서 그 주문에 필요한 스킬만 담은 플러그인 폴더를 앱이 조립해 넘긴다.
+ * 왜 학생 폴더가 아닌가: 이 조립은 **SDK 격리가 시작되기 전**에 앱 프로세스가 한다. 학생 폴더
+ * 안에 만들면 그 폴더에 접근할 수 있는 쪽(학생·다른 앱·링크)이 우리가 검사한 뒤 경로를 바꿔
+ * 우리 쓰기를 자기 목적지로 돌릴 수 있다(검토 1~3회차). 앱 전용 자리(`userData`)는 그런
+ * 경로가 없으므로, 검사와 쓰기 대상이 갈라지는 문제 자체가 사라진다.
  *
- * 주의: 이 쓰기는 **SDK 격리가 시작되기 전**에 앱 프로세스가 한다. 그래서 경로 판정을
- * SDK 에 맡길 수 없고, 여기서 직접 확인한다(아래).
+ * SDK 에는 **절대경로**로만 넘어가므로 위치가 학생 폴더일 필요가 없다(실측: `plugins[].path`).
+ *
+ * 수명: 주문 하나가 끝나면(`removeRelayPlugin`) 지운다. 앱이 중간에 죽어 남으면 다음 시작의
+ * `sweepRelayPlugins` 가 치운다.
  */
-export function prepareRelayPlugin(root: string, jobId: string, skill: string): string {
-  const base = join(root, '.knuaf-gui', 'relay-plugin')
-  assertWritableDir(base, root)
-  const dir = join(base, jobId)
-  /**
-   * **기존 폴더를 재사용하지 않는다.** 폴더 안에 남아 있는 링크(`plugin.json` 이 작업 폴더
-   * 밖 파일을 가리키는 경우 등)를 물려받지 않으려면, 이 주문 폴더를 통째로 새로 만든다.
-   * `rename` 은 대상이 링크여도 링크 자체를 교체하므로 바깥 파일을 건드리지 않는다.
-   */
-  const staging = join(base, `.staging-${randomUUID()}`)
-  assertWritableDir(staging, root)
-  mkdirSync(staging, { recursive: true })
-  try {
-    const manifest = join(staging, '.claude-plugin')
-    mkdirSync(manifest, { recursive: true })
-    // 파일 하나도 링크를 따라가지 않고 쓴다(임시 파일 + rename).
-    writeFileNoFollow(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }), root)
-    cpSync(skill, join(staging, 'skills', 'knuaf-dev'), { recursive: true })
-    // 다 만든 뒤에 한 번에 바꾼다 — 기존 `dir` 이 링크여도 링크 자체가 교체된다.
-    assertWritableDir(base, root)
-    replaceDirectory(staging, dir, root)
-    return dir
-  } catch (error) {
-    removeQuietly(staging)
-    throw error
-  }
+export function relayPluginPath(appDir: string, jobId: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) throw new Error('Invalid job id')
+  return join(appDir, 'relay-plugin', jobId)
+}
+
+export function prepareRelayPlugin(appDir: string, jobId: string, skill: string): string {
+  const dir = relayPluginPath(appDir, jobId)
+  mkdirSync(dir, { recursive: true })
+  const manifest = join(dir, '.claude-plugin')
+  mkdirSync(manifest, { recursive: true })
+  writeFileSync(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }))
+  // 스킬 사본은 앱이 소유한 원본에서 이 주문 전용으로 한 번만 뜬다.
+  cpSync(skill, join(dir, 'skills', 'knuaf-dev'), { recursive: true, force: true })
+  return dir
+}
+
+/** 주문이 끝났을 때(성공·실패·중단) 그 주문 전용 폴더를 지운다. 없어도 조용히 넘어간다. */
+export function removeRelayPlugin(appDir: string, jobId: string): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) return
+  try { rmSync(relayPluginPath(appDir, jobId), { recursive: true, force: true }) } catch { /* 다음 시작 정리가 맡는다 */ }
 }
 
 /**
- * 링크를 따라가지 않는 파일 쓰기 — 같은 폴더의 임시 파일에 쓰고 `rename` 으로 바꾼다.
+ * 앱 시작 때 지난 실행의 잔여 폴더를 치운다.
  *
- * 왜 필요한가(2회차 검토 차단 1): `writeFileSync(path, …)` 는 `path` 가 심볼릭 링크면 **링크를
- * 따라가** 목적 파일을 덮어쓴다. 그러면 앱이 SDK 격리 전에 작업 폴더 밖 파일을 고칠 수 있다.
- * `rename(temp, path)` 는 대상이 링크여도 **링크 자체를 교체**하고 링크를 따라가지 않는다.
- * 임시 파일은 `wx`(배타 생성)로 열어 "미리 만들어 둔 링크"도 따라가지 않게 한다.
+ * 지우는 것은 **이 앱이 만든 폴더 이름**뿐이다 — `relay-plugin/` 바로 아래 항목이고, 그 아래
+ * `.claude-plugin`·`skills` 만 앱이 쓴다. 링크는 따라가지 않도록 `rmSync` 대신 항목별로 지운다.
  */
-function writeFileNoFollow(path: string, data: string, root: string): void {
-  const temp = join(dirname(path), `.write-${randomUUID()}.tmp`)
-  assertWritableDir(dirname(temp), root)
-  let descriptor: number | undefined
-  try {
-    descriptor = openSync(temp, 'wx', 0o600)
-    writeFileSync(descriptor, data)
-    closeSync(descriptor); descriptor = undefined
-    renameSync(temp, path)
-  } finally {
-    if (descriptor !== undefined) { try { closeSync(descriptor) } catch { /* 이미 닫힘 */ } }
-    try { if (lstatSync(temp)) removeQuietly(temp) } catch { /* 이미 옮겨짐 */ }
-  }
-  // 결과가 링크면 안 된다 — rename 이 링크를 교체했어야 한다.
-  if (lstatSync(path).isSymbolicLink()) throw new Error('담당 플러그인 파일이 링크로 바뀌었어요.')
-}
-
-/**
- * 준비한 폴더를 목적지로 바꾼다.
- *
- * - 목적지가 없으면 `rename`.
- * - 목적지가 **링크**면 링크를 지우고 `rename`(링크를 따라가지 않는다).
- * - 목적지가 실제 폴더면 내용을 비우고 `rename` — Windows 에서 폴더 위 rename 이 막히므로
- *   옛 폴더를 안쪽 이름으로 물린 뒤 지운다.
- */
-function replaceDirectory(staging: string, target: string, root: string): void {
-  assertWritableDir(dirname(target), root)
-  let existing: ReturnType<typeof lstatSync> | undefined
-  try { existing = lstatSync(target) } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-  if (existing?.isSymbolicLink()) {
-    // 링크 자체만 지운다 — 따라가지 않는다.
-    unlinkSync(target)
-    renameSync(staging, target)
-    return
-  }
-  if (existing) {
-    const retired = join(dirname(target), `.retired-${randomUUID()}`)
-    renameSync(target, retired)
-    try { renameSync(staging, target) } finally { removeQuietly(retired) }
-    return
-  }
-  renameSync(staging, target)
-}
-
-/** 정리용 — 실패해도 원래 오류를 덮지 않는다. */
-function removeQuietly(path: string): void {
-  try { rmSync(path, { recursive: true, force: true }) } catch { /* 남겨도 다음 주문이 새 폴더를 쓴다 */ }
-}
-
-/**
- * 쓰기 전에 **한 번 더** 확인한다 — 앱이 만드는 폴더가 작업 폴더 안인가.
- *
- * 반례(검토 차단 1): `.knuaf-gui/relay-plugin` 이 작업 폴더 밖 디렉터리를 가리키는 심볼릭
- * 링크면, 이 조립은 SDK 격리 **전에** 앱 프로세스가 하므로 격리가 막아 주지 못한다. 그래서
- * ① 아직 없는 구간은 가장 가까운 존재 조상까지 실경로로 풀고(`canonical`),
- * ② 이미 있는 경로는 심볼릭 링크 자체를 거절한다(`lstat`).
- * 둘 중 하나라도 작업 폴더 밖을 가리키면 아무것도 쓰지 않고 던진다.
- */
-function assertWritableDir(path: string, root: string): void {
-  const realRoot = realOrSelf(resolve(root))
-  // ② 존재하는 경로는 링크를 따라가지 않고 그 자체를 본다.
-  try {
-    if (lstatSync(path).isSymbolicLink()) throw new Error('담당 플러그인 폴더가 심볼릭 링크예요. 작업 폴더 안의 실제 폴더여야 해요.')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-  // ① 없는 구간은 존재하는 조상의 실경로를 기준으로 판정한다.
-  const real = realOrSelf(canonicalPath(path))
-  const rel = relative(realRoot, real)
-  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-    throw new Error('담당 플러그인 폴더가 작업 폴더 밖을 가리켜요. 이 주문은 열지 않습니다.')
+export function sweepRelayPlugins(appDir: string): void {
+  const base = join(appDir, 'relay-plugin')
+  let names: string[]
+  try { names = readdirSync(base) } catch { return }
+  for (const name of names) {
+    const path = join(base, name)
+    try {
+      if (lstatSync(path).isSymbolicLink()) { unlinkSync(path); continue }
+      rmSync(path, { recursive: true, force: true })
+    } catch { /* 하나 못 지워도 나머지는 지운다 */ }
   }
 }
-
 
 /**
  * 담당 연결 — 본대화와 **완전히 다른 옵션 객체**를 쓴다(발주 §④-a).
@@ -1104,7 +1035,7 @@ export class ClaudeRelayConnection implements JobConnection {
   private controller?: AbortController
   /** 이미 실행 중인 주문 — 같은 연결에 두 주문이 겹치면 관문·중지가 뒤엉킨다. */
   private running = false
-  constructor(private options: AgentOptions, private request: RelayRequest) {}
+  constructor(private options: AgentOptions, private request: RelayRequest, private appDir: string) {}
 
   status(): Promise<ConnectionStatus> { return new ClaudeConnection(this.options).status() }
   /** 담당 연결은 로그인 창을 열지 않는다 — 본대화 연결의 몫이다. */
@@ -1198,11 +1129,15 @@ export class ClaudeRelayConnection implements JobConnection {
       if (!announced) throw new Error('담당 세션이 초기화를 알려 주지 않았어요.')
     } finally {
       q?.close(); this.active = undefined; this.running = false
+      // 성공·실패·한도·중단 어느 쪽으로 끝나도 이 주문의 플러그인 사본은 남기지 않는다.
+      removeRelayPlugin(this.appDir, this.request.jobId)
     }
   }
 
   async stop(): Promise<void> {
     this.controller?.abort(); this.active?.close(); this.active = undefined
+    // 주문이 시작되기 전에 멈춰도 그 주문의 사본이 남지 않게 한다.
+    removeRelayPlugin(this.appDir, this.request.jobId)
   }
 
   /**
@@ -1215,9 +1150,18 @@ export class ClaudeRelayConnection implements JobConnection {
     return text.replace(/^\s*\/knuaf-dev\b/, '/knuaf:knuaf-dev')
   }
 
-  /** 이 주문 전용 플러그인 폴더. */
+  /** 이 주문 전용 플러그인 폴더 — 학생 폴더가 아니라 앱 전용 자리다. */
   private pluginDir(): string {
-    return prepareRelayPlugin(this.options.root, this.request.jobId, this.request.skill)
+    return prepareRelayPlugin(this.appDir, this.request.jobId, this.request.skill)
+  }
+
+  /**
+   * 조립된 옵션을 그대로 보여준다 — 시험 이음매.
+   * "SDK 에 넘어간 `plugins` 경로가 앱 전용 자리인가"를 실제 옵션으로 확인하기 위한 것이다.
+   */
+  debugQueryOptions(): Record<string, unknown> {
+    // 경로만 계산한다 — 이 이음매가 파일을 만들면 시험이 검증하려는 대상이 흐려진다.
+    return this.queryOptions(new AbortController(), relayPluginPath(this.appDir, this.request.jobId))
   }
 
   /**
