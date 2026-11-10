@@ -14,8 +14,10 @@ export function PaneHandle({ folded }: { folded: boolean }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [setClosed])
   const label = folded ? COPY.expand : COPY.collapse
+  // 제목줄 팝오버(`.popover` z-index 20)가 펼쳐진 동안 이 단추(z-index 3)가
+  // 목록을 가리지 않게 한다 — 펼친 목록은 항상 위다(T1 u8-open 결함).
   return <button type="button" aria-controls="paperpane" aria-expanded={!closed} aria-label={`${label}${folded && notice ? ` · ${COPY.unseen}` : ''}`} title={`${label} ⌘\\`}
-    onClick={() => { setClosed(!closed); requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('button[aria-controls="paperpane"]')?.focus()) }} style={{ position: 'absolute', zIndex: 7, top: '50%', ...(folded ? { right: 12, height: 34, padding: '0 12px 0 8px', borderRadius: 10 } : { left: 0, transform: 'translate(-50%, -50%)', width: 28, height: 28, borderRadius: '50%', padding: 0 }), ...(folded ? { transform: 'translateY(-50%)' } : {}), border: 'var(--hairline) solid var(--line-strong)', background: 'var(--panel)', color: 'var(--ink-2)' }}>
+    onClick={() => { setClosed(!closed); requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('button[aria-controls="paperpane"]')?.focus()) }} style={{ position: 'absolute', zIndex: 3, top: '50%', ...(folded ? { right: 12, height: 34, padding: '0 12px 0 8px', borderRadius: 10 } : { left: 0, transform: 'translate(-50%, -50%)', width: 28, height: 28, borderRadius: '50%', padding: 0 }), ...(folded ? { transform: 'translateY(-50%)' } : {}), border: 'var(--hairline) solid var(--line-strong)', background: 'var(--panel)', color: 'var(--ink-2)' }}>
     {folded ? '‹ 내 논문' : '›'}{folded && notice && <span aria-hidden="true" style={{ position: 'absolute', right: -1, top: -1, width: 8, height: 8, borderRadius: '50%', background: 'var(--accent)', boxShadow: '0 0 0 2px var(--bg)' }} />}
   </button>
 }
