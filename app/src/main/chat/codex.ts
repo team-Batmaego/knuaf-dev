@@ -1,4 +1,5 @@
 import { MODEL_SELECTION_COPY } from '../../shared/copy'
+import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
@@ -100,15 +101,15 @@ export class CodexConnection implements AgentConnection {
   private serverArgs: string[]
   /** stop() 이후에는 진행 중인 connect() 의 재시도가 새 프로세스를 다시 띄우지 않는다. */
   private stopped = false
-  /** 대화(thread)별 토큰 기록 순번 — 같은 턴의 알림 여러 개를 구분한다. */
-  private tokenTurns = new Map<string, { turnId: unknown; request: number; notifications: number }>()
+  /** 이 턴에 **실제로 적용된** model·effort 와 턴 식별자 — 기록의 귀속 기준(검토 CT-02). */
+  private turnTokens?: { key: string; model: string; effort: string | null }
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
   }
   /**
    * `thread/tokenUsage/updated` 알림 하나를 대화별 JSONL 한 줄로 남긴다. `last`(이번 턴)와
    * `total`(서버 누적)을 **더하지 않고** 그대로 옮기며, 숫자·식별자만 담는다.
-   * 기록 실패는 대화를 막지 않는다.
+   * 기록은 비동기·best-effort 라 대화를 막지 않는다(token-log.ts).
    */
   private recordTokenUsage(p: { threadId?: unknown; turnId?: unknown; tokenUsage?: unknown }): void {
     try {
@@ -118,21 +119,19 @@ export class CodexConnection implements AgentConnection {
       if (!usage || typeof usage.last !== 'object' || !usage.last || typeof usage.total !== 'object' || !usage.total) return
       const conversationId = typeof p.threadId === 'string' && p.threadId ? p.threadId : this.thread ?? ''
       if (!conversationId) return
-      const turnId = p.turnId
-      const seen = this.tokenTurns.get(conversationId)
-      const state = !seen || seen.turnId !== turnId
-        ? { turnId, request: (seen?.request ?? 0) + 1, notifications: 0 }
-        : seen
-      state.notifications += 1
-      this.tokenTurns.set(conversationId, state)
-      const record = tokenRecord({
-        conversationId, jobId: '', company: 'codex',
-        model: this.threadModel ?? this.options.env.KNUAF_CODEX_MODEL ?? '',
-        effort: this.threadEffort ?? this.options.env.KNUAF_CODEX_EFFORT ?? null,
-        role: 'chat'
-      }, codexTokens({ last: usage.last as TokenCounts, total: usage.total as TokenCounts }, state.request, state.notifications),
-      new Date().toISOString())
-      if (record) appendTokenRecord(this.options.root, 'codex', record)
+      // 턴마다 새 키 — 같은 턴의 알림 여러 개만 한 요청으로 묶고, 다음 턴은 새 요청이다.
+      // (서버 턴 id 를 키로 쓰면 재연결 뒤 같은 id 가 다시 와도 이어 세게 된다.)
+      const turnKey = this.turnTokens?.key ?? ''
+      if (!turnKey) return
+      const model = this.turnTokens?.model ?? ''
+      const effort = this.turnTokens?.effort ?? null
+      appendTokenRecord(this.options.root, 'codex', {
+        conversationId, turnKey,
+        build: ({ requestSequence, notificationSequence }) => tokenRecord({
+          conversationId, jobId: '', company: 'codex', model, effort, role: 'chat'
+        }, codexTokens({ last: usage.last as TokenCounts, total: usage.total as TokenCounts }, requestSequence, notificationSequence),
+        new Date().toISOString())
+      })
     } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
   private async connect(): Promise<JsonRpcProcess> {
@@ -381,6 +380,16 @@ export class CodexConnection implements AgentConnection {
      * 서버가 새 대화에 쓰는 기본값을 명시적으로 다시 보낸다(검토 MC1-01).
      */
     const turnModel = await this.turnModelParams(!!sessionId)
+    /**
+     * 기록에 남길 **실제 적용값**(검토 CT-02). `thread/start` 응답은 이전 값이고, 학생이 이 턴에
+     * 고른 model·effort 는 `turn/start` 에 실려 나간다 — 보낸 값이 있으면 그 값이 이 턴에 적용된다.
+     * 없으면 이 대화가 지금 쓰는 값(thread 응답)이다.
+     */
+    this.turnTokens = {
+      key: randomUUID(),
+      model: turnModel.params.model ?? this.threadModel ?? this.options.env.KNUAF_CODEX_MODEL ?? '',
+      effort: turnModel.params.effort ?? this.threadEffort ?? this.options.env.KNUAF_CODEX_EFFORT ?? null
+    }
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {
