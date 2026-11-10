@@ -1124,3 +1124,85 @@ def test_undo_in_progress_crash_closes_its_own_row(tmp_path):
     # 원고는 되돌리기 전(고친 글) 또는 되돌린 글 — 둘 중 하나로 온전하다.
     text = (root / "sections" / "01.md").read_text(encoding="utf-8")
     assert TYPED in text or BODY in text
+
+
+# ── FIX2: 책임자 대조 4건 (기준 6a3c751) ───────────────────────────────────
+
+
+def test_undo_does_not_leave_a_phantom_lost_record(sidecar, project):
+    """① 되돌리기의 작업 줄은 `done` 이다 — 그 요청 ID 가 확정으로 세어져야 유령 건이 안 생긴다."""
+    first = _ok(sidecar, project)
+    sidecar.ok("section.edit_undo", root=str(project), edit_id=first["edit_id"],
+               expected_revision=first["revision"])
+    listed = sidecar.ok("section.edits", root=str(project))["result"]
+    assert [row["edit_id"] for row in listed["edits"]] == [first["edit_id"]]
+    assert not [row for row in listed["edits"] if row.get("lost_record")]
+    assert [row["state"] for row in listed["edits"]] == ["undone"]
+
+
+def test_cleanup_also_clears_backups_of_aborted_and_undo_rows(tmp_path):
+    """② 청소는 '끝줄이 적힌 건' 전부를 본다 — `aborted`·`done` 보존 폴더도 지운다."""
+    root = _crash_project(tmp_path, "cleanup_states")
+    assert _run_crash(root, "03_place") == 73  # `writing` → 다음 입구에서 `aborted`
+    methods_edit.section_edits(None, {"root": str(root)})
+    states = [row["state"] for row in _ledger(root)]
+    assert states[-1] == "aborted"
+
+    first = _call_edit(root)
+    methods_edit.section_edit_undo(None, {
+        "root": str(root), "edit_id": first["edit_id"],
+        "expected_revision": core.load(root)["revision"],
+    })
+    assert [row["state"] for row in _ledger(root)][-1] == "undone"
+
+    # 꺼진 시도 하나 + 저장 하나 + 되돌리기 하나.
+    bundles = sorted((root / ".knuaf-gui" / "edit-backup").iterdir())
+    assert len(bundles) == 3
+    rows = methods_edit._read_ledger(root)
+    for row in rows:
+        row["at"] = "2020-01-01T00:00:00+00:00"
+    methods_edit._cleanup(root, rows)
+    leftover = list((root / ".knuaf-gui" / "edit-backup").glob("*/"))
+    assert leftover == [], "끝난 건의 보존 폴더가 남았다: %s" % leftover
+
+
+def test_recovery_closes_a_registered_undo_row_as_done(tmp_path):
+    """③ 등록까지 끝난 되돌리기 작업 줄은 복구도 `done` 으로 닫고 대상 건을 `undone` 으로 적는다."""
+    root = _crash_project(tmp_path, "undo_done")
+    first = _call_edit(root)
+    assert _run_crash(root, "04_apply", {
+        "CRASH_UNDO": "1", "CRASH_EDIT": first["edit_id"],
+    }) == 73
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    rows = methods_edit._latest(methods_edit._read_ledger(root))
+    undo_rows = [row for row in rows.values() if row.get("undo_of")]
+    assert undo_rows and undo_rows[0]["state"] == "done"
+    target = [row for row in rows.values() if row["edit_id"] == first["edit_id"]][0]
+    assert target["state"] == "undone"
+    assert [row["edit_id"] for row in listed["edits"]] == [first["edit_id"]]
+    assert not [row for row in listed["edits"] if row.get("lost_record")]
+
+
+def test_recovery_without_canonical_or_backup_does_not_claim_restore(tmp_path):
+    """④ 자리도 보존본도 없으면 돌려놓은 것이 아니다 — 알림 없이 `aborted`."""
+    root = _crash_project(tmp_path, "gone")
+    p = core.load(root)
+    _manuscript(root).unlink()
+    methods_edit._append_ledger(root, {
+        "edit_id": "edit-gone",
+        "request_id": "app:student-edit:sec-01:1:deadbeefdead",
+        "at": "2020-01-01T00:00:00+00:00",
+        "revision_before": p["revision"],
+        "revision_after": None,
+        "edits": [{"section_id": "sec-01", "before_block": BODY, "after_block": TYPED}],
+        "needs_check": None,
+        "new_issues": [],
+        "state": "writing",
+        "undo_of": None,
+        "files": [{"n": 0, "section_id": "sec-01", "path": "sections/01.md",
+                   "sha_a": "0" * 64, "sha_c": "1" * 64}],
+    })
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    assert not [n for n in listed["notices"] if n["kind"] == "restored"]
+    states = [row["state"] for row in _ledger(root) if row["edit_id"] == "edit-gone"]
+    assert states == ["writing", "aborted"]

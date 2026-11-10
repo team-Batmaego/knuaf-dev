@@ -44,6 +44,8 @@ LEDGER_NAME = "student-edits.jsonl"
 BACKUP_DIR = "edit-backup"
 REQUEST_PREFIX = "app:student-edit:"
 CONFIRMED_STATES = ("plain", "pending", "sent", "undone")
+# 원장이 끝맺은 줄 전부 — `done`(되돌리기 작업 줄)·`aborted`(저장 안 됨)도 포함한다.
+TERMINAL_STATES = CONFIRMED_STATES + ("done", "aborted")
 MARK_STATES = ("sent", "pending")
 # §8-1: 시작 때 한 번 찔러 보고, 없으면 `section.edit` 계열을 아예 등록하지 않는다
 # (화면은 `methods.list` 를 보고 단추를 숨긴다).
@@ -517,7 +519,7 @@ def _store_file(bundle: Path, record: dict) -> None:
         raise RpcError("stale_view", "그사이 글이 바뀌었어요. 다시 골라 주세요.") from None
 
 
-def _restore_file(bundle: Path, n: int, path: Path, sha_a: str, sha_c: str) -> None:
+def _restore_file(bundle: Path, n: int, path: Path, sha_a: str, sha_c: str) -> bool:
     """파일 한 개 되돌리기 — **유일한 원복 절차**(§4-4-2). 글자를 새로 쓰지 않는다.
 
     자리에 있는 것이 내가 놓은 C(`sha_c`)일 때만 A 를 돌려놓는다. C 가 아니면(남이 썼다)
@@ -527,21 +529,22 @@ def _restore_file(bundle: Path, n: int, path: Path, sha_a: str, sha_c: str) -> N
     first = bundle / _file_name("displaced-1", n)
     second = bundle / _file_name("displaced-2", n)
     if not first.exists():
-        return  # 밀어낸 적 없다 — 원고 A 그대로
+        return False  # 밀어낸 적 없다 — 아무것도 돌려놓지 않았다(알릴 것도 없다)
     if not path.exists():
         # 자리가 비었다. 되돌리던 중 꺼져 남의 글이 displaced-2 에 있으면 그것이 더 새 글이다.
         if second.exists() and not _matches(second, sha_c):
             _restore_noclobber(path, second)
         else:
             _restore_noclobber(path, first)
-        return
+        return True
     if second.exists():
-        return  # 이미 되돌리던 중 — 자리의 글은 남의 것이니 손대지 않는다
+        return False  # 이미 되돌리던 중 — 자리의 글은 남의 것이니 손대지 않는다
     _displace(path, second)
     if _matches(second, sha_c):
         _restore_noclobber(path, first)  # 내 글만 걷어 내고 A 복귀
-    else:
-        _restore_noclobber(path, second)  # 남의 글을 제자리에 돌려놓는다
+        return True
+    _restore_noclobber(path, second)  # 남의 글을 제자리에 돌려놓는다
+    return False
 
 
 def _revert(records: list[dict], bundle: Path) -> None:
@@ -612,8 +615,7 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
                     _restore_noclobber(path, new)  # 등록 뒤 남이 지운 드문 경우
                     restored = True
                 elif not registered:
-                    _restore_file(bundle, n, path, sha_a, sha_c)
-                    restored = True
+                    restored = _restore_file(bundle, n, path, sha_a, sha_c) or restored
             except OSError:
                 raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
                                data={"backup": str(bundle)}) from None
@@ -624,14 +626,17 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
             continue  # 밀어내기 전에 멈췄거나 이미 돌려놓았다
         if _matches(path, sha_c):
             try:
-                _restore_file(bundle, n, path, sha_a, sha_c)
+                restored = _restore_file(bundle, n, path, sha_a, sha_c) or restored
             except OSError:
                 raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
                                data={"backup": str(bundle)}) from None
-            restored = True
             continue
         kept = True  # 남이 그사이 씀 — 보존본은 보관
-    state = "pending" if registered else "aborted"
+    # 되돌리기 작업 줄의 정상 끝 상태는 `done` 이다(§4-3·§4-4-8 6 '같은 순서').
+    if registered:
+        state = "done" if row.get("undo_of") else "pending"
+    else:
+        state = "aborted"
     notice = None
     if not registered and kept:
         notice = {"kind": "kept", "message": KEPT_NOTICE, "path": str(bundle), "edit_id": edit_id}
@@ -661,7 +666,7 @@ def _cleanup(root: Path, rows: list[dict]) -> list[dict]:
     notices: list[dict] = []
     now = datetime.now(timezone.utc)
     for edit_id, row in _latest(rows).items():
-        if row.get("state") not in CONFIRMED_STATES or row.get("cleaned"):
+        if row.get("state") not in TERMINAL_STATES or row.get("cleaned"):
             continue
         when = row.get("at")
         try:
@@ -1133,7 +1138,7 @@ def section_edits(ctx, params):
         })
     confirmed = set()
     for row in rows.values():
-        if row.get("state") not in CONFIRMED_STATES:
+        if row.get("state") not in TERMINAL_STATES:
             continue
         confirmed.add(row["edit_id"])
         if row.get("request_id"):
