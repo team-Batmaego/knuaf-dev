@@ -141,26 +141,35 @@ else {
       /**
        * 정리에는 **마감**이 있다. 예전에는 이 약속들이 끝나기를 상한 없이 기다려서, 하나라도
        * 안 끝나면(진행 중인 턴·늘어진 사이드카 큐 작업) 창을 닫아도 앱이 안 꺼졌다 — 윈도우 e2e
-       * 에서 `electronApp.close()` 가 44초 멈춘 그 자리다. 마감에 남은 정리 이름을 1줄 남기고
-       * `app.exit()` 로 확실히 끝낸다(남은 자식은 종료 시 OS 가 회수한다).
+       * 에서 `electronApp.close()` 가 44초 멈춘 그 자리다.
+       *
+       * 정리를 **시작하는 함수**를 넘긴다: 마감 타이머가 먼저 걸린다(검토 RT2-02). 실제 경과를
+       * 함께 받아 마감보다 길면 그대로 남긴다 — 타이머는 이벤트 루프가 돌아야 하므로, 같은 루프를
+       * 막는 일이 있으면 마감은 늦어지고 그 사실이 로그에 숫자로 보여야 한다.
+       *
        */
       void shutdownWithin([
-        { name: 'sidecar.stop', promise: sidecar.stop() },
-        { name: 'chat.close', promise: chat?.close() ?? Promise.resolve() }
-      ], SHUTDOWN_DEADLINE_MS).then((outcome) => {
+        { name: 'sidecar.stop', start: () => sidecar.stop() },
+        { name: 'chat.close', start: () => chat?.close() ?? Promise.resolve() }
+      ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
         for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, failure.reason)
-        if (outcome.pending.length) {
-          // 무엇이 안 끝났는지, 무엇이 아직 살아 있는지 남긴다 — 다음 재발 때 이 줄이 원인 지점을 가리킨다.
-          console.error(`[shutdown] ${SHUTDOWN_DEADLINE_MS}ms 안에 끝나지 않은 정리: ${outcome.pending.join(', ')}`)
-          console.error(`[shutdown] 남은 핸들: ${openHandles() || '(없음)'}`)
-          /**
-           * 강제 종료는 **우리 몫의 정리**에만 쓴다. 다른 청취자가 before-quit 에 걸려 있으면
-           * (`listenerCount > 1` — 진단·시험이 종료를 일부러 붙잡는 자리) 그 veto 를 무시하지 않고
-           * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
-           */
-          if (app.listenerCount('before-quit') === 1) { app.exit(0); return }
+        if (!outcome.pending.length) {
+          // 정상 종료도 한 줄 남긴다 — 이 줄이 없으면 before-quit 배선/마감이 아예 돌지 않은 것이다.
+          console.error(`[shutdown] 정리 완료 ${outcome.elapsedMs}ms (${outcome.done.join(', ') || '없음'})`)
+          if (outcome.elapsedMs > SHUTDOWN_DEADLINE_MS) {
+            console.error(`[shutdown] 정리가 마감(${SHUTDOWN_DEADLINE_MS}ms)을 넘겨 ${outcome.elapsedMs}ms 걸렸습니다 — 종료 경로에 동기 작업이 있습니다`)
+          }
+          app.quit()
+          return
         }
-        app.quit()
+        console.error(`[shutdown] ${SHUTDOWN_DEADLINE_MS}ms 안에 끝나지 않은 정리: ${outcome.pending.join(', ')} (경과 ${outcome.elapsedMs}ms)`)
+        /**
+         * 강제 종료는 **우리 몫의 정리**에만 쓴다. 다른 청취자가 before-quit 에 걸려 있으면
+         * (`listenerCount > 1` — 진단·시험이 종료를 일부러 붙잡는 자리) 그 veto 를 무시하지 않고
+         * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
+         */
+        if (app.listenerCount('before-quit') !== 1) { app.quit(); return }
+        app.exit(0)
       })
     }
   })

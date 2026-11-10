@@ -585,7 +585,7 @@ export class ChatService {
      */
     const runs = [...this.runs.entries()]
     const outcome = await shutdownWithin(
-      runs.map(([key, run]) => ({ name: `run:${key.replace(/\0/g, '/')}`, promise: run })),
+      runs.map(([key, run]) => ({ name: `run:${key.replace(/\0/g, '/')}`, start: () => run })),
       CLOSE_RUN_DEADLINE_MS
     )
     if (outcome.pending.length) console.error(`[shutdown] close: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 ${outcome.pending.length}건 — ${outcome.pending.join(', ')}`)
