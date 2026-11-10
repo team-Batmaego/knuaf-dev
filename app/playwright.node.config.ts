@@ -9,7 +9,8 @@ process.once('exit', cleanupTmpdir)
 // Do not inherit playwright.config.ts or add mixed GUI/store specs such as model-chip.spec.ts.
 export default defineConfig({
   testDir: 'e2e',
-  testMatch: ['preparation-main.spec.ts', 'preparation-state.spec.ts', 'artifact-refresh-store.spec.ts', 'chat-markdown.spec.ts', 'progress-list.spec.ts'],
+  // progress (v0.6.4 2단계): testMatch 끝에 `progress-file.spec.ts` 한 줄만 더한다(배열 모양 유지).
+  testMatch: ['preparation-main.spec.ts', 'preparation-state.spec.ts', 'artifact-refresh-store.spec.ts', 'chat-markdown.spec.ts', 'progress-list.spec.ts', 'progress-file.spec.ts'],
   timeout: 30_000,
   retries: 0,
   workers: 1,

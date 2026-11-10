@@ -4,6 +4,8 @@ import { mkdir, lstat } from 'node:fs/promises'
 import { probeProjectWritable } from './project-write'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { insideByFileId } from './file-identity'
+// progress (v0.6.4 2단계): 진행 파일 IPC — 새 폴더 `main/progress/`, 채널 접두어 `progress:`.
+import { registerProgressIpc } from './progress'
 import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
@@ -76,6 +78,8 @@ function findNestedProject(root: string): string | null {
 /** Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit. */
 export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService } {
   let currentRoot: string | null = null
+  // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
+  const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
   /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
   let openSeq = 0
   /** Published visit survives failed open attempts; openSeq still rejects stale successes. */
@@ -202,6 +206,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       // 남아야 메인의 파일 검사 기준과 화면의 현재 폴더가 어긋나지 않는다. 늦게 성공한 옛
       // 요청(그사이 다른 열기가 시작됨)도 기준을 되돌리지 않는다.
       if (seq === openSeq) { currentRoot = root; currentVisit = seq; dependencyGate = { root, visit: seq, phase: 'checking' } }
+      // progress (v0.6.4 2단계): 성공한 전환만 감시 대상을 바꾼다(이전 감시는 닫힌다).
+      if (seq === openSeq) progress.follow(root)
       rememberRecent(root)
       onRecentsChanged()
       // 앱이 만든 작업 폴더는 윈도우 탐색기에서 숨긴다 — 학생에게는 자기 자료만 보이게(hidden.ts).

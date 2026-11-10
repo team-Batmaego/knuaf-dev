@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
+import type { ProgressFile } from '../shared/progress-file'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -186,6 +187,13 @@ const api = {
     const listener = (_e: unknown, entry: { stream: string; line: string }) => fn(entry)
     ipcRenderer.on('sidecar:log', listener)
     return () => ipcRenderer.removeListener('sidecar:log', listener)
+  },
+  // progress (v0.6.4 2단계): 논문 폴더의 진행 파일(main이 검증해 읽은 값). 경로 인자 없음 —
+  // main이 지금 열린 논문만 읽는다. `onChanged`는 논문이 바뀌거나 파일이 다시 쓰일 때 온다.
+  progress: {
+    get: (): Promise<{ result: ProgressFile | null }> => ipcRenderer.invoke('progress:get'),
+    onChanged: (fn: (payload: { root: string; progress: ProgressFile | null }) => void): (() => void) =>
+      subscribe('progress:changed', fn)
   }
 }
 
