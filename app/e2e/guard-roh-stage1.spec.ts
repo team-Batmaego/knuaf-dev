@@ -142,6 +142,8 @@ test('I1: post-crash student edit must survive recovery then T0', () => {
   C.evaluateT0({
     ...e,
     state: recovery.state,
+    acceptedLeaves: recovery.acceptedLeaves,
+    acceptedHashes: recovery.acceptedHashes,
     scan: Scan.scanRoot({ root: e.rootReal, userData: e.userData })
   })
   expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('STUDENT AFTER CRASH\n')
@@ -217,7 +219,7 @@ test('16.2: case-variant .CLAUDE/ and claude.md are protected', () => {
   expect(Scope.isProtectedPath('/paper/notes.md', '/paper')).toBe(false)
 })
 
-test('16.4: recovery ② must fail when the new blob fingerprint does not match', () => {
+test('16.5.5-4: recovery ② repairs a corrupt same-name blob from disk instead of trusting it', () => {
   const e = env('recovery-blob')
   const state = init(e)
   const nextHash = S.putBlob(e.userData, e.folderHash, 'PENDING\n')
@@ -230,9 +232,33 @@ test('16.4: recovery ② must fail when the new blob fingerprint does not match'
   // 디스크는 새 지문과 같지만 blob 글자를 바꿔 둔다(이름만 맞는 변조).
   writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'PENDING\n')
   writeFileSync(join(S.blobsDir(e.userData, e.folderHash), nextHash), 'UNAPPROVED\n')
+  // 변조된 글자는 읽히지 않는다(보관본 조회는 이름·내용 대조).
+  expect(S.getBlob(e.userData, e.folderHash, nextHash)).toBeNull()
   const recovery = S.recoverPending({ ...e, state })
+  // §16.5.5 4 — 디스크 지문이 쪽지의 새 지문과 같으므로 **디스크 내용으로 blob을 다시 쓴다**.
+  // 변조된 글자를 믿는 것이 아니라 이름과 내용을 디스크에 맞추는 것이다(디스크가 정본).
+  expect(recovery.success).toBe(true)
+  expect(S.getBlob(e.userData, e.folderHash, nextHash)?.toString('utf-8')).toBe('PENDING\n')
+  expect(recovery.state.injected).toBe(nextHash)
+})
+
+test('16.5.5-4: recovery ② fails when the disk fingerprint is neither hash', () => {
+  const e = env('recovery-both')
+  const state = init(e)
+  const nextHash = S.putBlob(e.userData, e.folderHash, 'PENDING\n')
+  S.writePending(e.userData, e.folderHash, {
+    action: 'add',
+    previousHash: state.injected as string,
+    nextHash,
+    at: 1
+  }, e.key)
+  writeFileSync(join(e.rootReal, 'CLAUDE.md'), 'STUDENT AFTER CRASH\n')
+  const recovery = S.recoverPending({ ...e, state })
+  // ②도 ①도 아니다 — ④(죽은 뒤 학생 직접 수정)로 넘긴다. 덮어쓰지 않는다.
   expect(recovery.success).toBe(false)
-  expect(recovery.acceptedLeaves).toEqual([])
+  expect(recovery.acceptedLeaves).toEqual(['CLAUDE.md'])
+  expect(recovery.state.injected).toBe(state.injected)
+  expect(readFileSync(join(e.rootReal, 'CLAUDE.md'), 'utf8')).toBe('STUDENT AFTER CRASH\n')
 })
 
 test('16.4: state file with empty integrity is reported as mismatch', () => {

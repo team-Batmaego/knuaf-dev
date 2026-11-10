@@ -26,6 +26,19 @@ import {
 } from './instructions'
 import type { RuleEntry } from './store'
 
+/**
+ * 이번 변경으로 더해진 규칙 하나의 원문·시각(§16.5.4 ⓑ). 파일에는 id·시각을 적지 않으므로
+ * 저장이 끝나기 전까지 이 값은 쪽지가 나른다. `timestamp`가 없으면 저장 시각을 쓴다.
+ */
+export interface AddedRule {
+  /** `ruleId(normalized)` — 파일 글자 해시 */
+  id: string
+  /** 학생이 보낸 원문 */
+  message: string
+  messageId?: string
+  timestamp?: number
+}
+
 export interface UpdateResult {
   success: boolean
   /** 성공했을 때만 새 파일 전문. 실패면 빈 문자열(호출자가 파일을 쓰지 않는다) */
@@ -33,6 +46,8 @@ export interface UpdateResult {
   message: string
   sectionCreated: boolean
   errors: string[]
+  /** 더하기 성공 시 그 규칙의 원문·시각(지우기·실패면 없음) */
+  rule?: AddedRule
 }
 
 const DAMAGED_MESSAGE = 'CLAUDE.md의 규칙 구획이 손상돼 있어요 · [파일 열기]'
@@ -52,13 +67,24 @@ function ruleId(normalized: string): string {
   return 'file:' + createHash('sha256').update(normalized, 'utf-8').digest('hex')
 }
 
+/** 규칙 표 한 줄의 출처(§16.5.4 ⓒ) — 학생이 파일에 직접 쓴 규칙인가 */
+export const FILE_ORIGIN = 'file'
+
 /**
- * 파일 구획과 보관본 규칙 표를 맞춘다.
- * 같은 글자의 규칙이 표에 있으면 그 id·시각을 이어받고, 없으면 글자 해시로 새 id를 만든다.
+ * 파일 구획과 보관본 규칙 표를 맞춘다(§16.5.4).
+ *
+ * 항목의 출처는 셋뿐이다 — ⓐ 이전 표에 같은 정규 글자가 있으면 그 id·원문·시각
+ * ⓑ 없으면 이번 변경의 쪽지 항목(`candidate`) ⓒ 둘 다 없으면 원문 = 정규 글자,
+ * 시각 = 이 교체의 시각(학생이 파일에 직접 쓴 규칙). **시각 0은 쓰지 않는다.**
  * 구획에 같은 글자가 둘 이상 있으면(학생이 직접 복사) 손상이 아니라 **하나로 본다**.
  * 파일에서 사라진 규칙은 표에서 빠진다 — 학생이 지운 것으로 본다.
  */
-export function mergeRules(content: string, previous: RuleEntry[]): RuleEntry[] {
+export function mergeRules(
+  content: string,
+  previous: readonly RuleEntry[],
+  candidate?: RuleEntry,
+  now: number = Date.now()
+): RuleEntry[] {
   const parsed = parseClaudeMd(content)
   if (parsed.damaged) return []
   const pool = new Map<string, RuleEntry>()
@@ -74,14 +100,19 @@ export function mergeRules(content: string, previous: RuleEntry[]): RuleEntry[] 
     if (known) {
       pool.delete(item.normalized)
       merged.push(known)
-    } else {
-      merged.push({
-        id: ruleId(item.normalized),
-        message: item.normalized,
-        timestamp: 0,
-        normalized: item.normalized
-      })
+      continue
     }
+    if (candidate && candidate.normalized === item.normalized) {
+      merged.push({ ...candidate })
+      continue
+    }
+    merged.push({
+      id: ruleId(item.normalized),
+      message: item.normalized,
+      timestamp: now,
+      normalized: item.normalized,
+      origin: FILE_ORIGIN
+    })
   }
   return merged
 }
@@ -146,7 +177,13 @@ export function addRuleToContent(
     newContent: replaced.text,
     message: '규칙을 저장했어요.',
     sectionCreated: replaced.created,
-    errors: []
+    errors: [],
+    rule: {
+      id: ruleId(normalized),
+      message: rawText,
+      ...(opts?.messageId === undefined ? {} : { messageId: opts.messageId }),
+      ...(opts?.timestamp === undefined ? {} : { timestamp: opts.timestamp })
+    }
   }
 }
 
