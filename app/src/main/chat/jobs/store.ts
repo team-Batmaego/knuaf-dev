@@ -66,13 +66,14 @@ interface StoreState {
   /** 폴더별 승인 시각 — §5 "내가 정함 · {날짜}" 의 근거. 옛 파일에는 없다. */
   approvalAt: Record<string, string>
   /**
-   * 폴더별 [이번만] 배치(Q5) — 승인 배치를 덮지 않는다. 묶인 차례가 끝나고 그 차례 주문이
-   * 모두 끝나면 지운다(`once-ended`). 옛 파일에는 없다.
+   * 폴더별 [이번만] 배치(Q5) — 승인 배치를 덮지 않는다.
+   * **[v0.7.1] v0.7은 쓰지 않는다** — 카드가 만들지도 않고(`cards.ts` `ONCE_DEFERRED`),
+   * 주문 판정에도 쓰지 않는다(`effectivePlan`). 옛 자료가 파싱에서 깨지지 않게 읽기만 남긴다.
    */
   temporary: Record<string, TemporaryPlan>
 }
 
-/** [이번만]으로 도는 배치와 그것이 묶인 차례. */
+/** [이번만]으로 도는 배치와 그것이 묶인 차례. [v0.7.1] — v0.7은 만들지 않는다. */
 export interface TemporaryPlan {
   plan: LanePlan
   /** 도우미가 답하는 중이었으면 그 차례 id, 쉬는 중이었으면 `'next-student-turn'`. */
@@ -311,11 +312,15 @@ export class JobStore {
   }
 
   /**
-   * 주문 판정에 쓰는 지금 배치 — [이번만]이 있으면 그 값, 없으면 승인 배치. 승인 기록은
-   * 건드리지 않는다(Q5): [이번만]이 끝나면 이 함수가 다시 승인 배치를 돌려준다.
+   * 주문 판정에 쓰는 지금 배치 — **승인 배치뿐**이다.
+   *
+   * [C1-04 덜어냄] v0.7은 [이번만]을 쓰지 않는다(DESIGN-C0b 부록 A). 예전 판에서 저장된
+   * `temporary` 가 남아 있어도 **그 값으로 주문을 열지 않는다** — 남은 임시 승인이 학생이 고르지
+   * 않은 일을 실행하던 길이 바로 C1-04 였다. `temporary` 묶음과 접근자는 v0.7.1 이 다시 쓰도록
+   * 그대로 두되, 판정에는 끼우지 않는다.
    */
   effectivePlan(root: string): LanePlan | null {
-    return this.temporary(root)?.plan ?? this.approvedPlan(root)
+    return this.approvedPlan(root)
   }
 
   revokePlan(root: string): void {

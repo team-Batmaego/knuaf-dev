@@ -31,8 +31,16 @@ import { providerOf } from './providers'
 export { LaneFailure }
 import { laneAccounts, recommendation, type LaneRecommendation } from './source'
 
-/** [이번만]이 묶이는 차례 — 쉬는 중에 누르면 학생이 다음에 보내는 차례다(계약 §8-10). */
-const NEXT_STUDENT_TURN = 'next-student-turn'
+/**
+ * [이번만]은 v0.7에서 **적용 경로 자체가 꺼져 있다**(DESIGN-C0b 부록 A, DEFERRED-v071-C0b).
+ *
+ * 차례 범위를 차례 id 없이 판정하려던 것이 C1-04 의 뿌리였다 — 승인 시각과 이어 하기 관계로
+ * 좁혀도 "그 차례에 만든 주문"을 정확히 가릴 수 없다. 그래서 v0.7은 {계속} 하나만 받고,
+ * `'once'` 요청은 **아무것도 바꾸지 않고** 거절한다. 계약 칸(`CardAction`의 `'once'`,
+ * `CardState.applied.scope`의 `'once'`, `boundTurn`, `once-ended`, `temporary`)은 지우지
+ * 않는다 — 차례 id 와 함께 v0.7.1 에서 다시 쓴다.
+ */
+const ONCE_DEFERRED = '이번 차례만 적용은 아직 준비 중이에요 — [계속]으로 정해 주세요.'
 
 /**
  * 폴더 단위 직렬화 — 카드 열기·소비·끄기가 같은 폴더에서 겹치지 않는다.
@@ -262,10 +270,9 @@ async function decideCardLocked(
   if (switchesDesign && !deps.applyDesign) {
     throw new LaneFailure('unavailable', '설계를 다른 회사로 바꾸는 적용이 아직 앱에 이어지지 않았어요.')
   }
-  // 본대화 소유 변경은 이번 차례만으로 되돌릴 수 없다 — [이번만]은 주문 차선만 바꾼다.
-  if (switchesDesign && action === 'once') {
-    throw new LaneFailure('unavailable', '설계를 다른 회사로 바꾸는 것은 [이 배치로 계속]으로만 할 수 있어요.')
-  }
+  // [C1-04 덜어냄] v0.7은 [이번만]을 쓰지 않는다 — 소비(`beginCard`) **전에** 닫는다. 상태를
+  // 건드리지 않으므로 카드는 열린 채로 남고 학생은 [계속]을 다시 누를 수 있다.
+  if (action === 'once') throw new LaneFailure('unavailable', ONCE_DEFERRED)
 
   const claim = deps.store.beginCard(cardId, baseVersion)
   if (!claim.ok) {
@@ -310,8 +317,7 @@ async function decideCardLocked(
   if (!live || live.state.kind !== 'applying') return alreadyHandled(live ?? stored)
 
   switch (action) {
-    case 'continue':
-    case 'once': {
+    case 'continue': {
       // 부작용(설계 칩 바꾸기)은 **승인 분기 안에서만** — 취소·거절은 아무것도 바꾸지 않는다(
       // [C1-02]: 예전에는 계정 대조 뒤 action 분기보다 먼저 불렀다).
       if (switchesDesign) {
@@ -319,12 +325,8 @@ async function decideCardLocked(
         if (!applied) return closeAsInvalid(deps, cardId, null)
       }
       saveConsents(deps, stored)
-      if (action === 'continue') {
-        deps.store.approve(folder, plan)
-        return settle(deps, cardId, { kind: 'applied', scope: 'continue' }, null, null)
-      }
-      deps.store.setTemporary(folder, plan, NEXT_STUDENT_TURN)
-      return settle(deps, cardId, { kind: 'applied', scope: 'once' }, null, NEXT_STUDENT_TURN)
+      deps.store.approve(folder, plan)
+      return settle(deps, cardId, { kind: 'applied', scope: 'continue' }, null, null)
     }
     case 'decline':
       deps.store.addEvent(folder, { id: randomUUID(), at: new Date().toISOString(), kind: 'lanes-declined' })

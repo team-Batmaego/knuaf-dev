@@ -13,7 +13,7 @@ import type { JobRunner } from '../chat/jobs'
 import type { ExecutionAccount } from '../chat/jobs/types'
 import type { JobStore } from '../chat/jobs/store'
 import {
-  LanesPublisher, lanesSettings, type LaneAccountView, type LaneInput, type LaneTemporary
+  LanesPublisher, lanesSettings, type LaneAccountView, type LaneInput
 } from './snapshot'
 
 /** 이 폴더 상태를 만들기 위해 `ChatService` 가 넘기는 읽기 이음매. */
@@ -99,16 +99,16 @@ export async function laneInput(source: LaneSource, root: string | null): Promis
   const { executions, views } = await laneAccounts(source)
   const design = root ? source.store.approvedPlan(root)?.design?.model ?? null : null
   const recommended = recommendation(executions, source.mainCompany, design)
-  const temporary = root ? source.store.temporary(root) : null
-  const shown = root ? source.store.approvedPlan(root) ?? recommended?.plan ?? null : null
   const settings = lanesSettings({
     root,
     store: source.store,
     mainCompany: source.mainCompany,
     accounts: views,
     recommended: recommended ? { rowId: recommended.rowId, plan: recommended.plan, notes: recommended.notes } : null,
-    temporary: temporary ? temporaryRows(temporary.plan, shown) : [],
-    temporaryDesign: temporary?.plan.design?.company ?? null
+    // [C1-04 덜어냄] v0.7은 [이번만]을 쓰지 않는다 — 설정 화면의 "지금 이번 차례만" 줄도
+    // 비어 있다. 옛 판이 남긴 `temporary` 를 여기서 읽어 보여 주면 쓰지 않는 배치를 광고한다.
+    temporary: [],
+    temporaryDesign: null
   })
   return {
     root,
@@ -119,27 +119,6 @@ export async function laneInput(source: LaneSource, root: string | null): Promis
     archives: root && source.archives ? source.archives(root) : [],
     extraLines: root && source.extraLines ? source.extraLines(root) : []
   }
-}
-
-/**
- * [이번만] 배치 → 설정 보기. 설계는 본대화가 고정이라 주문 차선만 넘긴다(계약
- * `LanesSettingsView.temporary`) — 그리고 **지금 보이는 배치와 다른 차선만** 넘긴다. 같으면
- * "지금 이번 차례만" 줄이 아무것도 안 바뀐 값을 되풀이한다(UI-DESIGN §7).
- */
-function temporaryRows(plan: LanePlan, shown: LanePlan | null): LaneTemporary[] {
-  const rows: LaneTemporary[] = []
-  for (const lane of ['research', 'writing', 'repeat', 'review'] as const) {
-    const entry = plan[lane]
-    if (!entry) continue
-    if (sameLane(entry, shown?.[lane] ?? null)) continue
-    rows.push({ lane, entry })
-  }
-  return rows
-}
-
-function sameLane(a: LaneEntry | null, b: LaneEntry | null): boolean {
-  if (!a || !b) return a === b
-  return a.company === b.company && a.model === b.model && a.effort === b.effort && a.how === b.how
 }
 
 /** 묶음을 지어 보낸다. `send` 는 `ipc.ts` 가 넘기는 창 송신기. */

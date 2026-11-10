@@ -11,7 +11,6 @@ import { chatConnectionKey } from './jobs/key'
 import { JobRunner, type JobConnection, type JobRecord, type JobResult, type JobSpec, type RelayRequest } from './jobs'
 import { JobStore, type ConsentRecord } from './jobs/store'
 import { canonical } from './jobs/isolation'
-import { settleTemporary } from '../lanes/temporary'
 import { LaneFailure } from '../lanes/failure'
 import { providerOf } from '../lanes/providers'
 import type { ConversationOwner, ExecutionAccount } from './jobs/types'
@@ -707,25 +706,10 @@ export class ChatService {
         this.runs.delete(this.key(root, provider))
         // 본대화 차례가 끝난 뒤에만 주문을 줍는다(설계 §3.3). 전달 차례는 주문을 줍지
         // 않는다 — 전달이 남긴 주문은 다음 학생 차례가 끝날 때 수집된다.
-        void this.collectJobs(s).then(() => this.settleTemporary(s.root))
+        void this.collectJobs(s)
       })
       return structuredClone(s)
     } catch (e) { release(); throw e }
-  }
-  /**
-   * §3 [이번만] 차례 끝(Q5) — `lanes/temporary.ts` 가 판정하고, 접었을 때만 기록이 남는다.
-   * 승인 배치(계정 단위가 아닌 폴더 단위)는 건드리지 않는다.
-   */
-  private settleTemporary(root: string): void {
-    const store = this.jobStoreInstance
-    if (!store) return
-    let records: JobRecord[] = []
-    try { records = this.jobRunner?.records() ?? [] } catch (error) {
-      console.error('[knuaf] jobs', JSON.stringify({ type: 'temporary-scan', error: error instanceof Error ? error.message : String(error) }))
-    }
-    try { settleTemporary(store, records, root) } catch (error) {
-      console.error('[knuaf] jobs', JSON.stringify({ type: 'temporary-settle', error: error instanceof Error ? error.message : String(error) }))
-    }
   }
   private async execute(s: ChatSnapshot, connection: AgentConnection, text: string, requestId: string) {
     const key = this.key(s.root, s.provider)

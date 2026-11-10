@@ -179,24 +179,26 @@ test('card: a consumed card reports already-handled and keeps its applied record
   expect(await cardStatus(f.deps, f.root, opened.cardId)).toMatchObject({ outcome: 'already-handled' })
 })
 
-// ③ §3-2 [이번만] — 승인 배치를 덮지 않고 다음 학생 차례에 묶인다.
-test('card: [이번만] keeps the approved plan and binds the run to the next student turn', async () => {
+// ③ §3-2 [이번만] — **[C1-04 덜어냄]** v0.7은 이 갈래를 받지 않는다(DESIGN-C0b 부록 A).
+// 예전 시험 `card: [이번만] keeps the approved plan and binds the run to the next student turn`
+// 은 기대를 '거절'로 바꿨다 — 요청이 아무 상태도 바꾸지 않는지가 이제 잠글 사실이다.
+test('card: [이번만] is refused in v0.7 and changes no plan, consent or card state', async () => {
   const f = setup()
   const opened = await openCard(f.deps, f.root, writingToClaude)
-  const decision = await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'once')
-  expect(decision.outcome).toBe('applied')
-  expect(decision.card.state).toEqual({ kind: 'applied', scope: 'once' })
-  expect(decision.boundTurn).toBe('next-student-turn')
+  await expect(decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'once'))
+    .rejects.toMatchObject({ code: 'unavailable' })
+  // 승인 배치·임시 배치·동의·카드 상태 어디에도 흔적이 없다.
   expect(f.store.approvedPlan(f.root)).toBeNull()
-  expect(f.store.temporary(f.root)).toMatchObject({ boundTurn: 'next-student-turn' })
-
-  const body = await snapshot(f)
-  expect(body.settings.mode).toBe('undecided')
-  expect(body.settings.temporary).toEqual([
-    { lane: 'writing', entry: { company: 'claude', model: 'sonnet', effort: null, how: 'relay' } }
-  ])
-  // [이번만]도 요금 동의는 남긴다(§3-2 "동의는 [계속]·[이번만] 모두 남는다").
-  expect(f.store.consent('claude', 'claude-account')).toMatchObject({ state: 'agreed' })
+  expect(f.store.temporary(f.root)).toBeNull()
+  expect(f.store.consent('claude', 'claude-account')).toBeNull()
+  expect(await cardStatus(f.deps, f.root, opened.cardId)).toMatchObject({
+    outcome: 'open', card: { state: { kind: 'open' } }
+  })
+  expect(f.store.events(f.root)).toEqual([])
+  // 거절은 소비가 아니다 — 같은 카드로 [계속]이 그대로 된다.
+  const decision = await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
+  expect(decision.outcome).toBe('applied')
+  expect(f.store.approvedPlan(f.root)?.writing?.company).toBe('claude')
 })
 
 // ④ §3-5 옛 판 — 만든 뒤 배치 판이 바뀌면 적용하지 않고 무효로 접는다.
@@ -361,7 +363,7 @@ test('card: a design-company switch needs the apply seam and only reports applie
   expect((await cardStatus(f.deps, f.root, opened.cardId)).outcome).toBe('open')
   expect(f.store.approvedPlan(f.root)).toBeNull()
 
-  // [이번만]으로는 본대화 소유를 옮길 수 없다.
+  // [이번만]은 v0.7에서 통째로 거절된다 — 설계를 바꾸는 카드라도 이음매를 부르지 않는다.
   const seam: LaneEntry[] = []
   const withSeam: CardDeps = {
     ...f.deps,
@@ -412,11 +414,11 @@ test('card: status never re-applies and old cards without a stored plan close as
   expect(f.store.approvedPlan(f.root)).toBeNull()
 })
 
-// ⑭ §5 [나눠 맡기기 끄기] — 그 폴더의 진행·대기 주문만 멈추고 승인·[이번만]을 접는다.
+// ⑭ §5 [나눠 맡기기 끄기] — 그 폴더의 진행·대기 주문만 멈추고 승인을 거두고 옛 임시 배치도 지운다.
 test('card: disable stops only this folder\'s live jobs and revokes the plan', async () => {
   const f = setup()
   const approved = await openCard(f.deps, f.root, writingToClaude)
-  await decideCard(f.deps, f.root, approved.cardId, approved.baseVersion, 'once')
+  await decideCard(f.deps, f.root, approved.cardId, approved.baseVersion, 'continue')
   for (const [id, status] of [['j-queued', 'queued'], ['j-running', 'running'], ['j-limit', 'limit'], ['j-done', 'delivered']] as const) {
     f.records.push(record(f.root, id, status))
   }

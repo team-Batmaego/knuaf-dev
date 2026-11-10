@@ -9,21 +9,10 @@ import { ConversationHandoff, type HandoffSource } from '../src/main/chat/jobs/c
 import { JobStore } from '../src/main/chat/jobs/store'
 import { canonical } from '../src/main/chat/jobs/isolation'
 import { handoffLines } from '../src/main/lanes/handoff'
-import { settleTemporary } from '../src/main/lanes/temporary'
 import type { AgentConnection } from '../src/main/chat/contracts'
 import type { ConversationOwner, ExecutionAccount, JobRecord } from '../src/main/chat/jobs/types'
 import type { LanePlan } from '../src/shared/lanes'
 import { planFromRow } from '../src/shared/lanes'
-
-async function until(check: () => boolean, timeout = 20_000): Promise<void> {
-  const deadline = Date.now() + timeout
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error('시험이 기다리던 상태에 이르지 못했어요')
-    const { promise, resolve } = Promise.withResolvers<void>()
-    setTimeout(resolve, 20)
-    await promise
-  }
-}
 
 function proposal(patch: Record<string, unknown> = {}) {
   return {
@@ -73,49 +62,27 @@ test('a handoff without a bundle offers [새 대화로 시작] and reports the t
   expect(line).toMatchObject({ kind: 'main-limit-offer', tooLong: true, trimmed: true })
 })
 
-// ② §3 [이번만] 차례 끝 — 그 차례 주문이 살아 있는 동안은 유지, 끝나면 한 번만 접는다.
-test('a temporary plan survives live jobs and ends once with afterFirst', () => {
+// ② §3 [이번만] — **[C1-04 덜어냄]** v0.7은 이 배치를 쓰지 않는다(DESIGN-C0b 부록 A).
+// 예전 시험 `a temporary plan survives live jobs and ends once with afterFirst` ·
+// `a temporary plan over an approved one ends with afterFirst false` ·
+// `a temporary plan is cleared at the end of the bound student turn` 은 지웠다 — 지키던 사실
+// (차례 끝에 접힌다)이 v0.7에 없는 경로의 것이고, 남은 위험은 반대쪽(잔여 배치가 주문을 연다)이다.
+test('fix C1-04: a leftover temporary plan never opens an order on its own', () => {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-temp-')))
   const root = join(base, 'thesis')
   mkdirSync(root, { recursive: true })
   const store = new JobStore(join(base, 'jobs'))
+  // 예전 판이 남긴 [이번만] 배치를 그대로 심는다(옛 store.json 이 그대로 읽힌다).
   store.setTemporary(root, planFromRow('both-high'), 'next-student-turn')
-  // [C1-04] 승인 **뒤에** 만든 주문만 그 차례 것이다 — 이 시험의 주문도 그 뒤에 만든다.
-  const since = store.temporary(root)!.at
 
-  const job = (status: JobRecord['status']): JobRecord => ({
-    spec: {
-      schema: 1, id: `j-${status}`, lane: 'research', task: 't', inputs: [], outputs: ['result.md'],
-      contractVersion: 'role-v1', company: 'codex', model: 'astra', effort: null
-    },
-    rootJobId: `j-${status}`, root: canonical(root), owner: { id: `codex\0${canonical(root)}`, sessionId: 's', company: 'codex' },
-    authorSessionId: 'a', status, contentHash: 'h', outputs: [], createdAt: since
-  })
+  // 승인 배치가 없으면 주문 판정에 쓰는 배치는 **없다** — 임시 배치가 대신 열지 않는다.
+  expect(store.effectivePlan(root)).toBeNull()
 
-  expect(settleTemporary(store, [job('running')], root)).toBe(false)
-  expect(store.temporary(root)).not.toBeNull()
-  expect(settleTemporary(store, [job('completed')], root)).toBe(true)
-  expect(store.temporary(root)).toBeNull()
-  expect(store.events(root).map(event => event.kind)).toEqual(['once-ended'])
-  // 처음 카드였으니 승인 배치가 없다 — 화면은 "다음에 나눠 맡길 때 다시 물어봐요".
-  expect(store.events(root)[0]).toMatchObject({ kind: 'once-ended', afterFirst: true })
-  // 두 번째는 기록도 늘리지 않는다.
-  expect(settleTemporary(store, [], root)).toBe(false)
-  expect(store.events(root)).toHaveLength(1)
-})
-
-test('a temporary plan over an approved one ends with afterFirst false', () => {
-  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-temp2-')))
-  const root = join(base, 'thesis')
-  mkdirSync(root, { recursive: true })
-  const store = new JobStore(join(base, 'jobs'))
-  store.approve(root, planFromRow('both-high'))
-  store.setTemporary(root, planFromRow('codex-high'), 'next-student-turn')
-  // 주문 판정은 [이번만]이 이긴다 — 승인 기록은 그대로다.
+  // 승인 배치가 있으면 그것만 쓴다.
+  store.approve(root, planFromRow('codex-high'))
   expect(store.effectivePlan(root)?.design?.model).toBe('sol')
-  expect(settleTemporary(store, [], root)).toBe(true)
-  expect(store.effectivePlan(root)?.design?.model).toBe('opus')
-  expect(store.events(root)[0]).toMatchObject({ kind: 'once-ended', afterFirst: false })
+  expect(store.effectivePlan(root)).toEqual(planFromRow('codex-high'))
+  store.clearTemporary(root)
 })
 
 // ③ §4-2 보관 대화 — 넘긴 제안만 읽히고, 넘기지 못한 제안은 보관이 아니다.
@@ -328,96 +295,17 @@ test('opening a handoff mints the new conversation and closing it restores the o
   expect(f.svc.snapshot(f.root, 'claude').messages.map(message => message.text)).toEqual(['예전 학생 글'])
 })
 
-test('a temporary plan is cleared at the end of the bound student turn', async () => {
+// [C1-04 덜어냄] 예전 시험 `a temporary plan is cleared at the end of the bound student turn` 은
+// 지웠다. 잠그던 것은 이제 없는 경로(차례 끝 접기)이고, 이 자리에서 확인할 사실은 **차례를
+// 보내도 잔여 임시 배치가 주문 판정에 끼지 않는다**는 것이다.
+test('fix C1-04: ending a student turn never revives a leftover temporary plan', async () => {
   const f = serviceFixture({ proposals: [] })
   const store = (f.svc as unknown as { store: () => JobStore }).store()
   store.setTemporary(f.root, planFromRow('codex-high'), 'next-student-turn')
   await f.svc.send(f.root, 'claude', '차례 하나', 'req-1')
-  await until(() => store.temporary(f.root) === null)
-  expect(store.events(f.root).map(event => event.kind)).toEqual(['once-ended'])
   expect(f.svc.snapshot(f.root, 'claude').messages.some(message => message.text === '차례 하나')).toBe(true)
+  // 차례가 끝나도 판정은 승인 배치만 본다.
+  expect(store.effectivePlan(f.root)).toBeNull()
+  expect(store.events(f.root).map(event => event.kind)).not.toContain('once-ended')
+  store.clearTemporary(f.root)
 })
-
-// [C1-04] 판정서 VM 재현 3건 — [이번만]이 다음 차례까지 새지 않는다.
-//   ⓐ 같은 rootJobId 의 limit 부모 + completed 자식
-//   ⓑ [나중에]로 끝낸 limit (결과가 이미 넘어감)
-//   ⓒ 승인 전부터 있던 과거 limit
-test('fix C1-04: a limit parent whose continuation child completed does not keep the temporary plan', () => {
-  const f = tempFixture()
-  const job = f.job
-  // 판정서 재현 ⓐ.
-  f.store.setTemporary(f.root, planFromRow('codex-high'), 'next-student-turn')
-  expect(settleTemporary(f.store, [job('p0', 'limit', { at: f.laterAt }), job('c0', 'completed', { at: f.laterAt, parent: 'p0' })], f.root)).toBe(true)
-  expect(f.store.temporary(f.root)).toBeNull()
-  expect(f.store.effectivePlan(f.root)).toBeNull()
-
-  // 이어 받은 자식이 아직 도는 중이면 아직 끝난 것이 아니다.
-  // 새 [이번만] 승인은 다시 세운 시각이 기준이다 — 그 값으로 다시 읽는다.
-  f.store.setTemporary(f.root, planFromRow('codex-high'), 'next-student-turn')
-  const second = f.store.temporary(f.root)!.at
-  expect(settleTemporary(f.store, [job('p1', 'limit', { after: second }), job('c1', 'running', { after: second, parent: 'p1' })], f.root)).toBe(false)
-  expect(f.store.temporary(f.root)).not.toBeNull()
-
-  // 자식도 한도로 끝났으면 그 일은 아직 안 끝났다.
-  expect(settleTemporary(f.store, [job('p2', 'limit', { after: second }), job('c2', 'limit', { after: second, parent: 'p2' })], f.root)).toBe(false)
-  expect(f.store.temporary(f.root)).not.toBeNull()
-})
-
-test('fix C1-04: a limit the student finished with [나중에] does not keep the temporary plan', () => {
-  const f = tempFixture()
-  const late = f.job('later-job', 'limit', { at: f.laterAt })
-  // [나중에] 는 그 주문의 결과를 그대로 넘긴다 — 전달 기록이 남는다.
-  f.store.beginDelivery(late.rootJobId, f.root, late.owner.id)
-  f.store.finishDelivery(late.rootJobId)
-  expect(settleTemporary(f.store, [late], f.root)).toBe(true)
-  expect(f.store.temporary(f.root)).toBeNull()
-})
-
-test('fix C1-04: a past limit created before the approval does not keep the temporary plan', () => {
-  const f = tempFixture()
-  // 판정서 재현 ⓒ: 승인 **전에** 만들어진 채 한도로 남은 주문 하나.
-  const old = f.job('old-job', 'limit', { at: f.earlier })
-  expect(settleTemporary(f.store, [old], f.root)).toBe(true)
-  expect(f.store.temporary(f.root)).toBeNull()
-})
-
-test('fix C1-04: an undecided limit created after the approval still holds it', () => {
-  const f = tempFixture()
-  // 승인 뒤에 만든 주문이 아직 한도인 채로 아무 결정도 없으면 그것은 미해결이다.
-  expect(settleTemporary(f.store, [f.job('open-job', 'limit', { at: f.laterAt })], f.root)).toBe(false)
-  expect(f.store.temporary(f.root)).not.toBeNull()
-  // 대기·진행 주문도 마찬가지다.
-  expect(settleTemporary(f.store, [f.job('queued-job', 'queued', { at: f.laterAt })], f.root)).toBe(false)
-})
-
-/** [이번만] 승인 시각을 기준으로 만든 주문 묶음 — 승인 전/후를 시험하려면 시각이 필요하다. */
-function tempFixture() {
-  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-temp-fix-')))
-  const root = join(base, 'thesis')
-  mkdirSync(root, { recursive: true })
-  const store = new JobStore(join(base, 'jobs'))
-  store.setTemporary(root, planFromRow('codex-high'), 'next-student-turn')
-  /** 방금 세운 [이번만]의 승인 시각. */
-  const since = store.temporary(root)!.at
-  const earlier = new Date(Date.parse(since) - 60_000).toISOString()
-  const laterAt = new Date(Date.parse(since) + 60_000).toISOString()
-
-  const job = (
-    id: string,
-    status: JobRecord['status'],
-    options: { before?: string; after?: string; parent?: string } = {}
-  ): JobRecord => ({
-    spec: {
-      schema: 1, id, lane: 'research', task: 't', inputs: [], outputs: ['result.md'],
-      contractVersion: 'role-v1', company: 'codex', model: 'astra', effort: null,
-      ...(options.parent ? { parent: options.parent, cause: 'student-continue-after-limit' as const } : {})
-    },
-    rootJobId: id, root: canonical(root),
-    owner: { id: `codex\0${canonical(root)}`, sessionId: 's', company: 'codex' },
-    authorSessionId: 'a', status, contentHash: 'h', outputs: [],
-    createdAt: options.at ?? laterAt
-  })
-  return { base, root, store, since, earlier, laterAt, job }
-}
-
-void 0
