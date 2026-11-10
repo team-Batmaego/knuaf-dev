@@ -266,8 +266,13 @@ export type LaneLine =
   //      `handoff-failed`로 돌린다 — `handoff-done`을 남기지 않는다.
   /** §4-1 "{회사}로 넘기는 중…" (종류 3). */
   | (LineBase & { kind: 'handoff-running'; tier: 3; to: ModelRef })
-  /** §4-1 넘기지 못함 (종류 2) [다시 하기] [나중에]. */
-  | (LineBase & { kind: 'handoff-failed'; tier: 2; proposalId: string; to: ModelRef })
+  /**
+   * §4-1 넘기지 못함 (종류 2) [다시 하기] [나중에].
+   * [C0b] `reason:'target-limit'` — 이어 받을 회사의 첫 턴이 확인된 한도로 끝났다(DESIGN-C0b §1-4).
+   * 화면: "{to.company}도 지금 한도에 걸렸어요" + [나중에]만. 칸이 없거나 null이면(옛 자료 포함)
+   * 지금 문구 + [다시 하기] [나중에].
+   */
+  | (LineBase & { kind: 'handoff-failed'; tier: 2; proposalId: string; to: ModelRef; reason?: 'target-limit' | null })
 
 export type LaneLineKind = LaneLine['kind']
 
@@ -297,7 +302,7 @@ export type LaneEvent =
   | (EventBase & { kind: 'self-spawn' })
   /** 앱·스킬 판 안 맞음. */
   | (EventBase & { kind: 'version-mismatch' })
-  /** §3 [이번만] 차례 끝 — `afterFirst`면 "다음에 나눠 맡길 때 다시 물어봐요". */
+  /** [v0.7.1] v0.7에서는 생기지 않는다. §3 [이번만] 차례 끝 — `afterFirst`면 "다음에 나눠 맡길 때 다시 물어봐요". */
   | (EventBase & { kind: 'once-ended'; afterFirst: boolean })
   /** §3-1 [나눠 맡기지 않기] · §5 끄기. */
   | (EventBase & { kind: 'lanes-declined' })
@@ -310,9 +315,9 @@ export type LaneEvent =
 // ---------------------------------------------------------------- §3 카드
 
 export type CardVariant =
-  /** §3-1 처음 분담(요금 동의 + 배치 승인). */
+  /** §3-1 처음 분담(요금 동의 + 배치 승인). [v0.7.1] 대화 안 자동 진입(첫 주문)은 v0.7.1 — DESIGN-C0b 부록 A. */
   | 'first'
-  /** §3-2 배치 바꾸기(학생 말에서). §3-4 검토 모델 고르기도 이 갈래. */
+  /** §3-2 배치 바꾸기(학생 말에서). §3-4 검토 모델 고르기도 이 갈래. [v0.7.1] 학생 말 경로(lanes-request)는 v0.7.1, v0.7은 §3-4만. */
   | 'change'
   /** §3-3 설정 확인 창: 켜기. 범위는 [계속]만. */
   | 'settings-enable'
@@ -333,6 +338,7 @@ export interface CardRow {
    * "도우미가 직접"은 `main:true`. 적용된 줄이면 null — 그때는 `after`를 읽는다
    * (도우미 직접은 `after.how === 'main'`).
    */
+  /** [v0.7.1] 학생 말 경로가 v0.7.1이라 v0.7에서는 화면이 읽지 않는다(기록용). */
   requested: { main: boolean; model: string | null; effort: string | null } | null
 }
 
@@ -354,12 +360,16 @@ export type CardState =
    * 설계 전환 안내는 **`card.rows` 하나만** 읽어 그린다(적용 = `rejected === null`). 별도 목록 없음.
    * 설정 확인 창에서 적용한 카드도 같은 모양으로 `cards`에 들어간다(F5).
    */
-  | { kind: 'applied'; scope: RequestScope }
+  | { kind: 'applied'; scope: RequestScope /* [v0.7.1] 'once'는 v0.7.1 — v0.7은 'continue'만 */ }
   /** §3-1 [나눠 맡기지 않기]. */
   | { kind: 'declined' }
   | { kind: 'cancelled' }
-  /** §3-5 무효 — 다른 창에서 처리됨 또는 `baseVersion` 불일치. */
-  | { kind: 'invalid' }
+  /**
+   * §3-5 무효 — 다른 창에서 처리됨 · `baseVersion` 불일치 · 계정 바뀜.
+   * [C0b A3] `reason`은 다시 그릴 때도 사유별 문구(r3c "로그인 계정이 바뀌어…")를 내기 위한 칸.
+   * 칸이 없거나 null이면(옛 저장 자료 포함) §3-5 기본 무효 문구.
+   */
+  | { kind: 'invalid'; reason?: CardInvalidReason | null }
   /** §3-5·U6-04 더 새 카드로 밀려남 — "새 카드로 바뀌었어요". */
   | { kind: 'superseded'; by: string }
 
@@ -380,8 +390,9 @@ export interface LaneCard {
   baseVersion: number
   createdAt: string
   /** §3-1 검토가 필요해서 뜬 카드면 true — "검토할 차례예요…" 머리 줄. */
+  /** [v0.7.1] v0.7은 늘 false — "검토할 차례" 신호가 아직 없다. */
   reviewDue: boolean
-  /** §3 공통 2 — 학생 원문(`lanes-request.json` 인용 그대로). 학생 말에서 온 게 아니면 null. */
+  /** [v0.7.1] v0.7은 늘 null(학생 말 경로가 v0.7.1). §3 공통 2 — 학생 원문(`lanes-request.json` 인용 그대로). 학생 말에서 온 게 아니면 null. */
   quote: string | null
   rows: CardRow[]
   fees: FeeNotice[]
@@ -396,7 +407,7 @@ export interface LaneCard {
 }
 
 /** 카드 단추. `decline`=§3-1 [나눠 맡기지 않기], `cancel`=§3-2 [취소], `ack`=모두 거절일 때 [확인]. */
-export type CardAction = 'continue' | 'once' | 'decline' | 'cancel' | 'ack'
+export type CardAction = 'continue' | 'once' /* [v0.7.1] [이번만] — v0.7 화면은 보내지 않는다 */ | 'decline' | 'cancel' | 'ack'
 
 /** 카드를 쓸 수 없는 사유. `account-changed`는 [Roh 중요 3]. */
 export type CardInvalidReason = 'base-version' | 'superseded' | 'account-changed'
@@ -422,6 +433,7 @@ export interface CardDecision {
    * `'next-student-turn'`(앱이 도우미에게 따로 차례를 보내지 않는다). 이번만이 아니면 null.
    * 해제: 그 차례가 끝나고 **그 차례에 만든 주문도 모두 끝났을 때** — 그때 `once-ended` 기록(Q5).
    */
+  /** [v0.7.1] [이번만]이 v0.7.1이라 v0.7에서는 늘 null. */
   boundTurn: string | 'next-student-turn' | null
 }
 
@@ -453,6 +465,7 @@ export interface LanesSettingsView {
    * [Roh 중요 2] `LaneEntry`라 "도우미가 직접"(`how:'main'`, `model:null`)도 담긴다 — lanes.ts
    * `proposeLaneRequest`가 만든 값을 그대로 넣는다.
    */
+  /** [v0.7.1] [이번만] 몫은 v0.7.1 — v0.7에서는 이어 하기로 도는 값만 담긴다. */
   temporary: { lane: JobLane; entry: LaneEntry }[]
   /** [F2] §5 설계 줄 "아래 칩에서 골라요 (추천 {회사 모델})". 설계 줄은 `rows`에 없다. */
   recommendedDesign: ModelRef | null
