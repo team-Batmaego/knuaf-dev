@@ -193,7 +193,7 @@ test('자식이 살아 있어도 unref 덕에 부모가 스스로 끝난다 (RT3
     `const runner = join(process.cwd(), 'runner.mjs')`,
     `const pidPath = join(process.cwd(), 'tool.pid')`,
     `const binary = join(process.cwd(), WIN ? 'fake.cmd' : 'fake')`,
-    `if (WIN) writeFileSync(binary, '@echo off\\r\\n"${process.execPath}" "' + runner + '"\\r\\n', 'utf-8')`,
+    `if (WIN) writeFileSync(binary, '@echo off\\r\\n"' + process.execPath + '" "' + runner + '"\\r\\n', 'utf-8')`,
     `else writeFileSync(binary, '#!/bin/sh\\nexec ' + JSON.stringify(process.execPath) + ' ' + JSON.stringify(runner) + '\\n', { mode: 0o755 })`,
     `const rpc = new JsonRpcProcess(binary, [], process.cwd(), { ...process.env, TOOL_PID_FILE: pidPath }, { killFn: () => {} })`,
     `rpc.request('account/read', {}).catch(e => console.log('parent: pending rejected'))`,
