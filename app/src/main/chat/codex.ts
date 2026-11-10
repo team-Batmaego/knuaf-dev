@@ -842,12 +842,23 @@ export class CodexRelayConnection implements JobConnection {
      *
      * 플러그인은 `config.plugins` 만으로 부족하다 — 실측 0.167.0: 설정 17개 vs 설치 26개,
      * 원격 Apps 플러그인(`gmail@…` 등)은 설정 표에 없어도 설치되어 있다. 그래서 설치 목록과
-     * 합집합을 쓴다(없는 id 를 넣어도 `thread/start` 는 정상 — 실측). 설치 목록 조회가 실패해도
-     * 주문을 닫지는 않는다: 아래 `assertIsolated` 가 살아 있는 서버를 실제로 잡는다.
+     * 합집합을 쓴다(없는 id 를 넣어도 `thread/start` 는 정상 — 실측).
+     *
+     * **설치 목록을 읽지 못하면 스레드를 열지 않는다**(검토 중요 2). 목록 없이 만든 제한은 설치
+     * 전용 플러그인을 놓치고, 그 플러그인이 딸고 오는 MCP 는 `thread/start` 순간 기동된다 —
+     * 뒤의 `assertIsolated` 가 턴은 막아도 이미 뜬 프로세스는 되돌릴 수 없다. 실측 0.163.0·
+     * 0.164.0·0.167.0 셋 다 이 요청을 가지므로(응답 `{marketplaces, marketplaceLoadErrors}`),
+     * 실패는 "이 판이 지원하지 않는다"가 아니라 진짜 이상 상태다.
      */
     const userConfig = await rpc.request('config/read', { cwd: this.request.cwd, includeLayers: false })
       .catch(() => { throw new Error('학생 설정을 읽지 못해 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.') })
-    const installed = await rpc.request('plugin/installed', {}).catch(() => null)
+    const installed = await rpc.request('plugin/installed', {}).catch(() => {
+      throw new Error('학생이 설치한 플러그인 목록을 읽지 못해 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.')
+    })
+    // 응답 형식도 확인한다 — `marketplaces` 가 배열이 아니면 열거가 끝났는지 알 수 없다.
+    if (!Array.isArray(asRecord(installed).marketplaces)) {
+      throw new Error('학생이 설치한 플러그인 목록의 형식이 예상과 달라 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.')
+    }
     const lockdown = codexRelayLockdown(userConfig?.config, installed)
     const started = await rpc.request('thread/start', codexThreadParams(this.request, model, lockdown))
     const threadId = started?.thread?.id
@@ -860,7 +871,7 @@ export class CodexRelayConnection implements JobConnection {
     if (started.approvalsReviewer !== 'user') {
       throw new Error('Codex 담당 스레드의 승인 심사자가 앱이 정한 값과 달라요. 이 주문은 열지 않습니다.')
     }
-    await this.assertIsolated(rpc, threadId)
+    await this.assertIsolated(rpc, threadId, lockdown)
     this.thread = threadId
     // 순서 고정: 세션 id 가 먼저 와야 러너가 토큰 기록을 남긴다(jobs.ts `tokens`).
     events.session(threadId)
@@ -895,22 +906,41 @@ export class CodexRelayConnection implements JobConnection {
    * 안 먹었다"는 뜻이라 턴을 열지 않는다 — 서버를 하나라도 놓치면 학생 도구가 담당에 붙는다
    * (실측 0.167.0 실제 설정: 제한 없이는 17개 항목 중 13 connected·2 disabled·2 failed,
    * 제한을 걸면 13개 항목 전부 disabled).
+   *
+   * **확인하지 못한 상태를 통과로 넘기지 않는다**(검토 중요 1). 목록은 쪽 단위로 오므로
+   * ① 쪽 상한에 닿았는데 `nextCursor` 가 남아 있으면, ② 응답의 `data` 가 배열이 아니면,
+   * ③ 제한을 건 이름이 하나라도 있는데 목록이 비어 있으면 — 전부 "판정 불가"라 주문을 닫는다.
+   * 끝까지 읽고 전부 `disabled` 인 경우에만 통과한다.
    */
-  private async assertIsolated(rpc: JsonRpcProcess, threadId: string): Promise<void> {
+  private async assertIsolated(rpc: JsonRpcProcess, threadId: string, lockdown: RelayLockdown): Promise<void> {
+    const expected = Object.keys(lockdown.mcp_servers).length
     const live: string[] = []
+    let seen = 0
     let cursor: string | null = null
     for (let page = 0; page < 5; page++) {
       const r = await rpc.request('mcpServerStatus/list',
         cursor ? { threadId, cursor, detail: 'toolsAndAuthOnly' } : { threadId, detail: 'toolsAndAuthOnly' })
-      for (const raw of Array.isArray(r?.data) ? r.data : []) {
+      const data = asRecord(r).data
+      if (!Array.isArray(data)) {
+        throw new Error('Codex 담당 스레드의 MCP 상태 목록 형식이 예상과 달라 격리를 확인하지 못했어요. 이 주문은 열지 않습니다.')
+      }
+      for (const raw of data) {
+        seen++
         const entry = asRecord(raw)
         if (entry.runtimeStatus !== 'disabled') {
           const name = typeof entry.name === 'string' && entry.name ? entry.name : '(이름 없음)'
           live.push(`${name}=${String(entry.runtimeStatus)}`)
         }
       }
-      cursor = typeof r?.nextCursor === 'string' && r.nextCursor ? r.nextCursor : null
+      cursor = typeof asRecord(r).nextCursor === 'string' && asRecord(r).nextCursor ? asRecord(r).nextCursor as string : null
       if (!cursor) break
+    }
+    if (cursor) {
+      throw new Error('Codex 담당 스레드의 MCP 상태 목록이 끝나지 않아 격리를 확인하지 못했어요. 이 주문은 열지 않습니다.')
+    }
+    // 제한을 건 이름이 있는데 목록이 통째로 비면 "꺼졌다"가 아니라 "볼 것이 없다"이다.
+    if (expected > 0 && seen === 0) {
+      throw new Error('Codex 담당 스레드의 MCP 상태 목록이 비어 있어 격리를 확인하지 못했어요. 이 주문은 열지 않습니다.')
     }
     if (live.length > 0) {
       throw new Error(`Codex 담당 스레드에서 MCP 서버가 꺼지지 않았어요(${live.join(', ')}). 이 주문은 열지 않습니다.`)

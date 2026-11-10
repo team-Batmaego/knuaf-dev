@@ -8,16 +8,18 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import {
   ClaudeRelayConnection, claudeExecutionAccount, claudeSubscriptionTier, claudeUsageState
 } from '../src/main/chat/claude'
 import { CodexRelayConnection, codexExecutionAccount, codexRelayLockdown, codexSandboxPolicy, codexThreadParams, codexUsageState } from '../src/main/chat/codex'
 import { JsonRpcProcess } from '../src/main/chat/transport'
+import { winSpawn } from '../src/main/win'
 import { relayIsolation } from '../src/main/chat/jobs/isolation'
 import { claudeTokens, codexTokens, tokenRecord } from '../src/main/chat/jobs/tokens'
 import type { ExecutionAccount, JobEvents, RelayRequest, UsageState } from '../src/main/chat/jobs/types'
 import type { AgentOptions } from '../src/main/chat/contracts'
+import { codexRelayLauncher } from './fixtures/relay-launcher'
 
 const appRoot = process.cwd()
 
@@ -34,12 +36,17 @@ function bundledCli(): string | null {
 
 /** PATH 의 codex — 동봉본은 이 맥(arm64)에 없다(`app/scripts/fetch-codex.mjs` 는 x86_64 Windows). */
 function systemCodex(): string | null {
-  for (const dir of (process.env.PATH ?? '').split(':')) {
-    const candidate = join(dir, 'codex')
-    if (existsSync(candidate)) return realpathSync(candidate)
+  // 윈도우의 실행 파일은 확장자가 붙는다 — 확장자 없는 이름만 보면 조용히 건너뛴 것처럼 보인다.
+  const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex.bat', 'codex'] : ['codex']
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    for (const name of names) {
+      const candidate = join(dir, name)
+      if (existsSync(candidate)) return realpathSync(candidate)
+    }
   }
   return null
 }
+
 
 function appDir(tag: string): string { return realpathSync(mkdtempSync(join(tmpdir(), `kd-app-${tag}-`))) }
 
@@ -92,6 +99,27 @@ async function startServer(handler: (req: http.IncomingMessage, res: http.Server
   if (!address || typeof address === 'string') throw new Error('가짜 서버 주소를 얻지 못했어요')
   return { server, port: address.port, close: () => new Promise<void>(r => server.close(() => r())) }
 }
+
+test('relay 실행 래퍼: 윈도우는 .cmd, 유닉스는 셔뱅 — 윈도우 분기를 여기서 실제로 밟는다', () => {
+  // 이 시험이 없으면 윈도우 분기는 CI 의 windows 러너에서만 처음 실행된다(그때 깨지면 늦다).
+  // `winSpawn` 과 같은 주입 방식이라 맥에서도 윈도우 산출물을 그대로 검사한다.
+  const root = mkdtempSync(join(tmpdir(), 'kd-launcher-'))
+  const script = join(root, 'fake-server.mjs')
+  writeFileSync(script, '// noop\n')
+  const win = codexRelayLauncher(root, script, 'win32', 'C:\\node\\node.exe')
+  expect(win.endsWith('codex-wrapper.cmd')).toBe(true)
+  expect(readFileSync(win, 'utf-8')).toBe(`@echo off\r\n"C:\\node\\node.exe" "${script}" %*\r\n`)
+  // `transport.ts` 는 이 확장자를 보고 cmd.exe 로 감싼다 — 감싸지 않으면 Node 가 못 띄운다.
+  const spec = winSpawn(win, ['app-server'], 'win32')
+  expect(spec.command.toLowerCase()).toContain('cmd')
+  expect(spec.args.slice(-2, -1)).toEqual(['/c'])
+
+  const unix = codexRelayLauncher(root, script, 'linux', '/usr/bin/node')
+  expect(unix.endsWith('codex-wrapper.sh')).toBe(true)
+  expect(readFileSync(unix, 'utf-8')).toBe(`#!/bin/sh\nexec "/usr/bin/node" "${script}" "$@"\n`)
+  // 유닉스 경로는 그대로 띄운다(래퍼 자신이 실행 비트를 가진다).
+  expect(winSpawn(unix, ['app-server'], 'linux')).toEqual({ command: unix, args: ['app-server'], options: {} })
+})
 
 test('relay A 판정은 관측된 사건만 쓴다', () => {
   const cases: [Parameters<typeof claudeUsageState>[0], UsageState][] = [
@@ -319,13 +347,8 @@ test('Codex 담당 연결: 격리 정책과 거절을 실제 파라미터로 보
     KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill), KD_FAKE_ALLOWED: 'true'
   })
   // `serverArgsFor` 가 붙이는 `app-server` 인자를 흉내내려면 argv 가 필요하다 — 스크립트를
-  // 그대로 띄우도록 얇은 래퍼를 쓴다(Node 는 스크립트 경로를 첫 인자로 받는다).
-  const connection = new CodexRelayConnection({ ...options, binary: `${process.execPath} ${binary}`.replace(/ /g, '\u0000') },
-    request(root, out, skill, { company: 'codex', model: 'gpt-5-codex', effort: 'high' }))
-  void connection
-  // 실행 가능한 래퍼 스크립트를 만들어 `binary` 자리에 넣는다.
-  const wrapper = join(root, 'codex-wrapper.sh')
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  // 그대로 띄우도록 얇은 래퍼를 쓴다(플랫폼별 확장자는 `codexRelayLauncher`).
+  const wrapper = codexRelayLauncher(root, binary)
   const wired = new CodexRelayConnection({ ...options, binary: wrapper },
     request(root, out, skill, { company: 'codex', model: 'gpt-5-codex', effort: 'high' }))
   const recorderEvents = recorder()
@@ -398,8 +421,7 @@ test('Codex 담당 연결: 제한이 안 걸리면 턴을 열지 않는다', { t
   const logFile = join(root, 'app-server.log')
   writeFileSync(logFile, '')
   const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
-  const wrapper = join(root, 'codex-wrapper.sh')
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const wrapper = codexRelayLauncher(root, binary)
   const connection = new CodexRelayConnection(
     agentOptions(wrapper, root, skill, {
       KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill),
@@ -423,8 +445,7 @@ test('Codex 담당 연결: 설정을 읽지 못하면 스레드조차 열지 않
   const logFile = join(root, 'app-server.log')
   writeFileSync(logFile, '')
   const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
-  const wrapper = join(root, 'codex-wrapper.sh')
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const wrapper = codexRelayLauncher(root, binary)
   const connection = new CodexRelayConnection(
     agentOptions(wrapper, root, skill, {
       KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill),
@@ -440,6 +461,74 @@ test('Codex 담당 연결: 설정을 읽지 못하면 스레드조차 열지 않
   expect(entries.some(e => e.method === 'thread/start')).toBe(false)
   expect(entries.some(e => e.method === 'turn/start')).toBe(false)
 })
+
+/**
+ * 담당 연결을 가짜 app-server 로 돌리고 (실패 메시지, 요청 로그)를 돌려준다.
+ * `runJob` 이 던지지 않으면 `error` 가 null 이다 — 통과하면 안 되는 경우를 그 자리에서 잡는다.
+ */
+async function runFakeRelay(tag: string, env: NodeJS.ProcessEnv) {
+  const { root, out, skill } = fixtureRoot(tag)
+  const logFile = join(root, 'app-server.log')
+  writeFileSync(logFile, '')
+  const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
+  const connection = new CodexRelayConnection(
+    agentOptions(codexRelayLauncher(root, binary), root, skill, {
+      KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill), KD_FAKE_ALLOWED: 'true', ...env
+    }),
+    request(root, out, skill, { company: 'codex', model: 'gpt-5-codex', effort: 'high' }))
+  let error: Error | null = null
+  try { await connection.runJob('담당 모드: 주문서', recorder().events) }
+  catch (e) { error = e as Error }
+  finally { await connection.stop() }
+  const entries = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  const methods = entries.map(e => e.method).filter(Boolean)
+  return { error, methods }
+}
+
+test('Codex 담당 연결: 플러그인 열거가 실패하면 스레드를 열지 않는다', { timeout: 120_000 }, async () => {
+  // 검토 중요 2 — 설치 목록 없이 만든 제한은 설치 전용 플러그인을 놓치고, 그 플러그인의 MCP 는
+  // `thread/start` 순간 기동된다. 뒤의 상태 검사는 턴만 막고 이미 뜬 프로세스는 못 되돌린다.
+  const { error, methods } = await runFakeRelay('codex-plugin-error', { KD_FAKE_PLUGIN_ERROR: '1' })
+  expect(error, '열거 실패인데 주문이 열렸다').not.toBeNull()
+  expect(error?.message).toMatch(/플러그인 목록을 읽지 못해/)
+  expect(methods).toContain('plugin/installed')
+  // **스레드조차 열지 않는다** — 기동 전에 닫는 것이 이 고침의 핵심이다.
+  expect(methods).not.toContain('thread/start')
+  expect(methods).not.toContain('turn/start')
+})
+
+test('Codex 담당 연결: 플러그인 목록 형식이 다르면 스레드를 열지 않는다', { timeout: 120_000 }, async () => {
+  // 응답은 왔지만 `marketplaces` 가 없다 — 열거가 끝났는지 알 수 없으니 통과시키지 않는다.
+  const { error, methods } = await runFakeRelay('codex-plugin-shape', { KD_FAKE_PLUGIN_SHAPE: 'no-marketplaces' })
+  expect(error, '형식이 다른데 주문이 열렸다').not.toBeNull()
+  expect(error?.message).toMatch(/플러그인 목록의 형식이 예상과 달라/)
+  expect(methods).not.toContain('thread/start')
+  expect(methods).not.toContain('turn/start')
+})
+
+test('Codex 담당 연결: 상태 목록이 5쪽을 넘겨 남으면 턴을 열지 않는다', { timeout: 120_000 }, async () => {
+  /**
+   * 검토 중요 1 의 재현 그대로 — 앞 5쪽은 `disabled`, 6쪽째는 `connected`. 쪽 상한에 닿았는데
+   * 다음 쪽 표시가 남아 있으면 "끝까지 읽었다"가 아니므로 판정 불가로 닫는다.
+   */
+  const { error, methods } = await runFakeRelay('codex-status-pages', { KD_FAKE_STATUS_PAGES: '6' })
+  expect(error, '6쪽째 connected 를 못 보고 통과했다').not.toBeNull()
+  expect(error?.message).toMatch(/목록이 끝나지 않아/)
+  expect(methods.filter(m => m === 'mcpServerStatus/list')).toHaveLength(5)
+  expect(methods).toContain('thread/start')
+  expect(methods).not.toContain('turn/start')
+})
+
+for (const [shape, label] of [['absent', '없는'], ['null', 'null 인'], ['empty', '빈']] as const) {
+  test(`Codex 담당 연결: 상태 목록의 data 가 ${label} 응답은 턴을 열지 않는다`, { timeout: 120_000 }, async () => {
+    // `Array.isArray(r?.data) ? r.data : []` 로 읽으면 이 셋이 모두 "전부 disabled"와 같아진다.
+    const { error, methods } = await runFakeRelay(`codex-status-${shape}`, { KD_FAKE_STATUS_SHAPE: shape })
+    expect(error, `data 가 ${label} 응답인데 주문이 열렸다`).not.toBeNull()
+    expect(error?.message).toMatch(shape === 'empty' ? /목록이 비어 있어/ : /목록 형식이 예상과 달라/)
+    expect(methods).toContain('thread/start')
+    expect(methods).not.toContain('turn/start')
+  })
+}
 
 test('실물 Codex app-server: 제한을 건 담당 스레드는 사용자 MCP 를 기동조차 않는다', { timeout: 180_000 }, async () => {
   const binary = systemCodex()

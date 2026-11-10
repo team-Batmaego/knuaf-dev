@@ -94,6 +94,9 @@ const handlers = {
   /** 설치 목록 — 설정 표에 없는 원격 플러그인도 여기 있어 합집합이 필요하다(실측 17 vs 26). */
   'plugin/installed': (params) => {
     log({ method: 'plugin/installed', params })
+    // 열거 실패를 흉내내는 스위치 — 앱은 스레드를 열기 전에 주문을 닫아야 한다(검토 중요 2).
+    if (process.env.KD_FAKE_PLUGIN_ERROR === '1') throw new Error('plugin enumeration failed')
+    if (process.env.KD_FAKE_PLUGIN_SHAPE === 'no-marketplaces') return { marketplaceLoadErrors: [] }
     return { marketplaces: [{
       name: 'mkt', path: '/fake/mkt',
       plugins: [
@@ -106,19 +109,40 @@ const handlers = {
    * 실물과 같은 판정: `thread/start.config` 의 이름별 `enabled:false` 가 있으면 `disabled`,
    * 없으면 `connected`. 이 응답이 **제한을 빼면 실패하는 시험**의 근거다 — 앱이 보낸 제한이
    * 사라지면 여기가 `connected` 를 돌려주고 연결이 턴을 열지 않는다.
+   *
+   * 쪽 나눔 스위치(검토 중요 1 재현):
+   *  · `KD_FAKE_STATUS_PAGES=6` — 앞 5쪽은 `disabled`, 6쪽째는 `connected`. 쪽 상한(5)에서
+   *    멈추고 다음 쪽 표시를 무시하면 6쪽째를 못 보고 통과한다.
+   *  · `KD_FAKE_STATUS_SHAPE=absent|null` — `data` 가 아예 없거나 `null`. 빈 목록으로 읽으면
+   *    "전부 disabled"와 구분되지 않는다. `empty` 는 `data: []` — 제한을 건 이름이 있는데
+   *    목록이 비면 "꺼졌다"가 아니라 "볼 것이 없다"이므로 따로 닫는다.
    */
   'mcpServerStatus/list': (params) => {
     log({ method: 'mcpServerStatus/list', params })
+    const shape = process.env.KD_FAKE_STATUS_SHAPE
+    if (shape === 'absent') return { nextCursor: null }
+    if (shape === 'null') return { data: null, nextCursor: null }
+    if (shape === 'empty') return { data: [], nextCursor: null }
     const table = threadConfig?.mcp_servers
     const plugOff = (threadConfig?.plugins ?? {}) && USER_PLUGINS.every(id => disabledBy(threadConfig.plugins, id))
-    const servers = [...USER_SERVERS, ...(plugOff ? [] : PLUGIN_SERVERS)]
     // 사용자 설정이 제한을 이기는 경우(옛 판이 키를 무시하는 경우)를 흉내내는 스위치.
     const ignores = process.env.KD_FAKE_IGNORE_LOCKS === '1'
-    return { data: servers.map(name => ({
-      name, pluginId: null, authStatus: 'unsupported', serverCapabilities: null, serverInfo: null,
+    const status = (name) => ({ name, pluginId: null, authStatus: 'unsupported', serverCapabilities: null, serverInfo: null,
       tools: {}, resources: [], resourceTemplates: [],
-      runtimeStatus: !ignores && disabledBy(table, name) ? 'disabled' : 'connected'
-    })), nextCursor: null }
+      runtimeStatus: !ignores && disabledBy(table, name) ? 'disabled' : 'connected' })
+    const pages = Number(process.env.KD_FAKE_STATUS_PAGES ?? 0)
+    if (pages > 0) {
+      // 쪽마다 서버 하나. 마지막 쪽만 제한을 무시한 `connected` 다.
+      const index = Number(params?.cursor ?? '0')
+      const last = index >= pages - 1
+      const name = last ? 'late-mcp' : `${USER_SERVERS[0]}-p${index}`
+      return {
+        data: [{ ...status(name), runtimeStatus: last ? 'connected' : 'disabled' }],
+        nextCursor: last ? null : String(index + 1)
+      }
+    }
+    const servers = [...USER_SERVERS, ...(plugOff ? [] : PLUGIN_SERVERS)]
+    return { data: servers.map(status), nextCursor: null }
   },
   'turn/start': (params) => {
     log({ method: 'turn/start', params })

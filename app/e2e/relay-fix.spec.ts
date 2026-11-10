@@ -13,6 +13,7 @@ import { canonical, relayIsolation, sha256 } from '../src/main/chat/jobs/isolati
 import { JobFailure, type ConversationOwner, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest } from '../src/main/chat/jobs/types'
 import type { AgentOptions } from '../src/main/chat/contracts'
 import { planFromRow } from '../src/shared/lanes'
+import { codexRelayLauncher } from './fixtures/relay-launcher'
 
 const appRoot = process.cwd()
 const owner: ConversationOwner = { id: 'main', sessionId: 'author', company: 'claude' }
@@ -249,8 +250,7 @@ test('[차단 2] Codex 담당은 승인 심사자를 앱이 명시하고 돌려�
   // 돌려받은 값이 다르면 주문을 열지 않는다(사용자 설정이 심사자를 바꿔 놓은 경우).
   const logFile = join(root, 'app-server.log'); writeFileSync(logFile, '')
   const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
-  const wrapper = join(root, 'codex-wrapper.sh')
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const wrapper = codexRelayLauncher(root, binary)
   const hijacked = new CodexRelayConnection(
     agentOptions(wrapper, root, skill, { KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill), KD_FAKE_THREAD_REVIEWER: 'auto_review' }),
     relayRequest(root, out, skill, { company: 'codex', model: 'gpt-5-codex' }))
@@ -321,8 +321,7 @@ test('[중요 2] Codex 담당의 실제 노력 수준은 thread 기본값이 아
   const { root, out, skill } = fixtureRoot('effort')
   const logFile = join(root, 'app-server.log'); writeFileSync(logFile, '')
   const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
-  const wrapper = join(root, 'codex-wrapper.sh')
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const wrapper = codexRelayLauncher(root, binary)
   // 서버 thread 기본값은 high, 주문은 low.
   const connection = new CodexRelayConnection(
     agentOptions(wrapper, root, skill, { KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill), KD_FAKE_THREAD_EFFORT: 'high' }),
@@ -342,8 +341,7 @@ test('[중요 3] 권한 요청 거절은 스키마 모양으로 보낸다', asyn
   const { root, out, skill } = fixtureRoot('permissions')
   const logFile = join(root, 'app-server.log'); writeFileSync(logFile, '')
   const binary = join(appRoot, 'e2e', 'fixtures', 'fake-codex-relay.mjs')
-  const wrapper = join(root, 'codex-wrapper.sh')
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${binary}" "$@"\n`, { mode: 0o755 })
+  const wrapper = codexRelayLauncher(root, binary)
   const connection = new CodexRelayConnection(agentOptions(wrapper, root, skill, { KD_FAKE_CODEX_LOG: logFile, KD_FAKE_SKILL_ROOT: dirname(skill) }),
     relayRequest(root, out, skill, { company: 'codex', model: 'gpt-5-codex' }))
   try { await connection.runJob('담당 모드: 주문서', recorder().events) } finally { await connection.stop() }
