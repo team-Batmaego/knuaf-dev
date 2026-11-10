@@ -143,3 +143,16 @@ test('인라인 코드와 중첩 괄호 링크 주소 안 낱말은 본문으로
   expect(visible).toHaveLength(1)
   expect(visible[0].start).toBe(1)
 })
+
+test('구분자 경계를 정확히 읽는다 — 긴 백틱 묶음·escape 괄호', () => {
+  // 여는 묶음과 길이가 다른 백틱은 닫이가 아니다 — 코드 안이므로 세지 않는다.
+  expect(findPlaces([{ id: 'sec-01', draft: '명령 `코드 ``` 트랙터` 끝' }], '트랙터')).toEqual([])
+  // escape 된 `)` 는 주소를 닫지 않는다 — 주소는 끝까지 숨는다.
+  expect(findPlaces([{ id: 'sec-01', draft: '[자료](https://example.test/(x)\\)트랙터.png)' }], '트랙터'))
+    .toEqual([])
+  expect(findPlaces([{ id: 'sec-01', draft: '[자료](https://example.test/(x)\\(트랙터.png)' }], '트랙터'))
+    .toEqual([])
+  // 짝이 안 맞는 주소도 줄 끝까지 숨긴다(애매하면 안 세는 쪽).
+  expect(findPlaces([{ id: 'sec-01', draft: '[자료](https://example.test/(x 트랙터.png' }], '트랙터'))
+    .toEqual([])
+})

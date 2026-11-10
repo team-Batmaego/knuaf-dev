@@ -33,7 +33,7 @@ import os
 import re
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .methods_core import _core, _root
@@ -43,9 +43,10 @@ LEDGER_DIR = ".knuaf-gui"
 LEDGER_NAME = "student-edits.jsonl"
 BACKUP_DIR = "edit-backup"
 REQUEST_PREFIX = "app:student-edit:"
-CONFIRMED_STATES = ("plain", "pending", "sent", "undone")
-# 원장이 끝맺은 줄 전부 — `done`(되돌리기 작업 줄)·`aborted`(저장 안 됨)도 포함한다.
-TERMINAL_STATES = CONFIRMED_STATES + ("done", "aborted")
+CONFIRMED_STATES = ("plain", "pending", "sent")
+# 원장이 끝맺은 줄 전부. `aborted`(저장 안 됨)도 '이 요청은 이미 끝났다'로 센다 —
+# 그래야 정본 요청 원장과 대조할 때 유령 '기록 유실' 건을 만들지 않는다.
+TERMINAL_STATES = CONFIRMED_STATES + ("aborted",)
 MARK_STATES = ("sent", "pending")
 # §8-1: 시작 때 한 번 찔러 보고, 없으면 `section.edit` 계열을 아예 등록하지 않는다
 # (화면은 `methods.list` 를 보고 단추를 숨긴다).
@@ -91,26 +92,20 @@ def _app_dir(root: Path) -> Path:
 
 
 def _backup_root(root: Path) -> Path:
-    """보존 폴더 뿌리 — 앱 소유 폴더 안."""
-    return _app_dir(root) / BACKUP_DIR
+    """보존 폴더 뿌리 — 앱 소유 폴더 안, 바로가기 아님.
 
-
-def _check_backup(bundle: Path) -> Path:
-    """보존 폴더 안의 경로인지 확인한다 — 그 안의 **모든 파일**에 같은 검사를 건다."""
-    bundle = Path(bundle)
-    if bundle.is_symlink():
-        raise RpcError("ledger_unreadable", "보존 폴더가 바로가기예요: %s" % bundle.name)
-    parent = bundle.parent
-    if parent.is_symlink():
-        raise RpcError("ledger_unreadable", "보존 상위 폴더가 바로가기예요: %s" % parent.name)
-    return bundle
+    **무엇이든 쓰기 전에** 검사한다(D5). `.knuaf-gui` 만 보고 `edit-backup` 이 폴더 밖을
+    가리키는 바로가기면, 시험 파일만 잠깐 만들었다 지우는 것으로 끝나더라도 폴더 밖에
+    쓰는 일 자체가 없어야 한다.
+    """
+    return _contained(root, LEDGER_DIR + "/" + BACKUP_DIR)
 
 
 def _bundle_path(root: Path, edit_id: str) -> Path:
     """`<보존 뿌리>/<edit_id>` — 이름에 경로 구분자가 들어오면 거절한다."""
     if not edit_id or "/" in edit_id or "\\" in edit_id or edit_id in (".", ".."):
         raise RpcError("invalid_params", "보존 폴더 이름이 올바르지 않아요: %r" % edit_id)
-    return _check_backup(_backup_root(root) / edit_id)
+    return _contained(root, "%s/%s/%s" % (LEDGER_DIR, BACKUP_DIR, edit_id))
 
 
 def _file_name(prefix: str, n: int) -> str:
@@ -227,26 +222,13 @@ def _displace(path: Path, dest: Path) -> None:
 def _restore_noclobber(path: Path, src: Path) -> None:
     """보존본을 제자리에 돌려놓는다 — **이름 걸기 + 보존 이름 떼기**(§4-4-2).
 
-    글자를 새로 쓰지 않으므로 반쯤 쓰인 원고가 생길 수 없고 디스크 공간도 들지 않는다
-    (P2). 자리에 이미 파일이 있으면 `FileExistsError` — 남의 글을 지우지 않는다.
-    이름 걸기가 안 되는 폴더면 그대로 올린다(삼키지 않는다 — `restore_pending`).
+    글자를 새로 쓰지 않으므로 반쯤 쓰인 원고가 생기지 않고, **본문을 복사할 여유 공간은
+    요구하지 않는다**(P2·D7). 다만 이름 작업(디렉터리·메타데이터)도 실패할 수 있다 — 그때는
+    보존본과 `writing` 줄을 그대로 두고 `restore_pending` 으로 알린다. 자리에 이미 파일이
+    있으면 `FileExistsError` — 남의 글을 지우지 않는다.
     """
     os.link(src, path)
     src.unlink()
-
-
-def _remove_name(path: Path, sha: str) -> bool:
-    """지문이 `sha` 인 파일 이름만 뗀다(P1). 다르면 남의 글이라 손대지 않고 `False`."""
-    try:
-        if hashlib.sha256(Path(path).read_bytes()).hexdigest() != sha:
-            return False
-    except OSError:
-        return False
-    try:
-        Path(path).unlink()
-    except OSError:
-        return False
-    return True
 
 
 def _probe_noclobber(dirs: set[Path], backup_root: Path) -> None:
@@ -434,7 +416,6 @@ def _request_id(items: list[dict]) -> str:
 # ── 저장 한 번 ──────────────────────────────────────────────────────────────
 
 
-CLEANUP_AFTER = timedelta(minutes=10)
 RESTORED_NOTICE = "앱이 갑자기 꺼져서 마지막 고침이 저장되지 않았어요. 원고는 고치기 전 그대로예요."
 KEPT_NOTICE = "다른 프로그램이 같은 장을 동시에 고쳤어요. 그 내용은 지우지 않고 따로 보관했어요."
 RESTORE_PENDING_NOTICE = (
@@ -485,8 +466,9 @@ def _write_backup(path: Path, data: bytes, mode: int) -> None:
 def _place(path: Path, src: Path) -> None:
     """`src` 에 원고 자리 이름을 건다 — 자리에 이미 있으면 `FileExistsError`(§4-4-2).
 
-    이름 걸기(하드 링크)는 원자적이고 공간이 들지 않는다. 글자를 쓰지 않으므로 반쯤 쓰인
-    원고가 생길 수 없다(P2).
+    이름 걸기(하드 링크)는 본문을 복사하지 않는다 — **본문을 복사할 여유 공간은 요구하지
+    않는다**(D7). 다만 이름 작업도 실패할 수 있다: 실패하면 보존본과 `writing` 줄을 그대로
+    두고 `restore_pending` 으로 알린다. 글자를 쓰지 않으므로 반쯤 쓰인 원고는 생기지 않는다.
     """
     os.link(src, path)
 
@@ -519,32 +501,36 @@ def _store_file(bundle: Path, record: dict) -> None:
         raise RpcError("stale_view", "그사이 글이 바뀌었어요. 다시 골라 주세요.") from None
 
 
-def _restore_file(bundle: Path, n: int, path: Path, sha_a: str, sha_c: str) -> bool:
-    """파일 한 개 되돌리기 — **유일한 원복 절차**(§4-4-2). 글자를 새로 쓰지 않는다.
+def _restore_file(bundle: Path, n: int, path: Path, sha_a: str, sha_c: str) -> str:
+    """파일 한 개 되돌리기 — **유일한 원복 절차**(§4-4-2·§4-5-2). 글자를 새로 쓰지 않는다.
 
-    자리에 있는 것이 내가 놓은 C(`sha_c`)일 때만 A 를 돌려놓는다. C 가 아니면(남이 썼다)
-    그것을 제자리에 돌려놓고 손을 뗀다. 돌려놓기 자체가 실패하면 `OSError` 를 그대로
-    올린다 — 삼키지 않는다(부르는 쪽이 `restore_pending` 으로 알린다).
+    돌려주는 값은 참·거짓이 아니라 **세 값**이다(§4-5-2 D3):
+
+    - `restored` — A 를 원고 자리에 돌려놓았다.
+    - `nothing` — 돌려놓을 일이 없었다(밀어낸 적 없음).
+    - `left` — 원고 자리에 남의 글·내 글이 남았고 A 는 보존 폴더에 그대로 있다.
+      부르는 쪽은 `left` 를 알림 없이 닫지 않는다.
     """
     first = bundle / _file_name("displaced-1", n)
     second = bundle / _file_name("displaced-2", n)
     if not first.exists():
-        return False  # 밀어낸 적 없다 — 아무것도 돌려놓지 않았다(알릴 것도 없다)
+        return "nothing"  # 밀어낸 적 없다 — 아무것도 돌려놓지 않았다
     if not path.exists():
         # 자리가 비었다. 되돌리던 중 꺼져 남의 글이 displaced-2 에 있으면 그것이 더 새 글이다.
         if second.exists() and not _matches(second, sha_c):
             _restore_noclobber(path, second)
         else:
             _restore_noclobber(path, first)
-        return True
+        return "restored"
     if second.exists():
-        return False  # 이미 되돌리던 중 — 자리의 글은 남의 것이니 손대지 않는다
+        # 밀 자리가 없다 — 자리의 글을 덮지 않고 A 를 보존 폴더에 그대로 둔다(D3).
+        return "left"
     _displace(path, second)
     if _matches(second, sha_c):
         _restore_noclobber(path, first)  # 내 글만 걷어 내고 A 복귀
-        return True
+        return "restored"
     _restore_noclobber(path, second)  # 남의 글을 제자리에 돌려놓는다
-    return False
+    return "left"
 
 
 def _revert(records: list[dict], bundle: Path) -> None:
@@ -590,7 +576,12 @@ def _recover_pending(core, root: Path) -> list[dict]:
 
 
 def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
-    """`writing` 줄 하나를 §4-4-3 표대로 처분하고 끝줄을 적는다."""
+    """`writing` 줄 하나를 §4-5-2 표대로 처분하고 끝줄을 적는다.
+
+    표 일곱 줄: 등록 전이면 원래대로(restored), 손댈 수 없으면 남긴다(left → `kept`),
+    이미 A 면 아무것도 안 한다(nothing), 등록됐으면 확정 줄만 채운다. 못 돌려놓으면
+    줄을 닫지 않고 `restore_pending` 알림을 낸다.
+    """
     edit_id = row["edit_id"]
     bundle = _bundle_path(root, edit_id)
     files = [f for f in (row.get("files") or []) if isinstance(f, dict) and type(f.get("n")) is int]
@@ -600,7 +591,8 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
         raise RpcError("indeterminate", "정본을 읽지 못했어요.", data={"backup": str(bundle)}) from None
     registered = bool(row.get("request_id")) and row["request_id"] in (p.get("requests") or {})
     restored = False
-    kept = False
+    left = False
+    pending = False
     for entry in files:
         n = entry["n"]
         try:
@@ -610,110 +602,59 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
         sha_a, sha_c = entry.get("sha_a"), entry.get("sha_c")
         new = bundle / _file_name("new", n)
         if not path.exists():
-            try:
-                if registered and _matches(new, sha_c):
+            if registered and _matches(new, sha_c):
+                try:
                     _restore_noclobber(path, new)  # 등록 뒤 남이 지운 드문 경우
-                    restored = True
-                elif not registered:
-                    restored = _restore_file(bundle, n, path, sha_a, sha_c) or restored
+                except OSError:
+                    raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
+                                   data={"backup": str(bundle)}) from None
+                continue
+            if registered:
+                pending = True  # 자리가 비었고 new 가 내 글도 아니다 — 손댈 수 없다
+                continue
+            try:
+                outcome = _restore_file(bundle, n, path, sha_a, sha_c)
             except OSError:
                 raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
                                data={"backup": str(bundle)}) from None
+            if outcome == "nothing":
+                pending = True  # 돌려놓을 것이 없다 — '복구함'으로 적지 않는다
+            elif outcome == "left":
+                left = True
+            else:
+                restored = True
             continue
         if registered:
             continue  # 등록됐으면 파일은 손대지 않는다(내 글이든 남의 글이든 정본이 정본)
         if _matches(path, sha_a):
             continue  # 밀어내기 전에 멈췄거나 이미 돌려놓았다
-        if _matches(path, sha_c):
-            try:
-                restored = _restore_file(bundle, n, path, sha_a, sha_c) or restored
-            except OSError:
-                raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
-                               data={"backup": str(bundle)}) from None
-            continue
-        kept = True  # 남이 그사이 씀 — 보존본은 보관
-    # 되돌리기 작업 줄의 정상 끝 상태는 `done` 이다(§4-3·§4-4-8 6 '같은 순서').
-    if registered:
-        state = "done" if row.get("undo_of") else "pending"
-    else:
-        state = "aborted"
+        try:
+            outcome = _restore_file(bundle, n, path, sha_a, sha_c)
+        except OSError:
+            raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
+                           data={"backup": str(bundle)}) from None
+        if outcome == "left":
+            left = True  # 남의 글·내 글이 자리에 남았다 — A 는 보존 폴더에 그대로
+        elif outcome == "restored":
+            restored = True
+        else:
+            pending = True
+    state = "pending" if registered else "aborted"
     notice = None
-    if not registered and kept:
+    if not registered and left:
         notice = {"kind": "kept", "message": KEPT_NOTICE, "path": str(bundle), "edit_id": edit_id}
     elif not registered and restored:
         notice = {"kind": "restored", "message": RESTORED_NOTICE, "edit_id": edit_id}
-    closing = dict(row, state=state, at=_now(), kept=kept)
+    closing = dict(row, state=state, at=_now(), left=left, restore_pending=pending)
     if registered:
         closing["revision_after"] = closing.get("revision_after") or p.get("revision")
     if notice is not None:
         closing["notice"] = notice
     _append_ledger(root, closing)
-    if registered and row.get("undo_of"):
-        _mark_undone(root, rows, row, p.get("revision"))
     return [notice] if notice is not None else []
 
 
-def _mark_undone(root: Path, rows: list[dict], undo_row: dict, revision_after) -> None:
-    """되돌리기 작업 줄의 대상 건을 `undone` 으로 적는다 — 저장이 끝난 다음(§4-4-1 ⑤)."""
-    target = _latest(rows).get(undo_row.get("undo_of"))
-    if target is None or target.get("state") == "undone":
-        return
-    _append_ledger(root, dict(target, state="undone", at=_now(), revision_after=revision_after))
-
-
-def _cleanup(root: Path, rows: list[dict]) -> list[dict]:
-    """§4-4-4 청소 — 끝줄이 적힌 지 10분이 지난 건만, 지문이 같은 파일만 지운다(P1)."""
-    notices: list[dict] = []
-    now = datetime.now(timezone.utc)
-    for edit_id, row in _latest(rows).items():
-        if row.get("state") not in TERMINAL_STATES or row.get("cleaned"):
-            continue
-        when = row.get("at")
-        try:
-            closed = datetime.fromisoformat(str(when))
-        except (TypeError, ValueError):
-            continue
-        if now - closed < CLEANUP_AFTER:
-            continue
-        try:
-            bundle = _bundle_path(root, edit_id)
-        except RpcError:
-            continue
-        files = [f for f in (row.get("files") or []) if isinstance(f, dict) and type(f.get("n")) is int]
-        kept_any = not files and bundle.is_dir()
-        for entry in files:
-            n = entry["n"]
-            for name, sha in ((_file_name("new", n), None),
-                              (_file_name("displaced-1", n), entry.get("sha_a")),
-                              (_file_name("displaced-2", n), entry.get("sha_c"))):
-                target = bundle / name
-                if not target.exists():
-                    continue
-                if sha is None:
-                    try:
-                        target.unlink()  # 앱만 만드는 이름이라 지문을 안 본다
-                    except OSError:
-                        kept_any = True
-                elif not _remove_name(target, sha):
-                    kept_any = True
-        if bundle.is_dir():
-            try:
-                bundle.rmdir()
-            except OSError:
-                kept_any = True
-        notice = None
-        if kept_any and bundle.is_dir():
-            notice = {"kind": "kept", "message": KEPT_NOTICE, "path": str(bundle), "edit_id": edit_id}
-            notices.append(notice)
-        closing = dict(row, cleaned_at=_now(), cleaned=True, kept=kept_any)
-        if notice is not None:
-            closing["notice"] = notice
-        _append_ledger(root, closing)
-    return notices
-
-
-def _commit(core, root: Path, items: list[dict], expected_revision: int,
-            undo_of: str | None = None) -> dict:
+def _commit(core, root: Path, items: list[dict], expected_revision: int) -> dict:
     """고침 묶음 하나를 정본에 저장한다(한 개정). 차례는 §4-4-1 그대로."""
     _recover_and_clean(core, root)  # ⓪ 미완료 줄부터 정리(P3)
     p = core.load(root)
@@ -793,7 +734,6 @@ def _commit(core, root: Path, items: list[dict], expected_revision: int,
             "new_issues": [],
             "state": "writing",
             "request_id": request_id,
-            "undo_of": undo_of,
             "files": [
                 {"n": r["n"], "section_id": r["section_id"], "path": r["rel"],
                  "sha_a": r["sha_a"], "sha_c": r["sha_c"]}
@@ -808,9 +748,9 @@ def _commit(core, root: Path, items: list[dict], expected_revision: int,
         for record in records:
             _store_file(bundle, record)
     except RpcError as error:
-        _abort(core, root, p, edit_id, items, records, bundle, request_id, undo_of, error)
+        _abort(core, root, p, edit_id, items, records, bundle, request_id, error)
     except OSError as error:
-        _abort(core, root, p, edit_id, items, records, bundle, request_id, undo_of,
+        _abort(core, root, p, edit_id, items, records, bundle, request_id,
                RpcError("edit_failed", "덮어쓰지 않고 저장할 수 없어요: %s" % error))
     # ④ 등록 — 묶음도 한 개정.
     ops = [{"collection": "sections", "value": dict(p["sections"][sid])} for sid in manuscripts]
@@ -820,7 +760,7 @@ def _commit(core, root: Path, items: list[dict], expected_revision: int,
         new_p = core.apply(root, change, p["revision"])
     except Exception as error:  # noqa: BLE001 - commit_state decides, never the type
         new_p, cleanup_warning = _recover(
-            core, root, error, records, bundle, p, manuscripts, edit_id, items, request_id, undo_of,
+            core, root, error, records, bundle, p, manuscripts, edit_id, items, request_id,
         )
 
     after_checks = _check_keys(core, root, new_p)
@@ -840,17 +780,14 @@ def _commit(core, root: Path, items: list[dict], expected_revision: int,
     recheck = reviews_staled > 0 or any(
         i["check_id"] == "dependency_revision" for i in new_issues
     )
-    # ⑤ 마무리 — 보존 폴더는 지우지 않는다(청소 몫).
-    state = "done" if undo_of else ("pending" if needs_check else "plain")
+    # ⑤ 마무리 — 보존 폴더는 지우지 않는다(§4-5-1: 영구 보관).
+    state = "pending" if needs_check else "plain"
     _append_ledger(root, _row(
         p, edit_id, items, state, new_issues, needs_check,
         revision_after=new_p["revision"], request_id=request_id,
         files=[{"n": r["n"], "section_id": r["section_id"], "path": r["rel"],
                 "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records],
-        undo_of=undo_of,
     ))
-    if undo_of:
-        _mark_undone(root, _read_ledger(root), {"edit_id": edit_id, "undo_of": undo_of}, new_p["revision"])
     result = {
         "revision": new_p["revision"],
         "draft_hash": new_p["sections"][items[0]["section_id"]]["draft_hash"],
@@ -860,14 +797,12 @@ def _commit(core, root: Path, items: list[dict], expected_revision: int,
         "recheck_before_submit": recheck,
         "edit_id": edit_id,
     }
-    if undo_of:
-        result["undone_edit_id"] = undo_of
     if cleanup_warning:
         result["cleanup_warning"] = cleanup_warning
     return result
 
 
-def _abort(core, root, p, edit_id, items, records, bundle, request_id, undo_of, error):
+def _abort(core, root, p, edit_id, items, records, bundle, request_id, error):
     """③ 실패 — 손댄 파일 전부를 되돌리고 `aborted`. 되돌리기가 실패하면 `restore_pending`."""
     try:
         _revert(records, bundle)
@@ -875,8 +810,7 @@ def _abort(core, root, p, edit_id, items, records, bundle, request_id, undo_of, 
         raise pending from error  # 줄은 `writing` 그대로 — 다음 입구가 다시 시도한다
     _append_ledger(root, _row(p, edit_id, items, "aborted", [], None, request_id=request_id,
                              files=[{"n": r["n"], "section_id": r["section_id"], "path": r["rel"],
-                                     "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records],
-                             undo_of=undo_of))
+                                     "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records]))
     raise error
 
 
@@ -904,7 +838,7 @@ def _replay(core, root: Path, p: dict, rows: list[dict], request_id: str) -> dic
 
 
 def _row(p: dict, edit_id: str, items: list[dict], state: str, new_issues,
-         needs_check, revision_after=None, request_id=None, files=None, undo_of=None) -> dict:
+         needs_check, revision_after=None, request_id=None, files=None) -> dict:
     """원장 한 줄. 상태 변경도 **같은 `edit_id` 로 덧붙인다** — 앞 줄은 지우지 않는다."""
     row = {
         "edit_id": edit_id,
@@ -922,8 +856,6 @@ def _row(p: dict, edit_id: str, items: list[dict], state: str, new_issues,
     }
     if files is not None:
         row["files"] = files
-    if undo_of is not None:
-        row["undo_of"] = undo_of
     return row
 
 
@@ -947,7 +879,7 @@ def _commit_state(core, root: Path, error: Exception, expected: int, request_id:
     return "indeterminate"
 
 
-def _recover(core, root, error, records, bundle, p, manuscripts, edit_id, items, request_id, undo_of=None):
+def _recover(core, root, error, records, bundle, p, manuscripts, edit_id, items, request_id):
     """`apply` 실패를 §4-2 7 대로 처분한다: 되돌릴 것만 되돌리고, 나머지는 그대로 둔다."""
     state = _commit_state(core, root, error, p["revision"], request_id)
     if state == "committed_cleanup_pending":
@@ -959,8 +891,7 @@ def _recover(core, root, error, records, bundle, p, manuscripts, edit_id, items,
             raise  # 줄은 writing 그대로 — 다음 입구가 다시 시도한다(§4-4-2)
         _append_ledger(root, _row(p, edit_id, items, "aborted", [], None, request_id=request_id,
                                  files=[{"n": r["n"], "section_id": r["section_id"], "path": r["rel"],
-                                         "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records],
-                                 undo_of=undo_of))
+                                         "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records]))
         raise RpcError("edit_failed", "그사이 글이 바뀌어 저장하지 못했어요. 다시 골라 주세요.") from error
     # indeterminate — 정본을 다시 읽어 내 글 지문인지 본다. 읽지 못하면 손대지 않고 알린다.
     try:
@@ -979,8 +910,7 @@ def _recover(core, root, error, records, bundle, p, manuscripts, edit_id, items,
         raise
     _append_ledger(root, _row(p, edit_id, items, "aborted", [], None, request_id=request_id,
                              files=[{"n": r["n"], "section_id": r["section_id"], "path": r["rel"],
-                                     "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records],
-                             undo_of=undo_of))
+                                     "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records]))
     raise RpcError("edit_failed", "그사이 글이 바뀌어 저장하지 못했어요. 다시 골라 주세요.") from error
 
 
@@ -992,14 +922,12 @@ def _guard(ctx):
 
 
 def _recover_and_clean(core, root: Path) -> list[dict]:
-    """모든 입구가 먼저 부르는 한 줄 — 미완료 줄 복구(§4-4-3) 뒤 청소(§4-4-4)."""
-    notices = _recover_pending(core, root)
-    try:
-        rows = _read_ledger(root)
-    except RpcError:
-        return notices
-    notices.extend(_cleanup(root, rows))
-    return notices
+    """모든 입구가 먼저 부르는 한 줄 — 미완료 줄 복구(§4-5-2).
+
+    이름은 옛 호출 자리를 그대로 두려고 남긴다. v0.6.4에는 청소가 없다 — 앱은 원고가
+    한 번이라도 걸렸던 파일 이름을 지우지 않는다(§4-5-1).
+    """
+    return _recover_pending(core, root)
 
 
 
@@ -1055,43 +983,6 @@ def section_edit_batch(ctx, params):
     return _commit(core, root, items, revision)
 
 
-def section_edit_undo(ctx, params):
-    core = _core()
-    root = _root(params)
-    edit_id = params.get("edit_id")
-    if not isinstance(edit_id, str) or not edit_id:
-        raise RpcError("invalid_params", "edit_id 필요")
-    revision = params.get("expected_revision")
-    if type(revision) is not int:
-        raise RpcError("invalid_params", "expected_revision(정수) 필요")
-    _recover_and_clean(core, root)  # ⓪ 미완료 줄부터 정리(P3)
-    p = core.load(root)
-    rows = _latest(_read_ledger(root))
-    row = rows.get(edit_id)
-    if row is None:
-        raise RpcError("not_found", "고침 기록 없음: %s" % edit_id)
-    if row.get("state") not in ("plain", "pending", "sent"):
-        raise RpcError("invalid_params", "이 고침은 되돌릴 수 없어요.")
-    items = []
-    for edit in reversed(row.get("edits") or []):
-        sid = edit["section_id"]
-        entry = p["sections"].get(sid)
-        if entry is None:
-            raise RpcError("not_found", "절 없음: %s" % sid)
-        text = core.draft(core.local(root, entry["path"]).read_text(encoding="utf-8"))
-        if text.count(edit["after_block"]) != 1:
-            raise RpcError("ambiguous", "이 문장은 그 뒤에 다시 바뀌어서 되돌릴 수 없어요.")
-        items.append({
-            "section_id": sid,
-            "before_block": edit["after_block"],
-            "after_block": edit["before_block"],
-            "expected_draft_hash": None,
-        })
-    # 되돌리기도 저장 한 건이다 — 자기 `writing` 줄을 `done` 으로 닫고, 대상 건 `undone` 은
-    # 그 다음에 적는다(§4-3·§4-4-1 ⑤). 도중에 꺼지면 §4-4-3 복구가 같은 순서로 마무리한다.
-    return _commit(core, root, items, revision, undo_of=edit_id)
-
-
 def _sections_of_request(request_id: str) -> list[str]:
     """`app:student-edit:<절>[+<절>]:<개정>:<지문>` → `[<절>, …]`(모르면 빈 목록)."""
     rest = request_id[len(REQUEST_PREFIX):]
@@ -1118,8 +1009,6 @@ def section_edits(ctx, params):
         state = row.get("state")
         if state not in CONFIRMED_STATES:
             continue  # `writing`(쓰는 중)·`aborted`(저장 안 됨)는 목록에 없다
-        if row.get("undo_of"):
-            continue  # 되돌리기 작업 줄(`done`)은 목록에 안 보인다(§4-4-8 6)
         out.append({
             "edit_id": edit_id,
             "at": row.get("at"),
@@ -1162,8 +1051,25 @@ def section_edits(ctx, params):
             "answered": False,
             "lost_record": True,
         })
+    notices.extend(_unseen_notices(rows))
     notices.extend(_stuck_notices(rows))
     return {"edits": out, "notices": notices}
+
+
+def _unseen_notices(rows: dict[str, dict]) -> list[dict]:
+    """끝줄에 적힌 알림 중 학생이 아직 안 본 것을 싣는다(§4-5-3 D4).
+
+    복구가 어느 입구(첫 화면 읽기 포함)에서 돌았든 상관없다 — 알림은 `writing` 줄이 끝줄로
+    바뀔 때 그 줄에 적히므로, 첫 읽기(`section.read_all`)가 알림을 들고 사라져도 여기서
+    다시 나온다. `section.edits_mark(notices_seen=[…])` 뒤에만 빠진다.
+    """
+    out = []
+    for edit_id, row in rows.items():
+        notice = row.get("notice")
+        if not isinstance(notice, dict) or row.get("notice_seen"):
+            continue
+        out.append(dict(notice, edit_id=edit_id))
+    return out
 
 
 def _stuck_notices(rows: dict[str, dict]) -> list[dict]:
@@ -1181,27 +1087,48 @@ def _stuck_notices(rows: dict[str, dict]) -> list[dict]:
 
 
 def section_edits_mark(ctx, params):
-    """보냄/되돌림 표시. 정본을 건드리지 않으므로 `write=True` 가 아니다(§5)."""
+    """보냄 표시·알림 확인 표시. 정본을 건드리지 않으므로 `write=True` 가 아니다(§5).
+
+    `notices_seen` 만 보내도 받는다(§4-5-3) — 화면이 알림을 보여 준 뒤 그 건에
+    `notice_seen` 줄을 덧붙이고, 그때부터 `section.edits`가 그 알림을 싣지 않는다.
+    """
     root = _root(params)
+    rows = _latest(_read_ledger(root))
+    seen = params.get("notices_seen")
     edit_ids = params.get("edit_ids")
     state = params.get("state")
-    if not isinstance(edit_ids, list) or not all(isinstance(i, str) and i for i in edit_ids):
-        raise RpcError("invalid_params", "edit_ids(문자열 목록) 필요")
-    if state not in MARK_STATES:
-        raise RpcError("invalid_params", "state는 sent|pending")
-    rows = _latest(_read_ledger(root))
-    missing = [i for i in edit_ids if i not in rows]
-    if missing:
-        raise RpcError("not_found", "고침 기록 없음: %s" % ", ".join(missing))
-    turn_done = params.get("turn_done") is True
-    for edit_id in edit_ids:
-        row = dict(rows[edit_id])
-        row["state"] = state
-        row["at"] = _now()
-        if turn_done:
-            row["turn_done"] = True
-        _append_ledger(root, row)
-    return {"marked": edit_ids, "state": state}
+    marked: list[str] = []
+    if edit_ids is not None or state is not None:
+        if not isinstance(edit_ids, list) or not all(isinstance(i, str) and i for i in edit_ids):
+            raise RpcError("invalid_params", "edit_ids(문자열 목록) 필요")
+        if state not in MARK_STATES:
+            raise RpcError("invalid_params", "state는 sent|pending")
+        missing = [i for i in edit_ids if i not in rows]
+        if missing:
+            raise RpcError("not_found", "고침 기록 없음: %s" % ", ".join(missing))
+        turn_done = params.get("turn_done") is True
+        for edit_id in edit_ids:
+            row = dict(rows[edit_id])
+            row["state"] = state
+            row["at"] = _now()
+            if turn_done:
+                row["turn_done"] = True
+            _append_ledger(root, row)
+            marked.append(edit_id)
+    if seen is not None:
+        if not isinstance(seen, list) or not all(isinstance(i, str) and i for i in seen):
+            raise RpcError("invalid_params", "notices_seen(문자열 목록) 필요")
+        missing = [i for i in seen if i not in rows]
+        if missing:
+            raise RpcError("not_found", "고침 기록 없음: %s" % ", ".join(missing))
+        for edit_id in seen:
+            row = dict(rows[edit_id])
+            row["notice_seen"] = True
+            _append_ledger(root, row)
+            marked.append(edit_id)
+    if not marked:
+        raise RpcError("invalid_params", "edit_ids·state 또는 notices_seen 필요")
+    return {"marked": marked, "state": state}
 
 
 def _wrap_read_all(server):
@@ -1234,6 +1161,5 @@ def register(server):
     _wrap_read_all(server)
     server.register("section.edit", section_edit, write=True)
     server.register("section.edit_batch", section_edit_batch, write=True)
-    server.register("section.edit_undo", section_edit_undo, write=True)
     server.register("section.edits", section_edits)
     server.register("section.edits_mark", section_edits_mark)

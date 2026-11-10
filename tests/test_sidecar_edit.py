@@ -93,7 +93,8 @@ def test_methods_list_marks_only_saving_calls_as_write(sidecar):
     flags = {m["name"]: m["write"] for m in sidecar.ok("methods.list")["result"]}
     assert flags["section.edit"] is True
     assert flags["section.edit_batch"] is True
-    assert flags["section.edit_undo"] is True
+    # §4-5-1: 되돌리기는 v0.6.4에 없다 — 등록하지 않는다.
+    assert "section.edit_undo" not in flags
     # 원장 읽기·표시는 정본을 안 건드린다 — AI 작업 중에도 불려야 한다(§5).
     assert flags["section.edits"] is False
     assert flags["section.edits_mark"] is False
@@ -273,20 +274,14 @@ def _register_review(root):
     }}]}, p["revision"])
 
 
-def test_a_stale_review_blocks_the_submission_candidate_even_after_undo(sidecar, project):
+def test_a_stale_review_blocks_the_submission_candidate(sidecar, project):
     _register_review(project)
     assert not [r for r in core.gate(project, core.load(project)) if r["check_id"] == "review_content"]
-    first = _ok(sidecar, project)
+    _ok(sidecar, project)
     p = core.load(project)
     assert p["reviews"]["rev-01"]["stale"] is True
     blocked = [r for r in core.gate(project, p) if r["check_id"] == "review_content"]
     assert blocked and {r["status"] for r in blocked} == {"blocked"}
-
-    undone = sidecar.ok("section.edit_undo", root=str(project), edit_id=first["edit_id"],
-                        expected_revision=first["revision"])["result"]
-    # 되돌려도 절 개정이 올라갔으므로 검토는 저절로 살아나지 않는다(§7 한계 2).
-    assert core.load(project)["reviews"]["rev-01"]["stale"] is True
-    assert undone["revision"] == first["revision"] + 1
 
 
 def test_only_a_dependency_revision_does_not_need_a_check(sidecar, two_sections):
@@ -309,34 +304,16 @@ def test_only_a_dependency_revision_does_not_need_a_check(sidecar, two_sections)
 # ── 원장·되돌리기 ──────────────────────────────────────────────────────────
 
 
-def test_undo_restores_the_block_and_blocks_the_same_edit_again(sidecar, project):
-    original = (project / "sections" / "01.md").read_bytes()
+def test_undo_is_not_available_in_this_release(sidecar, project):
+    """§4-5-1: 되돌리기를 뺐다 — 잘못 고쳤으면 그 문장을 다시 고친다."""
     first = _ok(sidecar, project)
-    undone = sidecar.ok("section.edit_undo", root=str(project), edit_id=first["edit_id"],
-                        expected_revision=first["revision"])["result"]
-    assert undone["revision"] == first["revision"] + 1
-    assert undone["undone_edit_id"] == first["edit_id"]
-    assert (project / "sections" / "01.md").read_bytes() == original
-
-    states = [row["state"] for row in _ledger(project) if row["edit_id"] == first["edit_id"]]
-    assert states[-1] == "undone"
-    # 되돌린 뒤 같은 편집을 다시 하려면 새 개정으로 다시 읽어야 한다.
-    again = _edit(sidecar, project, expected_revision=first["revision"])
-    assert _code(again) == "stale_view"
-    # 같은 건을 두 번 되돌릴 수 없다.
-    twice = sidecar.call("section.edit_undo", root=str(project), edit_id=first["edit_id"],
-                         expected_revision=undone["revision"])
-    assert _code(twice) == "invalid_params"
-
-
-def test_undo_refuses_when_the_block_changed_since(sidecar, project):
-    first = _ok(sidecar, project)
-    # 그 문단을 다시 고친다(새 개정).
-    second = _ok(sidecar, project, before=TYPED, after="농장A의 재배 면적은 600평입니다.")
     r = sidecar.call("section.edit_undo", root=str(project), edit_id=first["edit_id"],
-                     expected_revision=second["revision"])
-    assert _code(r) == "ambiguous"
-    assert "600평입니다." in (project / "sections" / "01.md").read_text(encoding="utf-8")
+                     expected_revision=first["revision"])
+    assert _code(r) == "not_found"
+    # 그 문장을 다시 드래그해 고치는 길은 그대로다.
+    again = _ok(sidecar, project, before=TYPED, after=BODY)
+    assert again["revision"] == first["revision"] + 1
+    assert BODY in (project / "sections" / "01.md").read_text(encoding="utf-8")
 
 
 def test_sent_alone_does_not_clear_the_mark_until_the_turn_ends(sidecar, project):
@@ -394,28 +371,30 @@ def test_batch_saves_several_sections_in_one_revision(sidecar, two_sections):
     assert TYPED in (two_sections / "sections" / "01.md").read_text(encoding="utf-8")
     assert "700평" in (two_sections / "sections" / "02.md").read_text(encoding="utf-8")
 
-    undone = sidecar.ok("section.edit_undo", root=str(two_sections), edit_id=r["edit_id"],
-                        expected_revision=r["revision"])["result"]
-    assert undone["revision"] == r["revision"] + 1
+    # 되돌리기는 없다(§4-5-1) — 두 장을 다시 고쳐 되돌린다.
+    back = sidecar.ok("section.edit_batch", root=str(two_sections), expected_revision=r["revision"], edits=[
+        {"section_id": "sec-01", "before_block": TYPED, "after_block": BODY},
+        {"section_id": "sec-02", "before_block": "농장A는 700평 규모다.",
+         "after_block": "농장A는 600평 규모다."},
+    ])["result"]
+    assert back["revision"] == r["revision"] + 1
     assert BODY in (two_sections / "sections" / "01.md").read_text(encoding="utf-8")
     assert "600평" in (two_sections / "sections" / "02.md").read_text(encoding="utf-8")
 
 
-def test_batch_undo_is_all_or_nothing(sidecar, two_sections):
+def test_batch_undo_is_gone_and_a_partly_changed_batch_cannot_be_reverted(sidecar, two_sections):
+    """되돌리기가 없으므로 '묶음 되돌리기' 계약도 없다 — 한 장만 다시 고쳐 되돌린다."""
     p = core.load(two_sections)
     r = sidecar.ok("section.edit_batch", root=str(two_sections), expected_revision=p["revision"], edits=[
         {"section_id": "sec-01", "before_block": BODY, "after_block": TYPED},
         {"section_id": "sec-02", "before_block": "농장A는 600평 규모다.",
          "after_block": "농장A는 700평 규모다."},
     ])["result"]
-    # 그 뒤 한 장을 다시 고친다 — 묶음의 한 건이 지금 본문과 안 맞는다.
     again = _ok(sidecar, two_sections, "sec-02", "농장A는 700평 규모다.", "농장A는 800평 규모다.")
-    before = {rel: (two_sections / rel).read_bytes() for rel in ("sections/01.md", "sections/02.md")}
-    bad = sidecar.call("section.edit_undo", root=str(two_sections), edit_id=r["edit_id"],
-                       expected_revision=again["revision"])
-    assert _code(bad) == "ambiguous"
-    assert {rel: (two_sections / rel).read_bytes() for rel in before} == before
-    assert core.load(two_sections)["revision"] == again["revision"]
+    gone = sidecar.call("section.edit_undo", root=str(two_sections), edit_id=r["edit_id"],
+                        expected_revision=again["revision"])
+    assert _code(gone) == "not_found"
+    assert "800평" in (two_sections / "sections" / "02.md").read_text(encoding="utf-8")
 
 
 def test_batch_rolls_back_everything_when_one_edit_is_ambiguous(sidecar, two_sections):
@@ -1072,8 +1051,8 @@ def test_recovery_dying_again_ends_the_same_way(tmp_path):
     assert [row["state"] for row in _ledger(root)][-1] == "aborted"
 
 
-def test_cleanup_keeps_a_backup_whose_bytes_changed(tmp_path):
-    """P1 — 지문이 다른 보존본은 10분이 지나도 지우지 않고 `kept` 로 알린다."""
+def test_backups_are_kept_forever_even_when_the_bytes_changed(tmp_path):
+    """§4-5-1: 앱은 원고가 걸렸던 파일 이름을 지우지 않는다 — 지문이 달라도 남긴다."""
     root = _crash_project(tmp_path, "cleanup")
     p = core.load(root)
     result = _call_edit(root)
@@ -1082,109 +1061,68 @@ def test_cleanup_keeps_a_backup_whose_bytes_changed(tmp_path):
     assert len(bundles) == 1
     displaced = bundles[0] / "displaced-1-0"
     displaced.write_bytes(b"A1: opened handle wrote later")
-    rows = methods_edit._latest(methods_edit._read_ledger(root))
-    for row in rows.values():
-        row["at"] = "2020-01-01T00:00:00+00:00"
-    methods_edit._append_ledger(root, dict(next(iter(rows.values())), at="2020-01-01T00:00:00+00:00"))
-    notices = methods_edit._cleanup(root, methods_edit._read_ledger(root))
-    assert displaced.exists(), "지문이 다른 보존본을 지웠다"
-    assert any(n["kind"] == "kept" for n in notices)
+    assert not hasattr(methods_edit, "_cleanup"), "청소는 v0.6.4에 없다"
+    methods_edit.section_edits(None, {"root": str(root)})
+    assert displaced.exists(), "보존본을 지웠다"
+    assert displaced.read_bytes() == b"A1: opened handle wrote later"
 
 
-def test_cleanup_deletes_matching_backups_only_after_ten_minutes(tmp_path):
-    """§4-4-4 — 10분 안 된 건은 그대로, 지난 건은 지문 같은 것만 지운다."""
+def test_backups_survive_repeated_entry_calls(tmp_path):
+    """입구를 여러 번 불러도 보존 폴더는 그대로다(옛 10분 규칙은 없다)."""
     root = _crash_project(tmp_path, "window")
     _call_edit(root)
     bundle = next((root / ".knuaf-gui" / "edit-backup").iterdir())
     assert (bundle / "displaced-1-0").exists()
-    methods_edit._cleanup(root, methods_edit._read_ledger(root))
-    assert (bundle / "displaced-1-0").exists(), "10분 안 된 건을 지웠다"
-
     rows = methods_edit._read_ledger(root)
     for row in rows:
         row["at"] = "2020-01-01T00:00:00+00:00"
-    methods_edit._cleanup(root, rows)
-    assert not bundle.exists()
+    for _ in range(3):
+        methods_edit.section_edits(None, {"root": str(root)})
+    assert (bundle / "displaced-1-0").exists()
+    assert (bundle / "new-0").exists()
 
 
-def test_undo_in_progress_crash_closes_its_own_row(tmp_path):
-    """되돌리기도 자기 `writing` 줄을 열고, 꺼지면 복구가 같은 순서로 닫는다(§4-3)."""
-    root = _crash_project(tmp_path, "undo")
-    first = _call_edit(root)
-    revision = core.load(root)["revision"]
-    assert _run_crash(root, "03_place", {
-        "CRASH_UNDO": "1", "CRASH_EDIT": first["edit_id"],
-    }) == 73
-    listed = methods_edit.section_edits(None, {"root": str(root)})
-    ids = [row["edit_id"] for row in listed["edits"]]
-    assert first["edit_id"] in ids
-    states = [row["state"] for row in _ledger(root)]
-    assert states[-1] in ("aborted", "plain", "pending", "undone")
-    assert core.load(root)["revision"] == revision
-    # 원고는 되돌리기 전(고친 글) 또는 되돌린 글 — 둘 중 하나로 온전하다.
-    text = (root / "sections" / "01.md").read_text(encoding="utf-8")
-    assert TYPED in text or BODY in text
+# ── §4-5 범위 줄이기 · FIX3 D1~D6 ─────────────────────────────────────────
 
 
-# ── FIX2: 책임자 대조 4건 (기준 6a3c751) ───────────────────────────────────
+def test_a_successful_save_keeps_every_backup_file_even_after_an_hour(tmp_path):
+    """D1 — 청소를 뺐으므로 '마지막 이름을 지워 B 를 잃는' 경로 자체가 없다."""
+    root = _crash_project(tmp_path, "d1")
+    _call_edit(root)
+    bundle = next((root / ".knuaf-gui" / "edit-backup").iterdir())
+    kept = sorted(child.name for child in bundle.iterdir())
+    assert "new-0" in kept and "displaced-1-0" in kept
+    # 열린 핸들이 나중에 쓴 B 는 보존본에 남는다(지우는 코드가 없다).
+    (bundle / "displaced-1-0").write_bytes(b"B: opened handle wrote later")
+    for _ in range(2):
+        methods_edit.section_edits(None, {"root": str(root)})
+    assert (bundle / "displaced-1-0").read_bytes() == b"B: opened handle wrote later"
+
+
+def test_aborted_save_keeps_its_backup_folder(tmp_path):
+    """D1 — 실패한 저장의 보존 폴더도 남는다(옛 청소는 aborted 도 지웠다)."""
+    root = _crash_project(tmp_path, "d1b")
+    assert _run_crash(root, "03_place") == 73
+    methods_edit.section_edits(None, {"root": str(root)})
+    assert [row["state"] for row in _ledger(root)][-1] == "aborted"
+    bundles = list((root / ".knuaf-gui" / "edit-backup").iterdir())
+    assert len(bundles) == 1
+    # 복구가 A 를 제자리로 돌려놓아도, 앱이 쓴 `new-0` 은 지우지 않고 남긴다.
+    assert (bundles[0] / "new-0").exists()
 
 
 def test_undo_does_not_leave_a_phantom_lost_record(sidecar, project):
-    """① 되돌리기의 작업 줄은 `done` 이다 — 그 요청 ID 가 확정으로 세어져야 유령 건이 안 생긴다."""
-    first = _ok(sidecar, project)
-    sidecar.ok("section.edit_undo", root=str(project), edit_id=first["edit_id"],
-               expected_revision=first["revision"])
+    """D2/FIX2① — 되돌리기를 빼도 `aborted` 건이 유령 '기록 유실'을 만들지 않는다."""
+    p = core.load(project)
+    params = _params(project, before_block=BODY, after_block=TYPED)
+    stale = sidecar.call("section.edit", **{**params, "expected_revision": p["revision"] - 1})
+    assert _code(stale) == "stale_view"
     listed = sidecar.ok("section.edits", root=str(project))["result"]
-    assert [row["edit_id"] for row in listed["edits"]] == [first["edit_id"]]
-    assert not [row for row in listed["edits"] if row.get("lost_record")]
-    assert [row["state"] for row in listed["edits"]] == ["undone"]
-
-
-def test_cleanup_also_clears_backups_of_aborted_and_undo_rows(tmp_path):
-    """② 청소는 '끝줄이 적힌 건' 전부를 본다 — `aborted`·`done` 보존 폴더도 지운다."""
-    root = _crash_project(tmp_path, "cleanup_states")
-    assert _run_crash(root, "03_place") == 73  # `writing` → 다음 입구에서 `aborted`
-    methods_edit.section_edits(None, {"root": str(root)})
-    states = [row["state"] for row in _ledger(root)]
-    assert states[-1] == "aborted"
-
-    first = _call_edit(root)
-    methods_edit.section_edit_undo(None, {
-        "root": str(root), "edit_id": first["edit_id"],
-        "expected_revision": core.load(root)["revision"],
-    })
-    assert [row["state"] for row in _ledger(root)][-1] == "undone"
-
-    # 꺼진 시도 하나 + 저장 하나 + 되돌리기 하나.
-    bundles = sorted((root / ".knuaf-gui" / "edit-backup").iterdir())
-    assert len(bundles) == 3
-    rows = methods_edit._read_ledger(root)
-    for row in rows:
-        row["at"] = "2020-01-01T00:00:00+00:00"
-    methods_edit._cleanup(root, rows)
-    leftover = list((root / ".knuaf-gui" / "edit-backup").glob("*/"))
-    assert leftover == [], "끝난 건의 보존 폴더가 남았다: %s" % leftover
-
-
-def test_recovery_closes_a_registered_undo_row_as_done(tmp_path):
-    """③ 등록까지 끝난 되돌리기 작업 줄은 복구도 `done` 으로 닫고 대상 건을 `undone` 으로 적는다."""
-    root = _crash_project(tmp_path, "undo_done")
-    first = _call_edit(root)
-    assert _run_crash(root, "04_apply", {
-        "CRASH_UNDO": "1", "CRASH_EDIT": first["edit_id"],
-    }) == 73
-    listed = methods_edit.section_edits(None, {"root": str(root)})
-    rows = methods_edit._latest(methods_edit._read_ledger(root))
-    undo_rows = [row for row in rows.values() if row.get("undo_of")]
-    assert undo_rows and undo_rows[0]["state"] == "done"
-    target = [row for row in rows.values() if row["edit_id"] == first["edit_id"]][0]
-    assert target["state"] == "undone"
-    assert [row["edit_id"] for row in listed["edits"]] == [first["edit_id"]]
     assert not [row for row in listed["edits"] if row.get("lost_record")]
 
 
 def test_recovery_without_canonical_or_backup_does_not_claim_restore(tmp_path):
-    """④ 자리도 보존본도 없으면 돌려놓은 것이 아니다 — 알림 없이 `aborted`."""
+    """§4-5-2 — 자리도 보존본도 없으면 돌려놓은 것이 아니다. 알림 없이 `aborted`."""
     root = _crash_project(tmp_path, "gone")
     p = core.load(root)
     _manuscript(root).unlink()
@@ -1198,7 +1136,6 @@ def test_recovery_without_canonical_or_backup_does_not_claim_restore(tmp_path):
         "needs_check": None,
         "new_issues": [],
         "state": "writing",
-        "undo_of": None,
         "files": [{"n": 0, "section_id": "sec-01", "path": "sections/01.md",
                    "sha_a": "0" * 64, "sha_c": "1" * 64}],
     })
@@ -1206,3 +1143,118 @@ def test_recovery_without_canonical_or_backup_does_not_claim_restore(tmp_path):
     assert not [n for n in listed["notices"] if n["kind"] == "restored"]
     states = [row["state"] for row in _ledger(root) if row["edit_id"] == "edit-gone"]
     assert states == ["writing", "aborted"]
+
+
+# ── D3: `left` — 되돌리지 못했으면 조용히 닫지 않는다 ──────────────────────
+
+
+def test_restore_file_reports_left_when_it_cannot_displace(tmp_path):
+    """D3 — `displaced-2` 가 이미 있으면 참·거짓이 아니라 `left`(보존 폴더에 A)."""
+    bundle = tmp_path / "b"
+    bundle.mkdir()
+    path = tmp_path / "01.md"
+    path.write_bytes(b"C: installed")
+    (bundle / "displaced-1-0").write_bytes(b"A: original")
+    (bundle / "displaced-2-0").write_bytes(b"C: already displaced")
+    assert methods_edit._restore_file(bundle, 0, path, "a" * 64, "c" * 64) == "left"
+    assert path.read_bytes() == b"C: installed"
+    assert (bundle / "displaced-1-0").read_bytes() == b"A: original"
+
+
+def test_restore_file_reports_nothing_and_restored(tmp_path):
+    bundle = tmp_path / "b2"
+    bundle.mkdir()
+    path = tmp_path / "02.md"
+    assert methods_edit._restore_file(bundle, 0, path, "a" * 64, "c" * 64) == "nothing"
+    (bundle / "displaced-1-0").write_bytes(b"A: original")
+    assert methods_edit._restore_file(bundle, 0, path, "a" * 64, "c" * 64) == "restored"
+    assert path.read_bytes() == b"A: original"
+
+
+def test_recovery_announces_kept_when_the_seat_cannot_be_restored(tmp_path, monkeypatch):
+    """D3 — 복구가 되돌리지 못하면 `aborted` + `left` + `kept` 알림(조용히 닫지 않는다)."""
+    root = _crash_project(tmp_path, "left")
+    assert _run_crash(root, "03_place") == 73
+    real = methods_edit._restore_file
+    monkeypatch.setattr(methods_edit, "_restore_file", lambda *a, **k: "left")
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    kept = [n for n in listed["notices"] if n["kind"] == "kept"]
+    assert kept and kept[0]["path"]
+    row = [r for r in _ledger(root) if r["state"] == "aborted"][-1]
+    assert row["left"] is True
+    assert real is not None
+
+
+# ── D4: 알림은 학생이 볼 때까지 남는다 ────────────────────────────────────
+
+
+def test_notice_survives_read_all_and_repeats_until_seen(tmp_path):
+    """D4 — 첫 화면 읽기(`section.read_all`)가 복구해도 알림은 `section.edits`에 남는다."""
+    root = _crash_project(tmp_path, "d4")
+    assert _run_crash(root, "03_place") == 73
+
+    from knuaf_sidecar.rpc import Server
+
+    server = Server()
+    # 실제 기동 순서 그대로 — methods_core 가 먼저 등록하고 methods_edit 이 감싼다.
+    server.register("section.read_all", lambda ctx, params: [])
+    methods_edit.register(server)
+    fn, _write = server.methods["section.read_all"]
+    fn(None, {"root": str(root)})  # 화면이 논문을 처음 그리는 입구
+
+    first = methods_edit.section_edits(None, {"root": str(root)})
+    assert [n["kind"] for n in first["notices"]] == ["restored"]
+    again = methods_edit.section_edits(None, {"root": str(root)})
+    assert [n["kind"] for n in again["notices"]] == ["restored"]
+
+    edit_id = first["notices"][0]["edit_id"]
+    methods_edit.section_edits_mark(None, {"root": str(root), "notices_seen": [edit_id]})
+    after = methods_edit.section_edits(None, {"root": str(root)})
+    assert not [n for n in after["notices"] if n["kind"] == "restored"]
+
+
+def test_edits_mark_accepts_notices_seen_alone(sidecar, project):
+    """D4 — `notices_seen` 만 보내도 받는다(화면 묶음이 그대로 쓴다)."""
+    first = _ok(sidecar, project)
+    marked = sidecar.ok("section.edits_mark", root=str(project),
+                        notices_seen=[first["edit_id"]])["result"]
+    assert marked["marked"] == [first["edit_id"]]
+    assert _find(sidecar, project, first["edit_id"])["state"] == "plain"
+
+
+# ── D5: 보존 경로는 쓰기 전에 검사한다 ────────────────────────────────────
+
+
+def test_backup_root_symlink_is_refused_before_any_write(tmp_path):
+    """D5 — `edit-backup` 이 폴더 밖을 가리키면 시험 파일도 만들지 않고 거절한다."""
+    root = _crash_project(tmp_path, "d5")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    backup = root / ".knuaf-gui" / "edit-backup"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    assert not backup.exists()  # 아직 저장한 적이 없다
+    try:
+        backup.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("이 파일 시스템은 바로가기를 만들지 못한다")
+
+    with pytest.raises(RpcError) as caught:
+        _call_edit(root)
+    assert caught.value.code == "ledger_unreadable"
+    assert list(outside.iterdir()) == [], "폴더 밖에 시험 파일을 썼다"
+
+
+# ── D1/D2 잔재: 메서드·함수가 실제로 없어졌다 ─────────────────────────────
+
+
+def test_removed_surfaces_are_really_gone():
+    """§4-5-1 — 청소·되돌리기 코드가 남아 있으면 다시 새는 길이 된다."""
+    for name in ("_cleanup", "_remove_name", "_mark_undone", "section_edit_undo", "CLEANUP_AFTER"):
+        assert not hasattr(methods_edit, name), name
+    server_names = set()
+    from knuaf_sidecar.rpc import Server
+
+    server = Server()
+    methods_edit.register(server)
+    server_names.update(server.methods)
+    assert "section.edit_undo" not in server_names

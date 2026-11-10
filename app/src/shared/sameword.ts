@@ -130,7 +130,13 @@ export function vanishedWordPairs(beforeBlock: string, afterBlock: string): Word
   return out
 }
 
-/** `](` 다음의 괄호 짝이 맞는 구간 — 중첩 괄호를 세어 찾는다. */
+/**
+ * `](` 다음의 괄호 짝이 맞는 구간 — 중첩 괄호를 세어 찾는다.
+ *
+ * `\(`·`\)` 는 **괄호가 아니라 글자**다(CommonMark 의 백슬래시 escape). escape 를 깊이에
+ * 넣으면 주소를 일찍 닫거나 통째로 못 닫아 주소 속 낱말이 본문으로 새어 나간다(D6).
+ * 짝이 안 맞으면 그 주소는 끝을 모르므로 줄 끝까지 숨긴다 — 애매하면 안 세는 쪽(§4-5-4).
+ */
 function linkDestinations(text: string): Array<{ start: number; end: number }> {
   const out: Array<{ start: number; end: number }> = []
   const opener = /\]\(/g
@@ -138,22 +144,39 @@ function linkDestinations(text: string): Array<{ start: number; end: number }> {
   while ((m = opener.exec(text)) !== null) {
     const start = m.index + 1
     let depth = 0
-    for (let i = start; i < text.length; i++) {
-      if (text[i] === '(') depth += 1
-      else if (text[i] === ')') {
+    let i = start
+    for (; i < text.length; i++) {
+      const ch = text[i]
+      if (ch === '\\') {
+        i += 1 // escape 된 다음 글자는 구분자가 아니다
+        continue
+      }
+      if (ch === '\n') break
+      if (ch === '(') depth += 1
+      else if (ch === ')') {
         depth -= 1
         if (depth === 0) {
           out.push({ start, end: i + 1 })
           opener.lastIndex = i + 1
           break
         }
-      } else if (text[i] === '\n' && depth === 0) break
+      }
+    }
+    if (depth !== 0) {
+      out.push({ start, end: i }) // 짝이 안 맞는다 — 줄 끝까지 숨긴다
+      opener.lastIndex = i
     }
   }
   return out
 }
 
-/** 인라인 코드 자리 — 여는 백틱과 같은 길이의 백틱이 닫는다. */
+/**
+ * 인라인 코드 자리 — 여는 백틱 묶음과 **길이가 정확히 같은** 묶음만 닫는다(CommonMark).
+ *
+ * `indexOf(fence)` 는 더 긴 묶음의 일부를 닫이로 잡는다: `` `코드 ``` 트랙터` `` 에서 세
+ * 백틱의 첫 한 글자를 닫이로 보면 그 뒤가 본문으로 새어 나간다(D6). 닫이가 없으면 그 묶음은
+ * 코드가 아니므로 아무것도 숨기지 않는다.
+ */
 function inlineCodeSpans(text: string): Array<{ start: number; end: number }> {
   const out: Array<{ start: number; end: number }> = []
   let i = 0
@@ -164,9 +187,25 @@ function inlineCodeSpans(text: string): Array<{ start: number; end: number }> {
     }
     let ticks = 0
     while (text[i + ticks] === '`') ticks += 1
-    const fence = '`'.repeat(ticks)
-    const close = text.indexOf(fence, i + ticks)
-    if (close === -1) break
+    let close = -1
+    let j = i + ticks
+    while (j < text.length) {
+      if (text[j] !== '`') {
+        j += 1
+        continue
+      }
+      let run = 0
+      while (text[j + run] === '`') run += 1
+      if (run === ticks) {
+        close = j
+        break
+      }
+      j += run
+    }
+    if (close === -1) {
+      i += ticks
+      continue
+    }
     out.push({ start: i, end: close + ticks })
     i = close + ticks
   }
