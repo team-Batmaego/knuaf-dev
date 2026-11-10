@@ -11,6 +11,7 @@ import { PermissionCard } from '../components/PermissionCard'
 import { QuestionCard } from '../components/QuestionCard'
 import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
+import { ZoneLine, type ZoneTone } from '../components/ZoneLine'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
 import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
@@ -291,29 +292,6 @@ function NoFolder({ text, setText, onSubmit, submitted, name, setName, onPick, o
   )
 }
 
-
-/**
- * 입력칸 위 한 줄 알림(형님 확정 2026-10-19 알림창 B안) — 대화 화면의 기다림·경고·오류는 모두 여기 한 자리다.
- * 바탕은 옅은 회색(`--panel-2`) 하나, 색은 아이콘에만. 기다림은 빙글이 + 끝나면 저절로 사라짐(닫기 없음),
- * 경고·오류는 아이콘 + ✕ + "자세히"(원문). 허락·질문 카드가 입력칸 자리를 차지하면 그 카드 위에 선다.
- */
-type ZoneTone = 'wait' | 'bad' | 'attn' | 'info'
-function ZoneLine({ tone, title, sub, raw, actions, onClose, onReport }: { tone: ZoneTone; title: ReactNode; sub?: ReactNode; raw?: string; actions?: ReactNode; onClose?: () => void; onReport?: () => void }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="zline-wrap">
-      <div className={`zline ${tone}`} role={tone === 'bad' ? 'alert' : 'status'}>
-        {tone === 'wait' ? <span className="spin" /> : <Icon name={tone === 'info' ? 'info' : 'warn'} size={16} className={`ic ${tone}`} />}
-        <span className="grow">{title}{sub && <small>{sub}</small>}</span>
-        {actions}
-        {raw && <button type="button" className="lk" aria-expanded={open} onClick={() => setOpen(!open)}>{CHAT.details}</button>}
-        {onReport && <button type="button" className="lk" onClick={onReport}>{REPORT.inline}</button>}
-        {onClose && <button type="button" className="zx" aria-label={CLOSE_LABEL} title={CLOSE_LABEL} onClick={onClose}>✕</button>}
-      </div>
-      {raw && open && <code className="zline-raw">{raw}</code>}
-    </div>
-  )
-}
 
 const toneOf = (kind: string): ZoneTone => kind === 'error' ? 'bad' : kind === 'warning' ? 'attn' : 'info'
 
