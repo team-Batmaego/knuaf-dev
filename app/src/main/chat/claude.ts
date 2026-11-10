@@ -859,6 +859,22 @@ function looksSecretValue(token: string): boolean {
 }
 
 /**
+ * 소문자·숫자 조각이 `-`·`_` 로 이어진 무작위 값(검토 FIX4). `ab12-cd34-ef56-gh78-ij90-kl12`
+ * 처럼 이름도 접두도 없이 값만으로 토큰인 꼴이다. Roh 2회째 반례가 이 모양이었다 —
+ * 앞의 값 모양 규칙은 구분자 있는 소문자를 "사람이 붙인 이름"으로 보아 일부러 남겼고, 그
+ * 틈으로 새었다. **오가림 쪽으로 닫는다**: 비밀값이 새는 것보다 카드가 조금 더 가리는 편이 낫다.
+ *
+ * 걸리는 조건(전부 만족): 조각 3개 이상 + 전체 16자 이상 + 숫자 포함. 둘레에 경로 구분자
+ * (`/`·`\`)나 마침표가 붙어 있으면 보지 않는다 — 경로 조각·확장자 붙은 파일 이름은 값이 아니다.
+ */
+const SECRET_SEGMENTS = /(?<![A-Za-z0-9_./\\:_-])[a-z0-9]+(?:[-_][a-z0-9]+){2,}(?![A-Za-z0-9_./\\:_-])/g
+
+/** 이 조각이 위 모양의 무작위 값인가. 경로·확장자는 정규식이 이미 걸러냈다. */
+function looksSecretSegments(token: string): boolean {
+  return token.length >= 16 && /\d/.test(token) && /[a-z]/.test(token)
+}
+
+/**
  * 원시 JSON 폴백의 **이름 기준** 가리기.
  *
  * 값이 문자열이 아니어도(배열·객체) 이름이 비밀값이면 통째로 가린다 — 이름이 `X-Api-Key` 인데
@@ -941,6 +957,8 @@ function redactForCard(cmd: string): string {
     // 이름이 없어도 **값 모양**이 무작위 문자열이면 가린다(검토 FIX3 ②). 경로 조각은 제외한다 —
     // 폴더 이름·파일 이름은 영숫자가 섞여도 비밀값이 아니다(`SECRET_SHAPE` 주석).
     .replace(SECRET_SHAPE, (token) => (looksSecretValue(token) ? MASK : token))
+    // 소문자·숫자가 구분자로 이어진 무작위 값(검토 FIX4). 앞의 규칙이 일부러 남긴 꼴이다.
+    .replace(SECRET_SEGMENTS, (token) => (looksSecretSegments(token) ? MASK : token))
 }
 
 /**

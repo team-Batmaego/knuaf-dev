@@ -434,6 +434,50 @@ test('[중요] 이름이 없어도 값 모양이 무작위 문자열이면 가�
   }
 })
 
+test('[중요] Roh 반례 — 소문자·숫자가 구분자로 이어진 무작위 값도 세 카드에서 가린다', () => {
+  // 검토 FIX2 반례 그대로. 값 모양만으로 토큰인 꼴이라 이름·접두 규칙이 하나도 걸리지 않았다.
+  const LOWER = 'ab12-cd34-ef56-gh78-ij90-kl12'
+  const cases: [string, string, Record<string, unknown>][] = [
+    ['mcp__test__fetch', MAC, { blob: LOWER }],
+    ['Bash', MAC, { command: `curl -d ${LOWER} https://example.invalid` }],
+    ['PowerShell', WIN, { command: `Invoke-RestMethod https://example.invalid -Body "${LOWER}"` }]
+  ]
+  for (const [tool, root, input] of cases) {
+    const before = JSON.stringify(input)
+    const allowedBefore = autoAllow(root, tool, input)
+    const d = describeTool(tool, input, root)
+    // 표시만 바뀐다 — 입력도, 판정도 그대로다.
+    expect(JSON.stringify(input), tool).toBe(before)
+    expect(autoAllow(root, tool, input), tool).toBe(allowedBefore)
+    expect(d.detail, tool).not.toContain(LOWER)
+    expect(d.detail, tool).toContain('***')
+    if (tool.startsWith('mcp__')) expect(() => JSON.parse(d.detail)).not.toThrow()
+  }
+  // 경로가 섞이면 값이 아니다 — 폴더 안 상대경로는 그대로 읽힌다(같은 조각, 슬래시 붙음).
+  const inPath = describeTool('Bash', { command: 'ls sections/2026-11-10-v063-ps-ask' }, MAC)
+  expect(inPath.detail).not.toContain('***')
+  expect(inPath.detail).toContain('sections/2026-11-10-v063-ps-ask')
+})
+
+test('[기록] 긴 하이픈 파일 이름은 값 모양과 구별되지 않아 가려진다(오가림, 받아들임)', () => {
+  // 새 규칙의 **대가**를 숨기지 않고 그대로 고정한다. 검토 요청대로 "어떻게 보이는지"를 단언한다.
+  // 경로 구분자나 확장자가 붙으면 경로 조각으로 보아 가리지 않는다 — 아래 두 줄이 그 경계다.
+  const bare = describeTool('Bash', { command: 'ls my-2026-paper-final-version-2' }, MAC)
+  expect(bare.detail.split('\n')[0]).toBe('ls ***')
+  const fb = describeTool('mcp__test__fetch', { path: '2026-11-10-v063-ps-ask-final-version-2' }, MAC)
+  expect(JSON.parse(fb.detail)).toEqual({ path: '***' })
+  // 같은 이름이라도 경로·확장자가 붙으면 남는다 — 실제 스킬 호출이 사는 자리다.
+  for (const cmd of [
+    'ls sections/2026-11-10-v063-ps-ask',
+    'cp manuscript-2026-11-10-final.docx out.docx',
+    'cp 2026-11-10-v063-ps-ask-final-version-2.docx out.docx'
+  ]) {
+    const d = describeTool('Bash', { command: cmd }, MAC)
+    expect(d.detail, cmd).not.toContain('***')
+    expect(d.detail, cmd).toContain(cmd.replace('cp ', '').split(' ')[0])
+  }
+})
+
 test('[중요] 평범한 스킬 호출 카드는 그대로 읽힌다(오가림 없음)', () => {
   // 값 모양 규칙이 경로·파일 이름·스킬 이름을 덮으면 카드가 무용해진다. 실제 스킬 호출로 확인한다.
   const commands = [
