@@ -13,9 +13,10 @@ import { QuestionForm } from '../components/QuestionForm'
 import { Icon } from '../components/Icon'
 import { ZoneLine, type ZoneTone } from '../components/ZoneLine'
 import { LaneZone } from '../components/LaneZone'
+import { LanePlanCard } from '../components/LanePlanCard'
 import { useLanes, laneActions } from '../store/lanes'
 import { lineView, stopLabel, type LaneActionId } from '../laneLines'
-import type { LaneLine } from '../../../shared/lanes-ipc'
+import type { CardAction, LaneLine } from '../../../shared/lanes-ipc'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
 import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
@@ -505,6 +506,17 @@ export function Chat() {
   /** 이 폴더의 줄만 그린다 — 폴더를 옮기는 사이 남은 옛 묶음은 보이지 않는다. */
   const laneLines = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.lines : []
   const laneAnnouncement = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.announcement : null
+  const laneCards = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.cards : []
+  /** 카드 승인 — main이 카드 id 단위로 한 번만 소비한다. 결과는 밀려온 새 묶음이 그린다. */
+  const decideCard = (cardId: string, baseVersion: number, action: CardAction): void => {
+    if (!projectRoot) return
+    void laneActions().decideCard(projectRoot, cardId, baseVersion, action)
+  }
+  /** 10초 무응답 뒤 [다시 확인] — 다시 적용하지 않고 상태만 다시 묻는다(설계 §3-5). */
+  const recheckCard = (cardId: string): void => {
+    if (!projectRoot) return
+    void laneActions().cardStatus(projectRoot, cardId)
+  }
   /**
    * 작업 분담 줄의 단추 — 화면은 요청만 보내고, 그리기는 main이 밀어 준 새 묶음이 한다(설계 §3-5).
    * 같은 `continue`·`later` 글자가 줄 종류에 따라 다른 요청인 것은 계약이 나눠 둔 그대로다
@@ -788,6 +800,18 @@ export function Chat() {
   for (const e of events) {
     const edit = e.edit
     thread.push({ key: `ev-${e.id}`, at: Date.parse(e.at) || 0, node: <EventLine key={`ev-${e.id}`} title={e.title} edit={edit} onGo={() => goPaper(e.sectionId, edit?.kind === 'edited')} /> })
+  }
+  thread.sort((a, b) => a.at - b.at)
+  /**
+   * 배치 카드는 **앱이 만든 시각** 자리에 앉는다(설계 §3) — 메시지 순서는 건드리지 않고
+   * 같은 배열에 얹어 한 번 더 정렬한다. 입력칸 자리를 차지하지 않으므로 작성은 계속된다.
+   */
+  for (const card of laneCards) {
+    thread.push({
+      key: `card-${card.cardId}`,
+      at: Date.parse(card.createdAt) || 0,
+      node: <LanePlanCard card={card} onDecide={decideCard} onStatus={recheckCard} />
+    })
   }
   thread.sort((a, b) => a.at - b.at)
 
