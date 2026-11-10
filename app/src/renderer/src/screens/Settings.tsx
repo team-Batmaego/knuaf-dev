@@ -9,11 +9,18 @@ import { Feedback } from '../components/Feedback'
 import { RuntimeSetup } from '../components/RuntimeFix'
 import { OutputsTools } from './Outputs'
 import { TroubleshootSections } from './Troubleshoot'
-import { CREDIT, HELPER, PRIVACY_NOTE, SETTINGS, describeError, type DescribedError } from '../copy'
+import { CREDIT, HELPER, PRIVACY_NOTE, PROVIDER_NAME, SETTINGS, describeError, type DescribedError } from '../copy'
 import { useShallow } from 'zustand/react/shallow'
 import { APP_NAME } from '../../../shared/name'
 import { UpdateSettings } from '../components/Updates'
 import { settingsSectionForFocus, type SettingsSection } from '../copy-menus'
+import { requestArchive } from './Chat'
+import { useLanes } from '../store/lanes'
+import { LANE_ARCHIVE, providerName, stampKo } from '../copy-lanes'
+import type { ArchivedChatSummary } from '../../../shared/lanes-ipc'
+
+/** 폴더가 다르거나 아직 안 왔을 때 — 참조가 고정돼야 셀렉터가 매번 새 배열을 만들지 않는다. */
+const NO_ARCHIVES: ArchivedChatSummary[] = []
 
 const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'helper', label: '도우미 연결' },
@@ -39,6 +46,9 @@ export function SettingsScreen() {
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [buildCopy, setBuildCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
   const body = useRef<HTMLDivElement>(null)
+  /** §4-2 이 폴더의 보관 대화 — 설정 창이 스스로 받아 그린다(대화 칸과 같은 store). */
+  const laneSnapshot = useLanes((s) => s.snapshot)
+  const laneArchives = laneSnapshot && laneSnapshot.root === root ? laneSnapshot.archives : NO_ARCHIVES
   useEffect(() => { void window.knuaf.appInfo().then(setInfo) }, [])
   useEffect(() => { setOverride(settings?.python_override ?? ''); void refreshSidecar() }, [settings])
   /** Failure deep links: open the matching 펼침, then clear so it behaves like a normal disclosure. */
@@ -111,6 +121,20 @@ export function SettingsScreen() {
             <span className="caption">최근:</span>
             {settings!.recent.map((r) => <button key={r.root} className="quiet" onClick={() => void tryOpen(r.root)} disabled={loading || r.root === root}>{base(r.root)}</button>)}
             <button className="quiet" onClick={async () => { await window.knuaf.setSettings({ recent: [] }); await loadSettings() }}>{SETTINGS.folderRecentClear}</button>
+          </div>
+        )}
+        {/* §4-2 한도로 멈춘 대화 — 이 논문 폴더 단위. 0개면 줄 자체가 없다. */}
+        {laneArchives.length > 0 && (
+          <div style={{ marginTop: 'var(--sp-3)' }}>
+            <div className="set-sub">{LANE_ARCHIVE.folderSub(laneArchives.length)}</div>
+            {laneArchives.map((a) => (
+              <div className="set-row2" key={a.archiveId}>
+                <span className="nm">{providerName(a.company)}</span>
+                <span className="grow">{LANE_ARCHIVE.stoppedAt(stampKo(a.stoppedAt))}</span>
+                <button type="button" className="quiet" onClick={() => requestArchive(a.archiveId)}>{LANE_ARCHIVE.open}</button>
+              </div>
+            ))}
+            <p className="caption">{LANE_ARCHIVE.note}</p>
           </div>
         )}
         {permission === 'ask' && (settings?.trusted_roots?.length ?? 0) > 0 && (

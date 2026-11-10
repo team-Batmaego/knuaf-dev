@@ -675,3 +675,79 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .chat-thread:hover::-webkit-scrollbar-thumb, .chat-thread[data-scrolling]::-webkit-scrollbar-thumb,
 .desk:hover::-webkit-scrollbar-thumb, .desk[data-scrolling]::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--ink) 50%, transparent); }
 .chat-thread::-webkit-scrollbar-thumb:hover, .desk::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--ink) 65%, transparent); border-width: 1px; }
+
+/* =====================================================================================
+   작업 분담(v0.7 단위 6) — 설계 UI-DESIGN r3c §2~§5, 시안 mock/v07.r3.html.
+   파일 끝에만 덧붙인다(다른 칸과 동시 수정 충돌을 피하려고). 값은 시안 CSS 그대로.
+   ===================================================================================== */
+
+/* ---- §3 배치 카드 — 대화 흐름 안에 앉는다(입력칸 자리는 차지하지 않는다) ---- */
+.lane-card { align-self: stretch; background: var(--panel); border: var(--hairline) solid var(--line); border-radius: var(--r-lg); padding: 14px 16px; font-size: 14px; }
+.lane-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.lane-card .lead { margin: 0 0 10px; color: var(--ink-2); font-size: 13.5px; }
+.lane-card .quote { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.lane-dl { display: grid; grid-template-columns: 84px 1fr; gap: 6px 12px; margin: 0 0 10px; }
+.lane-dl dt { color: var(--muted); font-size: 13.5px; }
+.lane-dl dd { margin: 0; font-size: 14px; }
+.lane-dl dd .was { color: var(--muted); }
+.lane-dl dd .arrow { color: var(--faint); margin: 0 6px; }
+.lane-dl dd.rej { color: var(--ink-2); display: flex; gap: 6px; align-items: baseline; }
+.lane-dl dd.rej .ic { color: var(--bad); flex: none; }
+.lane-dl .chipref { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+.lane-risk { background: var(--panel-2); border-radius: 10px; padding: 9px 12px; font-size: 13px; color: var(--ink-2); line-height: 1.6; margin: 0 0 12px; }
+.lane-risk ul { margin: 4px 0 0; padding-left: 18px; }
+.lane-risk .i { color: var(--accent); margin-right: 4px; }
+.lane-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.lane-card .scope, .lane-card .data { margin: 6px 0 10px; font-size: 12.5px; color: var(--muted); }
+.lane-card .data .lk { font-size: 12.5px; }
+.lane-folded { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.lane-folded .lk { font-size: 12.5px; white-space: nowrap; flex: none; }
+
+/* ---- §2-1 알림 줄 안의 단추·작은 글 — 줄 높이를 키우지 않는 크기 ---- */
+.zline .grow small .lk { font-size: 12px; }
+.zline button.primary { padding: 4px 12px; font-size: 13px; white-space: nowrap; flex: none; }
+.zline button.quiet { padding: 4px 10px; font-size: 13px; white-space: nowrap; flex: none; }
+.zline .more { font-size: 12px; white-space: nowrap; flex: none; }
+.zline-more { margin-top: 4px; }
+/* §2-2 기록 줄 — 경고(한도·넘김)만 아이콘 색을 경고색으로. 바탕은 `.chat-event` 그대로. */
+.chat-event.warn { color: var(--attn); }
+.chat-event.warn svg { color: var(--attn); }
+
+/* ---- §4-2 한도로 멈춘 대화(읽기 전용) ---- */
+.stopped-banner .grow small { display: block; }
+.stopped-others { position: relative; flex: none; }
+.lane-pick { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; min-width: 260px;
+  background: var(--panel); border: var(--hairline) solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow-sheet); padding: 6px; display: flex; flex-direction: column; }
+.lane-pick button { text-align: left; }
+
+/* ---- §4-2 설정 › 폴더 보관 목록 ---- */
+.set-sub { font-size: 13px; font-weight: 600; margin: 18px 0 4px; }
+.set-row2 { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: var(--hairline) solid var(--line); font-size: 14px; }
+.set-row2:last-of-type { border-bottom: 0; }
+.set-row2 .nm { width: 80px; font-weight: 500; flex: none; }
+.set-row2 .grow { flex: 1; color: var(--ink-2); }
+
+/* ---- §5 설정 "작업 분담" 표 ---- */
+.lane-table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 8px 0 6px; }
+.lane-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12.5px; padding: 6px 8px; border-bottom: var(--hairline) solid var(--line); }
+.lane-table td { padding: 8px; border-bottom: var(--hairline) solid var(--line); vertical-align: top; }
+.lane-table tr:last-child td { border-bottom: 0; }
+.lane-table .muted { color: var(--muted); }
+.lane-table .exc { color: var(--ink-2); font-size: 13px; }
+.lane-table .exc .ic { color: var(--attn); }
+
+/* ---- 좁은 설정 창(설계 §5 [r3 U6-07]) — 내용 칸이 480px 미만이면 표를 줄마다 두 줄로.
+   분류 칸 축소는 설정 창 본문의 `container-type: inline-size`(Settings.tsx) 기준이다. ---- */
+@container (max-width: 479px) {
+  .lane-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .lane-table, .lane-table tbody, .lane-table tr { display: block; }
+  .lane-table tr { padding: 8px 0; border-bottom: var(--hairline) solid var(--line); }
+  .lane-table tr:last-child { border-bottom: 0; }
+  .lane-table td { display: inline; padding: 0; border: 0; }
+  .lane-table td:first-child { display: block; font-weight: 600; margin-bottom: 2px; }
+  .lane-table td + td:not(:last-child)::after { content: " · "; color: var(--faint); }
+  .set-row2 { flex-wrap: wrap; gap: 4px 12px; }
+  .set-row2 .grow { flex: 1 1 100%; order: 2; }
+  .set-row2 button { order: 3; }
+}

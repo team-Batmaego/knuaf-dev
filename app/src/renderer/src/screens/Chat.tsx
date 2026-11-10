@@ -14,9 +14,11 @@ import { Icon } from '../components/Icon'
 import { ZoneLine, type ZoneTone } from '../components/ZoneLine'
 import { LaneZone } from '../components/LaneZone'
 import { LanePlanCard } from '../components/LanePlanCard'
+import { LaneEventLine } from '../components/LaneEventLine'
+import { StoppedChatView } from '../components/StoppedChatView'
 import { useLanes, laneActions } from '../store/lanes'
-import { lineView, stopLabel, type LaneActionId } from '../laneLines'
-import type { CardAction, LaneLine } from '../../../shared/lanes-ipc'
+import { eventView, lineView, stopLabel, type LaneActionId } from '../laneLines'
+import type { ArchivedChat, CardAction, LaneLine } from '../../../shared/lanes-ipc'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
 import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
@@ -32,6 +34,20 @@ import { create } from 'zustand'
 export type DraftIntent = { seq: number; root: string | null; title?: string }
 export const useReportIntent = create<{ intent: DraftIntent | null }>(() => ({ intent: null }))
 let reportSeq = 0
+
+/**
+ * 설정 › 폴더에서 고른 보관 대화(설계 §4-2). 설정 창은 대화 칸을 직접 그리지 않으므로
+ * 요청만 남기고 창을 닫는다 — 대화 칸이 이 값을 받아 연다.
+ */
+export const useArchiveIntent = create<{ intent: { archiveId: string; seq: number } | null }>(() => ({ intent: null }))
+let archiveSeq = 0
+
+/** 설정 › 폴더 [열기] — 설정 창을 닫고 대화 칸에 보관 대화를 연다. */
+export function requestArchive(archiveId: string): void {
+  useArchiveIntent.setState({ intent: { archiveId, seq: ++archiveSeq } })
+  useProject.getState().setPaneView('chat')
+  useProject.getState().closeSheet()
+}
 
 /** TitleBar onReport callback; survives Chat unmounting in a narrow window. */
 export function requestReport(title?: string): void {
@@ -509,6 +525,22 @@ export function Chat() {
   const laneLines = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.lines : []
   const laneAnnouncement = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.announcement : null
   const laneCards = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.cards : []
+  /** §2-2 기록 줄 — `at` 순으로 대화 흐름에 섞인다(카드와 같은 방식). */
+  const laneEvents = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.events : []
+  const laneArchives = lanesSnapshot && lanesSnapshot.root === projectRoot ? lanesSnapshot.archives : []
+  /**
+   * 본대화 한도 줄이 떠 있으면 기존 대화 오류 줄을 그리지 않는다(설계 §4-1 "오류 줄 대신",
+   * 시험 §7 "본대화 한도 줄이 오류 줄을 대신"). [나중에]를 누르면 줄이 사라지고 오류 줄이 돌아온다.
+   */
+  const laneLimitLine = laneLines.some((l) => l.kind === 'main-limit-offer' || l.kind === 'handoff-running' || l.kind === 'handoff-failed')
+  /** 한도로 멈춘 대화 보기(§4-2) — 열려 있는 동안 지금 대화 대신 그 대화를 그린다. */
+  const [archive, setArchive] = useState<{ id: string; chat: ArchivedChat | null; loading: boolean; error: string | null } | null>(null)
+  const archiveIntent = useArchiveIntent((s) => s.intent)
+  /**
+   * 입력칸 ■ 의 이름 — 담당 진행 줄이 있으면 "대화와 담당 함께 멈추기"(설계 §2-1 [r2 W25]).
+   * 글자로 구별한다(툴팁만으로 구별하지 않음) — `aria-label`·`title` 둘 다 같은 글.
+   */
+  const stopText = stopLabel(lanesSnapshot?.stopButton ?? 'chat', CHAT.stop)
   /** 카드 승인 — main이 카드 id 단위로 한 번만 소비한다. 결과는 밀려온 새 묶음이 그린다. */
   const decideCard = (cardId: string, baseVersion: number, action: CardAction): void => {
     if (!projectRoot) return
@@ -519,6 +551,46 @@ export function Chat() {
     if (!projectRoot) return
     void laneActions().cardStatus(projectRoot, cardId)
   }
+  /**
+   * 보관 대화 열기(설계 §4-2). 응답 값이 필요해 `callValue` 로 받는다 — 묶음에는 실리지 않는다.
+   * 설정 창에서 부르면 창을 먼저 닫고 대화 칸에 그린다.
+   */
+  const openArchive = (archiveId: string): void => {
+    if (!projectRoot) return
+    setArchive({ id: archiveId, chat: null, loading: true, error: null })
+    void useLanes.getState().callValue(({ lanes }) => lanes.archive(projectRoot, archiveId)).then((r) => {
+      setArchive((prev) => prev && prev.id === archiveId
+        ? { id: archiveId, chat: 'error' in r ? null : r.value, loading: false, error: 'error' in r ? r.error : null }
+        : prev)
+    })
+  }
+  /** [지금 대화로 돌아가기]·Esc — 쓰던 글은 그대로 두고 초점만 입력칸으로 되돌린다. */
+  const closeArchive = (): void => {
+    setArchive(null)
+    requestAnimationFrame(() => taRef.current?.focus())
+  }
+  // 설정 › 폴더에서 고른 보관 대화 — 요청은 한 번만 소비한다(설정 창이 이미 닫혔다).
+  useEffect(() => {
+    if (!archiveIntent) return
+    useArchiveIntent.setState({ intent: null })
+    openArchive(archiveIntent.archiveId)
+    // openArchive 는 projectRoot 를 캡처하지 않는다(setState 만 한다) — 의도적 단발 소비.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveIntent])
+  // 보관 대화를 보는 동안 Esc 는 돌아가기다(설계 §4-2). 다른 Esc 처리(입력칸)보다 먼저 받는다.
+  useEffect(() => {
+    if (!archive) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      closeArchive()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archive])
+  /** 폴더가 바뀌면 보던 보관 대화는 그 폴더의 것이 아니다. */
+  useEffect(() => { setArchive(null) }, [projectRoot])
   /**
    * 작업 분담 줄의 단추 — 화면은 요청만 보내고, 그리기는 main이 밀어 준 새 묶음이 한다(설계 §3-5).
    * 같은 `continue`·`later` 글자가 줄 종류에 따라 다른 요청인 것은 계약이 나눠 둔 그대로다
@@ -815,7 +887,25 @@ export function Chat() {
       node: <LanePlanCard card={card} invalidReason={laneInvalid[card.cardId] ?? null} onDecide={decideCard} onStatus={recheckCard} />
     })
   }
+  /** §2-2 기록 줄 — 대화 기록·카드와 같은 시각 순서로 선다. 미지의 종류는 그리지 않는다. */
+  for (const e of laneEvents) {
+    const view = eventView(e)
+    if (view) thread.push({ key: `lane-ev-${view.id}`, at: view.at, node: <LaneEventLine view={view} onArchive={openArchive} /> })
+  }
   thread.sort((a, b) => a.at - b.at)
+
+  /**
+   * §4-2 보관 대화 보기 — 대화 칸 전체를 그 대화가 차지한다. 지금 대화의 작업 분담 줄은
+   * 숨긴다(옛 대화를 보다가 지금 대화의 단추를 잘못 누르지 않게). 안내 건수만 작은 글로 알린다.
+   */
+  if (archive) {
+    return (
+      <div className="chat-inner">
+        <StoppedChatView chat={archive.chat} others={laneArchives} notices={laneLines.length}
+          loading={archive.loading} error={archive.error} onBack={closeArchive} onOpen={openArchive} />
+      </div>
+    )
+  }
 
   return (
     <div className="chat-inner">
@@ -866,7 +956,7 @@ export function Chat() {
             <RuntimeFix failure={pOpenFailure} onRetry={async () => retryOpen(pOpenFailure.root)} />
           </>
         )}
-        {chatErr && <ZoneLine tone={toneOf(chatErr.kind)} title={chatErr.title} sub={chatErr.action} raw={chatErr.raw} onClose={clearError} onReport={toneOf(chatErr.kind) !== 'info' ? () => requestReport(chatErr.title) : undefined} />}
+        {chatErr && !laneLimitLine && <ZoneLine tone={toneOf(chatErr.kind)} title={chatErr.title} sub={chatErr.action} raw={chatErr.raw} onClose={clearError} onReport={toneOf(chatErr.kind) !== 'info' ? () => requestReport(chatErr.title) : undefined} />}
         {snapshot && haltKey && !closedNotes.has(haltKey) && (
           <ZoneLine tone="attn" title={snapshot.state === 'stopped' ? CHAT.stoppedTitle : CHAT.interruptedTitle} sub={snapshot.state === 'stopped' ? CHAT.stoppedBody : CHAT.interruptedBody}
             actions={lastUncertain ? <button type="button" className="lk" onClick={() => void send(lastUncertain.text)} disabled={running || busy || !!waiting}>{CHAT.resend}</button> : undefined}
@@ -955,7 +1045,7 @@ export function Chat() {
                 <span className="sp" />
                 {/* 오른쪽 아래 34×34 원형 위 화살표(먹색 채움) — 작업 중이면 같은 자리 멈추기. */}
                 {zone.kind === 'running'
-                  ? <button type="button" className="send" title={CHAT.stop} aria-label={CHAT.stop} onClick={() => void stop()}><Icon name="stop" size={20} /></button>
+                  ? <button type="button" className="send" title={stopText} aria-label={stopText} onClick={() => void stop()}><Icon name="stop" size={20} /></button>
                   : <button type="button" className="send" title={CHAT.send} aria-label={CHAT.send} onClick={() => void sendBody()} disabled={zone.kind === 'disconnected' || busy || !!waiting || !canSend}><Icon name="up" size={17} /></button>}
               </div>
             </div>
