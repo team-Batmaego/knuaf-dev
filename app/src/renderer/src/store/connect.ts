@@ -146,9 +146,6 @@ const attempts = new Map<Provider, number>()
 export function beginLoginAttempt(provider: Provider): number {
   const mine = (attempts.get(provider) ?? 0) + 1
   attempts.set(provider, mine)
-  // 새 시도는 **진행 중이던 상태 조회를 무효로** 만든다 — 늦게 도착한 옛 응답이 방금 성공한
-  // 로그인을 '로그인 필요'로 되돌리지 않게(검토 RT2-01 재현 A·B).
-  nextStatusSeq(provider)
   return mine
 }
 export function loginAttemptLive(provider: Provider, mine: number): boolean {
@@ -157,53 +154,6 @@ export function loginAttemptLive(provider: Provider, mine: number): boolean {
 /** 그 공급자의 진행 중 로그인 응답을 무효로 만든다(취소). */
 export function invalidateLoginAttempt(provider: Provider): void {
   attempts.set(provider, (attempts.get(provider) ?? 0) + 1)
-  nextStatusSeq(provider)
-}
-
-/**
- * 상태 응답의 세대 — **늦은 응답이 새 사실을 덮지 않게** 하는 표다.
- *
- * 검토 RT2-01 재현: 옛 tick 의 `connect.status` 가 매달려 있다가 새 로그인이 성공하고 감시까지
- * 끝난 뒤에야 `connected:false` 로 정착하면, 그 한 번의 쓰기가 방금 성공한 로그인을
- * '로그인 필요'로 되돌렸다. 감시는 이미 끝났으므로 아무도 다시 묻지 않는다.
- *
- * 계약은 "**가장 마지막에 시작한 조회의 응답만 쓴다**"다. 조회는 시작할 때 번호를 받고,
- * 쓸 때 그 번호가 (a) 지금까지 발급된 마지막 번호이고 (b) 이미 쓴 번호보다 크면 쓴다.
- * 그래서
- *  - B(새 조회)가 먼저 끝나 쓴 뒤 A(옛 조회)가 오면 → A 는 버려진다(성공이 유지된다).
- *  - B 가 끝나기 전에 A 만 오면 → A 도 버려진다(더 새 조회의 답을 기다린다 — 다음 tick 이 묻는다).
- *  - 로그인 시도 시작·취소는 번호를 올려 **그 전에 나간 조회**를 무효로 만든다.
- * 버려진 응답은 오류가 아니다: 화면은 직전 관찰을 그대로 두고, 다음 tick(3초)이 다시 묻는다.
- */
-const statusSeq = new Map<Provider, number>()
-const appliedStatus = new Map<Provider, number>()
-
-function nextStatusSeq(provider: Provider): number {
-  const next = (statusSeq.get(provider) ?? 0) + 1
-  statusSeq.set(provider, next)
-  return next
-}
-/** 이 응답을 써도 되는가 — 가장 마지막에 시작한 조회이고, 아직 아무것도 덮지 않았을 때만. */
-function statusStillFresh(provider: Provider, mine: number): boolean {
-  return mine === (statusSeq.get(provider) ?? 0) && mine > (appliedStatus.get(provider) ?? 0)
-}
-function markStatusApplied(provider: Provider, mine: number): void {
-  if (mine > (appliedStatus.get(provider) ?? 0)) appliedStatus.set(provider, mine)
-}
-
-/** 상태 조회 하나를 시작한다 — 돌려받은 표를 `applyStatusRead` 에 넘겨야 쓸 수 있다. */
-export function beginStatusRead(provider: Provider): number { return nextStatusSeq(provider) }
-
-/**
- * 이 조회 결과를 지금 화면에 반영할지 정하고, 반영한다. 반영했으면 true.
- * 첫 화면(`useConnect.refresh`)·폴더 화면(`useChat.refreshStatus`)이 **같은 표**를 쓴다 —
- * 두 화면의 늦은 응답이 서로를 덮는 것도 같은 규칙으로 막힌다.
- */
-export function applyStatusRead(provider: Provider, mine: number, apply: () => void): boolean {
-  if (!statusStillFresh(provider, mine)) return false
-  markStatusApplied(provider, mine)
-  apply()
-  return true
 }
 
 /**
@@ -271,22 +221,16 @@ export const useConnect = create<ConnectState>((set, get) => ({
     if (previous.state !== info.state || previous.detail !== info.detail || previous.version !== info.version) set(one(provider, info))
   },
   refresh: async (provider) => {
-    // 조회마다 번호를 받는다 — 이 응답이 **가장 마지막에 시작한 조회**일 때만 쓴다.
-    const mine = beginStatusRead(provider)
     const r = await window.knuaf.connect.status(provider) as Reply<ConnectionStatus>
-    // 늦게 도착한 옛 응답은 버린다: 그 사이 새 로그인이 성공했을 수 있고, 그 성공을
-    // '로그인 필요'로 되돌리면 감시도 이미 끝나 아무도 다시 묻지 않는다(검토 RT2-01).
-    applyStatusRead(provider, mine, () => {
-      if ('error' in r && r.error.code === 'update_suspended') {
-        set((s) => ({ ...one(provider, { state: 'unknown', detail: r.error.message, version: null }), loggingIn: { ...s.loggingIn, [provider]: false } }))
-        return
-      }
-      if (!('result' in r)) {
-        set(one(provider, { state: 'unknown', detail: r.error?.message ?? '', version: null }))
-        return
-      }
-      set(one(provider, connInfoOf(r.result)))
-    })
+    if ('error' in r && r.error.code === 'update_suspended') {
+      set((s) => ({ ...one(provider, { state: 'unknown', detail: r.error.message, version: null }), loggingIn: { ...s.loggingIn, [provider]: false } }))
+      return
+    }
+    if (!('result' in r)) {
+      set(one(provider, { state: 'unknown', detail: r.error?.message ?? '', version: null }))
+      return
+    }
+    set(one(provider, connInfoOf(r.result)))
   },
   refreshAll: async () => { await Promise.all([get().refresh('codex'), get().refresh('claude')]) },
   login: async (provider) => {
