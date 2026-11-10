@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY } from '../../../shared/copy'
 import { isPreparing, preparationFailureTitle, usePrep, waitPrepared } from './prep'
-import { beginLoginAttempt, connInfoOf, loginAttemptLive, startPoll, stopPoll, useConnect, type ConnState } from './connect'
+import { applyStatusRead, beginLoginAttempt, beginStatusRead, connInfoOf, loginAttemptLive, startPoll, stopPoll, useConnect, type ConnState } from './connect'
 import type { ChatModelInfo, ChatModels, ChatSnapshot, ConnectionStatus, ModelChoice, Provider } from '../../../shared/chat'
 
 /** 어떤 도우미로 채팅하는지. 인앱 터미널 모드는 제거됐다 — 내 논문은 항상 앱 채팅이다. */
@@ -236,11 +236,16 @@ export const useChat = create<ChatState>((set, get) => ({
   refreshStatus: async () => {
     const { root, provider } = get()
     if (!root) return
+    // 폴더 화면의 상태 조회도 **가장 마지막 조회**만 반영한다 — 늦은 옛 응답이 방금 확인한
+    // '연결됨'을 되돌리면 같은 회귀다(검토 RT2-01 범위 확인).
+    const mine = beginStatusRead(provider)
     const st = await window.knuaf.chat.status(root, provider) as Reply<ConnectionStatus>
     if (get().provider !== provider) return
     const info = statusInfo(st)
-    // 확인 요청 자체가 실패했으면 직전에 본 상태를 그대로 두고 'unknown' 만 말한다.
-    set({ status: info.status ?? get().status, statusFailed: info.statusFailed, connState: info.connState, error: messageOf(st) })
+    applyStatusRead(provider, mine, () => {
+      // 확인 요청 자체가 실패했으면 직전에 본 상태를 그대로 두고 'unknown' 만 말한다.
+      set({ status: info.status ?? get().status, statusFailed: info.statusFailed, connState: info.connState, error: messageOf(st) })
+    })
   },
   login: async () => {
     const { root, provider } = get()
