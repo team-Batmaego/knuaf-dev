@@ -1,4 +1,12 @@
 name: ci
+# 문서만 바뀐 변경(docs/**, 루트 *.md)은 app 작업의 무거운 단계(e2e 포함)를 건너뛴다.
+#
+# 왜 워크플로 단위 `paths-ignore` 가 아닌가: 그렇게 하면 워크플로가 아예 안 돌아 필수 체크가
+# "대기 중(Pending)"으로 남아 머지를 막는다(GitHub 문서 "Troubleshooting required status checks").
+# 왜 작업(job) 단위 `if:` 가 아닌가: matrix 작업을 job 수준에서 건너뛰면 matrix 가 확장되지 않아
+# `app (macos-latest)`·`app (windows-latest)` 체크 자체가 생기지 않는다(actions/runner#952).
+# 그래서 matrix 는 항상 확장하고, 바뀐 파일을 본 뒤 단계만 건너뛴다 — 작업은 성공으로 끝나고
+# 체크 이름도 그대로다. 코드가 바뀐 변경은 이 조건에 걸리지 않아 지금과 똑같이 전부 돈다.
 on:
   push:
     branches: ["**"]
@@ -8,6 +16,137 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # 바뀐 파일이 문서뿐인지 판별한다. 이 작업은 늘 돌고 늘 초록/빨강으로 끝나므로 체크 이름이
+  # 사라지지 않는다. 판별에 실패하면(새 갈래 push, 수동 실행, diff 불가) `docs_only=false` 로
+  # 닫아 전체 시험을 돈다 — 건너뛰는 쪽으로는 절대 fail-open 하지 않는다.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # push 는 before..after, pull_request 는 base..head 를 그대로 비교하려면 전체 이력이 필요하다.
+          fetch-depth: 0
+      - name: 바뀐 파일 분류
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          # `docs_only <repo> <base> <head> <mode>` — 바뀐 파일이 전부 문서면 true, 아니면 false.
+          # mode=merge-base(pull_request): base 가 앞서 나가도 이 갈래가 바꾼 것만 센다.
+          # mode=direct(push): before..after 그대로 — 밀어 넣은 커밋이 바꾼 것만 센다.
+          # 문서 = `docs/` 아래 전부 + 저장소 루트의 `*.md`. `app/README.md` 처럼 폴더 안의 md 는
+          # 문서가 아니다(앱 코드와 같은 관리 단위라 전체 시험을 돈다). 판단 불가도 false 다 —
+          # 건너뛰는 쪽으로는 절대 fail-open 하지 않는다.
+          docs_only() {
+            local repo="$1" base="$2" head="$3" mode="$4" from list path count=0 result=true
+            [ -n "$base" ] && [ -n "$head" ] || { echo false; return; }
+            from="$base"
+            if [ "$mode" = "merge-base" ]; then
+              from="$(git -C "$repo" merge-base "$base" "$head" 2>/dev/null)" || { echo false; return; }
+            fi
+            # 파일 이름에 줄바꿈이 있어도 경로가 쪼개지지 않도록 NUL 로 구분해 받는다.
+            list="$(mktemp)"
+            if ! git -C "$repo" -c core.quotePath=false diff --name-only -z --no-renames "$from" "$head" > "$list" 2>/dev/null; then
+              rm -f "$list"; echo false; return
+            fi
+            while IFS= read -r -d '' path; do
+              [ -n "$path" ] || continue
+              count=$((count + 1))
+              case "$path" in
+                docs/*) continue ;;
+                */*) result=false; break ;;
+                *.md) continue ;;
+                *) result=false; break ;;
+              esac
+            done < "$list"
+            rm -f "$list"
+            # 바뀐 파일이 없으면 알 수 없는 상태다.
+            [ "$count" -gt 0 ] || result=false
+            echo "$result"
+          }
+
+          # 분류 규칙 자기시험 — 규칙이 조용히 무너지면 CI 가 먼저 깨진다. 합성 저장소에서 확인한다.
+          expect() {
+            if [ "$2" != "$3" ]; then
+              echo "분류 자기시험 실패: $1 (기대 $3, 실제 $2)" >&2
+              exit 1
+            fi
+          }
+          selftest="$(mktemp -d)"
+          repo="$selftest/repo"
+          mkdir -p "$repo"
+          git -C "$repo" init -q -b main
+          commit() {
+            git -C "$repo" add -A
+            git -C "$repo" -c user.name=ci -c user.email=ci@example.com commit -qm "$1"
+            git -C "$repo" rev-parse HEAD
+          }
+          mkdir -p "$repo/docs"
+          : > "$repo/docs/a.md"
+          c1="$(commit 'docs first')"
+          : > "$repo/docs/b.md"
+          c2="$(commit 'docs second')"
+          mkdir -p "$repo/app"
+          : > "$repo/app/x.ts"
+          c3="$(commit 'code')"
+          : > "$repo/README.md"
+          c4="$(commit 'root readme')"
+          : > "$repo/app/README.md"
+          c5="$(commit 'nested readme')"
+          mkdir -p "$repo/docs/images"
+          : > "$repo/docs/images/x.png"
+          c6="$(commit 'docs image')"
+          expect 'docs/ 만 바뀌면 건너뛴다' "$(docs_only "$repo" "$c1" "$c2" direct)" true
+          expect '앱 코드가 섞이면 돌린다' "$(docs_only "$repo" "$c2" "$c3" direct)" false
+          expect '루트 *.md 만 바뀌면 건너뛴다' "$(docs_only "$repo" "$c3" "$c4" direct)" true
+          expect '폴더 안 md 는 문서가 아니다' "$(docs_only "$repo" "$c4" "$c5" direct)" false
+          expect 'docs/ 아래 그림도 문서다' "$(docs_only "$repo" "$c5" "$c6" direct)" true
+          expect '바뀐 파일이 없으면 돌린다' "$(docs_only "$repo" "$c6" "$c6" direct)" false
+          expect '비교 기준이 없으면 돌린다' "$(docs_only "$repo" '' "$c6" direct)" false
+          git -C "$repo" checkout -q -b behind "$c2"
+          : > "$repo/docs/c.md"
+          c7="$(commit 'docs on stale branch')"
+          expect '갈래가 뒤처져도 이 갈래가 바꾼 것만 센다' "$(docs_only "$repo" "$c6" "$c7" merge-base)" true
+          expect '직접 비교는 base 의 앞선 코드 변경을 이 변경의 삭제로 읽는다(안전측)' "$(docs_only "$repo" "$c6" "$c7" direct)" false
+
+          zero='0000000000000000000000000000000000000000'
+          base=''
+          head=''
+          mode='direct'
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD"; mode='merge-base' ;;
+            push) base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+          esac
+          # 비교 기준이 없으면(수동 실행·새 갈래 push) 전체 시험. 새 갈래 push 의 before 는 0 이다.
+          if [ "$base" = "$zero" ]; then head=''; fi
+
+          # 분류 함수가 예상 밖으로 실패하거나 이상한 값을 내도 단계는 실패하지 않는다 —
+          # 값을 믿을 수 없으면 전체 시험(false)으로 닫는다. `changes` 작업이 빨개져서
+          # 모든 PR 의 머지를 막는 일이 없게 한다.
+          if ! result="$(docs_only "$GITHUB_WORKSPACE" "$base" "$head" "$mode")"; then
+            result=false
+          fi
+          case "$result" in true) ;; *) result=false ;; esac
+          echo "docs_only=$result" >> "$GITHUB_OUTPUT"
+          echo "분류: event=$EVENT_NAME ${base:-<없음>}..${head:-<없음>} ($mode) → docs_only=$result"
+      # 문서만 바뀌어 e2e 를 건너뛴 실행에서도, 앱 빌드·e2e 가 읽는 파일은 그대로 있어야 한다
+      # (`app/electron-builder.yml` 이 이 두 파일을 설치본에 넣고 `app/e2e/*.spec.ts` 가 PDF 를 연다).
+      # 문서 PR 이 이 파일을 지우면 다음 코드 PR 이 아니라 여기서 먼저 멈춘다.
+      - name: 앱이 읽는 문서가 남아 있는지 확인 (문서만 바뀐 실행)
+        if: steps.classify.outputs.docs_only == 'true'
+        run: |
+          for f in docs/학생용-사용안내.pdf docs/학생용-사용안내.html; do
+            test -f "$f" || { echo "앱 빌드·e2e 가 읽는 파일이 없다: $f"; exit 1; }
+          done
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -71,6 +210,12 @@ jobs:
         env:
           PY39: ${{ steps.py39.outputs.python-path }}
   app:
+    needs: changes
+    # `changes` 가 실패해도 앱 시험을 통째로 건너뛰지 않는다. 의존 작업이 실패하면 이 작업은
+    # '건너뜀'이 되는데, GitHub 는 건너뜀을 성공으로 인정하므로 분류기가 고장 난 날 앱 시험이
+    # 조용히 통과해 버린다. 출력이 비면 아래 단계 조건(`!= 'true'`)이 전부 참이 되어 예전처럼
+    # 전부 돈다. `always()` 대신 `!cancelled()`: 실행이 취소된 경우에는 새 작업을 띄우지 않는다.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,42 +225,63 @@ jobs:
       run:
         working-directory: app
     steps:
+      # 문서만 바뀐 실행에서는 아래 단계를 전부 건너뛴다. 작업을 job `if:` 로 통째로 건너뛰면
+      # matrix 가 확장되지 않아 `app (macos-latest)`·`app (windows-latest)` 체크가 사라지고,
+      # 필수 체크가 '대기 중'으로 남는다(actions/runner#952). 그래서 단계만 건너뛴다 — 작업은
+      # 성공으로 끝나고 체크 이름은 그대로다. 코드가 바뀐 실행은 예전과 똑같이 전부 돈다.
+      - name: 문서만 바뀐 실행 — 앱 시험 건너뜀
+        if: needs.changes.outputs.docs_only == 'true'
+        # 이 작업의 기본 작업 폴더는 app 인데, checkout 을 건너뛰었으니 저장소 루트에 선다.
+        working-directory: .
+        run: echo "docs-only change — app build/e2e skipped on purpose"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: pnpm/action-setup@v4
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           version: 10
       - uses: actions/setup-node@v4
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
       - uses: actions/setup-python@v5
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           python-version: "3.13"
       - uses: actions/cache@v4
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           path: app/resources/skill-upstreams
           key: ${{ runner.os }}-skill-${{ hashFiles('app/skill-source.json') }}
       - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
+        if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm install --frozen-lockfile
+        if: needs.changes.outputs.docs_only != 'true'
       - run: node --test scripts/tests/app-release.test.mjs
+        if: needs.changes.outputs.docs_only != 'true'
       - run: node scripts/tests/check-skill-workflow.mjs
+        if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm typecheck
+        if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm build
+        if: needs.changes.outputs.docs_only != 'true'
       # xlsx-preview.spec.ts uses Playwright's browser page fixture; cache and install only its headless Chromium shell.
       - name: Cache Playwright Chromium (macOS)
-        if: runner.os == 'macOS'
+        if: needs.changes.outputs.docs_only != 'true' && runner.os == 'macOS'
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
       - name: Cache Playwright Chromium (Windows)
-        if: runner.os == 'Windows'
+        if: needs.changes.outputs.docs_only != 'true' && runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
       - name: Install Playwright Chromium headless shell
+        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm exec playwright install chromium --only-shell
       # live-*.spec.ts need a real Claude/Codex login and are excluded without KNUAF_LIVE=1.
       # 창 촬영(window-shots)은 맥 전용 `screencapture` 라 config 의 testIgnore 가 뺀다.
@@ -127,13 +293,13 @@ jobs:
       # back to a PATH python; narrow-PATH specs (those that plant a fake codex) would then hit
       # macOS' stock 3.9.6 and fail project:open. On Windows the interpreter is python.exe.
       - name: e2e (macOS)
-        if: runner.os == 'macOS'
+        if: needs.changes.outputs.docs_only != 'true' && runner.os == 'macOS'
         run: pnpm exec playwright test --grep-invert "real window capture" --output test-results/e2e-artifacts
         env:
           KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
           KNUAF_SHOT_DIR: test-results/ui-shots
       - name: e2e (Windows)
-        if: runner.os == 'Windows'
+        if: needs.changes.outputs.docs_only != 'true' && runner.os == 'Windows'
         run: pnpm exec playwright test --grep-invert "real window capture" --output test-results/e2e-artifacts
         env:
           KNUAF_PYTHON: ${{ env.pythonLocation }}\python.exe
@@ -159,7 +325,7 @@ jobs:
           retention-days: 7
       # Keep stage timing even if independent lock lookup makes the Windows job pass.
       - name: Aggregate diagnosis timings (Windows)
-        if: always() && runner.os == 'Windows'
+        if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: doctor-timings-windows
@@ -168,7 +334,7 @@ jobs:
           retention-days: 7
       # 시안 대조용 캡처 — 시험이 실패해도 남긴다(`always()`). 이름에 OS 를 넣어 구분한다.
       - name: UI captures (macOS)
-        if: always() && runner.os == 'macOS'
+        if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ui-shots-macos
@@ -180,7 +346,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: UI captures (Windows)
-        if: always() && runner.os == 'Windows'
+        if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ui-shots-windows

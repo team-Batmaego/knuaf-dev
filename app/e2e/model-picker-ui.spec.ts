@@ -40,14 +40,14 @@ for (const tier of ['low', 'high'] as const) {
           await expect(rows).toHaveCount(tier === 'low' ? 3 : 5)
           await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
           if (tier === 'low') {
-            await expect(rows.filter({ hasText: 'Terra' })).toContainText('설계 · 검토(새 대화)에 추천')
-            await expect(rows.filter({ hasText: 'Luna' })).toContainText('자료 찾기 · 글쓰기 · 반복 작업에 추천')
+            await expect(rows.filter({ hasText: 'Terra' })).toContainText('설계 · 자료 찾기 · 검토(새 대화)에 추천')
+            await expect(rows.filter({ hasText: 'Luna' })).toContainText('글쓰기 · 반복 작업에 추천')
             await expect(rows.filter({ hasText: 'Sol' })).toHaveCount(0)
           } else {
-            await expect(rows.filter({ hasText: 'Sol' })).toContainText('설계에 추천')
+            await expect(rows.filter({ hasText: 'Sol' })).toContainText('설계 · 글쓰기에 추천')
             await expect(rows.filter({ hasText: 'Astra' })).toContainText('자료 찾기 · 검토(새 대화)에 추천')
-            await expect(rows.filter({ hasText: 'Terra' })).toContainText('글쓰기에 추천')
-            await expect(rows.filter({ hasText: 'Luna' })).toContainText('반복 작업에 추천')
+            await expect(rows.filter({ hasText: 'Terra' })).toContainText('반복 작업에 추천')
+            await expect(rows.filter({ hasText: 'Luna' }).locator('.model-recommend')).toHaveCount(0)
           }
           await expect(popup).toContainText('검토는 새 대화로 하세요.')
           const bounds = await popup.boundingBox()
@@ -122,7 +122,7 @@ test('다른 공급자 모델은 칩 목록에도 추천에도 나오지 않는�
   const mixed = [
     ...highModels,
     option('anthropic/claude-sonnet-4', 'Claude Sonnet 4'),
-    // 실측: 이 id 에 '글쓰기' 추천이 붙었던 장면. OpenAI Terra 가 아니라 이 모델이 잡혔다.
+    // 실측: Terra 추천이 다른 공급자 id에 붙던 장면. 본래 목록에는 없는 그 모델을 거른다.
     option('commandcode-auth/gpt-5.6-terra', 'Terra')
   ]
   const { electronApp, page } = await scene(mixed)
@@ -135,9 +135,9 @@ test('다른 공급자 모델은 칩 목록에도 추천에도 나오지 않는�
     // OpenAI 네 개 + '안 고름'. 접두어 모델 두 개는 목록에 없다.
     await expect(rows).toHaveCount(5)
     await expect(rows.filter({ hasText: 'Claude Sonnet 4' })).toHaveCount(0)
-    // Terra 는 OpenAI 것 하나뿐이고, 글쓰기 추천은 그 하나에만 붙는다.
+    // Terra is recommended for repeat in the high row; the foreign Terra alias remains filtered.
     await expect(rows.filter({ hasText: 'Terra' })).toHaveCount(1)
-    await expect(rows.filter({ hasText: 'Terra' })).toContainText('글쓰기에 추천')
+    await expect(rows.filter({ hasText: 'Terra' })).toContainText('반복 작업에 추천')
   } finally { await electronApp.close() }
 })
 
@@ -152,9 +152,8 @@ test('실측 순서의 같은 별칭 여러 세대 중 최신 모델에만 추�
     await expect(rows).toHaveCount(10)
     for (const [name, purpose] of [
       ['GPT-6-Astra', '자료 찾기 · 검토(새 대화)에 추천'],
-      ['GPT-6-Luna', '반복 작업에 추천'],
-      ['GPT-6.1-Sol', '설계에 추천'],
-      ['GPT-6.1 Terra', '글쓰기에 추천']
+      ['GPT-6.1-Sol', '설계 · 글쓰기에 추천'],
+      ['GPT-6.1 Terra', '반복 작업에 추천']
     ]) {
       const row = rows.filter({ has: page.getByText(name, { exact: true }) })
       await expect(row).toContainText(purpose)

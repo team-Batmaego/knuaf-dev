@@ -1,11 +1,5 @@
-import {
-  WORK_LANES,
-  codexRecommendations,
-  isCrossProviderModelId,
-  resolveCodexAlias,
-  type Provider,
-  type WorkLane
-} from './chat'
+export type Provider = 'codex' | 'claude'
+export type WorkLane = 'design' | 'research' | 'writing' | 'repeat' | 'review'
 
 export type PlanTier = 'high' | 'low'
 export type LaneHow = 'main' | 'sub' | 'relay'
@@ -130,6 +124,136 @@ export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
     lane('claude', 'haiku', 'relay'),
     lane('codex', 'terra', 'relay', REVIEW_EFFORT)
   )
+}
+// ---------------------------------------------------------------- 모델 추천 (형님 확정표)
+//
+// 형님 확정표(`../DECISIONS.md` '최종 추천 레인 배치')를 **그대로** 옮긴 데이터다. 화면은
+// 이 상수와 `codexRecommendations()` 만 쓰면 되고, 문구를 화면 쪽에서 다시 짓지 않는다.
+//
+// 값은 **별칭**(sol·terra·astra·luna)이다. 계정이 실제로 쓰는 모델 id 는 요금제마다 달라
+// 아직 확인되지 않았다 — `model/list` 가 준 model/name 의 **끝 낱말**이 별칭인지로 찾는다
+// (`resolveCodexAlias`). 실제 목록을 실기기에서 확인하면 `CODEX_MODEL_ALIASES` 만 고치면 된다.
+
+export const WORK_LANES: { lane: WorkLane; label: string }[] = [
+  { lane: 'design', label: '설계' },
+  { lane: 'research', label: '자료 찾기' },
+  { lane: 'writing', label: '글쓰기' },
+  { lane: 'repeat', label: '반복 작업' },
+  { lane: 'review', label: '검토(새 대화)' }
+]
+export type CodexTier = 'low' | 'high'
+/** 추천 맵은 ChatGPT 낮음·높음 전용 행에서 파생한다. */
+export const CODEX_TIER_MODELS: Record<CodexTier, Record<WorkLane, string>> = {
+  low: {
+    design: LANE_TABLE['codex-low'].lanes.design.model!,
+    research: LANE_TABLE['codex-low'].lanes.research.model!,
+    writing: LANE_TABLE['codex-low'].lanes.writing.model!,
+    repeat: LANE_TABLE['codex-low'].lanes.repeat.model!,
+    review: LANE_TABLE['codex-low'].lanes.review.model!
+  },
+  high: {
+    design: LANE_TABLE['codex-high'].lanes.design.model!,
+    research: LANE_TABLE['codex-high'].lanes.research.model!,
+    writing: LANE_TABLE['codex-high'].lanes.writing.model!,
+    repeat: LANE_TABLE['codex-high'].lanes.repeat.model!,
+    review: LANE_TABLE['codex-high'].lanes.review.model!
+  }
+}
+/** 별칭 판정 낱말. 목록의 model·name 의 끝 낱말이 별칭인지 확인한다. */
+export const CODEX_MODEL_ALIASES: Record<string, string[]> = {
+  sol: ['sol'], terra: ['terra'], astra: ['astra'], luna: ['luna']
+}
+
+/**
+ * 다른 공급자로 우회되는 id 인가 — OpenAI 쪽 id 에는 `공급자/` 접두어가 없고, 다른 공급자
+ * 모델은 전부 `<공급자>/…` 형식이다(DQA-01 실측: `anthropic/claude-…`,
+ * `commandcode-auth/gpt-5.6-terra`). 이런 id 는 이 ChatGPT 계정의 모델이 아니므로 목록·추천·
+ * 전송 어디에도 올리지 않는다 — 고르면 다른 회사·다른 과금 경로로 간다.
+ */
+export function isCrossProviderModelId(model: string): boolean {
+  return model.includes('/')
+}
+
+export interface LaneRecommendation { lane: WorkLane; label: string; model: string }
+export interface CodexRecommendation {
+  /** 이 계정 목록으로 고른 줄. Sol·Astra 가 보이면 높음, 아니면 낮음. */
+  tier: CodexTier
+  /** 그 줄에서 **목록에 있는** 모델만 남긴 추천. 목록에 없는 모델은 빼고 칩에도 안 띄운다. */
+  lanes: LaneRecommendation[]
+  /** 모델별 용도 한 줄 — `model` 키, 값은 그 모델이 추천된 레인 이름들(` · ` 로 이은 문구). */
+  byModel: Record<string, { alias: string; lanes: WorkLane[]; purpose: string }>
+}
+
+/**
+ * 별칭 하나가 가리키는 모델을 계정 목록에서 찾는다. 없으면 undefined.
+ *
+ * 예전에는 model·name **어디에든** 별칭 낱말이 들어 있으면 맞다고 봤다. 그래서
+ * `commandcode-auth/gpt-5.6-terra` 같은 다른 공급자 모델이 terra 로 잡혀 추천이 붙었다
+ * (DQA-01). 지금은 **끝 낱말**만 본다 — `GPT-6.1-Sol` → `sol`, `GPT Sol (높음)` → `sol`.
+ * 다른 공급자 id 는 애초에 넘기지 않지만, 넘어와도 여기서 다시 거른다. 세대가 읽히는
+ * 후보가 있으면 가장 높은 GPT 버전을 고르고, 없거나 동률이면 목록의 첫 후보를 쓴다.
+ */
+export function resolveCodexAlias(models: readonly { model: string; name: string }[], alias: string): string | undefined {
+  const words = (CODEX_MODEL_ALIASES[alias] ?? [alias]).map((w) => w.toLowerCase())
+  let best: string | undefined
+  let bestVersion: number[] | null = null
+  for (const m of models) {
+    if (isCrossProviderModelId(m.model)) continue
+    if (!words.includes(lastWord(m.model)) && !words.includes(lastWord(m.name))) continue
+    const version = codexVersion(m.model) ?? codexVersion(m.name)
+    if (best === undefined || (version && (!bestVersion || compareVersion(version, bestVersion) > 0))) {
+      best = m.model
+      bestVersion = version
+    }
+  }
+  return best
+}
+
+/** GPT 뒤의 세대만 읽는다 — 다른 숫자(설명·날짜)를 모델 버전으로 오인하지 않는다. */
+function codexVersion(text: string): number[] | null {
+  const match = /\bgpt[-\s]+(\d+(?:\.\d+)*)/i.exec(text)
+  return match ? match[1].split('.').map(Number) : null
+}
+
+function compareVersion(a: number[], b: number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+/** 낱말 하나로 쪼갠 마지막 토큰 — `gpt-6.1-sol` → `sol`, `GPT Sol (높음)` → `sol`. */
+function lastWord(text: string): string {
+  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  return words[words.length - 1] ?? ''
+}
+
+/**
+ * 계정이 쓸 수 있는 모델 목록 → 형님 표의 추천.
+ *
+ * 줄 판정: 이번 판 규칙은 **높음 줄 전용 모델(Sol·Astra)이 목록에 하나라도 보이면 높음**이다
+ * (`../DECISIONS.md`: "Sol·Astra 가 있으면 높음"). 요금제별 실제 목록이 아직 확인되지 않아
+ * 추측을 최소화한 규칙이고, 실기기 확인 뒤 이 함수 하나만 고치면 화면은 그대로다.
+ */
+export function codexRecommendations(models: readonly { model: string; name: string }[]): CodexRecommendation {
+  const highOnly = ['sol', 'astra'].filter((a) => resolveCodexAlias(models, a))
+  const tier: CodexTier = highOnly.length > 0 ? 'high' : 'low'
+  const lanes: LaneRecommendation[] = []
+  const byModel: CodexRecommendation['byModel'] = {}
+  for (const { lane, label } of WORK_LANES) {
+    const alias = CODEX_TIER_MODELS[tier][lane]
+    const model = resolveCodexAlias(models, alias)
+    if (!model) continue
+    lanes.push({ lane, label, model })
+    const got = (byModel[model] ??= { alias, lanes: [], purpose: '' })
+    got.lanes.push(lane)
+  }
+  for (const entry of Object.values(byModel)) {
+    const labels = WORK_LANES.filter((l) => entry.lanes.includes(l.lane)).map((l) => l.label)
+    entry.purpose = labels.join(' · ')
+  }
+  return { tier, lanes, byModel }
 }
 
 export function planFromRow(value: LaneRowId | LaneRow): LanePlan {
