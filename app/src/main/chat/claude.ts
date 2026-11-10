@@ -807,6 +807,23 @@ export function lostToolCalls(message: unknown): number {
   return n
 }
 
+/** 카드에서 값을 가려야 하는 **이름**. 텍스트 규칙과 JSON 폴백이 같은 목록을 쓴다. */
+const SECRET_NAME = /^(?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|clientsecret|secret|token|password|passwd|pwd|credential|authorization)$/i
+
+/**
+ * 원시 JSON 폴백 카드의 본문. `redactForCard` 를 **문자열 값마다** 적용하고, 이름이 비밀값
+ * 자리인 키는 값 전체를 가린다(`api_key: …` 는 값만 봐서는 알아볼 수 없다).
+ *
+ * JSON 문자열을 통째로 가리면 인용부호가 사라져 구조가 깨진다. 학생은 카드에서 "무엇을
+ * 하려는지"를 읽어야 하므로 키·구조는 남기고 값만 가린다.
+ */
+function redactedInputForCard(input: unknown): string {
+  return JSON.stringify(input, (k, v) => {
+    if (typeof v !== 'string') return v
+    return SECRET_NAME.test(k) ? '***' : redactForCard(v)
+  }, 2)
+}
+
 /**
  * 카드에 보여 줄 명령에서 **비밀값 꼴만** 가린다.
  *
@@ -904,14 +921,17 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
       : { title: '컴퓨터에서 명령을 실행하려고 해요', detail: '앱이 읽을 수 있는 명령이 아니에요. 무슨 일인지 모르겠으면 거절해 주세요.' }
   }
   if (name === 'Bash' && typeof cmd === 'string') {
+    // 카드에 보여 줄 사본에서만 비밀값을 가린다. **판정은 아래 원문(`cmd`)으로** 한다 —
+    // 가린 글자로 조각을 나누면 경로 판정이 달라진다(검토 FIX2: 카드 표시만 고친다).
+    const shown = redactForCard(cmd)
     const segs = parseShell(cmd)
-    if (segs === null) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${cmd}\n\n변수나 기호가 섞여 있어 무엇을 건드릴지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+    if (segs === null) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${shown}\n\n변수나 기호가 섞여 있어 무엇을 건드릴지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
     const out = bashOutside(root, segs)
-    if (out.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${cmd}\n\n폴더 밖: ${out.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
+    if (out.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${shown}\n\n폴더 밖: ${out.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
     // 폴더 밖이 아니면 권한 파일을 건드리는지 본다. 둘 다 걸리면 폴더 밖을 먼저 말한다 —
     // 밖으로 나가는 쪽이 학생에게 더 큰 사실이고, 권한 파일은 그 다음 문제다.
     const guarded = segs.flatMap((t) => (touchesProtected(root, t) ? protectedHits(root, t) : []))
-    if (guarded.length) return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `${cmd}\n\n대상: ${guarded.join(', ')}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요.` }
+    if (guarded.length) return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `${shown}\n\n대상: ${guarded.join(', ')}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요.` }
     // 여기까지 왔다는 것은 autoAllow 가 통과시키지 않았다는 뜻이다. 이유를 사실대로
     // 나눠 말한다 — 예전에는 무엇에 걸렸든 "경로는 모두 논문 폴더 안이에요"라고 단정해서,
     // 경로 인자가 하나도 없는 명령(`command -v …`)에도 그렇게 적혔다(시험주행 발견 6).
@@ -919,20 +939,22 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
     const reasons = segs.map(segmentReason).filter((r): r is Reason => r !== null)
     const first = (kind: Reason['kind']) => reasons.find((r) => r.kind === kind)
     const reach = first('reach')
-    if (reach) return { title: '논문 폴더 밖으로 나가는 명령이에요', detail: `${cmd}\n\n"${reach.name}" 는 네트워크·다른 앱·설치처럼 폴더 밖에 닿아요. 의도한 일이 아니면 거절해 주세요.` }
+    if (reach) return { title: '논문 폴더 밖으로 나가는 명령이에요', detail: `${shown}\n\n"${reach.name}" 는 네트워크·다른 앱·설치처럼 폴더 밖에 닿아요. 의도한 일이 아니면 거절해 주세요.` }
     const ai = first('ai')
-    if (ai) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${cmd}\n\n"${ai.name}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
+    if (ai) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${shown}\n\n"${ai.name}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
     const launch = first('launch')
-    if (launch) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${cmd}\n\n"${launch.name}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+    if (launch) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${shown}\n\n"${launch.name}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
     const unpack = first('unpack')
-    if (unpack) return { title: '압축을 풀어 파일을 만드는 명령이에요', detail: `${cmd}\n\n"${unpack.name}" 는 압축 안에 든 파일을 그대로 꺼내 놓아요. 앱이 그 안을 미리 확인하지 못해요. 의도한 일이 아니면 거절해 주세요.` }
+    if (unpack) return { title: '압축을 풀어 파일을 만드는 명령이에요', detail: `${shown}\n\n"${unpack.name}" 는 압축 안에 든 파일을 그대로 꺼내 놓아요. 앱이 그 안을 미리 확인하지 못해요. 의도한 일이 아니면 거절해 주세요.` }
     const state = first('state')
-    if (state) return { title: '셸 설정을 바꾸는 명령이에요', detail: `${cmd}\n\n"${state.name}" 는 뒤에 오는 명령이 실행되는 방식을 바꿀 수 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
-    if (first('interp')) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${cmd}\n\n프로그램 안에 무엇이 있는지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
-    return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${cmd}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+    if (state) return { title: '셸 설정을 바꾸는 명령이에요', detail: `${shown}\n\n"${state.name}" 는 뒤에 오는 명령이 실행되는 방식을 바꿀 수 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+    if (first('interp')) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${shown}\n\n프로그램 안에 무엇이 있는지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+    return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${shown}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
   }
   const label = TOOL_LABELS[name] ?? '도구'
-  return { title: `도우미가 "${label}"을/를 쓰려고 해요`, detail: JSON.stringify(input, null, 2) }
+  // 이 폴백은 모델이 보낸 입력을 그대로 직렬화한다. 그 안에 헤더·토큰이 들어올 수 있으므로
+  // 같은 가리기 함수를 거친 사본을 보여 준다(검토 FIX2). 입력 원본은 판정에만 쓴다.
+  return { title: `도우미가 "${label}"을/를 쓰려고 해요`, detail: redactedInputForCard(input) }
 }
 
 /** 도구 입력에서 경로 인자 하나를 꺼낸다. 입력은 모델이 보낸 것이라 타입을 믿지 않는다. */

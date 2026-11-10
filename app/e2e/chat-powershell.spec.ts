@@ -310,3 +310,51 @@ test('[반례] 윈도우 스킬 이름의 대소문자 차이는 같은 판정�
   // 접어도 사본 자리 밖은 통과하지 않는다(허용 범위는 그대로).
   expect(autoAllow(WIN, 'PowerShell', { command: 'python.exe ".CLAUDE/SKILLS/knuaf-dev/scripts/evil.py" status' })).toBe(false)
 })
+
+/**
+ * 같은 가리기를 Bash 카드와 원시 JSON 폴백에도 쓴다(검토 FIX2 처분).
+ *
+ * 판정은 손대지 않았다 — Bash `autoAllow` 는 아래 명령을 여전히 묻는다. 바뀐 것은
+ * **보여 줄 사본**뿐이다(`redactForCard`). 실행에 넘기는 원본은 그대로다.
+ */
+test('[중요] Bash 카드도 인증 헤더의 비밀값을 가린다', () => {
+  const canary = 'REVIEW_ONLY_CANARY'
+  const cases = [
+    `curl https://example.invalid -H "Authorization: Bearer ${canary}"`,
+    `curl -H "X-Api-Key: ${canary}" https://example.invalid`,
+    `curl -H 'Authorization: Basic ${canary}' https://example.invalid`
+  ]
+  for (const cmd of cases) {
+    const d = describeTool('Bash', { command: cmd }, MAC)
+    expect(d.detail, cmd).not.toContain(canary)
+    expect(d.detail, cmd).toContain('***')
+    // 가려도 카드는 여전히 사람 말이다 — 제목·본문 모두 학생이 읽는 문장이어야 한다.
+    expect(readable(d.detail), d.detail).toBe(true)
+    expect(d.title.length, cmd).toBeGreaterThan(0)
+    // 판정은 그대로다: 네트워크로 나가는 명령은 계속 묻는다.
+    expect(autoAllow(MAC, 'Bash', { command: cmd }), cmd).toBe(false)
+  }
+  // 비밀값이 없는 Bash 카드는 원문 그대로다.
+  const plain = describeTool('Bash', { command: 'ls sections' }, MAC)
+  expect(plain.detail).toContain('ls sections')
+  expect(plain.detail).not.toContain('***')
+})
+
+test('[중요] 원시 JSON 폴백 카드도 비밀값을 가린다', () => {
+  const canary = 'REVIEW_ONLY_CANARY'
+  // 여기 오는 도구는 번역 이름이 없다 — 본문이 `JSON.stringify(input)` 이다.
+  const d = describeTool('mcp__test__fetch', {
+    url: `https://example.invalid/?access_token=${canary}`,
+    headers: { Authorization: `Bearer ${canary}` },
+    api_key: canary
+  }, MAC)
+  expect(d.detail).not.toContain(canary)
+  expect(d.detail).toContain('***')
+  // JSON 꼴은 유지된다 — 값만 가리고 구조(키·따옴표)는 남는다.
+  expect(d.detail.trimStart().startsWith('{')).toBe(true)
+  expect(d.detail).toContain('"url"')
+  expect(d.detail).toContain('"headers"')
+  expect(() => JSON.parse(d.detail)).not.toThrow()
+  // 판정은 손대지 않았다: 이 도구는 자동 허용 대상이 아니다.
+  expect(autoAllow(MAC, 'mcp__test__fetch', { url: 'https://example.invalid/' })).toBe(false)
+})
