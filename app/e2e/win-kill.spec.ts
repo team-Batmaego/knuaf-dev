@@ -5,32 +5,68 @@
 // **같은 이벤트 루프가 그 사이 돌 수 있는지**를 본다 — 맥에서도 가짜 taskkill 로 결정적으로.
 import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { killTree } from '../src/main/win'
 
 /**
- * `taskkill.exe` 대역 — `Windows/System32/taskkill.exe` 자리에 느린 스크립트를 둔다.
- * `killTree` 는 `SystemRoot` 아래 절대 경로만 보므로, 이 환경값 하나로 갈아 끼울 수 있다.
+ * `taskkill.exe` 대역 — `killTree` 가 보는 `<SystemRoot>\System32\taskkill.exe` 자리에 둔다.
+ *
+ * **윈도우에서는 셸 스크립트가 실행되지 않는다**(CI 실패: `ENOENT …\System32\taskkill.exe`,
+ * 그리고 폴더도 만들지 않았다). 그래서 플랫폼마다 실제로 실행되는 형식을 쓴다:
+ *  - macOS·리눅스: `#!/bin/sh` 스크립트(`sleep` 으로 느리게).
+ *  - 윈도우: **node 실행 파일 복사본**을 `taskkill.exe` 로 두고, `NODE_OPTIONS=--require <bootstrap>`
+ *    으로 마커·인자를 적고 지정 시간만큼 기다린 뒤 종료 코드를 정한다. 제품은 `taskkill.exe` 를
+ *    인자(`/pid <n> /T /F`)로 직접 spawn 하므로 이 대역이 그대로 그 경로를 지난다.
  */
-function slowTaskkill(ms: number): { env: Record<string, string | undefined>; ran: () => boolean; args: () => string[] } {
+function fakeTaskkill(ms: number, exitCode = 0): {
+  root: string
+  run: () => Promise<void>
+  restore: () => void
+  ran: () => boolean
+  args: () => string[]
+} {
   const root = mkdtempSync(join(tmpdir(), 'kd-win-kill-'))
-  // `taskkillPath` 는 `<SystemRoot>\System32\taskkill.exe` 를 **문자열로** 만든다 — 맥에서는
-  // 그 역슬래시가 경로 구분자가 아니라 파일 이름의 일부다. 같은 문자열을 그대로 만들어 둔다.
-  const exe = `${root}\\System32\\taskkill.exe`
-  mkdirSync(root, { recursive: true })  // System32 는 파일 이름 안에 있으므로 폴더를 만들지 않는다
   const marker = join(root, 'ran.txt')
   const argsFile = join(root, 'args.txt')
+  const exe = process.platform === 'win32' ? join(root, 'System32', 'taskkill.exe') : `${root}\\System32\\taskkill.exe`
+  const previous = process.env.NODE_OPTIONS
+  if (process.platform === 'win32') {
+    mkdirSync(join(root, 'System32'), { recursive: true })   // 윈도우는 실제 폴더가 필요하다
+    const bootstrap = join(root, 'taskkill-bootstrap.cjs')
+    writeFileSync(bootstrap, [
+      `const { writeFileSync } = require('node:fs')`,
+      // node 실행 파일을 **인자와 함께** 부르면 node 는 argv[1] 을 실행할 스크립트로 읽는다.
+      // 우리 bootstrap 은 그 전에 exit 하므로, 인자는 argv.slice(1) 가 제품이 넘긴 전부다.
+      `writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(1).join('\\n') + '\\n')`,
+      `writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+      // 동기 대기 — 제품이 기다리지 않는다는 것이 이 시험의 요점이다.
+      `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${Math.max(0, Math.round(ms))})`,
+      `process.exit(${exitCode})`
+    ].join('\n'), 'utf-8')
+    // node 실행 파일을 그 자리에 둔다 — 하드링크 우선(복사 비용 없음), 안 되면 복사.
+    try { linkSync(process.execPath, exe) } catch { copyFileSync(process.execPath, exe) }
+    return {
+      root,
+      run: async () => { process.env.NODE_OPTIONS = `--require ${JSON.stringify(bootstrap)}` },
+      restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous },
+      ran: () => { try { return existsSync(marker) } catch { return false } },
+      args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } }
+    }
+  }
+  mkdirSync(root, { recursive: true })   // POSIX 에서는 `System32\taskkill.exe` 가 **파일 이름 하나**다
   writeFileSync(exe, [
     '#!/bin/sh',
     `printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}`,
     `: > ${JSON.stringify(marker)}`,
-    // 셸에서만 잠깐 잡아 둔다 — Node 쪽이 기다리지 않는지가 이 시험의 요점이다.
-    `sleep ${(ms / 1000).toFixed(3)}`
+    `sleep ${(ms / 1000).toFixed(3)}`,
+    `exit ${exitCode}`
   ].join('\n'), { mode: 0o755 })
   return {
-    env: { SystemRoot: root },
+    root,
+    run: async () => { /* POSIX 는 환경 준비가 필요 없다 */ },
+    restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous },
     ran: () => { try { return existsSync(marker) } catch { return false } },
     args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } }
   }
@@ -39,15 +75,16 @@ function slowTaskkill(ms: number): { env: Record<string, string | undefined>; ra
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
 
 test('윈도우 트리 종료는 동기로 기다리지 않는다 — 같은 이벤트 루프가 그 사이 돈다 (RT2-02)', async () => {
-  const fake = slowTaskkill(600)
+  const fake = fakeTaskkill(600)
   // 죽이면 안 되는 관측 대상 — 이 시험은 "막히지 않았는가"만 본다.
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
   await new Promise<void>((resolve) => child.once('spawn', resolve))
   try {
+    await fake.run()
     let ticks = 0
     const ticker = setInterval(() => { ++ticks }, 20)
     const started = Date.now()
-    killTree({ pid: child.pid!, kill: () => true }, 'SIGTERM', { platform: 'win32', env: fake.env })
+    killTree({ pid: child.pid!, kill: () => true }, 'SIGTERM', { platform: 'win32', env: { SystemRoot: fake.root } })
     const callMs = Date.now() - started
     // 호출 자체가 바로 돌아와야 한다 — taskkill 이 끝나기를 기다리면 여기서 600ms 가 걸린다.
     expect(callMs, `killTree 가 ${callMs}ms 동기로 막았다`).toBeLessThan(250)
@@ -55,28 +92,32 @@ test('윈도우 트리 종료는 동기로 기다리지 않는다 — 같은 이
     await new Promise((resolve) => setTimeout(resolve, 700))
     clearInterval(ticker)
     expect(ticks, '이벤트 루프가 막혀 타이머가 돌지 못했다').toBeGreaterThan(5)
+    // 실제로 띄웠는지 — 윈도우는 node 대역이 NODE_OPTIONS bootstrap 으로 마커를 남긴다.
+    for (let i = 0; i < 50 && !fake.ran(); i++) await new Promise((r) => setTimeout(r, 20))
     expect(fake.ran(), 'taskkill 을 아예 띄우지 않았다').toBe(true)
     expect(fake.args(), 'pid·트리 인자로 부르지 않았다').toEqual(['/pid', String(child.pid), '/T', '/F'])
   } finally {
     try { child.kill('SIGKILL') } catch { /* already gone */ }
+    fake.restore()
   }
 })
 
 test('taskkill 이 거절하면 직접 kill 로 넘어간다 (RT2-02)', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'kd-win-kill-fail-'))
-  writeFileSync(`${root}\\System32\\taskkill.exe`, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+  const fake = fakeTaskkill(0, 1)   // 종료 코드 1 = 거절
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
   await new Promise<void>((resolve) => child.once('spawn', resolve))
   const pid = child.pid!
   try {
+    await fake.run()
     const signals: (NodeJS.Signals | undefined)[] = []
-    killTree({ pid, kill: (signal) => { signals.push(signal); return true } }, 'SIGTERM', { platform: 'win32', env: { SystemRoot: root } })
+    killTree({ pid, kill: (signal) => { signals.push(signal); return true } }, 'SIGTERM', { platform: 'win32', env: { SystemRoot: fake.root } })
     // 거절은 비동기로 관측되므로 잠깐 기다린다(동기 대기가 아니라는 것도 함께 증명된다).
     for (let i = 0; i < 50 && !signals.length; i++) await new Promise((r) => setTimeout(r, 20))
     expect(signals, 'taskkill 실패 뒤 직접 kill 이 없었다').toEqual(['SIGTERM'])
     expect(alive(pid), '시험용 자식이 죽었다 — 이 시험은 신호만 본다').toBe(true)
   } finally {
     try { child.kill('SIGKILL') } catch { /* already gone */ }
+    fake.restore()
   }
 })
 

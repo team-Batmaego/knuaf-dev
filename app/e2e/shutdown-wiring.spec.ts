@@ -7,6 +7,7 @@
 import { expect, test, type ElectronApplication } from '@playwright/test'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeCliShim } from './fixtures/fake-codex'
 
@@ -24,12 +25,16 @@ function mainLog(app: ElectronApplication): { read: () => string } {
  */
 function pidWritingShim(bin: string, pidFile: string): void {
   const proxy = join(bin, 'codex-proxy.mjs')
+  // **URL 로 넘긴다.** 동적 import 는 경로 문자열을 URL 로 해석하므로 윈도우의 `D:\…` 는
+  // `c:`·`d:` 를 스킴으로 읽혀 `ERR_UNSUPPORTED_ESM_URL_SCHEME` 로 죽는다(윈도우 CI:
+  // `확인 실패`는 이 proxy 가 pid 를 못 남겨 엔진이 안 뜬 결과다). 맥에서는 통과해 숨는다.
+  const serverUrl = pathToFileURL(resolve(__dirname, 'fixtures/fake-codex-server.mjs')).href
   writeFileSync(proxy, [
     `import { writeFileSync } from 'node:fs'`,
     `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
     // 동적 import 가 필요하다: 이 파일은 시험이 만들어 **자식 node 프로세스**가 단독 실행하는
     // 스크립트이고, pid 를 먼저 남긴 **뒤에** 가짜 서버를 시작해야 한다(정적 import 는 먼저 실행된다).
-    `await import(${JSON.stringify(resolve(__dirname, 'fixtures/fake-codex-server.mjs'))})`
+    `await import(${JSON.stringify(serverUrl)})`
   ].join('\n'), 'utf-8')
   // `findExecutable` 은 윈도우에서 `codex.exe` → `codex.cmd` → `codex.bat` 순으로 찾는다
   // (`agent.ts` `winCandidateNames`). 확장자 없는 `codex` 만 바꾸면 윈도우에서는 **기존
