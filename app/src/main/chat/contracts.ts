@@ -1,5 +1,6 @@
 import { delimiter } from 'node:path'
 import type { ChatModelInfo, ConnectionStatus, ModelChoice, PermissionRequest } from '../../shared/chat'
+import type { KordocMcpSpec } from './kordocMcp'
 export interface AgentEvents {
   message: (id: string, text: string) => void
   permission: (request: PermissionRequest) => void
@@ -31,6 +32,15 @@ export interface AgentConnection {
    * 대신 학생이 알 수 있는 오류로 막는다(검토 MC1-01).
    */
   prepare?(sessionId: string | undefined): Promise<void>
+  /**
+   * 이 세션에만 적용할 kordoc MCP 실행 사양(설계 §3.2). `null` = 붙이지 않음.
+   *
+   * 앱이 서버를 직접 띄우지 않는다 — 각 공급자가 자기 자식으로 띄울 설정만 받는다.
+   * 사양은 폴더당 한 번 확인되고(레지스트리), 실패하면 `null` 로 불린다. `ChatService` 가
+   * **첫 `send()`** 에서 한 번 부르며, 같은 사양이면 다시 부르지 않는다. 구현이 없으면
+   * (M1 이전 공급자) 그냥 MCP 없이 도는 것이고 `send()` 는 막히지 않는다.
+   */
+  setMcpSpec?(spec: KordocMcpSpec | null): void | Promise<void>
   respond(id: string, allow: boolean): void
   stop(): Promise<void>
 }

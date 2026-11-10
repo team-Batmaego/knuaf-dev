@@ -7,6 +7,9 @@ import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../sa
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
 import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
+import { KordocMcpRegistry } from './kordocMcpRegistry'
+import type { KordocMcpSpec, KordocRuntime } from './kordocMcp'
+import { rootKey } from './kordocMcp'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
@@ -35,6 +38,12 @@ export class ChatService {
   private reauthenticating = new Map<Provider, AgentConnection>()
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
+  /** 폴더별 kordoc MCP 수명 — 성공 캐시·실패 재시도·안내 1회는 레지스트리가 지킨다(§3.2). */
+  private kordocRegistries = new Map<string, KordocMcpRegistry>()
+  /** acquire 가 도는 동안만 열리는 안내 통로 — 폴더 키로 그 대화 스냅샷에 묶는다. */
+  private kordocNoteSinks = new Map<string, (text: string) => void>()
+  /** 연결별 kordoc 부착 상태. 항목 없음 = 아직 확인 안 함. */
+  private kordocAttach = new WeakMap<AgentConnection, 'attached' | 'notified'>()
   hasPendingLogin(): boolean { return this.pendingLogins.size > 0 }
   suspend(): void { agentActivity.suspend() }
   resume(): void { agentActivity.resume() }
@@ -92,6 +101,12 @@ export class ChatService {
     connectionFactory?: (provider: Provider, options: AgentOptions) => AgentConnection
     /** True while the app itself holds a sidecar write transaction; send() must not interleave. */
     sidecarBusy?: (root: string) => boolean
+    /**
+     * 폴더의 kordoc 실행 런타임(설계 §3.2). 값은 v0.6.0 ③이 정하고, 여기서는 **입력으로만** 받는다 —
+     * 없으면 MCP 를 붙이지 않고(기존 동작 그대로) `setMcpSpec` 도 부르지 않는다.
+     * 실패는 `null` 또는 예외(둘 다 "이번엔 못 붙었다")이고, 그때도 대화는 그대로 간다.
+     */
+    ensureKordoc?: (root: string) => Promise<KordocRuntime | null>
     /** 도우미가 쓸 Python — 프로젝트 .venv 와 번들 CPython. */
     venvPython?: (root: string) => string | null
     bundledPython?: () => string | null
@@ -236,6 +251,60 @@ export class ChatService {
     return () => { this.owners.delete(root); releaseSwitch(); releaseActivity() }
   }
   private skillDir(root: string, provider: Provider) { return skillTargets(root)[provider] }
+  /** 폴더의 kordoc 레지스트리 — 성공 캐시·실패 재시도·안내 1회는 이 객체가 지킨다(§3.2). */
+  private kordocRegistry(root: string): KordocMcpRegistry {
+    const key = rootKey(root)
+    let registry = this.kordocRegistries.get(key)
+    if (!registry) {
+      const ensureKordoc = this.opts.ensureKordoc
+      if (!ensureKordoc) throw new Error('kordoc 런타임 공급자가 없어요.')
+      registry = new KordocMcpRegistry({
+        ensureKordoc,
+        // 안내 줄은 **그 순간 그 폴더의 대화**에만 남는다 — acquire 는 폴더별 잠금 안에서만 돈다.
+        note: (text) => this.kordocNoteSinks.get(key)?.(text)
+      })
+      this.kordocRegistries.set(key, registry)
+    }
+    return registry
+  }
+  /**
+   * 이 턴에 붙일 kordoc MCP 사양을 연결에 넘긴다(설계 §3.2 '언제'·'실패 시').
+   *
+   * - **`send()` 에서만** 부른다(`status()`·`login()`·전역 연결은 타지 않는다).
+   * - 공급자가 `setMcpSpec` 을 구현하지 않았거나 런타임 공급자가 없으면 아무 것도 하지 않는다 —
+   *   확인 자체가 kordoc 설치(수백 MB)를 일으킬 수 있으므로 받을 곳이 없으면 시도하지 않는다.
+   * - 확인에 실패하면 `null` 을 넘기고 대화는 그대로 간다. 안내 줄은 레지스트리가 폴더당 1회 넣는다.
+   * - 같은 연결에 이미 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다.
+   */
+  private async attachKordoc(s: ChatSnapshot, connection: AgentConnection): Promise<string[]> {
+    const setSpec = connection.setMcpSpec
+    if (!setSpec || !this.opts.ensureKordoc) return []
+    const state = this.kordocAttach.get(connection)
+    // 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다. 미부착('notified')은
+    // 캐시가 아니므로 다음 턴에 다시 확인하되, "못 붙였다"는 말은 그 연결에 한 번만 한다.
+    if (state === 'attached') return []
+    const notes: string[] = []
+    const key = rootKey(s.root)
+    this.kordocNoteSinks.set(key, (text) => { notes.push(text) })
+    let spec: KordocMcpSpec | null
+    try { spec = await this.kordocRegistry(s.root).acquire(s.root) }
+    finally { this.kordocNoteSinks.delete(key) }
+    if (spec === null) {
+      if (state === 'notified') return notes
+      this.kordocAttach.set(connection, 'notified')
+      try { await setSpec.call(connection, null) } catch { /* 공급자가 스스로 정리한다 */ }
+      return notes
+    }
+    this.kordocAttach.set(connection, 'attached')
+    try { await setSpec.call(connection, spec) }
+    catch {
+      // 공급자가 사양을 받아들이지 못하면 MCP 없이 간다 — 붙이지 못한 것이 전송을 막지는 않는다.
+      // 다음 send 는 레지스트리의 성공 캐시에서 같은 사양을 다시 받아 재시도한다.
+      this.kordocAttach.delete(connection)
+      try { await setSpec.call(connection, null) } catch { /* 공급자가 스스로 정리한다 */ }
+    }
+    return notes
+  }
   private connection(root: string, provider: Provider): AgentConnection {
     this.ensureActive()
     const key = this.key(root, provider)
@@ -447,6 +516,10 @@ export class ChatService {
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로
       // 조용히 보내는 대신 학생에게 오류로 알린다(검토 MC1-01).
       await connection.prepare?.(s.sessionId)
+      // 폴더의 첫 전송에서만 kordoc 런타임을 확인해 이 연결에 넘긴다(§3.2). 실패해도 대화는 간다.
+      for (const note of await this.attachKordoc(s, connection)) {
+        s.messages.push({ id: randomUUID(), role: 'system', text: note, at: new Date().toISOString() })
+      }
       s.skillHash = version; s.skillLoaded = false; s.state = 'running'; s.error = undefined
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })

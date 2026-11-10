@@ -11,6 +11,7 @@ import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from '
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { agentApi, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService } from './chat/service'
+import { runtimeFromEnsureEnvelope } from './chat/kordocMcp'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
 import { APP_NAME } from '../shared/name'
@@ -566,6 +567,17 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       for (const diagnosis of dependencyDiagnoses.values()) if (diagnosis.gate === dependencyGate) return true
       for (const entry of inflight.values()) if (sidecar.isWrite(entry.method)) return true
       return false
+    },
+    // 폴더의 첫 전송에서만 kordoc 런타임을 확인한다(설계 §3.2). 앱은 이 값을 **입력으로만** 받는다 —
+    // 실행 파일 선택은 v0.6.0 ③(런타임 실측)의 몫이다. 여기서는 그 ③이 `kordoc.ensure`를 거칠 때의
+    // 잠정 경로를 봉투에서 그대로 읽는다(`node_path`·`cli.js`·`actual_version`). ③이 Electron 을
+    // Node 로 쓰기로 하면 이 호출에 `node`(그 실행 파일)를 넘기고 `extraEnv` 에
+    // `ELECTRON_RUN_AS_NODE=1` 을 넣는 것으로 바뀐다 — 그때까지 `node_path` 가 없으면 추측하지 않고
+    // 미부착(null)이고, 대화는 MCP 없이 그대로 간다.
+    ensureKordoc: async (root) => {
+      const envelope = await sidecar.call<Envelope>('kordoc.ensure', { root })
+      const node = (envelope.data as { node_path?: unknown } | null | undefined)?.node_path
+      return typeof node === 'string' && node ? runtimeFromEnsureEnvelope(envelope, node) : null
     },
     // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
