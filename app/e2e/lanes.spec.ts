@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
-import { CODEX_TIER_MODELS, WORK_LANES, type WorkLane } from '../src/shared/chat'
 import {
+  CODEX_TIER_MODELS,
+  WORK_LANES,
+  type WorkLane,
   LANE_TABLE,
   REVIEW_EFFORT,
   applyLaneProposal,
@@ -167,13 +169,13 @@ test('LANE_TABLE 8줄의 40칸이 11-04 확정 표와 일치하고 초안 표시
   expect(REVIEW_EFFORT).toBe('high')
 })
 
-test('CODEX_TIER_MODELS와 다른 칩 추천 복사본은 알려진 차이로 유지한다', () => {
-  expect(LANE_TABLE['codex-low'].lanes.research.model).toBe('terra')
-  expect(CODEX_TIER_MODELS.low.research).toBe('luna')
-  expect(LANE_TABLE['codex-high'].lanes.writing.model).toBe('sol')
-  expect(CODEX_TIER_MODELS.high.writing).toBe('terra')
-  expect(LANE_TABLE['codex-high'].lanes.repeat.model).toBe('terra')
-  expect(CODEX_TIER_MODELS.high.repeat).toBe('luna')
+test('칩 추천표는 ChatGPT 낮음·높음 정본 레인표의 모든 Codex 칸과 일치한다', () => {
+  for (const { lane } of WORK_LANES) {
+    expect(LANE_TABLE['codex-low'].lanes[lane].company).toBe('codex')
+    expect(CODEX_TIER_MODELS.low[lane]).toBe(LANE_TABLE['codex-low'].lanes[lane].model)
+    expect(LANE_TABLE['codex-high'].lanes[lane].company).toBe('codex')
+    expect(CODEX_TIER_MODELS.high[lane]).toBe(LANE_TABLE['codex-high'].lanes[lane].model)
+  }
 })
 
 test('how 규칙 — 설계만 main이고 나머지는 모두 relay다', () => {

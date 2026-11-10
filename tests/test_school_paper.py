@@ -35,7 +35,7 @@ def paper_text(tmp_path):
 # --- years(): the 5-year plan window is derived, not supplied -----------------
 
 def test_years_derives_a_five_year_window_from_the_writing_year():
-    writing, start, end, span = sp.years({"writing_year": 2026})
+    writing, start, end, span = sp.years({"writing_year": 2026, "start_year": 2027})
     assert (writing, start, end) == (2026, 2027, 2031)
     assert span == [2027, 2028, 2029, 2030, 2031]
 
@@ -67,7 +67,7 @@ def test_need_accepts_a_bare_string_as_the_value():
 # --- the generated skeleton ---------------------------------------------------
 
 MINIMAL = {"title": "테스트 논문", "student": "홍길동", "department": "특용작물전공",
-           "advisor": "김교수", "writing_year": 2026,
+           "advisor": "김교수", "writing_year": 2026, "start_year": 2027,
            "school_profile": {"school": "Synthetic school", "department": "Synthetic department",
                               "mode": "school", "layout": "forms_1_to_4"}}
 
@@ -209,7 +209,7 @@ def test_paper_accepts_a_markdown_heading_as_the_first_chapter(paper_text, ):
 def _write_inputs(folder):
     bound_test_context(folder)
     (folder / "paper.json").write_text(
-        json.dumps({"title": "T", "writing_year": 2026, "school_profile": SCHOOL["school_profile"]}, ensure_ascii=False),
+        json.dumps({"title": "T", "writing_year": 2026, "start_year": 2027, "school_profile": SCHOOL["school_profile"]}, ensure_ascii=False),
         encoding="utf-8",
     )
     merged = folder / "build" / "19" / "review" / "검토용.md"

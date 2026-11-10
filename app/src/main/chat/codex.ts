@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { JsonRpcProcess } from './transport'
+import { applyRejection, recordRejection } from './rejectLog'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import { writeFileAtomic } from '../safeWrite'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
@@ -251,6 +252,13 @@ export class CodexConnection implements AgentConnection {
       } else if (method === 'item/completed' && p.item?.type === 'fileChange') {
         const key = fileChangeKey(p.threadId, p.turnId, p.item.id)
         this.rememberFileChanges(key, undefined)
+      } else if (method === 'item/completed' && p.item?.type === 'commandExecution') {
+        // 정본 등록 거절은 도우미의 셸 출력으로만 돌아오고 지금까지 어디에도 남지 않았다
+        // (윈도우 W-08). 출력에서 거절 결과를 찾아 한 줄 남긴다 — 학생 화면은 그대로다.
+        const record = applyRejection({
+          provider: 'codex', command: p.item.command, output: p.item.aggregatedOutput, exitCode: p.item.exitCode
+        })
+        if (record) recordRejection(join(this.options.root, '.knuaf-gui', 'apply-reject.log'), record)
       }
       if (method === 'item/agentMessage/delta') {
         const text = (this.messages.get(p.itemId) ?? '') + p.delta
@@ -286,7 +294,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.0' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.2' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
@@ -558,7 +566,10 @@ export class CodexConnection implements AgentConnection {
   async stop() {
     this.stopped = true
     if (this.turn && this.thread && this.rpc && !this.rpc.closed) {
-      try { await this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }) } catch { /* process termination below */ }
+      // 종료 중에는 interrupt를 45s 전체 대기하지 않는다 — 짧은 예산 뒤에 kill로 넘어간다.
+      const { promise, reject } = Promise.withResolvers<void>()
+      const budget = setTimeout(() => reject(new Error('shutdown')), 3000)
+      try { await Promise.race([this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }), promise]) } catch { /* process termination below */ } finally { clearTimeout(budget) }
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
     this.fileChanges.clear(); this.pendingFileApprovals.clear()

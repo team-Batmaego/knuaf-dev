@@ -4,7 +4,9 @@ import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/
 import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
-import { withBold } from '../inline'
+import { cutAtLine, formFold as formFoldOf, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { ChatMarkdown } from '../components/ChatMarkdown'
+import { ProgressFold } from '../components/ProgressFold'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
 import { ComposerModelChip } from '../components/ComposerModelChip'
 import { PermissionCard } from '../components/PermissionCard'
@@ -74,118 +76,6 @@ export function applyReportIntent(intent: DraftIntent, projectRoot: string | nul
   return 'ready'
 }
 
-/** 프로젝트 안 상대경로처럼 생긴 것만. 주소(http:)·절대경로·.. 는 제외한다. */
-const INSIDE_PATH = /^(?![/\\]|[a-zA-Z][a-zA-Z0-9+.-]*:)(?!.*(?:^|[/\\])\.\.(?:[/\\]|$)).+$/
-
-interface ParsedLink { start: number; end: number; label: string; target: string }
-
-/** 대괄호 링크 하나를 읽는다. `<...>` 경로의 공백·괄호와 보통 괄호 안 경로를 받아들인다. */
-function parseLinkAt(text: string, start: number): ParsedLink | null {
-  const labelEnd = text.indexOf(']', start + 1)
-  if (labelEnd < 0 || text.slice(start, labelEnd).includes('\n') || text[labelEnd + 1] !== '(') return null
-  let i = labelEnd + 2
-  let target = ''
-  if (text[i] === '<') {
-    const targetStart = ++i
-    while (i < text.length && text[i] !== '>' && text[i] !== '\n') i++
-    if (text[i] !== '>') return null
-    target = text.slice(targetStart, i++)
-    while (i < text.length && /\s/.test(text[i]) && text[i] !== '\n') i++
-    if (text[i] !== ')') return null
-  } else {
-    const targetStart = i
-    // Windows plain targets end at the first `)`. An opening `(` or trailing
-    // separator makes that boundary ambiguous: preserve the source, or use `<...>`.
-    // Text after an unambiguous closing delimiter belongs to the surrounding prose.
-    const windowsAbsolute = /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(text.slice(i))
-    let depth = 0
-    let escaped = false
-    while (i < text.length && text[i] !== '\n') {
-      const ch = text[i]
-      if (escaped) { escaped = false; i++; continue }
-      if (windowsAbsolute && (ch === '(' || (ch === ')' && text[i - 1] === '\\'))) return null
-      if (ch === '\\' && !windowsAbsolute) { escaped = true; i++; continue }
-      if (ch === '(') { depth++; i++; continue }
-      if (ch === ')') {
-        if (depth === 0) break
-        depth--; i++; continue
-      }
-      i++
-    }
-    if (text[i] !== ')') return null
-    target = text.slice(targetStart, i)
-  }
-  return { start, end: i + 1, label: text.slice(start + 1, labelEnd), target }
-}
-
-function markdownLinks(text: string): ParsedLink[] {
-  const links: ParsedLink[] = []
-  let cursor = 0
-  while (cursor < text.length) {
-    const start = text.indexOf('[', cursor)
-    if (start < 0) break
-    const link = parseLinkAt(text, start)
-    if (link) { links.push(link); cursor = link.end }
-    else cursor = start + 1
-  }
-  return links
-}
-
-function isAbsolutePath(path: string): boolean {
-  return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|[/\\])/.test(path)
-}
-
-/** 프로젝트 안 절대경로만 상대경로로 바꾼다. 밖으로 빠지는 `..` 경로는 그대로 둔다. */
-function relativeProjectPath(target: string, root: string | null): string | null {
-  let decoded = target
-  try { decoded = decodeURIComponent(target) } catch { /* 원문 경로를 그대로 비교한다 */ }
-  if (!isAbsolutePath(decoded)) return INSIDE_PATH.test(decoded) ? decoded : null
-  if (!root) return null
-  const rootPath = root.replace(/\\/g, '/').replace(/\/+$/, '')
-  const targetPath = decoded.replace(/\\/g, '/')
-  const insensitive = window.knuaf.platform === 'win32'
-  const compare = (value: string): string => insensitive ? value.toLocaleLowerCase('en-US') : value
-  const rootKey = compare(rootPath)
-  const targetKey = compare(targetPath)
-  if (targetKey === rootKey) return '.'
-  if (!targetKey.startsWith(`${rootKey}/`)) return null
-  const relative = targetPath.slice(rootPath.length + 1)
-  const parts: string[] = []
-  for (const segment of relative.split('/')) {
-    if (!segment || segment === '.') continue
-    if (segment === '..') {
-      if (parts.length === 0) return null
-      parts.pop()
-    } else parts.push(segment)
-  }
-  return parts.join('/') || null
-}
-
-/**
- * 도우미 답변의 파일 링크를 누를 수 있게 만든다 — 마크다운 원문이 그대로 보이고
- * 접근성 역할도 일반 텍스트였다(GUI 감사 GUI-12).
- *
- * 경로는 "파일 얘기구나"를 판단하는 데만 쓰고, 누르면 메인이 경로를 다시 확인한 뒤 연다 —
- * 문서 형식이면 연결 프로그램으로, 아니면 탐색기/Finder 에서 그 파일을 선택해 보여 준다.
- * 없거나 폴더 밖이면 결과물 시트로 간다 — 무엇을 눌렀는지 알 수 있는 곳으로. 안쪽
- * 상대경로가 아닌 링크는 원문 그대로 둔다.
- */
-function withLinks(text: string, root: string | null, messageId: string, onFile: (relative: string) => void): ReactNode {
-  const out: ReactNode[] = []
-  let last = 0
-  for (const link of markdownLinks(text)) {
-    const relative = relativeProjectPath(link.target, root)
-    if (relative === null) continue
-    out.push(text.slice(last, link.start))
-    const label = isAbsolutePath(link.label) ? (relative.split('/').at(-1) || relative) : (link.label || relative.split('/').at(-1) || relative)
-    out.push(<button key={link.start} data-focus-key={`chat-link:${messageId}:${relative}`} className="lk" title={isAbsolutePath(link.target) ? link.target : undefined} onClick={() => onFile(relative)}>{label}</button>)
-    last = link.end
-  }
-  if (!out.length) return text
-  out.push(text.slice(last))
-  return out
-}
-
 /**
  * 한 말풍선이 이보다 길면 접는다. 도우미가 도구 보고 원문을 그대로 채팅에 쏟으면
  * (주행에서 20,600자가 들어왔다) 대화가 사람이 지나갈 수 없는 길이가 된다.
@@ -194,10 +84,14 @@ function withLinks(text: string, root: string | null, messageId: string, onFile:
 const LONG_MESSAGE = 2000
 
 /**
- * 카드가 떠 있는 동안 대화 원문에서 접을 보기 줄 범위. 같은 보기가 카드와 원문에 두 번
+ * 카드가 떠 있는 동안 대화 원문에서 접을 줄 범위. 같은 보기(또는 같은 칸)가 카드와 원문에 두 번
  * 보이면 어디를 눌러야 할지 헷갈린다 — 글자를 버리지는 않는다("여기에 펼치기").
+ *
+ * `kind` 는 접힌 것이 **보기 목록**인지 **여러 칸 질문**인지다. 형식 질문(`1.` `2.` 번호 칸)은
+ * `parseQuestion` 이 읽지 못해 zone 이 `form` 이 되는데, 예전에는 그때 span 을 넘기지 않아
+ * 카드와 원문이 같은 칸을 두 번 보여 줬다(형님 11-09 실측).
  */
-export interface FoldOptions { span: { start: number; end: number }; count: number }
+export interface FoldOptions { spans: { start: number; end: number }[]; count: number; kind: 'options' | 'fields' }
 
 /**
  * 학생 말풍선 **밖** 아래 오른쪽의 작은 글자(형님 확정 2026-10-19 전송 중 A안). 말풍선 안 알약·단추는 없다.
@@ -219,15 +113,18 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
   const projectRoot = useProject((s) => s.root)
   if (m.role === 'system') return <div className="chat-msg system"><span className="caption">{m.text}</span></div>
   const folding = !!fold && !unfolded
-  const lines = m.text.split('\n')
-  const text = folding && fold ? [...lines.slice(0, fold.span.start), ...lines.slice(fold.span.end + 1)].join('\n') : m.text
+  const text = folding && fold ? stripLines(m.text, fold.spans) : m.text
   const long = text.length > LONG_MESSAGE
-  const shown = long && !open ? text.slice(0, LONG_MESSAGE) : text
+  // 한도가 표·목록 한가운데를 가르지 않게 **줄 경계**에서 자른다. "더 보기"의 수는 자르기 전이
+  // 아니라 **접힌 뒤 실제로 남은 글** 기준이다(예전에는 원문 길이를 써서 실제보다 크게 보였다).
+  const shown = long && !open ? cutAtLine(text, LONG_MESSAGE) : text
+  // 접은 줄은 "더 보기"로 되돌릴 글도 아니다 — 수는 지금 화면 기준으로 센다.
+  const hidden = text.length - shown.length
   const quoted = m.role === 'user' ? /^> ([^\n]+)\n\(([^\n]+)에서\)\n\n([\s\S]+)$/.exec(shown) : null
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
-      <div className="prose">{m.role === 'assistant' ? withBold(shown, (part) => onFileLink ? withLinks(part, projectRoot, m.id, onFileLink) : part) : quoted ? <>
+      <div className="prose">{m.role === 'assistant' ? <ChatMarkdown text={shown} root={projectRoot} messageId={m.id} onFile={onFileLink} /> : quoted ? <>
         <span className="msg-quote" style={{ display: 'block', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: '1px 0 6px', padding: '6px 10px', background: 'color-mix(in srgb, var(--panel) 70%, transparent)', borderRadius: 10 }}>
           <b style={{ display: 'block', fontWeight: 500, fontSize: 11.5, color: 'var(--faint)' }}>{REVIEW.quoteLead(quoted[2])}</b>
           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{quoted[1]}</span>
@@ -235,12 +132,12 @@ function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMe
       </> : shown}</div>
       {folding && fold && (
         <div className="q-fold">
-          <span className="caption">{CHAT.foldHint(fold.count)}</span>
+          <span className="caption">{fold.kind === 'fields' ? CHAT.foldFields(fold.count) : CHAT.foldHint(fold.count)}</span>
           <span className="caption">·</span>
           <button className="lk" onClick={() => setUnfolded(true)}>{CHAT.unfold}</button>
         </div>
       )}
-      {long && <button className="lk" onClick={() => setOpen(!open)}>{open ? CHAT.showLess : CHAT.showMore(m.text.length - LONG_MESSAGE)}</button>}
+      {long && <button className="lk" onClick={() => setOpen(!open)}>{open ? CHAT.showLess : CHAT.showMore(hidden)}</button>}
     </div>
     <Delivery m={m} sending={sending} onResend={onResend} />
   </>)
@@ -862,14 +759,52 @@ export function Chat() {
   /**
    * 대화 기록과 이벤트 줄을 **시각 순으로** 섞는다 — 이벤트 줄은 저장된 글이 아니라 앱이
    * 그리는 표시라 대화 파일에 없고, 그래서 화면에서만 순서를 맞춘다.
+   *
+   * 접기는 두 축이다(형님 11-09).
+   *  - 한 턴의 중간말: 그 턴의 마지막 assistant 말만 최종 답으로 펴고 앞말은 `ProgressFold` 한 줄로 묶는다.
+   *  - 지금 질문 카드가 읽는 말: 카드가 이미 보여 주는 줄(보기 목록·번호 칸)을 원문에서 접는다.
+   * 어느 축이든 **글자를 지우지 않는다** — 펼치면 원문 그대로다.
+   *
+   * 카드가 **실제로 보일 때만** 원문을 접는다. 형식 질문에서 '자유롭게 답하기'를 누르면 카드는 숨고
+   * 입력칸이 뜨는데(`freeForm`), 그때까지 접어 두면 학생은 무엇에 답해야 하는지 '여기에 펼치기'를
+   * 눌러야 볼 수 있다. 접힘은 카드가 보여 주는 글의 대역이므로 카드와 함께 사라져야 한다(검토 wFJ:p1).
    */
+  const cardId = zone.kind === 'question' ? zone.messageId
+    : zone.kind === 'form' && !freeForm ? zone.messageId
+      : null
+  /** 여러 칸 질문 카드는 `parseQuestionForm` 이 읽은 원문의 머리 줄~마지막 칸 줄을 이미 보여 준다. */
+  const formFold = zone.kind === 'form'
+    ? (() => {
+        const found = formFoldOf(snapshot?.messages.find((m) => m.id === zone.messageId)?.text ?? '')
+        return found ? { spans: found.spans, count: found.count, kind: 'fields' as const } : null
+      })()
+    : null
+  const folds = progressGroups(snapshot?.messages ?? [])
   const thread: { key: string; at: number; node: ReactNode }[] = []
+  const messageNode = (m: ChatMessage): ReactNode => {
+    const card = cardId === m.id
+    const span = card
+      ? zone.kind === 'question' ? { spans: [zone.card.span], count: zone.card.options.length, kind: 'options' as const }
+        : formFold
+      : null
+    return <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onFileLink={openFileLink} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
+      fold={span ?? undefined} />
+  }
+  // 한 묶음은 첫 말 자리에 한 번만 선다 — 두 번째 말에서 또 만들면 같은 묶음이 여러 번 그려진다.
+  const placed = new Set<string>()
   for (const m of snapshot?.messages ?? []) {
-    thread.push({
-      key: m.id, at: Date.parse(m.at) || 0,
-      node: <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onFileLink={openFileLink} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
-        fold={zone.kind === 'question' && zone.messageId === m.id ? { span: zone.card.span, count: zone.card.options.length } : undefined} />
-    })
+    const group = folds.find((g) => g.ids.has(m.id))
+    if (group) {
+      if (!placed.has(group.key)) {
+        placed.add(group.key)
+        thread.push({
+          key: group.key, at: group.at,
+          node: <ProgressFold key={group.key} count={group.count}>{group.messages.map(messageNode)}</ProgressFold>
+        })
+      }
+      continue
+    }
+    thread.push({ key: m.id, at: Date.parse(m.at) || 0, node: messageNode(m) })
   }
   for (const e of events) {
     const edit = e.edit
