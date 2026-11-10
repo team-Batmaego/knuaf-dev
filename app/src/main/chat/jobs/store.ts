@@ -55,6 +55,8 @@ interface StoreState {
   deliveryText: Record<string, string>
   /** 폴더별 ✕로 닫은 줄 id. */
   dismissed: Record<string, string[]>
+  /** 폴더별 승인 시각 — §5 "내가 정함 · {날짜}" 의 근거. 옛 파일에는 없다. */
+  approvalAt: Record<string, string>
 }
 
 /** 한 폴더에 남기는 기록 줄 상한 — 무한히 자라지 않게 오래된 것부터 버린다. */
@@ -147,7 +149,7 @@ function parse(text: string): StoreState {
     approvals: state.approvals as Record<string, LanePlan>,
     consent: {},
     deliveries: state.deliveries as Record<string, DeliveryRecord>,
-    cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}
+    cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}
   }
   for (const [key, record] of Object.entries(state.consent as Record<string, unknown>)) {
     const consent = consentOf(record)
@@ -191,6 +193,13 @@ function parse(text: string): StoreState {
       parsed.dismissed[root] = list.filter((id): id is string => typeof id === 'string' && !!id)
     }
   }
+  if (state.approvalAt !== undefined) {
+    if (!isRecord(state.approvalAt)) throw new Error('Invalid job store')
+    for (const [root, at] of Object.entries(state.approvalAt as Record<string, unknown>)) {
+      if (typeof at !== 'string' || !at) throw new Error('Invalid job store')
+      parsed.approvalAt[root] = at
+    }
+  }
   return parsed
 }
 
@@ -212,7 +221,7 @@ export class JobStore {
     // The store file only ever lives in app storage; readRecoverable also restores a complete .tmp.
     this.state = readRecoverable(this.file, parse)?.value ?? {
       version: 1, approvals: {}, consent: {}, deliveries: {},
-      cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}
+      cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}
     }
     // Delivery claim happened before the crash: surface it once, never resend automatically.
     let recovered = false
@@ -231,6 +240,8 @@ export class JobStore {
     const key = canonical(root)
     if (!isPlan(structuredClone(plan))) throw new Error('승인 배치의 모양이 올바르지 않아요.')
     this.state.approvals[key] = structuredClone(plan)
+    // 같은 배치를 다시 저장해도 "내가 정한 날"이 조용히 밀리지 않게 최초 승인만 남긴다.
+    this.state.approvalAt[key] ??= new Date().toISOString()
     this.persist()
   }
 
@@ -240,10 +251,17 @@ export class JobStore {
   }
 
   revokePlan(root: string): void {
-    if (this.state.approvals[canonical(root)]) {
-      delete this.state.approvals[canonical(root)]
+    const key = canonical(root)
+    if (this.state.approvals[key]) {
+      delete this.state.approvals[key]
+      delete this.state.approvalAt[key]
       this.persist()
     }
+  }
+
+  /** §5 "내가 정함 · {날짜}" — 승인 기록이 없으면 null. */
+  approvedAt(root: string): string | null {
+    return this.state.approvalAt[rootKey(root)] ?? null
   }
 
   /** 동의는 **지우지 않는다** — 거둠도 날짜와 함께 남아야 §5 가 `withdrawn` 을 그린다(Q4). */

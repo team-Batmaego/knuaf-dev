@@ -44,6 +44,8 @@ export interface JobRecord {
   actualEffort?: string | null
   status: JobStatus
   reason?: string
+  /** 실제 실행이 시작된 시각 — §2-1 "{n}분째"의 근거. 대기 중이면 없다. */
+  startedAt?: string
   accountId?: string
   proposalId?: string
   contentHash: string

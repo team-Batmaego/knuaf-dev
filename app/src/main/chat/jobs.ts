@@ -218,6 +218,7 @@ export class JobRunner {
       // Restore the app-authorized specification immediately before the engine reads its job file.
       if (this.content(spec, record.root) !== record.contentHash) throw new Error('Input changed before start')
       if (!spec.parent && !this.approved(spec, record.root)) { this.update(record, 'rejected', 'Approved plan changed'); return }
+      record.startedAt = new Date().toISOString()
       this.update(record, 'running')
       await connection.runJob(`/knuaf-dev 담당 모드: ${join(record.root, '.knuaf-gui', 'jobs', `${spec.id}.json`)}`, {
         message: () => {}, note: () => {}, skill: () => {},
