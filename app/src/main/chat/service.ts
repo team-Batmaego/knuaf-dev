@@ -1034,6 +1034,8 @@ export class ChatService {
       s = this.snapshots.get(key)!
       const connection = this.connection(root, provider)
       const text = deliveryText(result, root)
+      // [자세히] 원문은 여기서 한 번 남긴다 — 전달이 실패해도 학생이 무슨 글이었는지 볼 수 있다.
+      try { store.saveDeliveryText(result.rootJobId, text) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'delivery-text', error: error instanceof Error ? error.message : String(error) })) }
       const epoch = this.stopEpoch.get(this.key(root, provider)) ?? 0
       // 전달 차례도 `runs` 에 올린다 — 학생이 중단하면 `stopped` 로 표시되고
       // `close()` 가 이 차례가 끝나기를 기다린다. 주문은 줍지 않는다(수집은 `send` 몫).
@@ -1051,9 +1053,10 @@ export class ChatService {
       await deliveryRun
     } catch (error) {
       // 전달을 시작조차 못했다. 다시 시도할 수 있는 상태(바쁨·업데이트 준비·일시 정지)면
-      // 보류하고, 그렇지 않으면(연결을 열 수 없음 등) 드러낸다.
+      // 보류하고, 그렇지 않으면(연결을 열 수 없음 등) **확실한 실패**로 드러낸다 —
+      // `deliver-failed` 줄에서만 학생이 누를 때 1회 다시 넘긴다(Q3).
       if (!release && !this.shuttingDown && (this.jobsClosing || agentActivity.suspended || this.busy(root))) { park(); return }
-      store.markUncertain(result.rootJobId, root, owner.id)
+      store.markFailed(result.rootJobId, root, owner.id)
       console.error('[knuaf] jobs', JSON.stringify({ type: 'deliver-failed', rootJobId: result.rootJobId, error: error instanceof Error ? error.message : String(error) }))
       return
     } finally {
