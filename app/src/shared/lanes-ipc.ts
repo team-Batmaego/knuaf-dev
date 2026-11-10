@@ -122,7 +122,12 @@ export interface LanesSnapshot {
   seq: number
   /** §2-0 알림 자리 작업 분담 줄. **main이 이미 정렬**(종류 1→5, 같은 종류는 먼저 생긴 것부터). */
   lines: LaneLine[]
-  /** §3 대화 흐름 안 카드(열림·접힘 모두). 대화 속 자리는 `createdAt` 순. */
+  /**
+   * §3 대화 흐름 안 카드(열림·접힘 모두). 대화 속 자리는 `createdAt` 순.
+   * [F5] 설정 확인 창 카드(`settingsCard`)는 열려 있는 동안 여기에 **넣지 않는다**(대화에 미결
+   * 카드가 같이 뜨지 않게). [계속]으로 적용이 확정되는 순간 `state.kind:'applied'`인 접힌 카드로
+   * 여기에 들어간다 — 이것이 §3-3 "대화에도 같은 기록 줄"이다. 취소하면 아무것도 남지 않는다.
+   */
   cards: LaneCard[]
   /** §2-2 대화 안 기록 줄. 자리는 `at` 순. 영속·재시작 뒤 유지는 main 몫(아래 열린 질문 Q1). */
   events: LaneEvent[]
@@ -182,8 +187,16 @@ export type LaneLine =
     })
   /** §2-1·§8-2 끝남, 넘기는 중 (종류 3, 단추 없음). */
   | (JobLineBase & { kind: 'delivering'; tier: 3 })
-  /** §2-1·§8-2 넘기기 실패 (종류 2) [다시 넘기기] [자세히]. */
+  /**
+   * §2-1·§8-2 넘기기 실패 (종류 2) [다시 넘기기] [자세히]. 앱이 살아 있는 동안 전달 호출이
+   * 실패해 **아직 안 들어간 것이 확실한** 경우만. [다시 넘기기]는 학생이 누를 때 1회(Q3).
+   */
   | (JobLineBase & { kind: 'deliver-failed'; tier: 2 })
+  /**
+   * §8-2 [F3] 넘기는 도중 앱이 닫혀 들어갔는지 모름(`JobStore` `uncertain`). 이미 들어갔을 수
+   * 있어 **다시 넘기기 단추가 없다** — [자세히]와 ✕만(Q3). 자동 재전송도 없다.
+   */
+  | (JobLineBase & { kind: 'deliver-uncertain'; tier: 2 })
   /** §4 한도 + 이어 하기 가능 (종류 2) [이어서 하기] [나중에]. 확인된 한도 + 열린 제안일 때만. */
   | (JobLineBase & {
       kind: 'limit-offer'
@@ -229,6 +242,9 @@ export type LaneLine =
    * `tooLong`이면 [이어서 하기] 대신 "앞 대화가 너무 길어…" + [새 대화로 시작].
    */
   | (LineBase & { kind: 'main-limit-offer'; tier: 2; proposalId: string; to: ModelRef; tooLong: boolean })
+  // [F6] "넘겨요 ▸" 펼침은 **고정 설명문**(copy-lanes.ts 상수)이다: 이어 받기 묶음 ①~⑤(내가 쓴 글
+  //      전부·마지막 AI 답·이 대화 동안 바뀐 파일 이름·작업 분담·주문 상태·스킬 판). 개수 같은 값
+  //      필드는 두지 않는다 — 화면은 `to.company` 이름만 끼운다.
   /** §4-1 "{회사}로 넘기는 중…" (종류 3). */
   | (LineBase & { kind: 'handoff-running'; tier: 3; to: ModelRef })
   /** §4-1 넘기지 못함 (종류 2) [다시 하기] [나중에]. */
@@ -266,8 +282,6 @@ export type LaneEvent =
   | (EventBase & { kind: 'once-ended'; afterFirst: boolean })
   /** §3-1 [나눠 맡기지 않기] · §5 끄기. */
   | (EventBase & { kind: 'lanes-declined' })
-  /** §3-3 설정에서 적용 — 대화에도 같은 기록. */
-  | (EventBase & { kind: 'settings-applied'; cardId: string })
   /**
    * §4-1·§4-2 이어 받은 대화 첫 줄 — "…한도로 멈춰 {회사}가 이어 받았어요" [멈춘 대화 보기].
    * 기록으로 저장돼 재시작 뒤에도 남는다.
@@ -295,6 +309,12 @@ export interface CardRow {
   rejected: LaneRejectReason | null
   /** §3-2 설계를 다른 회사로 바꾸는 줄이면 그 회사 — "다음 메시지를 보낼 때부터예요". */
   designSwitchTo: Provider | null
+  /**
+   * [F4] 거절된 줄에서 학생이 요청했던 값(lanes.ts `LaneRejection`의 model·effort 그대로).
+   * "도우미가 직접"은 `main:true`. 적용된 줄이면 null — 그때는 `after`를 읽는다
+   * (도우미 직접은 `after.how === 'main'`).
+   */
+  requested: { main: boolean; model: string | null; effort: string | null } | null
 }
 
 /** §3 공통 뼈대 6 — 요금 안내(§3-2 U6-06 공통 문구). */
@@ -310,8 +330,12 @@ export type CardState =
   | { kind: 'open' }
   /** §3-5 처리 중 — 단추 disabled, "적용하는 중…". */
   | { kind: 'applying' }
-  /** §3-5 접힘. `scope`는 적용 범위. 실제로 바뀐 줄만 `applied`에. */
-  | { kind: 'applied'; scope: RequestScope; applied: WorkLane[] }
+  /**
+   * §3-5 접힘. `scope`는 적용 범위. [D1] 접힌 한 줄의 적용된 줄(회사·모델)·적용 안 한 줄(이유)·
+   * 설계 전환 안내는 **`card.rows` 하나만** 읽어 그린다(적용 = `rejected === null`). 별도 목록 없음.
+   * 설정 확인 창에서 적용한 카드도 같은 모양으로 `cards`에 들어간다(F5).
+   */
+  | { kind: 'applied'; scope: RequestScope }
   /** §3-1 [나눠 맡기지 않기]. */
   | { kind: 'declined' }
   | { kind: 'cancelled' }
@@ -336,6 +360,11 @@ export interface LaneCard {
   fees: FeeNotice[]
   /** §3-2 한도가 빨리 주는 조합이면 true(막지 않음). */
   fastDrain: boolean
+  /**
+   * [F2] §3-1 "설계는 지금처럼 아래 칩에서 골라요 — 추천 {회사 모델}". 설계 줄은 `rows`에
+   * 넣지 않고(칩이 정본, D2-03) 추천만 여기 준다. 추천을 못 정하면 null(문구에서 추천 부분을 뺀다).
+   */
+  recommendedDesign: ModelRef | null
   state: CardState
 }
 
@@ -357,6 +386,7 @@ export interface CardDecision {
   /**
    * §8-10 [이번만]이 묶인 차례. 도우미가 답하는 중이면 그 차례 id, 쉬는 중이면
    * `'next-student-turn'`(앱이 도우미에게 따로 차례를 보내지 않는다). 이번만이 아니면 null.
+   * 해제: 그 차례가 끝나고 **그 차례에 만든 주문도 모두 끝났을 때** — 그때 `once-ended` 기록(Q5).
    */
   boundTurn: string | 'next-student-turn' | null
 }
@@ -380,19 +410,21 @@ export interface LanesSettingsView {
     | { kind: 'mine'; at: string }
     | { kind: 'recommendation-changed' }
     | { kind: 'none' }
-  /** 표 줄(설계 줄은 칩을 가리키므로 `entry`를 쓰지 않는다). `mode:'off'`면 빈 배열. */
+  /** 표 줄 — 설계 줄은 넣지 않는다(위 `recommendedDesign`). `mode:'off'`면 빈 배열. */
   rows: SettingsRow[]
   /** [추천으로 되돌리기] 활성 — 추천과 다를 때만. */
   differsFromRecommendation: boolean
   /** "지금 이번 차례만: …" — [이번만]·이어 하기로 다른 값이 돌고 있을 때만. */
   temporary: { lane: JobLane; entry: ModelRef }[]
+  /** [F2] §5 설계 줄 "아래 칩에서 골라요 (추천 {회사 모델})". 설계 줄은 `rows`에 없다. */
+  recommendedDesign: ModelRef | null
   /** "다음 메시지부터: 설계 {회사}" — 없으면 null. */
   nextDesignCompany: Provider | null
   consents: ConsentRow[]
 }
 
 export interface SettingsRow {
-  lane: WorkLane
+  lane: JobLane
   entry: LaneEntry | null
   /** 값 칸 예외 글. */
   note: 'main-takeover' | 'review-unavailable' | 'not-subscribed' | null
@@ -424,6 +456,8 @@ export interface ArchivedChatSummary {
   reason: 'limit'
   /** 이어 받은 대화 id. */
   successorId: string
+  /** [F1] 이어 받은 회사·모델 — 기록 줄 "⚠ 한도로 멈췄어요 — {회사 모델}이 이어 받았어요". */
+  successor: ModelRef
 }
 
 /** 읽기 전용. 새 차례·담당 결과를 받지 않는다(D7-02). */
@@ -488,28 +522,26 @@ export interface JobsApi {
   retry(root: string, jobId: string): Promise<LanesReply<void>>
   /** §2-1 [버리기]. */
   discard(root: string, jobId: string): Promise<LanesReply<void>>
-  /** §2-1·§8-2 [다시 넘기기]. */
+  /** §2-1·§8-2 [다시 넘기기] — `deliver-failed` 줄에서만, 학생이 누를 때 1회. `deliver-uncertain`은 거절. */
   redeliver(root: string, jobId: string): Promise<LanesReply<void>>
   /** §2-1 인증 [나중에]. */
   authLater(root: string, jobId: string): Promise<LanesReply<void>>
 }
 
 // =====================================================================================
-// 6. 열린 질문 — 설계·현재 main 코드로 닫히지 않아 구현 전에 책임자 확인이 필요한 것
+// 6. 결정된 것 — 책임자 결정(11-10). C1·C2는 이대로 구현한다
 // =====================================================================================
 /*
- * Q1 (§8-1·§2-2) 기록 줄과 "결과 전달 차례"는 대화 기록(`chat-${provider}.json`) 안에 있어야
- *     재시작 뒤에도 순서대로 남는다. 그건 `ChatMessage`에 `origin:'app-relay'` 같은 칸을 더하는
- *     일이라 `chat:` 갈래 몫이다. 이 계약은 `events`를 묶음으로 주지만, 영속 위치를 대화 기록으로
- *     할지 앱 저장소로 할지는 미정.
- * Q2 (§2-1 [이 담당 멈추기]) 지금 `JobRunner.stop(root)`는 폴더 단위(모든 주문)뿐이다. 주문 하나만
- *     멈추는 길이 main에 없다 — C1이 새로 만들어야 하는지, 범위 밖인지.
- * Q3 (§8-2 [다시 넘기기]) `JobStore`는 at-most-once(started→uncertain, 다시 보내지 않음)다.
- *     학생이 누른 다시 넘기기를 이 규칙의 예외로 둘지.
- * Q4 (§8-6 동의 상태) `JobStore.consent`는 `true`만 저장한다. 설계의 "동의함·{날짜}"·"거둠·{날짜}"를
- *     보이려면 상태·날짜 저장이 필요하다.
- * Q5 (§3·§8-10 `baseVersion`·카드 저장·차례 id) main에 아직 없다(배선 C1이 새로 만듦). 카드가
- *     재시작 뒤에도 남는지(미결 줄 ✕ 없음이라 남아야 자연스러움) 확인 필요.
- * Q6 (§8-5) 담당 중 논문 파일 바뀜의 비교 범위(본대화 쓰기 제외 방법)는 미정 — 줄 모양만 둔다.
- * Q7 (§4-2·§8-7) 보관 대화는 ConversationHandoff 앱 단위(pM 11-08) 몫. 이 계약은 읽기 두 통로만 둔다.
+ * Q1 (§8-1·§2-2) 기록 줄은 `events`로 준다. C1이 **폴더별로 앱 저장소에** 저장해 재시작 뒤에도
+ *     남긴다. 전달 원문은 `ChatMessage`에 system 줄로 넣지 않는다(`chat:` 갈래·대화 기록 안 건드림).
+ *     화면은 `events`를 `at` 순으로 대화 흐름에 끼워 그린다.
+ * Q2 (§2-1 [이 담당 멈추기]) C1이 `JobRunner.stopJob(jobId)`를 만든다. 통로 `jobs:stop-one` 유지.
+ * Q3 (§8-2) `deliver-failed`만 학생이 누를 때 1회 다시 넘긴다. `deliver-uncertain`은 다시 넘기기
+ *     단추가 없다([자세히]·✕만). 자동 재전송은 어느 쪽도 없다.
+ * Q4 (§8-6) C1이 동의 저장을 `{ state, at }`로 넓힌다. 옛 값 `true`는 `agreed`(날짜 모름 = null)로 읽는다.
+ * Q5 (§3·§8-10) `baseVersion`과 `cards`는 디스크에 저장한다(재시작 뒤 미결 카드 유지). [이번만]은
+ *     묶인 차례(쉬는 중이면 다음 학생 차례)와 그 차례 주문이 모두 끝날 때 풀리고 `once-ended`를 남긴다.
+ * Q6 (§8-5) `folder-changed`는 지금 `thesisHashes` 전후 비교 그대로. 본대화가 같은 때 쓴 경우도
+ *     걸리는 것은 알려진 한계 — 문구가 주체를 단정하지 않는 것으로 덮는다.
+ * Q7 (§4-2·§8-7) 보관 대화 읽기 두 통로 유지 + `successor`(F1). 보관 자체는 ConversationHandoff 앱 단위.
  */
