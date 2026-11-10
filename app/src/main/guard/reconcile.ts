@@ -13,8 +13,9 @@
  */
 
 import { adoptLeaves, cleanupEmptyClaudeDirs, quarantineLeaf, removeLeaf, restoreLeaf, type GuardState } from './store'
-import { diffLeaves, scanRoot, type ScanResult } from './scan'
+import { diffLeaves, fingerprintLeaf, sameFingerprint, type ScanResult } from './scan'
 import type { LeafFingerprint } from './scan'
+import { join, sep } from 'node:path'
 
 /** 되돌림 한 건 */
 export interface RevertEntry {
@@ -22,8 +23,10 @@ export interface RevertEntry {
   /** 격리에 남긴 자리(없으면 null — 지운 새 잎 등) */
   quarantinePath: string | null
   reason: 'untrusted' | 'claude-md' | 'crashed-query'
-  /** 보관본에 있던 잎을 되살렸는가(false = 새로 생긴 잎을 지웠다) */
+  /** 보관본에 있던 잎을 되살렸는가(false = 새로 생긴 잎을 지웠거나 되돌리지 못했다) */
   restoredFromStore: boolean
+  /** 디스크가 지금 보관본과 같은가. false면 이 잎은 보관본에 올리지 않는다(§4.3 '실패하면') */
+  reverted: boolean
 }
 
 export interface T0Result {
@@ -70,7 +73,11 @@ function noteAccepted(rel: string): string {
   return rel === 'CLAUDE.md' ? 'CLAUDE.md가 바뀌어 있어요. 새 내용을 도우미가 따라요.' : `설정 파일(${rel})이(가) 바뀌어 있어요. 그대로 두었어요.`
 }
 
-/** 허락 없이 바뀐 잎 하나를 되돌린다. 지금 내용은 격리에 남긴다. */
+/**
+ * 허락 없이 바뀐 잎 하나를 되돌린다. 지금 내용은 격리에 남긴다.
+ * 돌려준 `reverted`는 **되돌린 뒤 실제로 보관본과 같아졌는지**다 — 같아지지 못한 잎은
+ * 보관본에 올리면 안 되고(§4.3 '실패하면'), 루트 `CLAUDE.md`면 넣는 판을 비운다.
+ */
 function revertLeaf(
   rootReal: string,
   userData: string,
@@ -84,20 +91,49 @@ function revertLeaf(
   let restoredFromStore = false
   if (before) restoredFromStore = restoreLeaf(rootReal, userData, folderHash, rel, before)
   else removeLeaf(rootReal, rel)
-  return { rel, quarantinePath, reason, restoredFromStore }
+  const abs = join(rootReal, rel.split('/').join(sep))
+  const after = fingerprintLeaf(abs) ?? undefined
+  const reverted = before ? sameFingerprint(before, after) : after === undefined
+  return { rel, quarantinePath, reason, restoredFromStore, reverted }
 }
 
 /**
- * T0. `scan`은 지금 폴더 상태, `state`는 지난 T2가 남긴 상태다.
- * 돌려준 `state`는 **저장해야** 다음 T2가 같은 기준을 쓴다.
+ * 강제 종료 갈래의 다음 보관본. 바뀐 잎은 새 지문으로 갈아 끼우고(되돌리지 못한 잎은 이전
+ * 지문 그대로 — §4.3 '실패하면'), 나머지 잎은 이전 보관본 것을 그대로 둔다.
  */
+function mergeCrashed(
+  previous: Map<string, LeafFingerprint>,
+  changed: readonly string[],
+  adopted: Record<string, LeafFingerprint>,
+  holdBack: ReadonlySet<string>
+): Record<string, LeafFingerprint> {
+  const leaves: Record<string, LeafFingerprint> = Object.fromEntries(previous)
+  for (const rel of changed) delete leaves[rel]
+  for (const [rel, fingerprint] of Object.entries(adopted)) leaves[rel] = fingerprint
+  for (const rel of holdBack) {
+    const before = previous.get(rel)
+    if (before) leaves[rel] = before
+    else delete leaves[rel]
+  }
+  return leaves
+}
+
+/** 루트 CLAUDE.md를 되돌리지 못하면 넣는 판은 비운다 — 디스크가 보관본과 같아질 때까지(§4.3). */
+function injectedFor(leaves: Record<string, LeafFingerprint>, holdBack: ReadonlySet<string>): string | null {
+  if (holdBack.has('CLAUDE.md')) return null
+  return leaves['CLAUDE.md']?.hash ?? null
+}
 export function evaluateT0(opts: {
   rootReal: string
   userData: string
   folderHash: string
   state: GuardState
   scan: ScanResult
-  userDataForScan?: string
+  /**
+   * 복구 ④가 "학생 변경"으로 받아들인 잎(`recoverPending().acceptedLeaves`). 강제 종료
+   * 갈래에서도 이 잎은 되돌리지 않고 그대로 보관본에 올린다(§16 중요 1).
+   */
+  acceptedLeaves?: readonly string[]
   now?: number
 }): T0Result {
   const { rootReal, userData, folderHash, state, scan } = opts
@@ -109,16 +145,37 @@ export function evaluateT0(opts: {
   const notes: string[] = []
   const accepted: string[] = []
   const reverted: RevertEntry[] = []
+  const acceptedSet = new Set(opts.acceptedLeaves ?? [])
+  const holdBack = new Set<string>()
 
   if (crashedQuery) {
     for (const rel of changed) {
-      reverted.push(revertLeaf(rootReal, userData, folderHash, rel, previous.get(rel), 'crashed-query', now))
-      notes.push(rel === 'CLAUDE.md' ? CLAUDE_MD_NOTE : noteReverted(rel))
+      if (acceptedSet.has(rel)) {
+        accepted.push(rel)
+        notes.push(noteAccepted(rel))
+        continue
+      }
+      const entry = revertLeaf(rootReal, userData, folderHash, rel, previous.get(rel), 'crashed-query', now)
+      reverted.push(entry)
+      if (entry.reverted) {
+        notes.push(rel === 'CLAUDE.md' ? CLAUDE_MD_NOTE : noteReverted(rel))
+      } else {
+        holdBack.add(rel)
+        notes.push(`설정 파일(${rel})을 되돌리지 못했어요.`)
+      }
     }
-    // 되돌린 **뒤**의 폴더를 다시 스캔해 보관본을 맞춘다 — 되돌리지 못한 잎은 지금 것을 받아들인다.
-    const after = scanRoot({ root: rootReal, userData: opts.userDataForScan ?? userData })
-    next.leaves = adoptLeaves(rootReal, userData, folderHash, after.leaves).leaves
-    notes.push(crashedNote)
+    // 되돌린 잎만 새 기준이 된다 — 되돌리지 못한 잎은 이전 지문을 그대로 둔다(§4.3 '실패하면').
+    // 지문은 **되돌린 뒤 디스크**에서 다시 뜬다: 스캔 값은 되돌리기 전 내용이라 보관본에 올릴 수 없다.
+    const target = new Map<string, LeafFingerprint>()
+    for (const rel of changed) {
+      if (holdBack.has(rel)) continue
+      const fingerprint = fingerprintLeaf(join(rootReal, rel.split('/').join(sep)))
+      if (fingerprint) target.set(rel, fingerprint)
+    }
+    const adopted = adoptLeaves(rootReal, userData, folderHash, target)
+    next.leaves = mergeCrashed(previous, changed, adopted.leaves, holdBack)
+    if (holdBack.size === 0) notes.push(crashedNote)
+    else notes.push(crashedNote + ' 일부는 되돌리지 못했어요.')
   } else if (changed.length > 0) {
     for (const rel of changed) {
       accepted.push(rel)
@@ -130,7 +187,7 @@ export function evaluateT0(opts: {
   }
 
   // 넣는 판은 **보관본 잎**의 해시다 — 다음 질의는 디스크가 아니라 이 내용을 넣는다(§11.6-3).
-  next.injected = next.leaves['CLAUDE.md']?.hash ?? null
+  next.injected = injectedFor(next.leaves, holdBack)
   next.queryOpen = true
   return {
     proceed: true,
@@ -164,23 +221,45 @@ export function evaluateT2(opts: {
   const kept: string[] = []
   const reverted: RevertEntry[] = []
   const notes: string[] = []
-  const keptLeaves = new Map(previous)
+  /** 보관본에 새로 올릴 잎(카드로 허락된 것만) */
+  const toAdopt = new Map<string, LeafFingerprint>()
+  /** 되돌리지 못한 잎 — 보관본 항목을 이전 것 그대로 둔다 */
+  const holdBack = new Set<string>()
+  /** 잎 목록의 출발점은 **이전 보관본**이다 — 되돌린 잎은 그대로 맞고, 실패한 잎은 안 바뀐다 */
+  const finalLeaves = new Map(previous)
 
   for (const rel of changed) {
     const isRootClaudeMd = rel === 'CLAUDE.md'
     if (!isRootClaudeMd && trusted(rel)) {
       kept.push(rel)
       const fingerprint = scan.leaves.get(rel)
-      if (fingerprint) keptLeaves.set(rel, fingerprint)
-      else keptLeaves.delete(rel)
+      if (fingerprint) toAdopt.set(rel, fingerprint)
+      else finalLeaves.delete(rel)
       continue
     }
-    reverted.push(revertLeaf(rootReal, userData, folderHash, rel, previous.get(rel), isRootClaudeMd ? 'claude-md' : 'untrusted', now))
-    notes.push(isRootClaudeMd ? CLAUDE_MD_NOTE : noteReverted(rel))
+    const entry = revertLeaf(rootReal, userData, folderHash, rel, previous.get(rel), isRootClaudeMd ? 'claude-md' : 'untrusted', now)
+    reverted.push(entry)
+    if (entry.reverted) {
+      notes.push(isRootClaudeMd ? CLAUDE_MD_NOTE : noteReverted(rel))
+    } else {
+      // 되돌리지 못했으니 지금 글을 받아들이지 않는다(§4.3 '실패하면').
+      holdBack.add(rel)
+      notes.push(`설정 파일(${rel})을 되돌리지 못했어요.`)
+    }
   }
 
-  if (changed.length > 0) next.leaves = adoptLeaves(rootReal, userData, folderHash, keptLeaves).leaves
-  next.injected = next.leaves['CLAUDE.md']?.hash ?? null
+  if (toAdopt.size > 0) {
+    const adopted = adoptLeaves(rootReal, userData, folderHash, toAdopt)
+    for (const [rel, fingerprint] of Object.entries(adopted.leaves)) finalLeaves.set(rel, fingerprint)
+    for (const rel of adopted.failed) {
+      // 보관하지 못한 잎은 이전 기준을 유지한다(지금 내용을 새 기준으로 삼지 않는다).
+      if (!previous.has(rel)) finalLeaves.delete(rel)
+      notes.push('설정 파일 일부를 보관하지 못했어요. 다음에 다시 시도할게요.')
+    }
+  }
+
+  next.leaves = Object.fromEntries(finalLeaves)
+  next.injected = injectedFor(next.leaves, holdBack)
   next.queryOpen = false
 
   const cleaned = cleanupEmptyClaudeDirs(rootReal)

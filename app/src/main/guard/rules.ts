@@ -9,6 +9,7 @@
  * 파일을 그대로 둔다(§11.8 '구획 모양').
  */
 
+import { createHash } from 'node:crypto'
 import {
   type RuleItem,
   CLAUDE_MD_MAX_BYTES,
@@ -46,9 +47,15 @@ export function readRules(content: string): RuleItem[] {
   return parsed.damaged ? [] : parsed.rules
 }
 
+/** 항목 식별자 = 저장 글자의 sha256(§11.8 '규칙 목록'). 순번·메시지 id가 아니다. */
+function ruleId(normalized: string): string {
+  return 'file:' + createHash('sha256').update(normalized, 'utf-8').digest('hex')
+}
+
 /**
  * 파일 구획과 보관본 규칙 표를 맞춘다.
- * 같은 글자의 규칙이 표에 있으면 그 id·시각을 이어받고, 없으면 새 id를 만든다.
+ * 같은 글자의 규칙이 표에 있으면 그 id·시각을 이어받고, 없으면 글자 해시로 새 id를 만든다.
+ * 구획에 같은 글자가 둘 이상 있으면(학생이 직접 복사) 손상이 아니라 **하나로 본다**.
  * 파일에서 사라진 규칙은 표에서 빠진다 — 학생이 지운 것으로 본다.
  */
 export function mergeRules(content: string, previous: RuleEntry[]): RuleEntry[] {
@@ -58,21 +65,25 @@ export function mergeRules(content: string, previous: RuleEntry[]): RuleEntry[] 
   for (const entry of previous) {
     if (!pool.has(entry.normalized)) pool.set(entry.normalized, entry)
   }
-  let serial = 0
-  return parsed.rules.map((item) => {
+  const seen = new Set<string>()
+  const merged: RuleEntry[] = []
+  for (const item of parsed.rules) {
+    if (seen.has(item.normalized)) continue
+    seen.add(item.normalized)
     const known = pool.get(item.normalized)
     if (known) {
       pool.delete(item.normalized)
-      return known
+      merged.push(known)
+    } else {
+      merged.push({
+        id: ruleId(item.normalized),
+        message: item.normalized,
+        timestamp: 0,
+        normalized: item.normalized
+      })
     }
-    serial += 1
-    return {
-      id: `file:${item.normalized.slice(0, 8)}:${serial}`,
-      message: item.normalized,
-      timestamp: 0,
-      normalized: item.normalized
-    }
-  })
+  }
+  return merged
 }
 
 /** 규칙 표 항목 → 말풍선·목록용. 파일에 그 글자가 남아 있는지로 "기억함"을 판단한다. */
@@ -153,13 +164,22 @@ export function removeRuleFromContent(content: string, ruleText: string): Update
   const nextRules = parsed.rules.filter((_, i) => i !== index)
   if (nextRules.length === 0) {
     // 마지막 항목이면 구획을 통째로 뺀다 — 빈 구획을 남기지 않는다.
+    // 구획 밖 글자는 **한 바이트도** 건드리지 않는다(§11.8 '규칙 목록' 마지막 항목 줄).
     const startIdx = content.indexOf(RULES_START_MARK)
     const endIdx = content.indexOf(RULES_END_MARK)
     const before = content.slice(0, startIdx)
-    const after = content.slice(endIdx + RULES_END_MARK.length)
-    const head = before.replace(/\s+$/, '')
-    const joined = (head === '' ? '' : head + '\n\n') + after.replace(/^\s+/, '')
-    return { success: true, newContent: joined, message: '규칙을 지웠어요.', sectionCreated: false, errors: [] }
+    // 앱이 처음 만든 구획만 있던 파일이면, 구획을 만들 때 앱이 덧붙인 줄바꿈도 함께 지운다
+    // — 되돌린 결과가 원래의 빈 파일이어야 왕복이 맞는다.
+    const after = before === '' && content.slice(endIdx + RULES_END_MARK.length) === '\n'
+      ? ''
+      : content.slice(endIdx + RULES_END_MARK.length)
+    return {
+      success: true,
+      newContent: before + after,
+      message: '규칙을 지웠어요.',
+      sectionCreated: false,
+      errors: []
+    }
   }
   const replaced = replaceOrAppendSection(content, serializeRulesSection(nextRules))
   return { success: true, newContent: replaced.text, message: '규칙을 지웠어요.', sectionCreated: false, errors: [] }

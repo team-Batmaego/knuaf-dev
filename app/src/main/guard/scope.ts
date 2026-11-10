@@ -18,10 +18,13 @@ import { realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-/** 마지막 조각이 이 이름이면 보호(깊이 무관). */
-const PROTECTED_BASENAMES: Record<string, true> = { 'CLAUDE.md': true, 'CLAUDE.local.md': true }
+/**
+ * 마지막 조각이 이 이름이면 보호(깊이 무관). 상속 속성 이름(`toString` 등)이 섞이지 않도록
+ * `Set`을 쓰고, 비교는 대소문자를 무시한다(맥 기본 볼륨·윈도우는 같은 파일, §16.2).
+ */
+const PROTECTED_BASENAMES = new Set(['claude.md', 'claude.local.md'])
 /** 폴더 바로 아래(=루트)에서만 보호하는 이름. */
-const ROOT_ONLY_BASENAMES: Record<string, true> = { '.claude.json': true, '.mcp.json': true }
+const ROOT_ONLY_BASENAMES = new Set(['.claude.json', '.mcp.json'])
 /** 앱 스킬 자리 꼬리(경로 조각들). */
 const SKILL_HOST_TAIL = ['skill-host', '.claude', 'skills', 'knuaf-dev']
 
@@ -44,14 +47,15 @@ function pathSegments(p: string): string[] {
 /** 폴더 안 상대 경로 하나에 대한 보호 여부. */
 function isProtectedSegments(parts: string[], rootScoped: boolean): boolean {
   for (const part of parts) {
-    if (part === '.claude') return true
+    if (part.toLowerCase() === '.claude') return true
   }
-  const base = parts[parts.length - 1]
-  if (!base) return false
-  if (PROTECTED_BASENAMES[base]) return true
+  const raw = parts[parts.length - 1]
+  if (!raw) return false
+  const base = raw.toLowerCase()
+  if (PROTECTED_BASENAMES.has(base)) return true
   // `.claude.json`·`.mcp.json`은 폴더 바로 아래만이다. 루트를 모르는 호출에서는
   // 어느 깊이에서든 보호로 본다(안전측 — 설정 파일은 하위 폴더에서도 CLI가 읽는다).
-  if (ROOT_ONLY_BASENAMES[base] && (!rootScoped || parts.length === 1)) return true
+  if (ROOT_ONLY_BASENAMES.has(base) && (!rootScoped || parts.length === 1)) return true
   return false
 }
 

@@ -16,9 +16,12 @@
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readFileSync,
   readlinkSync,
   readdirSync,
@@ -27,12 +30,17 @@ import {
   rmdirSync,
   symlinkSync,
   unlinkSync,
-  writeFileSync
+  writeFileSync,
+  writeSync
 } from 'node:fs'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fingerprintLeaf, type LeafFingerprint } from './scan'
 import { isInside } from './scope'
+import { mergeRules } from './rules'
+
+/** 격리 복사 청크(64KB) — 큰 파일도 한 번에 통째로 읽지 않는다. */
+const COPY_CHUNK = 64 * 1024
 
 /** 규칙 표 한 줄(파일에는 id를 적지 않는다 — 학생이 보는 파일을 깨끗하게) */
 export interface RuleEntry {
@@ -44,17 +52,10 @@ export interface RuleEntry {
   normalized: string
 }
 
-/** 앱이 규칙을 쓰는 도중이라는 쪽지 */
-export interface PendingAppWrite {
-  action: 'add' | 'remove'
-  /** 이전 CLAUDE.md 내용 blob 해시(없던 파일이면 null) */
-  previousHash: string | null
-  /** 새 CLAUDE.md 내용 blob 해시 */
-  nextHash: string
-  at: number
-}
-
-/** 앱이 규칙을 쓰는 도중이라는 쪽지(§11.8 '앱이 쓰는 순서' 4~8). 죽으면 이걸 보고 복구한다. */
+/**
+ * 앱이 규칙을 쓰는 도중이라는 쪽지(§11.8 '앱이 쓰는 순서' 4~8). 죽으면 이걸 보고 복구한다.
+ * 표식(HMAC)은 이전 지문·새 지문·동작·시각·폴더 해시를 덮는다 — 손으로 만든 쪽지는 복구 근거가 못 된다.
+ */
 export interface PendingAppWrite {
   action: 'add' | 'remove'
   /** 이전 파일 내용 sha256(없던 파일이면 null) */
@@ -62,6 +63,8 @@ export interface PendingAppWrite {
   /** 새 파일 내용 sha256 */
   nextHash: string
   at: number
+  /** 이 폴더 열쇠로 계산한 표식 */
+  integrity?: string
 }
 
 /** 상태 파일 전체 모양 */
@@ -138,8 +141,12 @@ export interface LoadedState {
   integrity: IntegrityState
 }
 
-/** 상태 파일 로드. 표식이 안 맞아도 상태는 돌려준다 — 부르는 쪽이 기능을 끈다. */
+/**
+ * 상태 파일 로드. 표식이 안 맞아도 상태는 돌려준다 — 부르는 쪽이 기능을 끈다.
+ * **열쇠가 없으면 파일 유무보다 먼저 `no-key`** — 첫 실행(파일 없음)도 꺼짐이 기본이다(§4.3).
+ */
 export function loadState(userData: string, folderHash: string, key: GuardKey): LoadedState {
+  if (!key) return { state: defaultState(), integrity: 'no-key' }
   const path = statePath(userData, folderHash)
   if (!existsSync(path)) return { state: defaultState(), integrity: 'missing' }
   let parsed: Partial<GuardState>
@@ -156,7 +163,6 @@ export function loadState(userData: string, folderHash: string, key: GuardKey): 
     queryOpen: Boolean(parsed.queryOpen),
     integrity: typeof parsed.integrity === 'string' ? parsed.integrity : ''
   }
-  if (!key) return { state, integrity: 'no-key' }
   const expected = computeIntegrity(state, key)
   const a = Buffer.from(expected, 'utf-8')
   const b = Buffer.from(state.integrity, 'utf-8')
@@ -210,38 +216,60 @@ export function renameWithRetry(from: string, to: string, attempts = 5): void {
   throw last
 }
 
-/** blob 저장(내용 주소). 같은 내용은 한 번만 쓴다. */
+/** 내용의 sha256 — blob 이름·지문과 같은 함수. */
+function sha256(buf: Buffer): string {
+  return createHash('sha256').update(buf).digest('hex')
+}
+
+/**
+ * blob 저장(내용 주소). 같은 내용은 한 번만 쓴다.
+ * 이미 있는 파일은 **내용을 대조**한다 — 이름과 내용이 다르면 변조이므로 옳은 내용으로 다시 쓴다(§4.3 ②).
+ */
 export function putBlob(userData: string, folderHash: string, content: Buffer | string): string {
   const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf-8')
-  const hash = createHash('sha256').update(buf).digest('hex')
+  const hash = sha256(buf)
   const path = join(blobsDir(userData, folderHash), hash)
-  if (!existsSync(path)) {
+  let existing: Buffer | null = null
+  try {
+    existing = readFileSync(path)
+  } catch { /* 없는 편이 정상 */ }
+  if (!existing || sha256(existing) !== hash) {
     mkdirSync(blobsDir(userData, folderHash), { recursive: true })
     if (!atomicWrite(path, buf)) throw new Error(`blob을 쓰지 못했습니다: ${hash}`)
   }
   return hash
 }
 
+/** blob 읽기. **읽을 때마다 내용의 sha256이 이름과 같은지 확인**한다 — 다르면 읽지 않은 것으로 친다. */
 export function getBlob(userData: string, folderHash: string, hash: string): Buffer | null {
   if (!hash) return null
+  let bytes: Buffer
   try {
-    return readFileSync(join(blobsDir(userData, folderHash), hash))
+    bytes = readFileSync(join(blobsDir(userData, folderHash), hash))
   } catch {
     return null
   }
+  return sha256(bytes) === hash ? bytes : null
 }
 
 export function hasBlob(userData: string, folderHash: string, hash: string): boolean {
-  return existsSync(join(blobsDir(userData, folderHash), hash))
+  return getBlob(userData, folderHash, hash) !== null
 }
 
-/** 잎 지문이 가리키는 원본 내용. 파일은 내용, 링크는 `link:<대상>` — blob 키와 해시가 같다. */
+/**
+ * 잎 지문이 가리키는 원본 내용. 파일은 내용, 링크는 `link:<대상>` — blob 키와 해시가 같다.
+ * 지문과 다른 내용이면 null이다(보관본에 올릴 때도 대조한다).
+ */
 export function leafContent(rootReal: string, rel: string, fingerprint: LeafFingerprint): Buffer | null {
   const abs = join(rootReal, rel.split('/').join(sep))
   if (!isInside(rootReal, abs) || abs === rootReal) return null
   try {
-    if (fingerprint.kind === 'link') return Buffer.from('link:' + readlinkSync(abs), 'utf-8')
-    return readFileSync(abs)
+    if (fingerprint.kind === 'link') {
+      const bytes = Buffer.from('link:' + readlinkSync(abs), 'utf-8')
+      return sha256(bytes) === fingerprint.hash ? bytes : null
+    }
+    const bytes = readFileSync(abs)
+    return sha256(bytes) === fingerprint.hash ? bytes : null
   } catch {
     return null
   }
@@ -321,7 +349,59 @@ function removeIfPresent(abs: string): boolean {
   }
 }
 
-/** 지금 파일을 격리로 옮긴다. 같은 볼륨이면 rename, 아니면 복사·확인·삭제. */
+/** 청크 단위 해시 — 큰 파일에서도 본체가 멈추지 않게(정제 3.6). */
+function streamHash(path: string): string | null {
+  let fd: number | null = null
+  try {
+    fd = openSync(path, 'r')
+    const hash = createHash('sha256')
+    const buf = Buffer.allocUnsafe(COPY_CHUNK)
+    for (;;) {
+      const read = readSync(fd, buf, 0, COPY_CHUNK, null)
+      if (read <= 0) break
+      hash.update(buf.subarray(0, read))
+    }
+    return hash.digest('hex')
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) { try { closeSync(fd) } catch { /* ignore */ } }
+  }
+}
+
+/** 청크 단위 복사(원본은 그대로) + 해시. 실패면 null. */
+function streamCopyAndHash(from: string, to: string): string | null {
+  let inFd: number | null = null
+  let outFd: number | null = null
+  try {
+    inFd = openSync(from, 'r')
+    outFd = openSync(to, 'w')
+    const hash = createHash('sha256')
+    const buf = Buffer.allocUnsafe(COPY_CHUNK)
+    for (;;) {
+      const read = readSync(inFd, buf, 0, COPY_CHUNK, null)
+      if (read <= 0) break
+      hash.update(buf.subarray(0, read))
+      let written = 0
+      while (written < read) written += writeSync(outFd, buf, written, read - written)
+    }
+    closeSync(outFd)
+    outFd = null
+    return hash.digest('hex')
+  } catch {
+    return null
+  } finally {
+    if (inFd !== null) { try { closeSync(inFd) } catch { /* ignore */ } }
+    if (outFd !== null) { try { closeSync(outFd) } catch { /* ignore */ } }
+  }
+}
+
+/**
+ * 지금 파일을 격리로 옮긴다(§4.3 '격리').
+ * **같은 볼륨이면 이름 바꾸기가 먼저다** — 읽지도 쓰지도 않고 옮긴다. 안 될 때만
+ * 청크 복사 → 지문 확인 → 원본 삭제(큰 파일에서 본체가 멈추지 않게, 정제 3.6).
+ * 확인 전에는 원본을 절대 지우지 않는다.
+ */
 export function quarantineLeaf(rootReal: string, rel: string, timestamp: number): string | null {
   const abs = join(rootReal, rel.split('/').join(sep))
   if (!isInside(rootReal, abs) || abs === rootReal) return null
@@ -335,12 +415,54 @@ export function quarantineLeaf(rootReal: string, rel: string, timestamp: number)
 
   const base = quarantineDir(rootReal, timestamp)
   const blobs = join(base, 'blobs')
+  const incoming = join(blobs, `.incoming-${process.pid}-${randomBytes(6).toString('hex')}`)
+  let stored: string | null = null
+  let hash: string | null = null
+  let linkTarget: string | undefined
+
   try {
     mkdirSync(blobs, { recursive: true })
-    const content = st.isSymbolicLink() ? Buffer.from('link:' + readlinkSync(abs), 'utf-8') : readFileSync(abs)
-    const hash = createHash('sha256').update(content).digest('hex')
-    const stored = join(blobs, hash)
-    if (!existsSync(stored)) writeFileSync(stored, content)
+    if (st.isSymbolicLink()) {
+      // 링크는 "가리키는 문자열"이 항목이다 — 따라가지 않는다.
+      linkTarget = readlinkSync(abs)
+      const content = Buffer.from('link:' + linkTarget, 'utf-8')
+      hash = createHash('sha256').update(content).digest('hex')
+      stored = join(blobs, hash)
+      if (!existsSync(stored)) writeFileSync(stored, content)
+      unlinkSync(abs)
+    } else {
+      // ① 같은 볼륨 — 이름 바꾸기부터. 읽지 않는다.
+      let moved = false
+      try {
+        renameWithRetry(abs, incoming)
+        moved = true
+      } catch { /* 볼륨이 다르거나 잠김 — 아래 복사 길로 */ }
+      if (moved) {
+        hash = streamHash(incoming)
+        if (hash) {
+          stored = join(blobs, hash)
+          if (!existsSync(stored)) renameWithRetry(incoming, stored)
+          else unlinkSync(incoming)
+        } else {
+          // 해시를 못 읽으면 원래 자리로 돌려놓고 포기한다.
+          try { renameWithRetry(incoming, abs) } catch { /* ignore */ }
+          return null
+        }
+      } else {
+        // ② 다른 볼륨·잠김 — 복사 → 확인 → 삭제.
+        const copied = streamCopyAndHash(abs, incoming)
+        if (!copied || streamHash(incoming) !== copied) {
+          try { unlinkSync(incoming) } catch { /* ignore */ }
+          return null
+        }
+        hash = copied
+        stored = join(blobs, hash)
+        if (!existsSync(stored)) renameWithRetry(incoming, stored)
+        else unlinkSync(incoming)
+        unlinkSync(abs)
+      }
+    }
+
     const indexPath = join(base, 'index.json')
     let index: Array<{ originalPath: string; blobHash: string; kind: string; linkTarget?: string }> = []
     if (existsSync(indexPath)) {
@@ -349,13 +471,13 @@ export function quarantineLeaf(rootReal: string, rel: string, timestamp: number)
     index.push({
       originalPath: rel,
       blobHash: hash,
-      kind: st.isSymbolicLink() ? 'link' : 'file',
-      ...(st.isSymbolicLink() ? { linkTarget: readlinkSync(abs) } : {})
+      kind: linkTarget !== undefined ? 'link' : 'file',
+      ...(linkTarget !== undefined ? { linkTarget } : {})
     })
     writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf-8')
-    unlinkSync(abs)
     return stored
   } catch {
+    try { if (existsSync(incoming)) unlinkSync(incoming) } catch { /* ignore */ }
     return null
   }
 }
@@ -428,8 +550,9 @@ export interface SentLedger {
   integrityOk: boolean
 }
 
-/** 장부 읽기 + 줄마다 표식 확인. 한 줄이라도 안 맞으면 `integrityOk=false`(기능 끔). */
+/** 장부 읽기 + 줄마다 표식 확인. **열쇠가 없으면 파일 유무보다 먼저 끈다.** */
 export function readSentLog(userData: string, folderHash: string, key: GuardKey): SentLedger {
+  if (!key) return { entries: [], integrityOk: false }
   const target = sentPath(userData, folderHash)
   if (!existsSync(target)) return { entries: [], integrityOk: true }
   let text: string
@@ -438,7 +561,6 @@ export function readSentLog(userData: string, folderHash: string, key: GuardKey)
   } catch {
     return { entries: [], integrityOk: false }
   }
-  if (!key) return { entries: [], integrityOk: false }
   const entries: SentEntry[] = []
   let integrityOk = true
   for (const line of text.split('\n')) {
@@ -530,20 +652,54 @@ export function writeClaudeMd(rootReal: string, content: string): boolean {
 
 // ── 앱이 쓰는 도중 쪽지 ────────────────────────────────────────────────────
 
-export function writePending(userData: string, folderHash: string, note: PendingAppWrite): boolean {
-  return atomicWrite(pendingPath(userData, folderHash), JSON.stringify(note, null, 2))
+function pendingCanonical(note: Omit<PendingAppWrite, 'integrity'>, folderHash: string): string {
+  return canonical({
+    action: note.action,
+    previousHash: note.previousHash,
+    nextHash: note.nextHash,
+    at: note.at,
+    folder: folderHash
+  })
 }
 
-export function readPending(userData: string, folderHash: string): PendingAppWrite | null {
+/**
+ * 쪽지를 쓴다. 표식은 이 폴더 열쇠로 계산한다 — 열쇠가 없으면 쓰지 않는다(false).
+ * 쪽지는 복구의 유일한 근거라 **실패를 부르는 쪽이 반드시 확인해야 한다**(§11.8 4번).
+ */
+export function writePending(
+  userData: string,
+  folderHash: string,
+  note: PendingAppWrite,
+  key: GuardKey
+): boolean {
+  if (!key) return false
+  const { integrity: _i, ...rest } = note
+  const full: PendingAppWrite = { ...rest, integrity: hmac(key, pendingCanonical(rest, folderHash)) }
+  return atomicWrite(pendingPath(userData, folderHash), JSON.stringify(full, null, 2))
+}
+
+/** 쪽지를 읽는다. 표식이 없거나 안 맞으면 **지우고** null — 그 쪽지로는 아무것도 하지 않는다. */
+export function readPending(userData: string, folderHash: string, key: GuardKey): PendingAppWrite | null {
   const path = pendingPath(userData, folderHash)
   if (!existsSync(path)) return null
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as PendingAppWrite
-    if (typeof parsed.nextHash !== 'string') return null
-    return parsed
-  } catch {
+  const reject = (): null => {
+    clearPending(userData, folderHash)
     return null
   }
+  if (!key) return reject()
+  let parsed: PendingAppWrite
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf-8')) as PendingAppWrite
+  } catch {
+    return reject()
+  }
+  if (typeof parsed.nextHash !== 'string' || typeof parsed.integrity !== 'string') return reject()
+  const { integrity: tag, ...rest } = parsed
+  const expected = hmac(key, pendingCanonical(rest, folderHash))
+  const a = Buffer.from(expected, 'utf-8')
+  const b = Buffer.from(tag, 'utf-8')
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return reject()
+  return rest
 }
 
 export function clearPending(userData: string, folderHash: string): void {
@@ -584,6 +740,18 @@ function leafFor(rootReal: string): LeafFingerprint | null {
 }
 
 /**
+ * 엄격한 UTF-8 해석. 치환 문자로 바꾸지 않고 실패하면 null(§11.3-10·§11.8 3번).
+ * 잘못된 바이트를 살려서 저장하면 학생 파일이 조용히 망가진다.
+ */
+function decodeStrict(bytes: Buffer): string | null {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 앱이 구획을 고치는 유일한 길. **디스크의 현재 파일을 재료로 쓰지 않는다** —
  * 보관본(blob)의 내용에 학생이 고른 변경 하나만 적용한다(§11.8).
  *
@@ -615,26 +783,47 @@ export function applyRuleChange(opts: {
     notes
   }
 
+  // 열쇠가 없으면 아무것도 쓰지 않는다 — 표식 없는 보관본은 믿을 수 없다(§4.3 기본값 끔).
+  if (!key) return { ...base, message: '지금은 규칙을 저장할 수 없어요. 앱을 다시 열어 주세요.' }
+
   const disk = readClaudeMd(rootReal)
   if (disk.state === 'link') {
     return { ...base, message: 'CLAUDE.md가 링크라서 규칙을 저장할 수 없어요. 보통 파일로 바꿔 주세요.' }
   }
-  const diskText = disk.state === 'file' ? disk.content.toString('utf-8') : ''
-  const diskHash = disk.state === 'file' ? hashContent(disk.content) : null
-  const storedBlob = state.injected ? getBlob(userData, folderHash, state.injected) : null
-  let baseline = storedBlob ? storedBlob.toString('utf-8') : diskText
-  const baselineHash = storedBlob ? state.injected : diskHash
+  const diskBytes = disk.state === 'file' ? disk.content : null
+  const diskHash = diskBytes ? hashContent(diskBytes) : null
+
+  // 2번 — 보관본이 기준이다. 없음(null)이면 "파일 없음"이 기준이고, 있어야 할 blob이
+  // 없거나 지문이 안 맞으면 디스크로 대신하지 않고 실패한다(§16 차단 1·2).
+  let baseline: string
+  let baselineHash: string | null
+  if (state.injected === null) {
+    baseline = ''
+    baselineHash = null
+  } else {
+    const storedBlob = getBlob(userData, folderHash, state.injected)
+    if (!storedBlob) {
+      return { ...base, message: '지금은 저장하지 못했어요. 보관본이 손상돼 있어요.' }
+    }
+    const decoded = decodeStrict(storedBlob)
+    if (decoded === null) {
+      return { ...base, message: '지금은 저장하지 못했어요. CLAUDE.md가 올바른 UTF-8이 아니에요.' }
+    }
+    baseline = decoded
+    baselineHash = state.injected
+  }
+
   let cleanedDisk = false
   let acceptedStudentChange = false
 
-  // 2번 — 디스크와 보관본 대조
   if (diskHash !== baselineHash) {
     if (state.queryOpen) {
       // 도우미가 건드린 것으로 보고 먼저 정리한다(격리 → 보관본 복원).
       quarantineLeaf(rootReal, 'CLAUDE.md', now)
-      if (storedBlob) writeClaudeMd(rootReal, baseline)
-      else {
+      if (baselineHash === null) {
         try { unlinkSync(join(rootReal, 'CLAUDE.md')) } catch { /* ignore */ }
+      } else {
+        writeClaudeMd(rootReal, baseline)
       }
       cleanedDisk = true
       notes.push('도우미가 고친 CLAUDE.md를 되돌린 뒤 저장했어요.')
@@ -645,7 +834,15 @@ export function applyRuleChange(opts: {
       }
     } else {
       // 질의 밖 학생 변경 — 받아들인 뒤 그 내용에 변경을 얹는다.
-      baseline = diskText
+      if (diskBytes === null) {
+        baseline = ''
+      } else {
+        const decoded = decodeStrict(diskBytes)
+        if (decoded === null) {
+          return { ...base, message: '지금은 저장하지 못했어요. CLAUDE.md가 올바른 UTF-8이 아니에요.' }
+        }
+        baseline = decoded
+      }
       acceptedStudentChange = true
       notes.push('CLAUDE.md가 바뀌어 있어요. 그대로 두고 새 규칙을 더했어요.')
     }
@@ -657,18 +854,24 @@ export function applyRuleChange(opts: {
   }
 
   const nextText = mutation.newContent
-  // 4번 — 쓰는 중 쪽지(이전 지문·새 지문). 지문은 내용에서 바로 나오므로 blob보다 먼저 적을 수 있다.
-  const nextHash = createHash('sha256').update(Buffer.from(nextText, 'utf-8')).digest('hex')
-  writePending(userData, folderHash, {
-    action: opts.action,
-    previousHash: baselineHash,
-    nextHash,
-    at: now
-  })
+  const nextBytes = Buffer.from(nextText, 'utf-8')
+  const nextHash = hashContent(nextBytes)
+
+  // 4번 — 쓰는 중 쪽지(이전 지문·새 지문·표식). **못 쓰면 여기서 멈춘다** — 쪽지가 없으면
+  // 강제 종료 때 복구할 근거가 없어 파일을 바꿔서는 안 된다(§11.8 4번).
+  const wrote = writePending(
+    userData,
+    folderHash,
+    { action: opts.action, previousHash: baselineHash, nextHash, at: now },
+    key
+  )
+  if (!wrote) {
+    return { ...base, message: '규칙을 저장하지 못했어요.', errors: ['쓰는 중 표시를 남기지 못했습니다.'], cleanedDisk, acceptedStudentChange }
+  }
 
   // 5번 — 새 내용을 blob으로 쓰고 확인한다.
   try {
-    putBlob(userData, folderHash, nextText)
+    putBlob(userData, folderHash, nextBytes)
   } catch {
     clearPending(userData, folderHash)
     return { ...base, message: '규칙을 저장하지 못했어요.', errors: ['보관본에 쓰지 못했습니다.'], cleanedDisk, acceptedStudentChange }
@@ -680,12 +883,18 @@ export function applyRuleChange(opts: {
     return { ...base, message: '규칙을 저장하지 못했어요. 파일이 다른 프로그램에 열려 있는지 확인해 주세요.', errors: ['CLAUDE.md를 쓰지 못했습니다.'], cleanedDisk, acceptedStudentChange }
   }
 
-  // 7번 — 상태 파일 하나 교체. 여기가 저장 성공 시점이다.
+  // 7번 — 상태 파일 하나 교체(잎 목록·`injected`·**규칙 표**가 함께). 여기가 저장 성공 시점이다.
   const leaves = { ...state.leaves }
   const leaf = leafFor(rootReal)
   if (leaf) leaves['CLAUDE.md'] = leaf
   else delete leaves['CLAUDE.md']
-  const nextState: GuardState = { ...state, leaves, injected: nextHash, integrity: '' }
+  const nextState: GuardState = {
+    ...state,
+    leaves,
+    injected: nextHash,
+    rules: mergeRules(nextText, state.rules),
+    integrity: ''
+  }
   const { integrity: _drop, ...withoutIntegrity } = nextState
   const saved = saveState(userData, folderHash, withoutIntegrity, key)
   if (!saved) {
@@ -713,6 +922,11 @@ export interface RecoveryOutcome {
   success: boolean
   message: string
   state: GuardState
+  /**
+   * 복구가 "학생 변경"으로 받아들인 잎(§16 중요 1). 바로 이어지는 T0가 `queryOpen`을 이유로
+   * 이 잎을 되돌리지 않게 넘긴다.
+   */
+  acceptedLeaves: string[]
 }
 
 /**
@@ -727,33 +941,76 @@ export function recoverPending(opts: {
   state: GuardState
 }): RecoveryOutcome {
   const { rootReal, userData, folderHash, key, state } = opts
-  const pending = readPending(userData, folderHash)
-  if (!pending) return { hadPending: false, success: false, message: '', state }
+  const idle: RecoveryOutcome = { hadPending: false, success: false, message: '', state, acceptedLeaves: [] }
+  // 표식 없는 쪽지로는 아무것도 하지 않는다(readPending이 지운다).
+  const pending = readPending(userData, folderHash, key)
+  if (!pending) return idle
 
   const disk = readClaudeMd(rootReal)
   const diskHash = disk.state === 'file' ? hashContent(disk.content) : null
-  const finish = (nextState: GuardState, success: boolean, message: string): RecoveryOutcome => {
-    clearPending(userData, folderHash)
-    return { hadPending: true, success, message, state: nextState }
-  }
 
   // ① 상태 파일이 이미 새 지문 — 성공, 쪽지만 지운다.
-  if (state.injected === pending.nextHash) return finish(state, true, '규칙을 저장했어요.')
+  if (state.injected === pending.nextHash) {
+    clearPending(userData, folderHash)
+    return { hadPending: true, success: true, message: '규칙을 저장했어요.', state, acceptedLeaves: [] }
+  }
 
-  // ② 디스크가 새 지문 — 7번을 마저 한다.
-  if (diskHash === pending.nextHash) {
+  // 디스크가 새 지문인데 그 blob이 없거나 지문이 안 맞는다 — 어느 쪽도 믿을 수 없다.
+  // 학생 변경으로 받아들이지도 않고(변조된 글이 보관본에 올라간다) 질의를 닫지도 않는다.
+  // `queryOpen`을 남겨 다음 T0가 지금 글을 되돌리게 한다(§4.3 '실패하면', §16 차단 3).
+  if (diskHash === pending.nextHash && pending.nextHash && !hasBlob(userData, folderHash, pending.nextHash)) {
+    clearPending(userData, folderHash)
+    return { hadPending: true, success: false, message: '규칙을 저장하지 못했어요.', state, acceptedLeaves: [] }
+  }
+
+  const finishFailed = (message: string, accepted: string[]): RecoveryOutcome => {
+    clearPending(userData, folderHash)
+    return { hadPending: true, success: false, message, state, acceptedLeaves: accepted }
+  }
+
+  // ② 디스크가 새 지문 — 7번을 마저 한다. **새 blob의 존재와 지문까지** 확인한다.
+  if (diskHash === pending.nextHash && pending.nextHash && hasBlob(userData, folderHash, pending.nextHash)) {
     const leaves = { ...state.leaves }
     const leaf = leafFor(rootReal)
     if (leaf) leaves['CLAUDE.md'] = leaf
-    const nextState: GuardState = { ...state, leaves, injected: pending.nextHash, integrity: '' }
+    else delete leaves['CLAUDE.md']
+    const blob = getBlob(userData, folderHash, pending.nextHash)
+    const text = blob ? decodeStrict(blob) : null
+    const nextState: GuardState = {
+      ...state,
+      leaves,
+      injected: pending.nextHash,
+      rules: text === null ? state.rules : mergeRules(text, state.rules),
+      integrity: ''
+    }
     const { integrity: _drop, ...withoutIntegrity } = nextState
     const saved = saveState(userData, folderHash, withoutIntegrity, key)
-    return finish(saved ? loadState(userData, folderHash, key).state : state, saved, saved ? '규칙을 저장했어요.' : '규칙을 저장하지 못했어요.')
+    if (!saved) {
+      // 상태 저장 실패 — 쪽지는 남긴다(다음 실행이 다시 시도한다, §11.8 4·7번).
+      return { hadPending: true, success: false, message: '규칙을 저장하지 못했어요.', state, acceptedLeaves: [] }
+    }
+    clearPending(userData, folderHash)
+    return {
+      hadPending: true,
+      success: true,
+      message: '규칙을 저장했어요.',
+      state: loadState(userData, folderHash, key).state,
+      acceptedLeaves: []
+    }
   }
 
   // ③ 디스크가 이전 지문 — 저장되지 않은 것으로 닫는다.
-  if (diskHash === pending.previousHash) return finish(state, false, '규칙을 저장하지 못했어요.')
+  if (diskHash === pending.previousHash) return finishFailed('규칙을 저장하지 못했어요.', [])
 
-  // ④ 둘 다 아님(죽은 뒤 학생이 직접 고침) — 덮어쓰지 않는다.
-  return finish(state, false, '규칙을 저장하지 못했어요. 다시 눌러 주세요.')
+  // ④ 둘 다 아님(죽은 뒤 학생이 직접 고침) — 덮어쓰지 않고 학생 변경으로 받아들인다.
+  // `queryOpen`을 내려 이 질의를 닫는다 — 그래야 바로 이어지는 T0가 이 잎을 "질의 밖 변경"으로
+  // 받아들이고 되돌리지 않는다(§11.8 복구 표 ④, §16 중요 1).
+  clearPending(userData, folderHash)
+  return {
+    hadPending: true,
+    success: false,
+    message: '규칙을 저장하지 못했어요. 다시 눌러 주세요.',
+    state: { ...state, queryOpen: false },
+    acceptedLeaves: ['CLAUDE.md']
+  }
 }

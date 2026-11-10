@@ -252,13 +252,13 @@ export function replaceOrAppendSection(content: string, block: string): { text: 
 export function validateRulesCollection(rules: Array<Pick<RuleItem, 'normalized'>>): { valid: boolean; errors: string[] } {
   const errors: string[] = []
   if (rules.length > RULES_MAX_COUNT) errors.push(`규칙이 ${RULES_MAX_COUNT}개를 초과합니다(${rules.length}개).`)
-  const seen: Record<string, true> = {}
+  const seen = new Set<string>()
   for (const rule of rules) {
-    if (seen[rule.normalized]) {
+    if (seen.has(rule.normalized)) {
       errors.push('같은 내용의 규칙이 이미 있어요.')
       break
     }
-    seen[rule.normalized] = true
+    seen.add(rule.normalized)
     const check = validateRuleText(rule.normalized)
     if (!check.ok) errors.push(check.reason || '규칙이 올바르지 않아요.')
   }

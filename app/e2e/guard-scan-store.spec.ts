@@ -374,7 +374,7 @@ test('앱이 쓰는 순서: 보관본 내용에 변경 하나만 얹고, 성공 
   const after = loadState(userData, folder, key)
   expect(after.integrity).toBe('ok')
   expect(readBlob(userData, folder, after.state.injected!)).toBe('# student direct\n\n- 숨체로 써 줘.\n')
-  expect(readPending(userData, folder)).toBeNull()
+  expect(readPending(userData, folder, key)).toBeNull()
 })
 
 test('앱이 쓰는 순서: 질의 중이면 도우미가 고친 파일을 먼저 되돌린 뒤 저장한다', () => {
@@ -447,7 +447,7 @@ test('죽은 뒤 복구 네 갈래', () => {
   {
     const { root, userData, folder, key } = setup()
     const nextHash = putBlob(userData, folder, 'new\n')
-    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 })
+    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 }, key)
     const current = loadState(userData, folder, key).state
     const withNew: GuardState = { ...current, injected: nextHash }
     const { integrity: _x, ...withoutNew } = withNew
@@ -455,40 +455,40 @@ test('죽은 뒤 복구 네 갈래', () => {
 
     const recovery = recoverPending({ rootReal: root, userData, folderHash: folder, key, state: withNew })
     expect(recovery).toMatchObject({ hadPending: true, success: true })
-    expect(readPending(userData, folder)).toBeNull()
+    expect(readPending(userData, folder, key)).toBeNull()
   }
 
   // ② 디스크가 새 지문 — 7번을 마저 한다.
   {
     const { root, userData, folder, key, state } = setup()
     const nextHash = putBlob(userData, folder, 'new\n')
-    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 })
+    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 }, key)
     writeClaudeMd(root, 'new\n')
 
     const recovery = recoverPending({ rootReal: root, userData, folderHash: folder, key, state })
     expect(recovery).toMatchObject({ hadPending: true, success: true })
     expect(loadState(userData, folder, key).state.injected).toBe(nextHash)
-    expect(readPending(userData, folder)).toBeNull()
+    expect(readPending(userData, folder, key)).toBeNull()
   }
 
   // ③ 디스크가 이전 지문 — 저장 안 된 것으로 닫는다.
   {
     const { root, userData, folder, key, state } = setup()
     const nextHash = putBlob(userData, folder, 'new\n')
-    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 })
+    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 }, key)
 
     const recovery = recoverPending({ rootReal: root, userData, folderHash: folder, key, state })
     expect(recovery.hadPending).toBe(true)
     expect(recovery.success).toBe(false)
     expect(readFileSync(join(root, 'CLAUDE.md'), 'utf-8')).toBe('old\n')
-    expect(readPending(userData, folder)).toBeNull()
+    expect(readPending(userData, folder, key)).toBeNull()
   }
 
   // ④ 디스크가 둘 다 아님 — 덮어쓰지 않는다.
   {
     const { root, userData, folder, key, state } = setup()
     const nextHash = putBlob(userData, folder, 'new\n')
-    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 })
+    writePending(userData, folder, { action: 'add', previousHash: hashContent('old\n'), nextHash, at: 1 }, key)
     writeClaudeMd(root, 'student typed this\n')
 
     const recovery = recoverPending({ rootReal: root, userData, folderHash: folder, key, state })

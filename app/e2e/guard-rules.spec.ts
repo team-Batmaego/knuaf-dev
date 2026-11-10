@@ -429,8 +429,7 @@ async function press(box: RuleBox, text: string): Promise<{ success: boolean; me
     mutate: (baseline) => addRuleToContent(baseline, text, { messageId: `msg:${text}`, timestamp: 1 })
   })
   if (outcome.success) {
-    const merged = mergeRules(outcome.newContent, state.rules)
-    const { integrity: _i, ...save } = { ...outcome.state, rules: merged }
+    const { integrity: _i, ...save } = outcome.state
     saveState(box.userData, box.folder, save, box.key)
   }
   return { success: outcome.success, message: outcome.message }
