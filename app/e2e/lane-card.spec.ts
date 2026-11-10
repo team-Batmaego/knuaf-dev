@@ -517,18 +517,22 @@ test('card fix: two cards of the same version never both apply', async () => {
   expect(approved.review?.company).toBe('codex')
 })
 
-// [C1-13] 적용 중에 앱이 죽은 카드는 재시작 뒤 `pending` 으로 남지 않는다.
-test('card fix: a card interrupted while applying never stays pending after restart', async () => {
+// [C1-13] 적용 중에 앱이 죽은 카드는 재시작 뒤 `pending` 으로 남지 않고, **결과를 모르는 카드를
+// 적용된 것으로 추정하지 않는다** — 학생이 다시 확인하게 한다.
+test('card fix: a card interrupted while applying is invalid after restart, never guessed as applied', async () => {
   const f = setup()
   const opened = await openCard(f.deps, f.root, writingToClaude)
   f.store.beginCard(opened.cardId, opened.baseVersion)
+  // 반례 ①: **다른 카드의** 승인이 폴더에 남아 있다. 예전 판은 이것만 보고 `applied` 로 복구했다.
   f.store.approve(f.root, f.store.cardPlan(opened.cardId)!)
   const reopened = new JobStore(join(f.base, 'jobs'))
   const status = cardStatus({ store: reopened }, f.root, opened.cardId)
   expect(status.outcome).not.toBe('pending')
-  // 승인 기록이 있는 카드는 적용된 것으로 복구된다 — 아직 안 한 일을 했다고 하지 않는다.
-  expect(status.card.state).toEqual({ kind: 'applied', scope: 'continue' })
-  // 승인 기록이 없으면 무효로 접는다.
+  expect(status.card.state).toEqual({ kind: 'invalid' })
+  // 판은 그대로다 — 남은 카드가 옛 판으로 밀리지 않는다.
+  expect(reopened.versionOf(f.root)).toBe(f.store.versionOf(f.root))
+
+  // 반례 ②: 승인 기록이 없어도 같은 결과다(추정이 아니라 "모른다"로 통일).
   const g = setup()
   const other = await openCard(g.deps, g.root, writingToClaude)
   g.store.beginCard(other.cardId, other.baseVersion)

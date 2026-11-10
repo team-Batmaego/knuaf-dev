@@ -262,15 +262,17 @@ export class JobStore {
     for (const record of Object.values(this.state.deliveries)) {
       if (record.state === 'started') { record.state = 'uncertain'; recovered = true }
     }
-    // [C1-13] 적용 중(`applying`)에 앱이 죽은 카드는 다시 소비할 수 없다(중복 적용 금지).
-    // 그렇다고 `pending` 으로 영원히 두지도 않는다 — 승인 기록이 있으면 적용된 것으로,
-    // 없으면 무효로 접는다. 판은 그대로 두어 남은 카드가 옛 판으로 밀리게 하지 않는다.
-    for (const [root, list] of Object.entries(this.state.cards)) {
+    // [C1-13] 적용 중(`applying`)에 앱이 죽은 카드는 **결과를 모른다**. 다시 소비할 수는 없고
+    // (중복 적용 금지), `pending` 으로 영원히 둘 수도 없다. 예전 판은 폴더의 승인 유무로
+    // 추정했다 — 그 폴더에 다른 카드의 승인이 있으면 **아무 일도 하지 않은 카드가 `applied`**
+    // 가 됐고, 이번만 승인이 살아 있으면 적용된 카드가 `invalid` 가 됐다. 이제는 추정하지
+    // 않는다: 결과를 모르는 카드는 **무효**로 접고, 학생이 카드를 다시 열어 확인하게 한다
+    // (계약 `CardState.invalid` — 사유 없이 기본 문구). 판은 그대로 두어 남은 카드가 옛 판으로
+    // 밀리지 않게 한다.
+    for (const list of Object.values(this.state.cards)) {
       for (const card of list) {
         if (card.state.kind !== 'applying') continue
-        card.state = this.state.approvals[root]
-          ? { kind: 'applied', scope: 'continue' }
-          : { kind: 'invalid' }
+        card.state = { kind: 'invalid' }
         recovered = true
       }
     }
