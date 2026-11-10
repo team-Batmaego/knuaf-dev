@@ -219,6 +219,7 @@ def test_clear_refuses_to_overwrite_output(school_source, tmp_path):
     out.write_bytes(b"x")
     r = clear(school_source, out_map, out, tmp_path / "receipt.json")
     assert r.returncode == 2
+    assert "refusing to overwrite" in r.stderr
     assert out.read_bytes() == b"x"
 
 

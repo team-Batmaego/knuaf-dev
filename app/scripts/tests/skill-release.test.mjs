@@ -5,7 +5,9 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSyn
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { composeFiles, jsonBytes, sha256, zipBytes, writeTree, fileHashes, readTree, assertLimits, overlayHash } from '../compose-skill.mjs'
+import { composeFiles, jsonBytes, sha256, zipBytes, writeTree, fileHashes, readTree, assertLimits, overlayHash, dirtyVerdict } from '../compose-skill.mjs'
+import { cacheMissReason } from '../fetch-skill.mjs'
+import { assertStagingOutput } from '../stage-skill.mjs'
 import { signManifest, releaseManifest, signedChannel } from '../sign-skill.mjs'
 
 const source = { repo: 'starceas/knuaf-doc', tag: 'v0.2.0', commit: 'a'.repeat(40) }
@@ -115,4 +117,53 @@ test('shared W1 vector verifies original bytes and rejects one-byte mutation', (
   assert.equal(verify(null, bytes, vector.publicKey, sig), true)
   bytes[vector.mutation.offset] ^= vector.mutation.xor
   assert.equal(verify(null, bytes, vector.publicKey, sig), false)
+})
+
+test('offline cache miss names the real cause instead of one generic message', t => {
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-cache-miss-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const upstream = join(root, 'skill-upstreams')
+  const prefix = /^Offline pinned source cache miss: v0\.2\.0@a{40}; expected /
+  const missing = cacheMissReason(upstream, '/pinned/upstream', source)
+  assert.match(missing, prefix)
+  assert.match(missing, /Cause: cache directory .* does not exist \(fresh worktree or never populated\)\./)
+
+  mkdirSync(upstream)
+  const empty = cacheMissReason(upstream, '/pinned/upstream', source)
+  assert.match(empty, prefix)
+  assert.match(empty, /Cause: cache directory .* exists but holds no pinned source \(interrupted clone or manual removal\)\./)
+
+  // An interrupted clone's temporary folder is not a cached pin and must not be reported as one.
+  for (const pin of ['b'.repeat(40), '.checkout-abcd1234']) mkdirSync(join(upstream, pin))
+  const other = cacheMissReason(upstream, '/pinned/upstream', source)
+  assert.match(other, prefix)
+  assert.match(other, /Cause: cache directory .* holds other pins only: b{40}\./)
+  assert.doesNotMatch(other, /\.checkout-/)
+  assert.match(other, /Populate this cache online first, or set KNUAF_SKILL_UPSTREAM to a clean matching checkout\./)
+})
+
+test('dirty source verdict lists the paths to clean and caps the list', () => {
+  assert.equal(dirtyVerdict('?? a.py\n M b.py\n!! c/__pycache__/d.pyc\n'),
+    'Source checkout is dirty (including ignored files): a.py, b.py, c/__pycache__/d.pyc')
+  assert.equal(dirtyVerdict('?? a.py\n M b.py\n!! c/d.pyc\n', 2),
+    'Source checkout is dirty (including ignored files): a.py, b.py (+1 more)')
+  assert.equal(dirtyVerdict('?? 한글.py\n'), 'Source checkout is dirty (including ignored files): 한글.py')
+})
+
+test('staging refuses any output that overlaps the pinned source cache but keeps the default path usable', t => {
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-stage-guard-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const cache = join(root, 'resources', 'skill-upstreams')
+  // Equal path, a pin inside it, a nested path, and any ancestor whose deletion takes the cache.
+  for (const output of [cache, join(cache, 'a'.repeat(40)), join(cache, 'nested', 'deeper'),
+    join(root, 'resources'), root]) {
+    assert.throws(() => assertStagingOutput(output, root), /Refusing to stage over the pinned source cache/, output)
+  }
+  for (const output of [join(root, 'resources', 'skill'), join(root, 'resources', 'skill-upstreams-backup'),
+    join(root, 'out', 'bundle')]) {
+    assert.equal(assertStagingOutput(output, root), resolve(output))
+  }
+  // The CLI default output sits next to the cache, so the guard must not refuse it.
+  const defaultOutput = resolve(import.meta.dirname, '../../resources/skill')
+  assert.equal(assertStagingOutput(defaultOutput), defaultOutput)
 })

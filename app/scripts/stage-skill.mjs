@@ -1,6 +1,6 @@
 // Packaging and release use the same composition; only compatible final bytes become S0.
 import { chmodSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs'
-import { resolve, join } from 'node:path'
+import { relative, resolve, isAbsolute, join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
@@ -12,8 +12,23 @@ const app = resolve(import.meta.dirname, '..')
 const defaultPython = process.env.PYTHON || (existsSync(resolve(app, '../.venv-dev/bin/python'))
   ? resolve(app, '../.venv-dev/bin/python') : process.platform === 'win32' ? 'python' : 'python3')
 
+/** `--output` must never reach the pinned source cache: staging deletes whatever it replaces. */
+export function assertStagingOutput(output, appRoot = app) {
+  const cache = resolve(appRoot, 'resources', 'skill-upstreams'), target = resolve(output)
+  const contains = (parent, child) => {
+    const rest = relative(parent, child)
+    return rest === '' || (rest !== '..' && !rest.startsWith(`..${sep}`) && !isAbsolute(rest))
+  }
+  if (contains(cache, target) || contains(target, cache)) {
+    throw new Error(`Refusing to stage over the pinned source cache: ${target} overlaps ${cache}. ` +
+      'Use an output outside app/resources (the default is app/resources/skill).')
+  }
+  return target
+}
+
 /** Also accepts an explicit local composition for offline compatibility verification. */
 export function stageComposed({ files, upstream, output, python = defaultPython }) {
+  assertStagingOutput(output)
   const temp = mkdtempSync(join(tmpdir(), 'knuaf-stage-check-'))
   try {
     const bundle = join(temp, 'bundle'), archive = join(temp, 'skill.zip')
