@@ -27,6 +27,9 @@ const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AU
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
 
+/** 사양 적용 결과. `unsafe` = 공급자가 사양도 해제도 받지 못해 MCP 상태를 확인할 수 없다. */
+type KordocApplyOutcome = 'attached' | 'rejected' | 'unsafe'
+
 export class ChatService {
   private snapshots = new Map<string, ChatSnapshot>()
   private connections = new Map<string, AgentConnection>()
@@ -42,8 +45,8 @@ export class ChatService {
   private kordocRegistries = new Map<string, KordocMcpRegistry>()
   /** acquire 가 도는 동안만 열리는 안내 통로 — 폴더 키로 그 대화 스냅샷에 묶는다. */
   private kordocNoteSinks = new Map<string, (text: string) => void>()
-  /** 연결별 kordoc 부착 상태. 항목 없음 = 아직 확인 안 함. */
-  private kordocAttach = new WeakMap<AgentConnection, 'attached' | 'notified'>()
+  /** 연결별 kordoc 부착 상태. 항목 없음 = 아직 확인 안 함. `key` 는 부착 당시의 폴더 식별(realpath). */
+  private kordocAttach = new WeakMap<AgentConnection, { state: 'attached' | 'notified'; key: string }>()
   hasPendingLogin(): boolean { return this.pendingLogins.size > 0 }
   suspend(): void { agentActivity.suspend() }
   resume(): void { agentActivity.resume() }
@@ -274,36 +277,97 @@ export class ChatService {
    * - 공급자가 `setMcpSpec` 을 구현하지 않았거나 런타임 공급자가 없으면 아무 것도 하지 않는다 —
    *   확인 자체가 kordoc 설치(수백 MB)를 일으킬 수 있으므로 받을 곳이 없으면 시도하지 않는다.
    * - 확인에 실패하면 `null` 을 넘기고 대화는 그대로 간다. 안내 줄은 레지스트리가 폴더당 1회 넣는다.
-   * - 같은 연결에 이미 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다.
+   * - 같은 연결·같은 폴더에 이미 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다.
+   *   폴더 식별(realpath)이 달라졌으면 **옛 사양을 먼저 뗀다** — A 의 울타리로 B 턴을 돌리지 않는다(M1-01).
+   * - 부착·해제가 모두 실패해 상태를 확인할 수 없으면 그 연결로는 턴을 열지 않고, 새 연결로 한 번만
+   *   다시 연다. 그것도 안 되면 전송을 막고 알린다(M1-02). 반환된 연결을 `execute()` 에 넘긴다.
    */
-  private async attachKordoc(s: ChatSnapshot, connection: AgentConnection): Promise<string[]> {
-    const setSpec = connection.setMcpSpec
-    if (!setSpec || !this.opts.ensureKordoc) return []
-    const state = this.kordocAttach.get(connection)
-    // 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다. 미부착('notified')은
-    // 캐시가 아니므로 다음 턴에 다시 확인하되, "못 붙였다"는 말은 그 연결에 한 번만 한다.
-    if (state === 'attached') return []
-    const notes: string[] = []
+  private async attachKordoc(s: ChatSnapshot, connection: AgentConnection): Promise<{ notes: string[]; connection: AgentConnection }> {
+    if (!connection.setMcpSpec || !this.opts.ensureKordoc) return { notes: [], connection }
     const key = rootKey(s.root)
+    const state = this.kordocAttach.get(connection)
+    if (state?.state === 'attached' && state.key === key) return { notes: [], connection }
+
+    const notes: string[] = []
     this.kordocNoteSinks.set(key, (text) => { notes.push(text) })
-    let spec: KordocMcpSpec | null
-    try { spec = await this.kordocRegistry(s.root).acquire(s.root) }
-    finally { this.kordocNoteSinks.delete(key) }
-    if (spec === null) {
-      if (state === 'notified') return notes
-      this.kordocAttach.set(connection, 'notified')
-      try { await setSpec.call(connection, null) } catch { /* 공급자가 스스로 정리한다 */ }
-      return notes
+    try {
+      const registry = this.kordocRegistry(s.root)
+      const spec = await registry.acquire(s.root)
+      let target = connection
+      let outcome: KordocApplyOutcome = 'rejected'
+      // 남아 있는 상태가 **다른 폴더의 부착**이면 옛 울타리를 먼저 뗀다 — A 의 사양으로 B 턴을
+      // 돌리지 않는다(M1-01). 이 해제는 필수다: 못 떼면 그 연결의 MCP 범위를 확인할 수 없다.
+      if (state?.state === 'attached' && state.key !== key) {
+        outcome = (await this.releaseKordocSpec(target, registry, s.root, true)) ? 'rejected' : 'unsafe'
+      }
+      if (outcome !== 'unsafe') {
+        if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
+        // 처음 보는 연결에는 "붙일 것이 없다"를 알린다. 실패해도 안전 문제는 아니다 — 아직 아무것도
+        // 넘기지 않은 연결이므로 남은 구성이 없다(M1-02 는 이미 사양이 올라간 연결의 경우다).
+        else if (!state) this.releaseKordocSpec(target, registry, s.root, false)
+      }
+      if (outcome === 'unsafe') {
+        target = await this.reopenConnection(s.root, s.provider, connection, s.sessionId)
+        // 새 연결은 처음 보는 연결이다 — 같은 사양을 한 번 더 적용한다.
+        if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
+        else { this.releaseKordocSpec(target, registry, s.root, false); outcome = 'rejected' }
+        if (outcome === 'unsafe') {
+          throw new Error('한글 문서 읽기 도구를 붙이지 못했어요. 이 대화 도구가 문서 읽기 설정을 받아들이지 못해 안전하게 보낼 수 없어요. 잠시 뒤 다시 시도해 주세요.')
+        }
+      }
+      this.kordocAttach.set(target, { state: outcome === 'attached' ? 'attached' : 'notified', key })
+      return { notes, connection: target }
+    } finally {
+      this.kordocNoteSinks.delete(key)
     }
-    this.kordocAttach.set(connection, 'attached')
-    try { await setSpec.call(connection, spec) }
+  }
+  /** 논문 폴더 밖 접근을 막는 사양을 하나 적용한다. 공급자가 거절하면 `null` 로 내리는 것까지가 몫이다. */
+  private async applyKordocSpec(
+    connection: AgentConnection,
+    spec: KordocMcpSpec,
+    registry: KordocMcpRegistry,
+    root: string
+  ): Promise<KordocApplyOutcome> {
+    const setSpec = connection.setMcpSpec!
+    try { await setSpec.call(connection, spec); return 'attached' }
     catch {
       // 공급자가 사양을 받아들이지 못하면 MCP 없이 간다 — 붙이지 못한 것이 전송을 막지는 않는다.
       // 다음 send 는 레지스트리의 성공 캐시에서 같은 사양을 다시 받아 재시도한다.
-      this.kordocAttach.delete(connection)
-      try { await setSpec.call(connection, null) } catch { /* 공급자가 스스로 정리한다 */ }
+      registry.reportProviderFailure(root)
+      return (await this.releaseKordocSpec(connection, registry, root, false)) ? 'rejected' : 'unsafe'
     }
-    return notes
+  }
+  /**
+   * 사양을 내린다. `required` 면 이것이 옛 울타리를 떼는 일이라 실패가 곧 "MCP 범위를 확인할 수
+   * 없음"이다(M1-02). 아니면 아직 아무것도 안 올라간 연결을 정리하는 것이라 실패해도 안전하다.
+   * 반환값 `true` = MCP 없는 상태로 확인됨.
+   */
+  private async releaseKordocSpec(
+    connection: AgentConnection,
+    registry: KordocMcpRegistry,
+    root: string,
+    required: boolean
+  ): Promise<boolean> {
+    try { await connection.setMcpSpec!.call(connection, null); return true }
+    catch {
+      if (!required) return false
+      registry.reportProviderFailure(root)
+      return false
+    }
+  }
+  /** 안전을 확인하지 못한 연결을 버리고 같은 폴더·공급자의 새 연결을 연다(M1-02). */
+  private async reopenConnection(root: string, provider: Provider, dead: AgentConnection, sessionId: string | undefined): Promise<AgentConnection> {
+    const key = this.key(root, provider)
+    if (this.connections.get(key) === dead) this.connections.delete(key)
+    this.kordocAttach.delete(dead)
+    try { await dead.stop() } catch { /* 이미 죽은 연결 — 버리는 것이 목적이다 */ }
+    const fresh = this.connection(root, provider)
+    if (!(await this.checkedStatus(provider, fresh)).connected) {
+      throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
+    }
+    // 새 연결도 첫 전송과 같은 준비를 거친다 — 모델 기본값 확인을 건너뛰면 다른 모델로 조용히 보낸다.
+    await fresh.prepare?.(sessionId)
+    return fresh
   }
   private connection(root: string, provider: Provider): AgentConnection {
     this.ensureActive()
@@ -517,14 +581,17 @@ export class ChatService {
       // 조용히 보내는 대신 학생에게 오류로 알린다(검토 MC1-01).
       await connection.prepare?.(s.sessionId)
       // 폴더의 첫 전송에서만 kordoc 런타임을 확인해 이 연결에 넘긴다(§3.2). 실패해도 대화는 간다.
-      for (const note of await this.attachKordoc(s, connection)) {
+      // 상태를 확인하지 못한 연결은 버리고 새 연결을 받을 수 있다(M1-02) — 그 연결로 실행한다.
+      const attach = await this.attachKordoc(s, connection)
+      for (const note of attach.notes) {
         s.messages.push({ id: randomUUID(), role: 'system', text: note, at: new Date().toISOString() })
       }
+      const live = attach.connection
       s.skillHash = version; s.skillLoaded = false; s.state = 'running'; s.error = undefined
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
       this.publish(s)
-      const run = this.execute(s, connection, text, requestId).finally(release)
+      const run = this.execute(s, live, text, requestId).finally(release)
       this.runs.set(this.key(root, provider), run)
       void run.finally(() => this.runs.delete(this.key(root, provider)))
       return structuredClone(s)

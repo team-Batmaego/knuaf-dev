@@ -29,7 +29,8 @@ const FAILURE_REASON: Record<KordocAttachFailure, string> = {
   'old-version': '깔린 kordoc 판이 오래됐어요',
   'no-node': 'kordoc을 실행할 프로그램을 정하지 못했어요',
   'shuttle': 'kordoc 실행 파일이 직접 실행할 수 있는 형태가 아니에요',
-  'bad-root': '논문 폴더 경로를 확인하지 못했어요'
+  'bad-root': '논문 폴더 경로를 확인하지 못했어요',
+  'provider': '이 대화 도구가 한글 문서 읽기를 받아들이지 못했어요'
 }
 
 /** 설계 §3.2 '실패 시'의 문장 그대로. (이유)만 바뀐다. */
@@ -143,6 +144,14 @@ export class KordocMcpRegistry {
   isDisabled(root: string): boolean {
     const path = resolve(root)
     return this.disabled.has(path) || this.disabled.has(this.key(root))
+  }
+
+  /**
+   * 공급자가 사양을 받아들이지 못한 경우(§3.2 '실패 시'). 사양 생성은 성공했으므로 이 모듈이
+   * 스스로 말하지 않는다 — 부착을 시도한 쪽(`ChatService`)이 알리고, 안내는 폴더당 1회다.
+   */
+  reportProviderFailure(root: string): void {
+    this.reportOnce(this.key(root), 'provider')
   }
 
   private rememberAttached(path: string, key: string): void {

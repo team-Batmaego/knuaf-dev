@@ -95,8 +95,8 @@ export interface KordocMcpSpec {
   version: string
 }
 
-/** 미부착 이유 — 실패 안내 문장을 고르는 데 쓴다. */
-export type KordocAttachFailure = 'no-runtime' | 'old-version' | 'no-node' | 'shuttle' | 'bad-root'
+/** 미부착 이유 — 실패 안내 문장을 고르는 데 쓴다. `provider` 는 사양은 만들었지만 공급자가 받지 못한 경우다. */
+export type KordocAttachFailure = 'no-runtime' | 'old-version' | 'no-node' | 'shuttle' | 'bad-root' | 'provider'
 
 export type KordocMcpResolution =
   | { ok: true; spec: KordocMcpSpec; reason: null }
