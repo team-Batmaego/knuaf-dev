@@ -3,6 +3,8 @@ import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
 import { applyRejection, recordRejection } from './rejectLog'
+import { codexTokens, tokenRecord, type TokenCounts } from './jobs/tokens'
+import { appendTokenRecord } from './jobs/token-log'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
@@ -98,8 +100,40 @@ export class CodexConnection implements AgentConnection {
   private serverArgs: string[]
   /** stop() 이후에는 진행 중인 connect() 의 재시도가 새 프로세스를 다시 띄우지 않는다. */
   private stopped = false
+  /** 대화(thread)별 토큰 기록 순번 — 같은 턴의 알림 여러 개를 구분한다. */
+  private tokenTurns = new Map<string, { turnId: unknown; request: number; notifications: number }>()
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
+  }
+  /**
+   * `thread/tokenUsage/updated` 알림 하나를 대화별 JSONL 한 줄로 남긴다. `last`(이번 턴)와
+   * `total`(서버 누적)을 **더하지 않고** 그대로 옮기며, 숫자·식별자만 담는다.
+   * 기록 실패는 대화를 막지 않는다.
+   */
+  private recordTokenUsage(p: { threadId?: unknown; turnId?: unknown; tokenUsage?: unknown }): void {
+    try {
+      const usage = p.tokenUsage as
+        | { last?: unknown; total?: unknown }
+        | undefined
+      if (!usage || typeof usage.last !== 'object' || !usage.last || typeof usage.total !== 'object' || !usage.total) return
+      const conversationId = typeof p.threadId === 'string' && p.threadId ? p.threadId : this.thread ?? ''
+      if (!conversationId) return
+      const turnId = p.turnId
+      const seen = this.tokenTurns.get(conversationId)
+      const state = !seen || seen.turnId !== turnId
+        ? { turnId, request: (seen?.request ?? 0) + 1, notifications: 0 }
+        : seen
+      state.notifications += 1
+      this.tokenTurns.set(conversationId, state)
+      const record = tokenRecord({
+        conversationId, jobId: '', company: 'codex',
+        model: this.threadModel ?? this.options.env.KNUAF_CODEX_MODEL ?? '',
+        effort: this.threadEffort ?? this.options.env.KNUAF_CODEX_EFFORT ?? null,
+        role: 'chat'
+      }, codexTokens({ last: usage.last as TokenCounts, total: usage.total as TokenCounts }, state.request, state.notifications),
+      new Date().toISOString())
+      if (record) appendTokenRecord(this.options.root, 'codex', record)
+    } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
   private async connect(): Promise<JsonRpcProcess> {
     if (this.stopped) throw new Error('Codex 연결이 중단됐어요.')
@@ -145,6 +179,10 @@ export class CodexConnection implements AgentConnection {
           provider: 'codex', command: p.item.command, output: p.item.aggregatedOutput, exitCode: p.item.exitCode
         })
         if (record) recordRejection(join(this.options.root, '.knuaf-gui', 'apply-reject.log'), record)
+      } else if (method === 'thread/tokenUsage/updated') {
+        // 캐시 토큰(cachedInputTokens·cacheWriteInputTokens)을 대화별로 기록만 한다 — 동작 불변.
+        // last 는 이번 턴, total 은 서버가 준 누적이다. 앱이 더하지 않고 그대로 옮긴다.
+        this.recordTokenUsage(p)
       }
       if (method === 'item/agentMessage/delta') {
         const text = (this.messages.get(p.itemId) ?? '') + p.delta
