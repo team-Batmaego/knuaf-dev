@@ -12,7 +12,7 @@ import type {
   ReviewModelGroup
 } from '../../../shared/lanes-ipc'
 import type { Provider } from '../../../shared/chat'
-import { LANES_TEST_EVENT } from '../copy-lanes'
+import { LANES_TEST_ARCHIVE_EVENT, LANES_TEST_EVENT } from '../copy-lanes'
 
 /**
  * 작업 분담(단위 6) 상태 — **계산하지 않는다.**
@@ -97,6 +97,11 @@ interface LanesState {
    * 접힌 줄이 `account-changed` 만 다른 문구를 쓰므로(설계 §3-5 [r3c C0]) 응답에서 받아 여기 둔다.
    */
   invalid: Record<string, CardInvalidReason>
+  /**
+   * `knuaf:lanes-test-archive` 로 넣은 보관 대화 — `archive` 는 묶음이 아니라 응답으로만 오는 값이라
+   * (계약 `LanesApi.archive`) 주입한 묶음만으로는 §4-2 화면을 그릴 수 없다. 배선 뒤에는 늘 빈 배열.
+   */
+  testArchives: ArchivedChat[]
 
   attach: () => void
   detach: () => void
@@ -121,6 +126,7 @@ export const useLanes = create<LanesState>((set, get) => ({
   injected: false,
   lastError: null,
   invalid: {},
+  testArchives: [],
 
   attach: () => {
     const { lanes } = seam()
@@ -142,6 +148,13 @@ export const useLanes = create<LanesState>((set, get) => ({
           set({ injected: true, unavailable: false })
           get().apply(detail)
         }
+      }) as EventListener)
+      window.addEventListener(LANES_TEST_ARCHIVE_EVENT, ((event: Event) => {
+        const detail = (event as CustomEvent<ArchivedChat | ArchivedChat[]>).detail
+        if (!detail) return
+        const list = Array.isArray(detail) ? detail : [detail]
+        const kept = list.filter((chat) => chat && chat.summary && Array.isArray(chat.messages))
+        if (kept.length > 0) set({ testArchives: kept })
       }) as EventListener)
     }
   },

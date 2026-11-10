@@ -12,22 +12,26 @@ import { Icon } from './Icon'
  * 기본값은 지금까지의 규칙 그대로: bad 만 `alert`, 나머지는 `status`.
  */
 export type ZoneTone = 'wait' | 'bad' | 'attn' | 'info'
-export function ZoneLine({ tone, title, sub, raw, actions, onClose, onReport, role, id }: {
+export function ZoneLine({ tone, title, sub, raw, actions, onClose, onReport, role, id, detailFirst }: {
   tone: ZoneTone; title: ReactNode; sub?: ReactNode; raw?: string; actions?: ReactNode
   onClose?: () => void; onReport?: () => void
   /** 줄 자체의 역할. `none` 이면 아무 역할도 주지 않는다(작업 분담 줄). */
   role?: 'alert' | 'status' | 'none'
   id?: string
+  /** [자세히]를 단추들 **앞**에 둔다 — 작업 분담 줄의 기본(설계 §2-1). 기존 줄은 그대로 뒤에 둔다. */
+  detailFirst?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const lineRole = role === 'none' ? undefined : (role ?? (tone === 'bad' ? 'alert' : 'status'))
+  const details = raw && <button type="button" className="lk" aria-expanded={open} onClick={() => setOpen(!open)}>{CHAT.details}</button>
   return (
     <div className="zline-wrap">
       <div id={id} className={`zline ${tone}`} role={lineRole}>
         {tone === 'wait' ? <span className="spin" /> : <Icon name={tone === 'info' ? 'info' : 'warn'} size={16} className={`ic ${tone}`} />}
         <span className="grow">{title}{sub && <small>{sub}</small>}</span>
+        {detailFirst && details}
         {actions}
-        {raw && <button type="button" className="lk" aria-expanded={open} onClick={() => setOpen(!open)}>{CHAT.details}</button>}
+        {!detailFirst && details}
         {onReport && <button type="button" className="lk" onClick={onReport}>{REPORT.inline}</button>}
         {onClose && <button type="button" className="zx" aria-label={CLOSE_LABEL} title={CLOSE_LABEL} onClick={onClose}>✕</button>}
       </div>

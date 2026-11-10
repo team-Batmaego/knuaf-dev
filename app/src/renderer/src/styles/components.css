@@ -799,7 +799,8 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .chat-md button.lk { margin-top: 0; }
 
 /* ---- 설정 분류 칸 — 본문이 좁아지면 함께 줄어 글자가 한 글자씩 꺾이지 않게(설계 §5 [r3 U6-07]) ---- */
+/* 임계값은 설계의 "내용 칸 480px 미만"에서 역산한다: 480(내용) + 196(분류) + 32(좌우 여백) = 708. */
 .settings-nav { width: 196px; flex: 0 0 196px; }
-@container settings-wrap (max-width: 560px) {
+@container settings-wrap (max-width: 708px) {
   .settings-nav { width: 156px; flex: 0 0 156px; }
 }

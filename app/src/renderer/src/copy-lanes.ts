@@ -1,4 +1,4 @@
-import { MODEL_PICKER, PROVIDER_NAME } from './copy'
+import { MODEL_PICKER, PROVIDER_NAME, objectParticle } from './copy'
 import { WORK_LANES, type Provider, type WorkLane } from '../../shared/chat'
 import type { CardVariant, JobStatus, ModelRef } from '../../shared/lanes-ipc'
 
@@ -94,9 +94,11 @@ const PARTICLE: Record<string, '이' | '가'> = {
 }
 
 export function subjectParticle(name: string): '이' | '가' {
-  const fixed = PARTICLE[name.trim()]
+  // "Claude Opus"·"ChatGPT Astra" 처럼 회사 이름이 앞에 붙는다 — 조사는 **끝 낱말**이 정한다.
+  const word = name.trim().split(/\s+/).pop() ?? ''
+  const fixed = PARTICLE[word]
   if (fixed) return fixed
-  const last = name.trim().slice(-1).toLowerCase()
+  const last = word.slice(-1).toLowerCase()
   if (!last) return '가'
   return 'aeiou'.includes(last) ? '가' : '이'
 }
@@ -104,6 +106,14 @@ export function subjectParticle(name: string): '이' | '가' {
 /** `ChatGPT Sol이` 처럼 조사까지 붙인 이름. */
 export function subjectOf(name: string): string {
   return `${name}${subjectParticle(name)}`
+}
+
+/**
+ * 보조사 `은/는` — 받침 판정은 `copy.ts` 의 `objectParticle` 과 같은 규칙이라 그 결과를 뒤집어 쓴다.
+ * "반복 작업"처럼 받침으로 끝나는 이름에 `는` 을 붙이면 "작업는"이 된다.
+ */
+export function topicParticle(word: string): '은' | '는' {
+  return objectParticle(word) === '을' ? '은' : '는'
 }
 
 export function clip(text: string, max = 40): string {
@@ -160,7 +170,7 @@ export const LANE_LINE = {
     if (clock) parts.push(`${fromCompany}가 알려 준 한도 풀림 예정 ${clock}`)
     return parts.join(' · ')
   },
-  limitOfferFoot: (lane: string) => `나중에: 이번 ${lane}는 건너뛰어요`,
+  limitOfferFoot: (lane: string) => `나중에: 이번 ${lane}${topicParticle(lane)} 건너뛰어요`,
   /** §2-1 한도 + 이어 하기 불가(사유 한 줄). */
   limitBlocked: (lane: string) => `${lane} 담당이 한도에 걸려 하지 못했어요`,
   limitBlockedReason: {
@@ -242,9 +252,11 @@ export const LANE_SAY = {
 // =====================================================================================
 
 export const LANE_EVENT = {
-  delivered: (lane: string, by: string, task: string) =>
-    `${lane} 담당(${by})이 “${clip(task)}”을 끝내 도우미에게 넘겼어요`,
-  continued: (lane: string, by: string) => `${lane}를 ${by}이 이어 받아 끝내 도우미에게 넘겼어요`,
+  delivered: (lane: string, by: string, task: string) => {
+    const text = clip(task)
+    return `${lane} 담당(${by})이 “${text}”${objectParticle(text)} 끝내 도우미에게 넘겼어요`
+  },
+  continued: (lane: string, by: string) => `${lane}${objectParticle(lane)} ${subjectOf(by)} 이어 받아 끝내 도우미에게 넘겼어요`,
   notRun: (lane: string, reason: 'limit' | 'auth' | 'unknown' | 'error') => {
     const word = reason === 'limit' ? '한도' : reason === 'auth' ? '로그인' : reason === 'unknown' ? '사용량 모름' : '오류'
     return `${lane} 담당이 하지 못했어요(${word}) — 도우미에게 알렸어요`
@@ -264,8 +276,8 @@ export const LANE_EVENT = {
    * §4-2 보관 대화 맨 끝 줄은 같은 사건을 다르게 쓴다(`handoffEnd`).
    */
   handoffDone: (from: string, to: string) =>
-    `${from} 대화가 한도로 멈춰 ${to}가 이어 받았어요. 논문 파일과 진행 상황은 그대로예요`,
-  handoffEnd: (to: string) => `한도로 멈췄어요 — ${to}이 이어 받았어요`,
+    `${from} 대화가 한도로 멈춰 ${subjectOf(to)} 이어 받았어요. 논문 파일과 진행 상황은 그대로예요`,
+  handoffEnd: (to: string) => `한도로 멈췄어요 — ${subjectOf(to)} 이어 받았어요`,
   archiveLink: '멈춘 대화 보기'
 } as const
 
@@ -441,6 +453,12 @@ export const LANE_STOP_LABEL = '대화와 담당 함께 멈추기'
 
 /** 테스트 주입 통로 — preload(preload/index.ts)에 `lanes` 가 아직 없어서(배선 C1 몫) 화면 시험은 이 사건으로 상태를 넣는다. */
 export const LANES_TEST_EVENT = 'knuaf:lanes-test'
+
+/**
+ * 보관 대화도 같은 통로로 넣는다 — `archive` 는 묶음이 아니라 요청 응답으로만 오는 값이라
+ * (`LanesApi.archive`) 주입한 묶음만으로는 §4-2 화면을 그릴 수 없다. 배선 뒤에는 쓰이지 않는다.
+ */
+export const LANES_TEST_ARCHIVE_EVENT = 'knuaf:lanes-test-archive'
 
 /** 폴더가 없거나 이음매가 없을 때 화면이 쓰는 빈 값 대신 — 계산하지 않는다는 원칙상 store 가 `null` 로 둔다. */
 export type LaneModelRef = ModelRef

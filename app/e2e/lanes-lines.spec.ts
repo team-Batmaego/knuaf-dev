@@ -72,6 +72,8 @@ test('넘기기 갈래 — 실패만 [다시 넘기기], 불확실은 단추 없
   expect(failed.detail).toBeTruthy()
   expect(failed.actions).toEqual([{ id: 'redeliver', label: LANE_ACTION.redeliver }])
   expect(failed.tone).toBe('attn')
+  // §2-1 표 순서: 실패 줄만 [다시 넘기기]가 [자세히]보다 앞이다.
+  expect(failed.detailAfterActions).toBe(true)
 
   const uncertain = lineView(line('deliver-uncertain', { tier: 2 }), NOW)
   expect(uncertain.title).toBe(LANE_LINE.deliverUncertain('자료 찾기'))
@@ -260,6 +262,20 @@ test('이름·조사·자르기 — 표 밖 이름도 읽을 수 있게', () => 
   expect(subjectParticle('Data')).toBe('가')
   expect(subjectParticle('Chat')).toBe('이')
   expect(subjectOf('Opus')).toBe('Opus가')
+  // 조사는 **끝 낱말**이 정한다 — "ChatGPT Astra"의 끝 글자 `t`가 아니라 `Astra`를 본다.
+  expect(subjectOf('ChatGPT Astra')).toBe('ChatGPT Astra가')
+  expect(subjectOf('ChatGPT Sol')).toBe('ChatGPT Sol이')
+  expect(subjectOf('Claude Opus')).toBe('Claude Opus가')
+
+  // 목적격·보조사는 한글 받침으로 고른다 — "조사"는 받침이 없어 `를`, "작업"은 있어 `은`.
+  expect(LANE_EVENT.delivered('자료 찾기', 'ChatGPT Astra', '감초 도매·소매 가격 조사'))
+    .toBe('자료 찾기 담당(ChatGPT Astra)이 “감초 도매·소매 가격 조사”를 끝내 도우미에게 넘겼어요')
+  expect(LANE_EVENT.delivered('글쓰기', 'ChatGPT Sol', '3장 초안'))
+    .toBe('글쓰기 담당(ChatGPT Sol)이 “3장 초안”을 끝내 도우미에게 넘겼어요')
+  expect(LANE_LINE.limitOfferFoot('자료 찾기')).toBe('나중에: 이번 자료 찾기는 건너뛰어요')
+  expect(LANE_LINE.limitOfferFoot('반복 작업')).toBe('나중에: 이번 반복 작업은 건너뛰어요')
+  expect(LANE_EVENT.handoffEnd('ChatGPT Sol')).toBe('한도로 멈췄어요 — ChatGPT Sol이 이어 받았어요')
+  expect(LANE_EVENT.continued('자료 찾기', 'Claude Sonnet')).toBe('자료 찾기를 Claude Sonnet이 이어 받아 끝내 도우미에게 넘겼어요')
 
   expect(clip('  여러   줄\n공백  ')).toBe('여러 줄 공백')
   expect(clip('가'.repeat(40))).toHaveLength(40)

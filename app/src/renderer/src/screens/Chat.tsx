@@ -454,6 +454,12 @@ export function Chat() {
    */
   const openArchive = (archiveId: string): void => {
     if (!projectRoot) return
+    // 주입 통로(설계 §7) — 배선 전 화면 시험은 `knuaf:lanes-test-archive` 로 넣은 값을 쓴다.
+    const injected = useLanes.getState().testArchives.find((chat) => chat.summary.archiveId === archiveId)
+    if (injected) {
+      setArchive({ id: archiveId, chat: injected, loading: false, error: null })
+      return
+    }
     setArchive({ id: archiveId, chat: null, loading: true, error: null })
     void useLanes.getState().callValue(({ lanes }) => lanes.archive(projectRoot, archiveId)).then((r) => {
       setArchive((prev) => prev && prev.id === archiveId

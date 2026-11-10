@@ -58,6 +58,11 @@ export interface LaneLineView {
   sub?: string
   /** [자세히] 로 펼칠 산문(원문 오류·이어 받기 묶음). */
   detail?: string
+  /**
+   * [자세히]를 단추들 **뒤**에 둔다 — 설계 §2-1 "넘기기 실패" 줄만 `[다시 넘기기] [자세히]` 순서다.
+   * 나머지 줄은 `[자세히] [문제 신고]` 처럼 [자세히]가 먼저다.
+   */
+  detailAfterActions?: boolean
   actions: LaneActionView[]
   /** ✕ — main이 `dismissible:false` 라고 한 줄은 닫을 수 없다(card-pending). */
   close: boolean
@@ -123,6 +128,7 @@ export function lineView(line: LaneLine, now: number): LaneLineView {
         title: LANE_LINE.deliverFailed(lane),
         sub: LANE_LINE.keptResult,
         detail: detailText(line.detail),
+        detailAfterActions: true,
         actions: [{ id: 'redeliver', label: LANE_ACTION.redeliver }]
       }
     /**

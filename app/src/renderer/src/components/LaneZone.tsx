@@ -84,6 +84,7 @@ function LaneZoneLine({ view, line, onAction, onShowCard, more, less }: {
   )
   return (
     <ZoneLine tone={view.tone} title={view.title} sub={subOf(view.sub)} raw={view.detail}
+      detailFirst={!view.detailAfterActions}
       role={view.alert ? 'alert' : 'none'} id={view.id} actions={actions}
       onClose={view.close ? () => onAction('dismiss', line) : undefined} />
   )
