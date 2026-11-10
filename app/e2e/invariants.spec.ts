@@ -84,7 +84,7 @@ test('hard rules hold across screens', async () => {
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
 
   await expect(page.getByLabel('프로젝트', { exact: true })).toBeVisible()
-  await expect(page.locator('.titlebar .tbtn.now')).toBeVisible()
+  await expect(page.locator('.titlebar .tbtn.stg')).toBeVisible()
 
   // 대화 화면 controls must not ask for JSON/model/path input either (same rule as 도구).
   expect(await page.locator('.chat-pane .tbar-seg, .chat-pane .segmented').count()).toBe(0)

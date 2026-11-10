@@ -20,7 +20,7 @@ import { MENUS } from '../copy-menus'
  * macOS 신호등 자리(왼쪽 여백)는 `main/index.ts`의 창 설정과 함께 봐야 해서 별도 작업
  * (feat/gui-v5-hidden) 합류 뒤에 맞춘다 — 그 전에는 CSS 토큰 `--titlebar-inset`만 비워 둔다.
  *
- * 가운데 "지금 · ○○ ▾"은 `StageMenu` 다 — 3-A 의 `derive()` 가 정한 "지금" 하나를 말한다.
+ * 가운데 진행 표시(T1)는 `StageMenu` 다 — 도우미 답의 진행 목록 덩어리를 고른다.
  */
 export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
   useUpdateSubscription()
