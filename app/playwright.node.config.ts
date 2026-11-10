@@ -14,6 +14,7 @@ export default defineConfig({
     'preparation-state.spec.ts',
     'artifact-refresh-store.spec.ts',
     'chat-markdown.spec.ts',
+    'progress-list.spec.ts',
     'guard-scope.spec.ts',
     'guard-scan-store.spec.ts',
     'guard-reconcile.spec.ts',
