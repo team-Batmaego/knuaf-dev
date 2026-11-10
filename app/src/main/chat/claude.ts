@@ -967,8 +967,11 @@ const RELAY_SYSTEM_APPEND = `${CLAUDE_SYSTEM_APPEND} 이 세션은 앱이 연 �
  * 수명: 주문 하나가 끝나면(`removeRelayPlugin`) 지운다. 앱이 중간에 죽어 남으면 다음 시작의
  * `sweepRelayPlugins` 가 치운다.
  */
+/** 주문 id 이자 플러그인 폴더 이름의 규칙 — 만들 때·지울 때·정리할 때 같은 규칙을 쓴다. */
+const RELAY_JOB_ID = /^[a-zA-Z0-9_-]+$/
+
 export function relayPluginPath(appDir: string, jobId: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) throw new Error('Invalid job id')
+  if (!RELAY_JOB_ID.test(jobId)) throw new Error('Invalid job id')
   return join(appDir, 'relay-plugin', jobId)
 }
 
@@ -1006,7 +1009,7 @@ function ownsRelayPlugin(dir: string): boolean {
 
 /** 주문이 끝났을 때(성공·실패·중단) 그 주문 전용 폴더를 지운다. 우리 것이 아니면 건드리지 않는다. */
 export function removeRelayPlugin(appDir: string, jobId: string): void {
-  if (!/^[a-zA-Z0-9_-]+$/.test(jobId)) return
+  if (!RELAY_JOB_ID.test(jobId)) return
   const path = relayPluginPath(appDir, jobId)
   // 표식이 없으면 이 폴더는 우리가 만든 것이 아니다 — 지우지 않는다.
   if (!ownsRelayPlugin(path)) return
@@ -1031,6 +1034,9 @@ export function sweepRelayPlugins(appDir: string): void {
     names = readdirSync(base)
   } catch { return }
   for (const name of names) {
+    // 표식 **과** 이름 규칙이 둘 다 맞아야 우리 것이다 — 이름을 바꾼 폴더(예: `job-a.backup`)는
+    // 사람이 손댄 것이라 남긴다(검토 5회차).
+    if (!RELAY_JOB_ID.test(name)) continue
     const path = join(base, name)
     if (!ownsRelayPlugin(path)) continue
     try { rmSync(path, { recursive: true, force: true }) } catch { /* 하나 못 지워도 나머지는 지운다 */ }

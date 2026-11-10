@@ -3,7 +3,7 @@
 // 원칙: 지적마다 **먼저 재현**하고, 고친 뒤 같은 시험이 통과함을 본다. 실행으로 재현할 수 없는
 // 것(차단 2)은 스키마 근거 + 보낸 옵션 고정으로 잠근다. 실제 AI 호출 0회.
 import { expect, test } from '@playwright/test'
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ClaudeRelayConnection, claudeExecutionAccount, prepareRelayPlugin, removeRelayPlugin, sweepRelayPlugins } from '../src/main/chat/claude'
@@ -128,6 +128,25 @@ test('[중요 1·4회차] 정리는 남의 파일과 남의 폴더를 건드리�
   expect(readFileSync(join(base, 'keep.txt'), 'utf8')).toBe('KEEP')
   expect(readFileSync(join(foreign, 'theirs.md'), 'utf8')).toBe('THEIRS')
   expect(existsSync(odd)).toBe(true)
+})
+
+/**
+ * 표식이 있어도 이름이 주문 id 규칙에 안 맞으면 남긴다(검토 5회차 중요 1 재현: 학생·사람이
+ * `job-a` 를 `job-a.backup` 으로 바꿔 메모를 넣은 경우 표식 때문에 통째로 지워졌다).
+ */
+test('[중요 1·5회차] 표식이 있어도 이름 규칙에 안 맞는 폴더는 지우지 않는다', () => {
+  const { skill } = fixtureRoot('sweep-renamed')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-sweep-')))
+  const made = prepareRelayPlugin(appDir, 'job-a', skill)
+  const renamed = join(dirname(made), 'job-a.backup')
+  renameSync(made, renamed)
+  writeFileSync(join(renamed, 'memo.txt'), 'MEMO')
+  const ours = prepareRelayPlugin(appDir, 'job-c', skill)
+
+  sweepRelayPlugins(appDir)
+
+  expect(readFileSync(join(renamed, 'memo.txt'), 'utf8')).toBe('MEMO')
+  expect(existsSync(ours)).toBe(false)
 })
 
 /** 기준 폴더(`relay-plugin`)가 링크면 아무것도 지우지 않는다 — 바깥을 순회할 수 없다. */
