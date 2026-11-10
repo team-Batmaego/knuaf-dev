@@ -418,6 +418,8 @@ export const LANES_SETTINGS = {
   consentWithdrawn: (day: string) => `거둠${day ? ` · ${day}` : ''}`,
   consentAgree: '안내 보고 동의하기',
   consentAgain: '안내 보고 다시 동의하기',
+  /** 확인 창의 최종 단추(설계 §5 "…를 확인 창에 보이고 [동의] [취소]"). */
+  consentYes: '동의',
   consentWithdraw: '동의 거두기',
   consentOnly: '구독 로그인일 때만 작업 분담을 써요.',
   noFolder: '논문을 열면 그 논문의 배치가 보여요',

@@ -16,14 +16,16 @@ import { UpdateSettings } from '../components/Updates'
 import { settingsSectionForFocus, type SettingsSection } from '../copy-menus'
 import { requestArchive } from './Chat'
 import { useLanes } from '../store/lanes'
-import { LANE_ARCHIVE, providerName, stampKo } from '../copy-lanes'
+import { LANE_ARCHIVE, LANES_SETTINGS, providerName, stampKo } from '../copy-lanes'
 import type { ArchivedChatSummary } from '../../../shared/lanes-ipc'
+import { LanesSettings } from './LanesSettings'
 
 /** 폴더가 다르거나 아직 안 왔을 때 — 참조가 고정돼야 셀렉터가 매번 새 배열을 만들지 않는다. */
 const NO_ARCHIVES: ArchivedChatSummary[] = []
 
 const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'helper', label: '도우미 연결' },
+  { id: 'lanes', label: LANES_SETTINGS.title },
   { id: 'folder', label: '폴더' },
   { id: 'trouble', label: '문제 해결' },
   { id: 'tools', label: '고급 도구' },
@@ -97,14 +99,18 @@ export function SettingsScreen() {
   const pickFolder = async () => { const d = await window.knuaf.pickFolder(); if (d) void tryOpen(d) }
   const base = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-      <nav aria-label={SETTINGS.title} style={{ width: 196, flex: '0 0 196px', overflowY: 'auto', padding: 10, background: 'var(--bg-2)' }}>
+    <div className="settings-wrap" style={{ display: 'flex', height: '100%', minHeight: 0, containerType: 'inline-size', containerName: 'settings-wrap' }}>
+      <nav className="settings-nav" aria-label={SETTINGS.title} style={{ overflowY: 'auto', padding: 10, background: 'var(--bg-2)' }}>
         {SETTINGS_SECTIONS.map(({ id, label }) => <button key={id} type="button" aria-current={section === id ? 'page' : undefined}
           onClick={() => setSection(id)} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8,
             border: section === id ? 'var(--hairline) solid var(--line)' : 'var(--hairline) solid transparent',
             background: section === id ? 'var(--panel)' : 'transparent', fontWeight: section === id ? 600 : 400 }}>{label}</button>)}
       </nav>
-      <div ref={body} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '0 16px' }}>
+      <div ref={body} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '0 16px', containerType: 'inline-size' }}>
+      <section className="card" hidden={section !== 'lanes'}>
+        <div className="card-head"><h2>{LANES_SETTINGS.title}</h2></div>
+        <LanesSettings root={root} />
+      </section>
       <section className="card" hidden={section !== 'folder'}>
         <div className="card-head"><h2>{SETTINGS.folderTitle}</h2></div>
         {root && <div className="row"><strong>{base(root)}</strong><span className="caption">{root}</span></div>}
