@@ -1,128 +1,188 @@
 /**
- * guard/reconcile.ts — T0(질의 시작 전) / T2(질의 종료) 맞춤
+ * guard/reconcile.ts — T0(질의 시작 전) / T2(질의 끝) 맞추기
  *
- * - T0(질의 시작 전, send() 전): 지난 T2 뒤로 바뀐 보호 파일은 학생이 고친 것으로 보고
- *   수용(알림만) — queryOpen이 설정되어 있으면 T2처럼 되돌리지 않음
- * - T2(질의 끝, execute() finally 전, release 전): 허락 없는 보호 파일 변경은 되돌리고
- *   격리(.knuaf-gui/quarantine/<timestamp>/) + 빈 .claude 하위 폴더 정리
- *   - 루트 CLAUDE.md는 예외: 카드로 허락돼도 T2에서 되돌린다(§11.8)
- * - 보호 대상: .claude/ 아래 파일·링크(스캔 leaves 기준)
+ * 두 시점뿐이다(§4.3). 자리는 `service.ts` 전송 경로(Claude·Codex 공통, 폴더 잠금 안).
+ *
+ * T0 — 지난 T2 뒤로 바뀐 잎은 **학생이 고친 것**으로 보고 받아들인다(알림만).
+ *      단, `queryOpen` 표식이 남아 있으면 앱이 강제 종료된 것이므로 그 변경은
+ *      **질의 안 변경**으로 보고 T2처럼 되돌린다(§10-8 다).
+ * T2 — 그 질의 동안 바뀐 잎 중 카드로 허락된 경로만 남기고 나머지는 되돌린다.
+ *      **루트 `CLAUDE.md`는 허락됐어도 되돌린다**(§11.8 — 규칙은 [규칙으로 기억] 단추로만).
+ *
+ * 되돌리기는 **잎 단위**다. 폴더를 통째로 옮기지 않는다. 지금 내용은 격리에 남긴다.
  */
 
-import { isProtectedPath, isSkillHostPath } from './scope'
-import { type GuardState, type RuleEntry, computeIntegrity, quarantineFile, cleanupEmptyClaudeDirs } from './store'
+import { adoptLeaves, cleanupEmptyClaudeDirs, quarantineLeaf, removeLeaf, restoreLeaf, type GuardState } from './store'
+import { diffLeaves, scanRoot, type ScanResult } from './scan'
+import type { LeafFingerprint } from './scan'
 
-/** T0 수용 결과 */
+/** 되돌림 한 건 */
+export interface RevertEntry {
+  rel: string
+  /** 격리에 남긴 자리(없으면 null — 지운 새 잎 등) */
+  quarantinePath: string | null
+  reason: 'untrusted' | 'claude-md' | 'crashed-query'
+  /** 보관본에 있던 잎을 되살렸는가(false = 새로 생긴 잎을 지웠다) */
+  restoredFromStore: boolean
+}
+
 export interface T0Result {
-  accepted: boolean  // T0에서 수용(알림만)
-  notes: string[]    // 알림 메시지 배열
-  queryOpen: boolean // queryOpen 표식이 있었음
-}
-
-/** T2 되돌림 결과 */
-export interface T2Result {
-  /** 실제로 되돌린 leaf 경로들 */
-  restored: string[]
-  /** 격리된 경로들 */
-  quarantined: string[]
-  /** 삭제된 빈 폴더 경로들 */
-  cleaned: string[]
-  /** 알림 메시지 */
+  /** 질의를 시작해도 되는가(1층이 보증이라 실패해도 true) */
+  proceed: boolean
+  /** 이전 질의가 T2 없이 끝났다(강제 종료) */
+  crashedQuery: boolean
+  /** 학생 변경으로 받아들인 상대 경로들 */
+  accepted: string[]
+  /** 되돌린 상대 경로들(강제 종료 복구) */
+  reverted: RevertEntry[]
   notes: string[]
-  /** integrity가 변경됐는지 */
-  integrityChanged: boolean
+  /** 루트 CLAUDE.md 내용이 바뀌었는가(넣는 판 갱신은 instructions가 한다) */
+  claudeMdChanged: boolean
+  /** 저장할 새 상태(호출자가 saveState) */
+  state: GuardState
 }
 
-/** T0: 질의 시작 전 수용 판단 */
-export function evaluateT0(
-  _rootReal: string,
-  _currentState: GuardState,
-  previousStateFromLastT2: GuardState | null,
-  queryOpen: boolean
-): T0Result {
-  const notes: string[] = []
+export interface T2Result {
+  /** 카드 허락으로 남긴 상대 경로들 */
+  kept: string[]
+  reverted: RevertEntry[]
+  cleaned: string[]
+  notes: string[]
+  claudeMdChanged: boolean
+  state: GuardState
+}
 
-  // T0: 지난 T2 뒤 바뀐 보호 파일은 학생이 고친 것으로 보고 수용
-  // queryOpen이 true면 T2처럼 되돌리지 않음(앱이 직접 관리 중)
-  if (queryOpen && previousStateFromLastT2) {
-    notes.push('이 폴더의 설정 파일이 바뀐 채로 질문 시작돼요. 도우미가 따라요.')
+function copyState(state: GuardState): GuardState {
+  return { ...state, leaves: { ...state.leaves }, rules: state.rules.map((rule) => ({ ...rule })) }
+}
+
+/** 카드에 보인 보호 경로 판정. 루트 CLAUDE.md는 언제나 false여야 한다(§10-9). */
+export type TrustedPaths = (rel: string) => boolean
+
+const CLAUDE_MD_NOTE = '도우미가 CLAUDE.md를 바꾸려 해서 되돌렸어요. 규칙은 메시지 옆 [규칙으로 기억]으로 저장할 수 있어요.'
+const crashedNote = '지난번 질의가 끝나기 전에 앱이 꺼져서, 그때 바뀐 설정 파일을 되돌렸어요.'
+
+function noteReverted(rel: string): string {
+  return `도우미가 일하는 동안 설정 파일(${rel})이 허락 없이 바뀌어서 원래대로 되돌렸어요. 바뀐 내용은 따로 보관했어요.`
+}
+
+function noteAccepted(rel: string): string {
+  return rel === 'CLAUDE.md' ? 'CLAUDE.md가 바뀌어 있어요. 새 내용을 도우미가 따라요.' : `설정 파일(${rel})이(가) 바뀌어 있어요. 그대로 두었어요.`
+}
+
+/** 허락 없이 바뀐 잎 하나를 되돌린다. 지금 내용은 격리에 남긴다. */
+function revertLeaf(
+  rootReal: string,
+  userData: string,
+  folderHash: string,
+  rel: string,
+  before: LeafFingerprint | undefined,
+  reason: RevertEntry['reason'],
+  now: number
+): RevertEntry {
+  const quarantinePath = quarantineLeaf(rootReal, rel, now)
+  let restoredFromStore = false
+  if (before) restoredFromStore = restoreLeaf(rootReal, userData, folderHash, rel, before)
+  else removeLeaf(rootReal, rel)
+  return { rel, quarantinePath, reason, restoredFromStore }
+}
+
+/**
+ * T0. `scan`은 지금 폴더 상태, `state`는 지난 T2가 남긴 상태다.
+ * 돌려준 `state`는 **저장해야** 다음 T2가 같은 기준을 쓴다.
+ */
+export function evaluateT0(opts: {
+  rootReal: string
+  userData: string
+  folderHash: string
+  state: GuardState
+  scan: ScanResult
+  userDataForScan?: string
+  now?: number
+}): T0Result {
+  const { rootReal, userData, folderHash, state, scan } = opts
+  const now = opts.now ?? Date.now()
+  const previous = new Map(Object.entries(state.leaves))
+  const crashedQuery = state.queryOpen
+  const changed = diffLeaves(previous, scan.leaves)
+  const next = copyState(state)
+  const notes: string[] = []
+  const accepted: string[] = []
+  const reverted: RevertEntry[] = []
+
+  if (crashedQuery) {
+    for (const rel of changed) {
+      reverted.push(revertLeaf(rootReal, userData, folderHash, rel, previous.get(rel), 'crashed-query', now))
+      notes.push(rel === 'CLAUDE.md' ? CLAUDE_MD_NOTE : noteReverted(rel))
+    }
+    // 되돌린 **뒤**의 폴더를 다시 스캔해 보관본을 맞춘다 — 되돌리지 못한 잎은 지금 것을 받아들인다.
+    const after = scanRoot({ root: rootReal, userData: opts.userDataForScan ?? userData })
+    next.leaves = adoptLeaves(rootReal, userData, folderHash, after.leaves).leaves
+    notes.push(crashedNote)
+  } else if (changed.length > 0) {
+    for (const rel of changed) {
+      accepted.push(rel)
+      notes.push(noteAccepted(rel))
+    }
+    const adopted = adoptLeaves(rootReal, userData, folderHash, scan.leaves)
+    next.leaves = adopted.leaves
+    if (adopted.failed.length > 0) notes.push('설정 파일 일부를 보관하지 못했어요. 다음에 다시 시도할게요.')
   }
 
-  return { accepted: true, notes, queryOpen }
+  // 넣는 판은 **보관본 잎**의 해시다 — 다음 질의는 디스크가 아니라 이 내용을 넣는다(§11.6-3).
+  next.injected = next.leaves['CLAUDE.md']?.hash ?? null
+  next.queryOpen = true
+  return {
+    proceed: true,
+    crashedQuery,
+    accepted,
+    reverted,
+    notes,
+    claudeMdChanged: changed.includes('CLAUDE.md'),
+    state: next
+  }
 }
 
-/** T2: 질의 종료 후 되돌림 판단 */
-export function evaluateT2(
-  rootReal: string,
-  currentState: GuardState,
-  scanResult: {
-    leaves: string[]
-    leafHashes: Record<string, string> | Map<string, string>
-  },
-  trusted: boolean, // 카드 허락 여부
-  _queryOpen: boolean
-): T2Result {
-  const restored: string[] = []
-  const quarantined: string[] = []
-  const cleaned: string[] = []
+/**
+ * T2. `trusted`는 그 질의에서 카드로 허락한 보호 경로. 루트 `CLAUDE.md`는 무시된다.
+ */
+export function evaluateT2(opts: {
+  rootReal: string
+  userData: string
+  folderHash: string
+  state: GuardState
+  scan: ScanResult
+  trusted?: TrustedPaths
+  now?: number
+}): T2Result {
+  const { rootReal, userData, folderHash, state, scan } = opts
+  const now = opts.now ?? Date.now()
+  const trusted = opts.trusted ?? (() => false)
+  const previous = new Map(Object.entries(state.leaves))
+  const changed = diffLeaves(previous, scan.leaves)
+  const next = copyState(state)
+  const kept: string[] = []
+  const reverted: RevertEntry[] = []
   const notes: string[] = []
+  const keptLeaves = new Map(previous)
 
-  const currentLeaves = currentState.leaves || []
-  const scanHashes: Record<string, string> = scanResult.leafHashes instanceof Map
-    ? Object.fromEntries(scanResult.leafHashes)
-    : scanResult.leafHashes
-
-  // T2: 허락 없는 보호 파일 변경은 되돌리고, 루트 CLAUDE.md는 예외 처리
-  for (const leaf of currentLeaves) {
-    // 보호 대상 경로이고, 앱 스킬 자리 밖인 경우만 처리
-    if (!isProtectedPath(leaf) || isSkillHostPath(leaf)) continue
-
-    const leafBasename = leaf.split('/').pop() || leaf
-    if (leafBasename === 'CLAUDE.md' || leafBasename === 'CLAUDE.local.md') {
-      // 루트 CLAUDE.md: 카드 허락 여부와 상관없이 T2에서 되돌림
-      restored.push(leaf)
-      notes.push(`규칙이(가) 허락 없이 바뀌어서 원래대로 되돌렸어요. 바뀐 내용은 따로 보관했어요.`)
+  for (const rel of changed) {
+    const isRootClaudeMd = rel === 'CLAUDE.md'
+    if (!isRootClaudeMd && trusted(rel)) {
+      kept.push(rel)
+      const fingerprint = scan.leaves.get(rel)
+      if (fingerprint) keptLeaves.set(rel, fingerprint)
+      else keptLeaves.delete(rel)
       continue
     }
-
-    // 일반 보호 대상: 허락 없으면 되돌림, 허락 있으면 남김
-    const hashInState = currentState.leafHashes?.[leaf]
-    const hashInScan = scanHashes[leaf]
-    const isModified = !hashInState || hashInState !== hashInScan
-
-    if (isModified) {
-      if (!trusted) {
-        restored.push(leaf)
-        const ts = Date.now()
-        const q = quarantineFile(rootReal, leaf, ts)
-        if (q) quarantined.push(q)
-        notes.push(`파일(${leaf})이(가) 허락 없이 바뀌어서 원래대로 되돌렸어요.`)
-      } else {
-        // trusted여도 보호 파일 변경은 정책에 따라 처리(루트 CLAUDE.md 제외 일반 보호)
-        restored.push(leaf)
-        notes.push(`규칙이(가) 바뀌었어요. 일부만 남기고 나머지는 원래대로 돌아갔어요.`)
-      }
-    }
+    reverted.push(revertLeaf(rootReal, userData, folderHash, rel, previous.get(rel), isRootClaudeMd ? 'claude-md' : 'untrusted', now))
+    notes.push(isRootClaudeMd ? CLAUDE_MD_NOTE : noteReverted(rel))
   }
 
-  // 빈 .claude 하위 폴더 정리
-  const justCleaned = cleanupEmptyClaudeDirs(rootReal)
-  cleaned.push(...justCleaned)
+  if (changed.length > 0) next.leaves = adoptLeaves(rootReal, userData, folderHash, keptLeaves).leaves
+  next.injected = next.leaves['CLAUDE.md']?.hash ?? null
+  next.queryOpen = false
 
-  // 무결성 표식 재계산(현재 상태 기준)
-  const integrityChanged = currentState.integrity !== computeIntegrity({
-    leaves: currentState.leaves,
-    leafHashes: currentState.leafHashes,
-    injected: currentState.injected,
-    rules: currentState.rules,
-    queryOpen: currentState.queryOpen
-  })
-
-  return {
-    restored,
-    quarantined,
-    cleaned,
-    notes,
-    integrityChanged
-  }
+  const cleaned = cleanupEmptyClaudeDirs(rootReal)
+  return { kept, reverted, cleaned, notes, claudeMdChanged: changed.includes('CLAUDE.md'), state: next }
 }

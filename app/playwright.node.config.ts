@@ -9,7 +9,17 @@ process.once('exit', cleanupTmpdir)
 // Do not inherit playwright.config.ts or add mixed GUI/store specs such as model-chip.spec.ts.
 export default defineConfig({
   testDir: 'e2e',
-  testMatch: ['preparation-main.spec.ts', 'preparation-state.spec.ts', 'artifact-refresh-store.spec.ts', 'chat-markdown.spec.ts'],
+  testMatch: [
+    'preparation-main.spec.ts',
+    'preparation-state.spec.ts',
+    'artifact-refresh-store.spec.ts',
+    'chat-markdown.spec.ts',
+    'guard-scope.spec.ts',
+    'guard-scan-store.spec.ts',
+    'guard-reconcile.spec.ts',
+    'guard-instructions.spec.ts',
+    'guard-rules.spec.ts'
+  ],
   timeout: 30_000,
   retries: 0,
   workers: 1,

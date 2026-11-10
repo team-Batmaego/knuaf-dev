@@ -1,72 +1,69 @@
 /**
- * guard/lock.ts — 폴더별 비동기 뮤텍스(큐)
+ * guard/lock.ts — 폴더별 **기다리는** 비동기 큐
  *
- * 같은 폴더에 동시에 Claude·Codex 전송을 막기 위한 잠금 장치.
- * T0·T2는 물론 단추 저장(IPC)·규칙 삭제(IPC)·터미널 도우미 실행(`agent:launch`)
- * 등 모든 경로가 이 뮤텍스를 거쳐야 한다(§11.8 '지킴이와의 관계').
+ * 보관본을 만지는 다섯 호출자(T0, T2, [규칙으로 기억] 저장, [지우기], 터미널 도우미 띄우기)가
+ * 이 큐에서 차례를 기다린다(§11.8 '지킴이와의 관계', 정제 R6).
+ * - 던지는 잠금이면 T0·T2가 실패한다 — **기다린다**.
+ * - 같은 비동기 문맥 안에서 다시 부르면 그대로 이어서 돈다(교착 방지).
+ * - 이 잠금은 도우미의 파일 쓰기까지 막지는 못한다. 그래서 앱이 쓰는 순서는 디스크를 믿지 않는다.
  *
- * 구현: Node 메모리 기반 큐. 실제 프로덕션에서는 service.ts의 전역 뮤텍스와 연동된다.
- * 각 root 폴더별로 잠금 상태와 대기자 큐를 관리한다.
+ * 전송의 폴더 잠금(`service.ts`의 `acquire(root)`)과는 **별개**다 — 단추는 질의가 도는 중에도
+ * 눌려야 한다.
  */
 
-// root당 잠금 상태와 대기자 resolvers 관리
-const lockHolders: Map<string, boolean> = new Map()
-const waitQueue: Map<string, Array<{ resolve: () => void }>> = new Map()
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { resolve } from 'node:path'
 
-/** 지정된 root 폴더에 대한 잠금 획득 */
-export function acquireGuardLock(root: string): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const key = root
-
-    // 대기자 큐 초기화
-    if (!waitQueue.has(key)) {
-      waitQueue.set(key, [])
-    }
-
-    const waiters = waitQueue.get(key)!
-
-    // 이미 잠금이 잡혀 있으면 대기열에 추가
-    if (lockHolders.has(key)) {
-      // 대기자에게 resolve 호출될 때까지 대기
-      waiters.push({ resolve })
-      // 다음 순차 실행을 위해 즉시 재귀 확인
-      attemptNext(key, waiters)
-      return
-    }
-
-    // 잠금 획득
-    lockHolders.set(key, true)
-    resolve()
-  })
+interface Slot {
+  tail: Promise<void>
+  pending: number
 }
 
-/** 다음 대기자 실행 시도 */
-function attemptNext(key: string, waiters: Array<{ resolve: () => void }>): void {
-  if (waiters.length === 0) return
+const slots = new Map<string, Slot>()
+const held = new AsyncLocalStorage<string>()
 
-  const next = waiters.shift!
+function slotFor(key: string): Slot {
+  const existing = slots.get(key)
+  if (existing) return existing
+  const created: Slot = { tail: Promise.resolve(), pending: 0 }
+  slots.set(key, created)
+  return created
+}
 
-  // 현재 잠금이 해제되었는지 확인 후 다음 대기자에게 진행
-  if (!lockHolders.has(key)) {
-    // 잠금이 풀린 경우: 다음 대기자에게 resolve 호출
-    next()
-    attemptNext(key, waiters)
-  } else {
-    // 여전히 잠금 상태: 다음 사이클에 재시도
-    setTimeout(() => attemptNext(key, waiters), 10)
+/** 이 폴더에 지금 줄이 서 있는가(대기자 포함). 단추는 이것만 확인하고 큐에 들어간다. */
+export function busy(root: string): boolean {
+  return (slots.get(resolve(root))?.pending ?? 0) > 0
+}
+
+/** 대기 중인 호출자 수(시험·진단용). */
+export function pendingCount(root: string): number {
+  return slots.get(resolve(root))?.pending ?? 0
+}
+
+/**
+ * 폴더 잠금을 잡고 `fn`을 돈다. 앞선 호출자가 끝나야 시작한다.
+ * `fn`이 던지면 잠금은 풀리고 그대로 던진다.
+ */
+export async function withGuardLock<T>(root: string, fn: () => Promise<T> | T): Promise<T> {
+  const key = resolve(root)
+  if (held.getStore() === key) return await fn()
+
+  const slot = slotFor(key)
+  slot.pending += 1
+  const previous = slot.tail
+  const gate = Promise.withResolvers<void>()
+  slot.tail = previous.then(() => gate.promise).then(() => undefined)
+  try {
+    await previous
+    return await held.run(key, async () => await fn())
+  } finally {
+    gate.resolve()
+    slot.pending -= 1
+    if (slot.pending === 0 && slots.get(key) === slot) slots.delete(key)
   }
 }
 
-/** 잠금 해제 */
-export function releaseGuardLock(root: string): void {
-  lockHolders.delete(root)
-
-  // 해당 root의 대기자들 중 첫 번째 resolve 호출
-  const waiters = waitQueue.get(root)
-  if (waiters && waiters.length > 0) {
-    const next = waiters.shift()
-    if (next) {
-      next.resolve()
-    }
-  }
+/** 시험 사이 상태를 비운다. 실행 중인 호출자가 있으면 쓰지 않는다. */
+export function resetGuardLocks(): void {
+  slots.clear()
 }
