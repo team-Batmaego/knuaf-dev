@@ -1367,7 +1367,10 @@ export class ChatService {
     // [C1-01] 제안의 회사는 실행 파일 선택까지 가므로 여기서도 닫는다.
     const provider = providerOf(request.entry.company)
     const key = this.key(request.root, provider)
-    const previous = this.snapshots.get(key)
+    // [C1-09] 이전 대화는 **메모리에만** 있지 않다. 앱을 다시 켰거나 다른 경로가 스냅샷을 비웠으면
+    // 지도가 비어 있고, 그 상태로 빈 대화를 `publish` 하면 디스크의 기존 기록을 **덮어쓴다**
+    // (넘기기를 실패했을 때 되돌릴 것도 사라진다). 그래서 디스크에서 먼저 찾는다.
+    const previous = this.snapshots.get(key) ?? this.readChat(request.root, provider)
     this.handoffOpened.set(request.id, previous ? structuredClone(previous) : null)
     await this.connections.get(key)?.stop()
     this.connections.delete(key)
@@ -1399,6 +1402,25 @@ export class ChatService {
       // 열다 만 대화는 여기서 접는다 — 넘기지 못했으므로 이전 기록으로 되돌린다([C1-09]).
       await this.closeHandoff({ id: request.id, sessionId: '', company: provider })
       throw error
+    }
+  }
+  /**
+   * 디스크의 대화 기록. 없거나 깨졌으면 `null` — 이 경로는 **되돌리기용 값**만 필요하므로
+   * 읽기 실패를 새 대화로 승격하지 않는다(던지면 넘기기 자체가 멈춘다).
+   */
+  private readChat(root: string, provider: Provider): ChatSnapshot | null {
+    try {
+      const got = readRecoverable(this.file(root, provider), (text) => parseChat(text, provider))
+      if (!got) return null
+      const value = got.value
+      value.root = root; value.permission = undefined
+      if (value.state === 'running' || value.state === 'permission') {
+        value.state = 'interrupted'; value.error = '앱이 작업 도중 종료됐어요. 마지막 답변은 자동 재전송하지 않았어요.'
+        for (const message of value.messages) if (message.delivery === 'pending') message.delivery = 'uncertain'
+      }
+      return value
+    } catch {
+      return null
     }
   }
   /**

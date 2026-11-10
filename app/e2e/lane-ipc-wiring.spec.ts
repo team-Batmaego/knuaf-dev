@@ -422,6 +422,54 @@ test('fix C1-09: a handoff that fails to open puts the previous transcript back'
   await svc.close()
 })
 
+// [C1-09] 판정서 재현: 이전 대화가 **디스크에만** 있고 메모리에 없을 때. 예전에는 빈 대화를
+// 먼저 publish 해 기존 파일을 덮어썼고, 인계가 실패해도 이전 대화가 돌아오지 않았다.
+test('fix C1-09: a disk-only previous transcript survives a failed handoff', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-diskonly-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-diskonly-ud-'))
+  const main: AgentConnection = {
+    status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+    login: async () => {}, respond: () => {}, prepare: async () => {},
+    models: async () => [
+      { model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] }
+    ] as never,
+    // 세션을 주지 않는다 — 인계는 실패하고 되돌리기가 일어나야 한다.
+    run: async () => {}, stop: async () => {}
+  }
+  // 첫 서비스가 대화를 만들어 디스크에 남긴다(그 뒤 서비스는 새로 띄운다 = 재시작).
+  const first = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => ({ ...main, run: async (_t, _s, events) => { events.session('old-session') } })
+  })
+  await first.send(root, 'codex', '예전 학생 글', 'req-1')
+  await until(() => !first.busy(root))
+  await first.close()
+
+  // 재시작 — 메모리는 비었고 디스크에만 기록이 있다.
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main
+  })
+  await expect(svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: null, how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: new AbortController().signal
+  })).rejects.toThrow(/세션/)
+  // 이전 대화가 돌아온다 — 빈 대화로 덮이지 않았다.
+  expect(svc.snapshot(root, 'codex').messages.map(message => message.text)).toEqual(['예전 학생 글'])
+  // 디스크에도 그대로다(읽는 새 서비스도 같은 것을 본다).
+  await svc.close()
+  const third = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main
+  })
+  expect(third.snapshot(root, 'codex').messages.map(message => message.text)).toEqual(['예전 학생 글'])
+  await third.close()
+})
+
 // ⑩ [C1-10] 이미 취소된 인계 요청은 세션을 열지 않는다.
 test('fix C1-10: an already-aborted handoff request opens nothing', async () => {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-abort-')))
