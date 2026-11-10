@@ -3,7 +3,7 @@ import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { join, posix, resolve, sep, win32 } from 'node:path'
 import { query, type Query, type PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
@@ -553,6 +553,130 @@ function argsInRoot(root: string, args: string[]): boolean {
   return args.every((a) => a.startsWith('-') || !looksLikePath(a) || outsideRoot(root, a) === null)
 }
 
+/** 윈도우 셸 도구 이름. 맥은 `Bash`, 윈도우는 bash 가 없어 동봉 CLI 가 `PowerShell` 로 올린다. */
+const POWERSHELL_TOOLS: Record<string, true> = { PowerShell: true, pwsh: true }
+
+/**
+ * 이 뿌리가 윈도우 경로인가. 판정을 `process.platform` 에 맡기면 맥에서 윈도우 경로를 재현할 수
+ * 없다 — 맥은 `C:\…` 를 그냥 파일 이름으로 접어 "폴더 안"으로 오판한다. 뿌리 모양으로 정하면
+ * 실기기(윈도우)와 시험(맥)이 같은 계산을 쓴다.
+ */
+function pathOpsFor(root: string): typeof posix {
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(root) ? win32 : posix
+}
+
+/**
+ * 뿌리 기준 상대경로(윈도우는 앞으로 슬래시). 밖이면 null. 윈도우는 대소문자를 구분하지 않으므로
+ * 접는다.
+ *
+ * `outsideRoot` 를 쓰지 않는 이유: 그것은 `node:path` 의 **실행 플랫폼** 기본값을 쓰므로 맥에서
+ * 윈도우 뿌리를 판정할 수 없다. 이 함수는 뿌리 모양으로 고른 연산만 쓴다. 맥 뿌리에서 `\` 는
+ * 구분자가 아니라 파일명 글자이므로 슬래시로 바꾸지 않는다(그런 경로는 폴더 안이 아니다).
+ */
+function relIn(ops: typeof posix, root: string, value: string): string | null {
+  if (!value) return null
+  const fold = ops === win32 ? (x: string) => x.normalize('NFC').toLowerCase() : (x: string) => x.normalize('NFC')
+  const base = fold(ops.resolve(root))
+  const abs = fold(ops.resolve(ops.resolve(root), value))
+  const rel = ops.relative(base, abs)
+  if (rel === '') return ''
+  if (rel.startsWith('..') || ops.isAbsolute(rel)) return null
+  return ops === win32 ? rel.replace(/\\/g, '/') : rel
+}
+
+/** 뿌리 기준 상대경로가 보호 대상인가(`protectedRel` 의 조각 규칙과 같은 선). */
+function protectedInRel(rel: string): boolean {
+  const segs = rel.split(/[\\/]/).filter(Boolean).map((s) => s.toLowerCase())
+  if (segs.some((s) => PROTECTED_DIRS.includes(s))) return true
+  const last = segs[segs.length - 1] ?? ''
+  if (PROTECTED_NAMES.includes(last)) return true
+  return segs.length === 1 && PROTECTED_ROOT_FILES.includes(last)
+}
+
+/** 인자 하나가 보호 경로를 가리키는가. 플래그에 붙은 경로(`--out=…`)도 본다. */
+function relProtected(ops: typeof posix, root: string, a: string): boolean {
+  const pieces = [a]
+  if (a.startsWith('-')) pieces.push(a.replace(/^-+[A-Za-z0-9_-]*=?/, ''))
+  return pieces.some((p) => {
+    if (!p) return false
+    const rel = relIn(ops, root, p)
+    return rel !== null && protectedInRel(rel)
+  })
+}
+
+/**
+ * PowerShell 명령을 낱말로 나눈다. 닫히지 않은 인용부호나 줄바꿈이면 null.
+ *
+ * `safe` 는 "이 명령의 뜻을 앱이 따라갈 수 있는가"다. Bash 파서를 재사용하지 않는 이유:
+ * PowerShell 은 `\` 가 경로 구분자이고(이스케이프는 백틱), `&` 가 **호출 연산자**, `;` 가 문장
+ * 구분자, `|` 가 파이프, `$`·`@` 가 변수·스플래팅이라 같은 문자열이 다른 프로그램을 실행한다.
+ *
+ * 판정 불가 기호를 만나도 **낱말은 계속 모은다** — 카드가 "무엇에 걸렸는지" 경로를 짚으려면
+ * 인용부호 안쪽 경로("무제 폴더" 처럼 공백이 든)를 낱말 하나로 붙잡아야 한다.
+ */
+function powerShellWords(raw: string): { words: string[]; safe: boolean } | null {
+  const cmd = raw.trim()
+  if (!cmd || /[\r\n]/.test(cmd)) return null
+  const words: string[] = []
+  let word: string | null = null
+  let safe = true
+  const end = () => { if (word !== null) { words.push(word); word = null } }
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]
+    if (c === '"' || c === "'") {
+      const close = cmd.indexOf(c, i + 1)
+      if (close < 0) return null
+      const body = cmd.slice(i + 1, close)
+      // 큰따옴표 안에서는 `$`(보간)와 백틱(이스케이프)이 글자 그대로가 아니다.
+      if (c === '"' && /[`$]/.test(body)) safe = false
+      word = (word ?? '') + body
+      i = close
+      continue
+    }
+    if (/\s/.test(c)) { end(); continue }
+    // 판정 불가 기호: 백틱·`$`·`;`·`|`·`&`·리다이렉트·괄호·`@`·`~`·`#`(주석)·`,`(배열).
+    if (/[`$;|&<>(){}@~#,]/u.test(c)) { end(); safe = false; continue }
+    word = (word ?? '') + c
+  }
+  end()
+  return words.length ? { words, safe } : null
+}
+
+/**
+ * 윈도우 `PowerShell`·`pwsh` 명령을 카드 없이 통과시켜도 되는가.
+ *
+ * 통과하는 꼴은 **하나뿐**이다: 파이썬 인터프리터(경로 어디에 있든 이름이 `python`)가
+ * `.claude/skills/` 아래의 스킬 스크립트를 여는 호출. 그 밖의 PowerShell 명령은 전부 묻는다.
+ *
+ * - 실행 파일은 **이름**으로만 인정한다(설치본의 `…\resources\python\python.exe` 는 논문 폴더
+ *   밖이다). Bash 판정과 같은 선이라 이 예외로 새 자리를 열지 않는다.
+ * - 스크립트는 앱이 매 전송마다 다시 까는 사본 자리(`.claude/skills/`)여야 한다. 남의 `.py`·
+ *   `.ps1` 을 여는 것은 통과시키지 않는다.
+ * - 나머지 인자는 폴더 안이어야 하고, 보호 경로(`.claude`·`CLAUDE.md` 등)를 가리키면 묻는다.
+ * - `;`·`|`·`&`·`$()`·백틱·리다이렉트가 하나라도 섞이면 `safe` 가 꺼져 묻는다.
+ */
+function powerShellSkillCall(root: string, raw: string): boolean {
+  const parsed = powerShellWords(raw)
+  if (!parsed?.safe) return false
+  const { words } = parsed
+  if (words.length < 2) return false
+  const [exe, script, ...args] = words
+  if (!INTERPRETERS.test(exeName(exe))) return false
+  const ops = pathOpsFor(root)
+  const s = ops === win32 ? script.replace(/\\/g, '/') : script
+  if (s.startsWith('-') || s.includes('..')) return false
+  if (!SKILL_PATH.test(s) || !SKILL_SCRIPT.test(s)) return false
+  const rel = relIn(ops, root, script)
+  if (!rel || !rel.toLowerCase().startsWith(APP_SKILL_PREFIX)) return false
+  for (const a of args) {
+    if (relProtected(ops, root, a)) return false
+    // 플래그(`-Recurse`)는 경로가 아니다. 그 밖의 낱말은 경로일 때 폴더 안이어야 한다.
+    if (a.startsWith('-') && !looksLikePath(a, ops === win32 ? 'win32' : 'darwin')) continue
+    if (looksLikePath(a, ops === win32 ? 'win32' : 'darwin') && relIn(ops, root, a) === null) return false
+  }
+  return true
+}
+
 /**
  * 이 명령을 묻지 않고 통과시켜도 되는가. 모든 조각이 묻는 이유 없이 폴더 안이어야 한다.
  *
@@ -624,6 +748,35 @@ export function lostToolCalls(message: unknown): number {
   return n
 }
 
+/**
+ * PowerShell 명령 카드 — 원시 JSON 대신 사람이 읽는 문장.
+ *
+ * Bash 카드와 같은 어휘를 쓰되 판정기는 따로다(Bash 파서로 PowerShell 을 읽으면 오판한다).
+ * 걸리는 것이 없는데도 autoAllow 가 막았다면 "왜 막혔는지"를 사실대로 적는다 — 이 경로로
+ * 오는 것은 대개 인터프리터가 스킬 스크립트가 아닌 파일을 여는 호출이다.
+ */
+function describePowerShell(root: string, cmd: string): { title: string; detail: string } {
+  const ops = pathOpsFor(root)
+  const platform = ops === win32 ? 'win32' : 'darwin'
+  // 인용부호를 지켜 낱말을 얻는다. 공백이 든 폴더 이름(`무제 폴더`)을 쪼개면 엉뚱한 경로를 짚는다.
+  const parsed = powerShellWords(cmd)
+  const words = parsed?.words ?? []
+  // 플래그(`-Value`, `-Recurse`)는 경로로 보지 않는다. 경로처럼 생긴 낱말만 대상이다.
+  const args = words.filter((w) => !w.startsWith('-') || looksLikePath(w, platform))
+  const outside = [...new Set(args.filter((a) => looksLikePath(a, platform) && relIn(ops, root, a) === null))]
+  if (outside.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${cmd}\n\n폴더 밖: ${outside.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
+  // 폴더 밖이 아니면 권한 파일을 건드리는지 본다. 둘 다 걸리면 폴더 밖을 먼저 말한다.
+  const guarded = [...new Set(args.filter((a) => relProtected(ops, root, a)))]
+  if (guarded.length) return { title: '도우미의 권한을 바꾸는 파일이에요', detail: `${cmd}\n\n대상: ${guarded.join(', ')}\n\n이 파일은 다음에 도우미가 무엇을 묻지 않고 할 수 있는지를 정해요. 마음에 들지 않으면 거절해 주세요.` }
+  const base = words.length ? exeName(words[0]) : ''
+  if (AI_CLI.has(base)) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${cmd}\n\n"${base}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
+  if (OUTSIDE_REACH.has(base)) return { title: '논문 폴더 밖으로 나가는 명령이에요', detail: `${cmd}\n\n"${base}" 는 네트워크·다른 앱·설치처럼 폴더 밖에 닿아요. 의도한 일이 아니면 거절해 주세요.` }
+  if (LAUNCHERS.has(base)) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${cmd}\n\n"${base}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  if (INTERPRETERS.test(base)) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${cmd}\n\n"${(words[1] ?? '').replace(/\\/g, '/')}" 안에 무엇이 있는지 앱이 미리 알 수 없어요. 스킬이 쓰는 스크립트가 아니면 자동으로 통과시키지 않아요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  if (!parsed?.safe || !words.length) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${cmd}\n\n변수·파이프·리다이렉트처럼 앱이 미리 따라갈 수 없는 기호가 섞여 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${cmd}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+}
+
 /** 원시 JSON 대신 학생이 읽을 수 있는 한 문장. 자세한 값은 그대로 덧붙인다. */
 function describeTool(name: string, input: unknown, root: string): { title: string; detail: string } {
   const keys = PATH_TOOLS[name] ?? []
@@ -634,6 +787,12 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
   const outside = keys.map((k) => outsideRoot(root, argOf(input, k))).find(Boolean)
   if (outside) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `대상: ${outside}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
   const cmd = argOf(input, 'command')
+  if (POWERSHELL_TOOLS[name]) {
+    // 타입을 믿지 않는다 — `command` 가 문자열이 아니어도 읽을 수 있는 문장을 만든다.
+    return typeof cmd === 'string' && cmd.trim()
+      ? describePowerShell(root, cmd)
+      : { title: '컴퓨터에서 명령을 실행하려고 해요', detail: '앱이 읽을 수 있는 명령이 아니에요. 무슨 일인지 모르겠으면 거절해 주세요.' }
+  }
   if (name === 'Bash' && typeof cmd === 'string') {
     const segs = parseShell(cmd)
     if (segs === null) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${cmd}\n\n변수나 기호가 섞여 있어 무엇을 건드릴지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
@@ -682,6 +841,11 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
     // 폴더 안이어도 권한 파일은 묻는다 — 도우미가 자기 권한을 스스로 넓히는 통로를 막는다.
     if (!READ_ONLY_TOOLS[name] && values.some((v) => protectedRel(root, v) !== null)) return false
     return true
+  }
+  if (POWERSHELL_TOOLS[name]) {
+    const raw = argOf(input, 'command')
+    // PowerShell 은 Bash 파서로 판정하지 않는다(문법이 다르다). 확실히 아는 꼴 하나만 통과.
+    return typeof raw === 'string' && powerShellSkillCall(root, raw)
   }
   if (name === 'Bash') {
     const raw = argOf(input, 'command')
