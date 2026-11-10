@@ -168,18 +168,29 @@ export const useLanes = create<LanesState>((set, get) => ({
       return
     }
     set({ unavailable: false, root })
-    // 폴더를 옮기는 중 늦게 온 응답을 새 폴더 묶음으로 붙이지 않는다.
-    const mine = (): boolean => get().root === root
+    /**
+     * 폴더를 옮기는 중 늦게 온 응답을 새 폴더 묶음으로 붙이지 않는다.
+     * 폴더가 같아도 그 사이 밀려온 더 새 묶음(`seq` 큼)을 옛 응답으로 덮지 않는다 — 응답과 구독은
+     * 서로 다른 길로 오므로, 응답이 늦으면 이미 지나간 상태일 수 있다(검토 C02).
+     */
     const r = await laneCall(() => lanes.snapshot(root))
-    if (!mine()) return
+    if (get().root !== root) return
     if ('error' in r) set({ unavailable: true, lastError: r.error })
-    else set({ snapshot: r.value, lastError: null })
+    else get().apply(r.value)
   },
 
   apply: (snapshot) => {
     const current = get().snapshot
+    const root = get().root
+    /**
+     * 이 묶음이 어느 폴더의 것인가 — `root` 가 정해졌으면 그 폴더의 묶음만 받는다. 다른 폴더로
+     * 옮긴 뒤 늦게 닿은 push 가 새 폴더 화면에 섞이면 안 된다(검토 C02).
+     * 아직 폴더를 안 정했으면(설정 화면이 폴더 없이 열린 경우) 받은 묶음의 폴더를 채택한다.
+     */
+    if (root !== null && snapshot.root !== root) return
+    if (root === null) set({ root: snapshot.root })
     // 밀려온 묶음은 항상 최신이지만, 구독과 응답이 엇갈려 옛 것이 마지막에 닿을 수 있다.
-    if (current && snapshot.seq <= current.seq) return
+    if (current && current.root === snapshot.root && snapshot.seq <= current.seq) return
     set({ snapshot, unavailable: false })
   },
 
