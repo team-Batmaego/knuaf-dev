@@ -409,10 +409,11 @@ export const useChat = create<ChatState>((set, get) => ({
     // 턴이 **정상으로** 끝났는가 — 진행 중이던 턴이 `idle` 로 돌아온 순간이다(§6-3 `answered`).
     // 실패·중단(`error`·`interrupted`·`stopped`)은 정상 종료가 아니므로 `answered` 로 닫지 않는다;
     // 그 건은 `sent` 로 남아 점 표시가 그대로이고, 학생이 다시 물으면 그때 확인된다.
-    const wasTurn = previousState === 'running' || previousState === 'permission'
+    // 직전 상태를 **덮어쓰기 전에** 잡는다 — 덮어쓴 뒤에 넘기면 늘 (x, x) 라 `ended` 가
+    // 영영 거짓이 되고 이 갈래 전체가 꺼진다.
+    const prev = previousState
     previousState = snapshot.state
-    const ended = turnEnded(previousState, snapshot.state)
-    if (wasTurn && ended && snapshot.root === get().root) {
+    if (turnEnded(prev, snapshot.state) && snapshot.root === get().root) {
       // 그 턴을 가리키는 id 는 그 턴의 학생 메시지 id 다 — `send` 가 넘긴 `requestId` 와 같다.
       const turn = [...snapshot.messages].reverse().find((m) => m.role === 'user')?.id
       // 전달이 불확실하면 닫지 않는다(§6-3). 정상으로 끝나기 전에 메모가 실린 건은 `sent` 다.

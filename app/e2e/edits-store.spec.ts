@@ -460,3 +460,53 @@ test('고침1 — 유실 행은 서버로 안 보내고 화면에서만 닫으�
     expect(useEdits.getState().rows.map((r) => [r.edit_id, r.state])).toEqual([['app:student-edit:sec-02:xyz', 'sent'], ['e1', 'sent']])
   })
 })
+
+// ── 중요 1(2회째): onSnapshot 배선을 지나는 턴 종료 처리 ─────────────────────
+
+/** `onSnapshot` 이 읽는 필드만 갖춘 스냅샷. */
+function snap(root: string, state: 'idle' | 'running' | 'permission' | 'error' | 'stopped' | 'interrupted', turn?: string, delivery?: 'sent' | 'uncertain') {
+  return {
+    root, provider: 'codex' as const, state,
+    messages: turn ? [{ id: turn, role: 'user' as const, text: '보낸 글', at: '2026-11-11T00:00:00+00:00', delivery }] : []
+  }
+}
+
+/** `void` 로 띄운 저장 작업이 끝날 때까지 한 바퀴 돌린다. */
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+test('중요1(배선) — running→idle 이면 그 턴에 묶인 건이 answered 가 된다', async () => {
+  const model = { knuaf: { call: async () => ({ result: null }) } }
+  await withWindow(model, async () => {
+    const { useChat } = await import('../src/renderer/src/store/chat')
+    useChat.setState({ root: '/A', snapshot: undefined as never })
+    useEdits.getState().reset()
+    useEdits.setState({ rows: [editRow('e1', 'pending')], root: '/A' } as never)
+    await useEdits.getState().markSent('/A', useEdits.getState().attach(''), 'turn-A')
+    expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['sent'])
+
+    // 진행 중 → 정상 종료. 배선이 살아 있어야 여기서 answered 가 켜진다.
+    useChat.getState().onSnapshot(snap('/A', 'running', 'turn-A', 'sent') as never)
+    useChat.getState().onSnapshot(snap('/A', 'idle', 'turn-A', 'sent') as never)
+    await flush()
+    expect(useEdits.getState().rows.map((r) => r.answered)).toEqual([true])
+  })
+})
+
+test('중요1(배선) — running→error 면 그 건이 pending 으로 돌아와 다음 메시지에 다시 붙는다', async () => {
+  const model = { knuaf: { call: async () => ({ result: null }) } }
+  await withWindow(model, async () => {
+    const { useChat } = await import('../src/renderer/src/store/chat')
+    useChat.setState({ root: '/A', snapshot: undefined as never })
+    useEdits.getState().reset()
+    useEdits.setState({ rows: [editRow('e1', 'pending')], root: '/A' } as never)
+    await useEdits.getState().markSent('/A', useEdits.getState().attach(''), 'turn-A')
+
+    useChat.getState().onSnapshot(snap('/A', 'running', 'turn-A', 'sent') as never)
+    useChat.getState().onSnapshot(snap('/A', 'error', 'turn-A', 'sent') as never)
+    await flush()
+    expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['pending'])
+    expect(useEdits.getState().rows.map((r) => r.answered)).toEqual([false])
+    // 다음 메시지에 다시 실린다.
+    expect(useEdits.getState().attach('다시').ids).toEqual(['e1'])
+  })
+})
