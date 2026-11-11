@@ -147,68 +147,11 @@ jobs:
             test -f "$f" || { echo "앱 빌드·e2e 가 읽는 파일이 없다: $f"; exit 1; }
           done
 
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - run: python -m pip install ruff
-      - run: ruff check .
-
-  tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.13"]
-    runs-on: ${{ matrix.os }}
-    env:
-      PYTHONWARNDEFAULTENCODING: "1"
-      PYTHONUTF8: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: app/skill-source.json
-      - uses: actions/cache@v4
-        with:
-          path: app/resources/skill-upstreams
-          key: ${{ runner.os }}-skill-${{ hashFiles('app/skill-source.json') }}
-      - run: python -m pip install -r "$(node app/scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
-      - name: Prepare pinned runtime and run tests
-        run: node app/scripts/test-with-skill.mjs --python python
-  py39-guard:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - uses: actions/setup-python@v5
-        id: py39
-        with:
-          python-version: "3.9"
-          update-environment: false
-      - uses: actions/cache@v4
-        with:
-          path: app/resources/skill-upstreams
-          key: ${{ runner.os }}-skill-${{ hashFiles('app/skill-source.json') }}
-      - run: python -m pip install -r "$(node app/scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
-      - name: Prepare pinned runtime and run Python 3.9 guard
-        run: node app/scripts/test-with-skill.mjs --python python -- tests/test_py39_guard.py
-        env:
-          PY39: ${{ steps.py39.outputs.python-path }}
+  # 임시 측정 갈래(tmp/relogin-repeat-base)에서는 `lint`·`tests`(6칸 matrix)·`py39-guard` 를
+  # 지웠다. 이 갈래의 목적은 닫기 멈춤 재현율 측정 하나뿐이라 파이썬·ruff 시험은 값을 더하지 않고
+  # 실행 시간과 대기열만 먹는다. 머지하지 않는 갈래이므로 필수 체크 이름이 비는 것도 문제가 아니다.
+  # 원복은 이 커밋을 되돌리면 된다 — 아래 `app` 작업은 한 줄도 손대지 않았다(빌드·typecheck·
+  # app-release/node 시험 유지). 측정 끝난 뒤 이 갈래는 버린다.
   app:
     needs: changes
     # `changes` 가 실패해도 앱 시험을 통째로 건너뛰지 않는다. 의존 작업이 실패하면 이 작업은
@@ -283,10 +226,25 @@ jobs:
       - name: Install Playwright Chromium headless shell
         if: needs.changes.outputs.docs_only != 'true'
         run: pnpm exec playwright install chromium --only-shell
-      # live-*.spec.ts need a real Claude/Codex login and are excluded without KNUAF_LIVE=1.
-      # 창 촬영(window-shots)은 맥 전용 `screencapture` 라 config 의 testIgnore 가 뺀다.
-      # 화면 캡처(screenshots.spec.ts 포함)는 CI 에서도 돌려 `KNUAF_SHOT_DIR` 에 남기고 아래에서
-      # 아티팩트로 올린다 — 사람이 내려받아 시안과 나란히 본다. 로컬 기본값은 docs/images 그대로다.
+      # ── 임시 측정 갈래(tmp/relogin-repeat-base) ───────────────────────────────
+      # 목적: 고치기 전 코드에서 '닫기 멈춤'이 얼마나 자주 나오는지 재는 것. 그래서 전체 스펙이
+      # 아니라 `e2e/codex-relogin.spec.ts` 한 파일만, `--repeat-each 20` 으로 20번 반복한다
+      # (13 시험 × 20 = 260 실행 = 이 파일 20바퀴).
+      # 예산 근거(2026-11-11 윈도 실측 로그 42992084224): 이 파일 1바퀴 = 13건 중 통과 12건 합
+      # 352.5초, 멈춘 401 1건은 90초에서 끊겼다. 13건이 다 통과하면 약 6.5분/바퀴 →
+      # 20바퀴 ≈ 130분. 멈춤은 시험 1건(90초) + Worker teardown timeout(90초) = +3분이고,
+      # 원 실행에서도 멈춘 뒤 다음 워커가 남은 시험을 이어 돌았다(09:36:00 타임아웃 → 09:36:52
+      # 다음 시험). 멈춤 몇 건 + 빌드·설치 25~35분을 더해도 20바퀴 ≈ 3.3시간이라 6시간 안이다.
+      # 그래서 `--max-failures` 는 걸지 않는다 — 첫 실패에서 끊으면 남은 바퀴를 못 재서
+      # '20바퀴 중 멈춤 몇 건'이라는 비교 기준이 사라지고, 원 실행(전체 스펙, 중단 없음)과
+      # 조건도 달라진다.
+      # 재현율: app(윈도) 잡 166개 중 8개가 이 멈춤으로 실패했고, 그 한 잡이 이 파일을 1바퀴
+      # 돈다 → 바퀴당 p≈5%. 최소 1건 볼 확률은 1−0.95^N: 20바퀴 64%, 30바퀴 79%,
+      # 40바퀴 87%, 60바퀴 95%. 20바퀴(≈2.2시간)면 두 갈래를 여러 번 돌릴 수 있다.
+      # 아티팩트 경로는 그대로다 — Playwright 가 반복마다 출력 폴더에 `-repeatN` 을 붙이므로
+      # 아래 `**/doctor-*.jsonl`·`test-results/e2e-artifacts` 글롭이 하위 폴더까지 함께 올린다.
+      # `--grep-invert "real window capture"` 는 뺐다: 이 파일에는 그 제목의 시험이 없고
+      # window-shots 는 config 의 testIgnore 가 이미 제외한다. 원복은 이 커밋을 되돌리면 된다.
       #
       # e2e runs on macOS and Windows alike. `KNUAF_PYTHON` must be an absolute path — the app
       # tests `existsSync(KNUAF_PYTHON)` in choosePython, so a bare name is ignored and it falls
@@ -294,13 +252,13 @@ jobs:
       # macOS' stock 3.9.6 and fail project:open. On Windows the interpreter is python.exe.
       - name: e2e (macOS)
         if: needs.changes.outputs.docs_only != 'true' && runner.os == 'macOS'
-        run: pnpm exec playwright test --grep-invert "real window capture" --output test-results/e2e-artifacts
+        run: pnpm exec playwright test e2e/codex-relogin.spec.ts --repeat-each 20 --output test-results/e2e-artifacts
         env:
           KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
           KNUAF_SHOT_DIR: test-results/ui-shots
       - name: e2e (Windows)
         if: needs.changes.outputs.docs_only != 'true' && runner.os == 'Windows'
-        run: pnpm exec playwright test --grep-invert "real window capture" --output test-results/e2e-artifacts
+        run: pnpm exec playwright test e2e/codex-relogin.spec.ts --repeat-each 20 --output test-results/e2e-artifacts
         env:
           KNUAF_PYTHON: ${{ env.pythonLocation }}\python.exe
           KNUAF_SHOT_DIR: test-results/ui-shots
