@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { rpc, RpcFailure } from '../rpc'
+import { recheckMemo, withRecheck } from '../../../shared/recheck'
 import type { EditNotice, EditResult, EditRow } from '../../../shared/types'
 
 /**
@@ -50,6 +51,33 @@ interface EditState {
   save: (root: string, params: SaveParams) => Promise<SaveOutcome>
   /** 알림을 보여 준 뒤 — 그 건을 다시 싣지 않게 표시한다(§4-5-3). */
   seen: (root: string, editIds: string[]) => Promise<void>
+  /**
+   * 다음 메시지에 붙일 재확인 메모(§6-1). 확인 전 고침이 없으면 `null`.
+   * `titles` 는 절 id → 장 제목 — 메모가 장을 이름으로 말해야 학생·도우미가 찾는다.
+   */
+  memo: (titles?: Record<string, string>) => string | null
+  /**
+   * 보낼 본문에 메모를 붙인다(§6-1) — 그리고 **메모에 실제로 실린 건의 id** 를 함께 돌려준다.
+   *
+   * 돌려주는 목록이 중요한 이유: 응답을 기다리는 사이 학생이 하나 더 고쳐 저장할 수 있다.
+   * 그 건은 메모에 **안 붙었다** — 그러니 `sent` 로 닫으면 안 되고 다음 메시지에 붙어야 한다.
+   * 「지금 pending 전부」를 닫으면 그 고침이 확인 없이 지나간다.
+   */
+  attach: (text: string, titles?: Record<string, string>) => { text: string; ids: string[] }
+  /**
+   * 전송이 받아들여진 뒤 — **`attach` 가 돌려준 그 건들만** `sent` 로 적는다(§6-3).
+   *
+   * **턴이 끝나기를 기다리지 않는다** — 턴 도중 앱이 꺼져도 메시지는 이미 갔다. 전달이
+   * 실패하면 `pending` 그대로 두어 다음 전송에 다시 붙는다(두 번 가도 해가 없다).
+   */
+  markSent: (root: string, ids: string[]) => Promise<void>
+  /**
+   * 목록의 `다시 확인 요청` — 그 건을 `pending` 으로 되돌린다(§6-3). 다음 메시지에 다시 붙는다.
+   * 이미 `answered` 였으면 그 표시도 지운다(다시 확인받아야 하므로).
+   */
+  askAgain: (root: string, editId: string) => Promise<void>
+  /** 턴이 정상으로 끝났다 — 보낸 건들을 `answered` 로 닫는다(§5·§6-3). */
+  markTurnDone: (root: string) => Promise<void>
   /** 폴더를 닫거나 바꾸면 비운다. */
   reset: () => void
 }
@@ -131,6 +159,56 @@ export const useEdits = create<EditState>((set, get) => ({
       if (missing) set({ available: false })
       return { ok: false, ...saveFailureText(e) }
     }
+  },
+
+  memo: (titles) => recheckMemo(get().rows, titles),
+
+  attach: (text, titles) => {
+    // 메모에 실릴 **그 목록**을 한 번만 계산해 문구와 함께 돌려준다(두 번 계산하면 그 사이
+    // 새로 저장된 고침이 문구에는 빠지고 id 목록에는 들어오는 어긋남이 생긴다).
+    const ids = get().rows.filter((row) => row.state === 'pending').map((row) => row.edit_id)
+    return { text: withRecheck(text, recheckMemo(get().rows, titles)), ids }
+  },
+
+  markSent: async (root, ids) => {
+    if (ids.length === 0) return
+    // 화면부터 닫는다 — 서버가 실패해도 다음 전송에 같은 메모가 또 붙지 않게(중복 전송이 더 나쁘다).
+    // `seq` 를 올려 **떠 있던 읽기**의 응답을 버린다. 안 올리면 저장 직후의 목록 읽기가 늦게
+    // 돌아와 방금 닫은 건을 `pending` 으로 되돌려 놓는다(보낸 메모가 다시 붙는 원인).
+    set((s) => ({
+      rows: s.rows.map((r) => (ids.includes(r.edit_id) ? { ...r, state: 'sent' as const } : r)),
+      seq: s.seq + 1
+    }))
+    try {
+      await rpc.editsMark(root, { edit_ids: ids, state: 'sent' })
+      // 서버가 받아들였으면 원장과 다시 맞춘다 — 화면과 원장이 어긋난 채로 두지 않는다.
+      if (get().root === root) void get().load(root)
+    } catch { /* 다음 읽기에서 다시 pending 으로 보인다 — 그때 또 붙는다 */ }
+  },
+
+  askAgain: async (root, editId) => {
+    set((s) => ({
+      rows: s.rows.map((r) => (r.edit_id === editId ? { ...r, state: 'pending' as const, answered: false } : r)),
+      seq: s.seq + 1
+    }))
+    try {
+      await rpc.editsMark(root, { edit_ids: [editId], state: 'pending' })
+      if (get().root === root) void get().load(root)
+    } catch { /* 다음 읽기에서 되살아난다 */ }
+  },
+
+  markTurnDone: async (root) => {
+    // 이번 턴에 보낸(`sent`) 건만 닫는다. 아직 `pending` 인 건은 다음 메시지에 붙어야 한다.
+    const ids = get().rows.filter((row) => row.state === 'sent' && !row.answered).map((row) => row.edit_id)
+    if (ids.length === 0) return
+    set((s) => ({
+      rows: s.rows.map((r) => (ids.includes(r.edit_id) ? { ...r, answered: true } : r)),
+      seq: s.seq + 1
+    }))
+    try {
+      await rpc.editsMark(root, { edit_ids: ids, state: 'sent', turn_done: true })
+      if (get().root === root) void get().load(root)
+    } catch { /* 화면 표시만 남는다 */ }
   },
 
   seen: async (root, editIds) => {

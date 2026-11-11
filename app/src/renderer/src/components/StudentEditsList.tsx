@@ -14,7 +14,7 @@ import type { EditRow } from '../../../shared/types'
  *
  * 앱은 "확인 끝·맞음"이라고 말하지 않는다(§5) — 상태는 `확인 전`·`도우미에게 전달됨`뿐이다.
  */
-export function StudentEditsList({ open, onOpenChange, rows, titles, recheckSections }: {
+export function StudentEditsList({ open, onOpenChange, rows, titles, recheckSections, onAskNow, onAskAgain }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   rows: EditRow[]
@@ -22,8 +22,13 @@ export function StudentEditsList({ open, onOpenChange, rows, titles, recheckSect
   titles: Record<string, string>
   /** 제출 전 점검이 필요한 장들(§4-5-8 07) — 그 장의 검토가 다시 유효해질 때까지 보인다. */
   recheckSections: string[]
+  /** `지금 확인받기`(§6-4) — 메모만 담은 메시지를 바로 보낸다. 보낼 수 없으면 `null`. */
+  onAskNow: (() => void) | null
+  /** `다시 확인 요청`(§6-3) — 그 건을 `pending` 으로 되돌려 다음 메시지에 다시 싣는다. */
+  onAskAgain: (editId: string) => void
 }) {
   const label = EDIT.listButton(rows.length)
+  const pending = rows.filter((row) => row.state === 'pending').length
   const clock = (at: string | null): string => {
     if (!at) return ''
     const d = new Date(at)
@@ -36,6 +41,13 @@ export function StudentEditsList({ open, onOpenChange, rows, titles, recheckSect
       <button className="lnk" aria-expanded={open} onClick={() => onOpenChange(!open)}>{label}</button>
       <Popover open={open} onClose={() => onOpenChange(false)} align="right" width={380} label={EDIT.listTitle}>
         <PopHead>{EDIT.listTitle}</PopHead>
+        {/* 맨 위 — 확인 전 고침이 있을 때만. 메모만 담은 메시지를 곧장 보낸다(§6-4). */}
+        {pending > 0 && onAskNow && (
+          <div className="edit-asknow">
+            <span>{EDIT.askNowLead(pending)}</span>
+            <button type="button" className="lnk" onClick={onAskNow}>{EDIT.askNow}</button>
+          </div>
+        )}
         {recheckSections.length > 0 && (
           <div className="edit-recheck" role="status">
             {EDIT.listRecheck(recheckSections.map((id) => titles[id] ?? id).join(' · '))}
@@ -59,8 +71,15 @@ export function StudentEditsList({ open, onOpenChange, rows, titles, recheckSect
               )
             })}
             <div className="meta">
-              <span className="state" data-state={row.state}>{EDIT.listState[row.state] ?? row.state}</span>
+              <span className="state" data-state={row.state}>
+                {row.answered ? EDIT.listState.answered : EDIT.listState[row.state] ?? row.state}
+              </span>
               <span>{clock(row.at)}</span>
+              {/* 이미 보낸 건은 다음 메시지에 저절로 다시 붙지 않는다(같은 말 반복 방지, §6-3).
+                  다시 확인받고 싶으면 학생이 여기서 되돌린다 — 되돌린 건은 `pending` 이 된다. */}
+              {row.state === 'sent' && (
+                <button type="button" className="lnk" onClick={() => onAskAgain(row.edit_id)}>{EDIT.askAgain}</button>
+              )}
             </div>
           </div>
         ))}

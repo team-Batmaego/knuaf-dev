@@ -586,7 +586,12 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
         {editRows.length > 0 && (
           <StudentEditsList open={listOpen} onOpenChange={setListOpen} rows={editRows}
             titles={Object.fromEntries((sections ?? []).map((x) => [x.id, x.title]))}
-            recheckSections={recheckSections} />
+            recheckSections={recheckSections}
+            /* 지금 확인받기 — 메모만 보낸다. 보내는 길은 채팅 한 곳(`send`)뿐이라 여기서 부른다(§6-4). */
+            onAskNow={editRows.some((row) => row.state === 'pending')
+              ? () => { useProject.getState().setPaneView('chat'); void useChat.getState().send('') }
+              : null}
+            onAskAgain={(editId) => { void useEdits.getState().askAgain(root, editId) }} />
         )}
         {/* 권하는 단추 **하나** — "지금"이 고른 행동이다(1·2단계는 없다: 대화가 이끈다).
             만들기 자체는 "파일" 팝오버에서 언제든 되지만, 화면에 권하는 것은 이 하나뿐이다. */}

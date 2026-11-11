@@ -3,6 +3,12 @@ import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY } from '../../../shared/copy'
 import { isPreparing, preparationFailureTitle, usePrep, waitPrepared } from './prep'
 import { beginLoginAttempt, connInfoOf, loginAttemptLive, startPoll, stopPoll, useConnect, type ConnState } from './connect'
 import type { ChatModelInfo, ChatModels, ChatSnapshot, ConnectionStatus, ModelChoice, Provider } from '../../../shared/chat'
+import { useEdits } from './edits'
+import { useProject } from './project'
+import type { RunState } from '../../../shared/chat'
+
+/** 직전 스냅샷의 실행 상태 — 턴이 정상으로 끝났는지(진행→idle) 판정한다(§6-3). */
+let previousState: RunState | null = null
 
 /** 어떤 도우미로 채팅하는지. 인앱 터미널 모드는 제거됐다 — 내 논문은 항상 앱 채팅이다. */
 export type ChatMode = 'codex-chat' | 'claude-chat'
@@ -278,7 +284,12 @@ export const useChat = create<ChatState>((set, get) => ({
   },
   send: async (text, opts) => {
     const { root, provider, draft } = get()
-    const body = (text ?? draft).trim()
+    // 재확인 메모를 **보내기 직전** 붙인다(설계 §6-1). 보내는 길 셋(자유 입력·질문 카드 보기·
+    // 여러 칸 폼)이 모두 이 함수를 지나므로 여기 한 곳이면 다 덮인다. 확인 전 고침이 없으면
+    // 본문 그대로다. 제목은 지금 등록된 절 목록에서 읽는다(옛 제목을 붙이지 않는다).
+    const titles = Object.fromEntries((useProject.getState().sections ?? []).map((sec) => [sec.id, sec.title]))
+    const attached = useEdits.getState().attach((text ?? draft), titles)
+    const body = attached.text.trim()
     if (!root || !body) return false
     // 보낼 때의 폴더·공급자와 초안 편집 번호. 응답은 몇 초 뒤에 온다 — 그 사이 학생이 다른
     // 논문을 열었을 수 있고, 그러면 이 응답은 지금 화면의 것이 아니다(검토 P1-R1-01).
@@ -336,6 +347,11 @@ export const useChat = create<ChatState>((set, get) => ({
       return 'result' in r
     }
     if ('result' in r) {
+      // 전달이 **받아들여진 순간** 그 고침들을 `sent` 로 닫는다(§6-3). 턴 끝을 기다리지 않는다 —
+      // 턴 도중 앱이 꺼져도 메시지는 이미 갔다. 실패면 위 갈래에서 `pending` 그대로다.
+      // `attach` 가 돌려준 목록만 닫는다 — 보내는 사이 새로 저장된 고침은 `pending` 그대로 남아
+      // 다음 메시지에 붙는다(§6-3: 하나도 확인 없이 지나가지 않게).
+      if (!left()) void useEdits.getState().markSent(root, attached.ids)
       // 보기를 눌러 보낸 `send(text)` 는 초안을 건드리지 않는다 — 학생이 쓰던 글이 남는다.
       // 인용을 합쳐 보낸 경우(`consumeDraft`)는 그 초안을 **소비**하므로 일반 전송과 같은
       // `draftSeq` 규칙을 쓴다 — 보낸 글이 입력칸에 남지 않고, 그 사이 새로 쓴 글은 지켜진다.
@@ -365,6 +381,14 @@ export const useChat = create<ChatState>((set, get) => ({
   onSnapshot: (snapshot) => {
     const detail = snapshot.provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
     if (snapshot.authRequired) useConnect.getState().observeChat(snapshot.provider, { state: 'need-login', detail, version: null })
+    // 턴이 **정상으로** 끝났는가 — 진행 중이던 턴이 `idle` 로 돌아온 순간이다(§6-3 `answered`).
+    // 실패·중단(`error`·`interrupted`·`stopped`)은 정상 종료가 아니므로 `answered` 로 닫지 않는다;
+    // 그 건은 `sent` 로 남아 점 표시가 그대로이고, 학생이 다시 물으면 그때 확인된다.
+    const wasTurn = previousState === 'running' || previousState === 'permission'
+    previousState = snapshot.state
+    if (wasTurn && snapshot.state === 'idle' && snapshot.root === get().root) {
+      void useEdits.getState().markTurnDone(snapshot.root)
+    }
     if (snapshot.root === get().root && snapshot.provider === get().provider) set({ snapshot,
       ...(snapshot.authRequired ? { status: { installed: true, connected: false, version: null, probe: 'ok' as const, detail }, statusFailed: false, connState: 'need-login' as const } : {})
     })

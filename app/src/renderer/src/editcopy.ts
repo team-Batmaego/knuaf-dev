@@ -30,7 +30,13 @@ export const EDIT = {
   listButton: (n: number) => `직접 고친 곳 ${n}`,
   listTitle: '직접 고친 곳',
   listEmpty: '직접 고친 곳이 없어요.',
-  listState: { plain: '저장됨', pending: '확인 전', sent: '도우미에게 전달됨' } as Record<string, string>,
+  listState: {
+    plain: '저장됨',
+    pending: '확인 전',
+    sent: '도우미에게 전달됨',
+    // 전달은 확인이 아니다 — 그 턴이 정상으로 끝났을 때만 이 말을 쓴다(§5·§6-3).
+    answered: '도우미가 답했어요'
+  } as Record<string, string>,
   dotHint: '확인 전 — 도우미에게 말을 걸 때 함께 확인해요',
   /** 같은 낱말(§3-4). */
   elsewhere: (word: string, n: number) => `다른 곳에도 '${word}'가 ${n}군데 있어요.`,
@@ -48,6 +54,13 @@ export const EDIT = {
   noticeConfirm: '확인',
   noticePath: (path: string) => `보관 위치: ${path}`,
   noticeOpenFolder: '폴더 열기',
+  /** 입력칸 위 칩 — 확인 전 고침이 있을 때(§3-3, §6). */
+  chip: (n: number) => `직접 고친 문장 ${n}개 — 보낼 때 도우미가 확인해요`,
+  /** 목록 맨 위 — 메모만 담은 메시지를 바로 보낸다(§6-4). */
+  askNow: '지금 확인받기',
+  askNowLead: (n: number) => `확인 전 고침 ${n}건이 있어요.`,
+  /** 목록의 한 줄 — 그 건을 `pending` 으로 되돌려 다음 메시지에 다시 싣는다(§6-3). */
+  askAgain: '다시 확인 요청',
   /** 실패 — 자세히 보기(§3-5). */
   failureMore: '자세히 보기'
 } as const
