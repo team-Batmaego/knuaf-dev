@@ -89,6 +89,10 @@ test('스캔은 lstat 잎만 모으고 내용·링크 대상·실행 비트를 �
   write(root, 'chapters/chapter1.docx', 'docx-bytes')
   write(root, 'notes.md', 'not protected')
   symlinkSync('/somewhere/else.json', join(root, '.mcp.json'))
+  // 윈도우 Node는 만든 링크 문자열을 그대로 두지 않고 드라이브 경로로 바꿔 저장한다
+  // (`/somewhere/else.json` → `D:\somewhere\else.json`). 리터럴을 기대값으로 박으면 플랫폼마다
+  // 달라지므로, 링크를 만든 직후 실제로 읽은 값을 기준으로 삼고 그 값이 무엇인지도 함께 확인한다.
+  const createdLink = readlinkSync(join(root, '.mcp.json'))
 
   const scan = scanRoot({ root })
   expect([...scan.leaves.keys()].sort()).toEqual(['.claude/settings.json', '.mcp.json', 'CLAUDE.md'])
@@ -97,7 +101,10 @@ test('스캔은 lstat 잎만 모으고 내용·링크 대상·실행 비트를 �
   expect(settings.hash).toBe(hashContent('{"a":1}'))
   const link = scan.leaves.get('.mcp.json')!
   expect(link.kind).toBe('link')
-  expect(link.linkTarget).toBe('/somewhere/else.json')
+  expect(link.linkTarget).toBe(createdLink)
+  // "아무 값이나 통과"를 막는다: 빈 문자열도, 엉뚱한 경로도 링크 대상이 아니다.
+  expect(createdLink).not.toBe('')
+  expect(createdLink.endsWith('else.json')).toBe(true)
   expect(link.executable).toBe(false)
 })
 
@@ -244,7 +251,14 @@ test('복원: 파일 내용·실행 비트와 링크 문자열을 되살리고, 
   write(root, '.claude/settings.json', '{"v":1}')
   if (process.platform !== 'win32') chmodSync(join(root, '.claude/settings.json'), 0o755)
   symlinkSync('/old/target.json', join(root, '.claude', 'link.json'))
+  // 윈도우는 링크 대상을 드라이브 경로(`D:\old\target.json`)로 바꿔 저장하므로 리터럴 비교는
+  // 플랫폼에 따라 깨진다. 보관 전에 실제 문자열을 잡아 두고, 스캔 기록·복원 결과를 모두 그 값과
+  // 맞춘다 — 세 지점이 같은 문자열을 가리켜야 링크 왕복이 실제로 검증된다.
+  const originalLink = readlinkSync(join(root, '.claude', 'link.json'))
+  expect(originalLink).not.toBe('')
+  expect(originalLink.endsWith('target.json')).toBe(true)
   const scan = scanRoot({ root })
+  expect(scan.leaves.get('.claude/link.json')!.linkTarget).toBe(originalLink)
 
   // 보관본에 올린다.
   const stored: Record<string, LeafFingerprint> = {}
@@ -266,7 +280,7 @@ test('복원: 파일 내용·실행 비트와 링크 문자열을 되살리고, 
 
   expect(restoreLeaf(root, userData, folder, '.claude/link.json', stored['.claude/link.json'])).toBe(true)
   expect(lstatSync(join(root, '.claude/link.json')).isSymbolicLink()).toBe(true)
-  expect(readlinkSync(join(root, '.claude/link.json'))).toBe('/old/target.json')
+  expect(readlinkSync(join(root, '.claude/link.json'))).toBe(originalLink)
 
   expect(removeLeaf(root, '.claude/new-file.json')).toBe(true)
   expect(existsSync(join(root, '.claude/new-file.json'))).toBe(false)
