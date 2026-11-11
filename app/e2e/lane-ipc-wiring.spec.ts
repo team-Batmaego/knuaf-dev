@@ -502,6 +502,53 @@ test('fix C1-10: an already-aborted handoff request opens nothing', async () => 
   await svc.close()
 })
 
+// [C1-10] 판정서 재현: 모델 조회를 기다리는 사이 취소하면 **run 이 한 번도 불리지 않는다**.
+test('fix C1-10: cancelling while the model lookup is pending never starts the turn', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-cancel-await-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-cancel-await-ud-'))
+  const runs: string[] = []
+  let releaseModels: () => void = () => {}
+  const modelsGate = new Promise<void>(resolve => { releaseModels = resolve })
+  const controller = new AbortController()
+  const main: AgentConnection = {
+    status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+    login: async () => {}, respond: () => {}, prepare: async () => {},
+    // 목록 조회가 붙잡혀 있는 동안 학생이 취소한다.
+    models: async () => {
+      await modelsGate
+      return [{ model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] }] as never
+    },
+    run: async (_text, _session, events) => { runs.push('run'); events.session('s') },
+    stop: async () => {}
+  }
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => main,
+    modelChoice: () => ({ model: 'gpt-6.1-astra', effort: 'low' }),
+    modelChosen: () => true,
+    storeModelChoice: () => {}
+  })
+  const opening = svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: 'high', how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: controller.signal
+  })
+  const settled = opening.catch(error => error as Error)
+  // 목록 조회가 실제로 걸려 있는지 확인한 뒤 취소하고, 그 뒤에 조회를 풀어 준다.
+  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  controller.abort()
+  releaseModels()
+  const error = await settled
+  expect(error).toBeInstanceOf(Error)
+  expect((error as Error).message).toMatch(/취소/)
+  // 대기가 끝난 뒤에도 실행은 시작되지 않았다.
+  expect(runs).toEqual([])
+  await svc.close()
+})
+
 // ⑪ [C1-10] 중단·전환은 **실제 제안**을 무효화하고 보관된 대화는 건드리지 않는다.
 test('fix C1-10: invalidating a folder drops open proposals but keeps archives', async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'kd-inv-'))

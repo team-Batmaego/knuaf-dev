@@ -1385,10 +1385,15 @@ export class ChatService {
         const picked = await this.setModel(request.root, provider, {
           model: request.entry.model, effort: request.entry.effort
         })
+        // [C1-10] 모델 검증은 계정 목록을 기다린다(await). 그 사이 학생이 취소했으면 여기서
+        // 멈춘다 — 예전에는 이 대기 뒤에도 `run` 이 한 번 불렸다.
+        if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
         if (!picked || picked.model !== request.entry.model) {
           throw new Error('이어 받기 모델을 이 계정에서 쓸 수 없어요.')
         }
       }
+      // [C1-10] 실제 실행 직전 마지막 확인 — `prepare()` 가 네트워크를 타는 동안에도 취소될 수 있다.
+      if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
       await this.send(request.root, provider, request.firstMessage, randomUUID())
       // [C1-09] `send` 는 세션 이벤트를 기다리지 않고 돌아온다. 세션은 **비동기**로 온다 —
       // 즉시 검사하면 늦게 오는 정상 세션을 실패로 만들고, 그 실패가 이전 기록까지 지운 뒤
