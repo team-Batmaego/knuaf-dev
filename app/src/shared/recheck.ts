@@ -13,15 +13,82 @@ import type { EditRow } from './types'
 /** 표지 줄 — 말풍선이 이 줄부터 끝까지를 메모로 본다. 문구를 바꾸면 여기만 바꾼다. */
 export const RECHECK_MARK = '[학생이 뷰어에서 직접 고친 문장 — 확인 요청]'
 
-/** 고침 한 건을 메모 한 줄로. 기계 검사 결과가 있으면 이유를 덧붙인다. */
-function lineOf(row: EditRow): string | null {
-  const edit = row.edits[0]
-  if (!edit) return null
+/** 인용 안에 넣어도 메모 서식이 깨지지 않게 — 줄바꿈은 공백으로 눕힌다(권고 4 '알려진 한계'의 완화). */
+function oneLine(text: string): string {
+  return text.replace(/\s*\n\s*/g, ' ').trim()
+}
+
+/** 고침 한 건의 기계 검사 이유 — 숫자가 바뀌었는데 이유가 비어 있으면 그 사실을 말한다(§6-2). */
+function whyOf(row: EditRow, edit: { before_block: string; after_block: string }): string {
   const reasons = (row.new_issues ?? []).map((issue) => issue.reason).filter(Boolean)
-  // 숫자가 바뀐 고침은 이유가 비어도 그 사실을 말한다 — 기계가 판정한 근거다(§6-2).
   const numbersChanged = /\d/.test(edit.before_block) || /\d/.test(edit.after_block)
-  const why = [...reasons, ...(numbersChanged && reasons.length === 0 ? ['숫자 바뀜'] : [])].join(' · ')
-  return `- ${row.section_ids[0] ?? edit.section_id}: "${edit.before_block}" → "${edit.after_block}"${why ? `  (기계 검사: ${why})` : ''}`
+  return [...reasons, ...(numbersChanged && reasons.length === 0 ? ['숫자 바뀜'] : [])].join(' · ')
+}
+
+/**
+ * 행 하나가 메모에 남길 줄들 — **`edits[]` 전부**다.
+ *
+ * 첫 항목만 쓰면 `n곳 고치기`(§3-4)의 나머지 곳이 메모에 안 실린다. 그런데 행 전체는
+ * `sent` 로 닫히므로, 도우미가 못 본 고침이 "답함"이 된다(검토 B-R1 차단 1).
+ *
+ * 기록 유실 행(`lost_record`, `edits: []`)은 §5 가 정한 문구 한 줄로 싣는다. 그 행은
+ * 본문 변경 내용을 알 수 없으므로 장 전체를 대조하라고 말한다.
+ */
+function linesOf(row: EditRow, titles: Record<string, string>): string[] {
+  if (row.lost_record === true) {
+    const id = row.section_ids[0] ?? ''
+    return [`- ${titles[id] ?? id}: 직접 고친 기록이 유실됨 — 이 장 전체를 사실·출처와 대조`]
+  }
+  return row.edits.map((edit) => {
+    const title = titles[edit.section_id] ?? edit.section_id
+    const why = whyOf(row, edit)
+    return `- ${title}: "${oneLine(edit.before_block)}" → "${oneLine(edit.after_block)}"${why ? `  (기계 검사: ${why})` : ''}`
+  })
+}
+
+/**
+ * 붙일 것·닫을 것·서버로 보낼 것을 한 번에 정한다.
+ *
+ * - `ids`: 메모에 줄이 **실제로 실린** 행들. 이것만 화면에서 닫는다.
+ * - `marks`: 그중 **서버 원장에 있는** 행. 기록 유실 행은 원장에 없어 `edits_mark` 가
+ *   호출 전체를 거절하므로(`methods_edit.py` `section_edits_mark`) 여기서 빼야 정상 건이 산다.
+ * - `localOnly`: 기록 유실 행 — 화면에서만 닫아 같은 세션에 되풀이되지 않게 한다.
+ * - `memo`: 붙일 문구. 실을 줄이 없으면 `null`.
+ *
+ * 유실 행은 `marks` 에서 빠지므로 서버 상태는 `pending` 그대로다 — 앱을 다시 켜면 한 번 더
+ * 붙는다. 설계 §6-3 "두 번 가도 해가 없다"가 그 경우를 이미 받아들인다(알려진 한계).
+ */
+export interface RecheckPlan {
+  /** 메모에 줄이 실린 행들 — 화면에서 닫을 것. */
+  ids: string[]
+  /** 그중 서버 원장에 있는 행 — `section.edits_mark` 로 보낼 것(유실 행 제외). */
+  marks: string[]
+  /** 이번 세션에 화면에서만 닫아 둘 행(기록 유실) — 서버는 모른다. */
+  localOnly: string[]
+  /** 붙일 문구. 실을 줄이 없으면 `null`. */
+  memo: string | null
+}
+
+export function recheckPlan(rows: EditRow[], titles: Record<string, string> = {}): RecheckPlan {
+  const pending = rows.filter((row) => row.state === 'pending')
+  const ids: string[] = []
+  const lines: string[] = []
+  for (const row of pending) {
+    const own = linesOf(row, titles)
+    if (own.length === 0) continue          // 실을 줄이 없으면 닫지도 않는다 — 붙인 범위 = 닫는 범위
+    ids.push(row.edit_id)
+    lines.push(...own)
+  }
+  const memo = lines.length === 0 ? null : [
+    RECHECK_MARK,
+    ...lines,
+    '이 고침은 이미 본문에 저장·등록돼 있다. 등록된 사실·출처와 대조해라.',
+    '맞으면 인용·근거 위치만 새 문장에 맞춰 다시 등록하고, 어긋나면 학생 문장을 임의로 되돌리지 말고 무엇이 다른지 학생에게 물어라.'
+  ].join('\n')
+  const lostId = (id: string): boolean => pending.find((row) => row.edit_id === id)?.lost_record === true
+  const marks = ids.filter((id) => !lostId(id))
+  const localOnly = ids.filter(lostId)
+  return { ids, marks, localOnly, memo }
 }
 
 /**
@@ -29,21 +96,7 @@ function lineOf(row: EditRow): string | null {
  * 메모 없는 메시지에 빈 표지를 붙이지 않는다.
  */
 export function recheckMemo(rows: EditRow[], titles: Record<string, string> = {}): string | null {
-  const pending = rows.filter((row) => row.state === 'pending')
-  if (pending.length === 0) return null
-  const lines = pending.map((row) => {
-    const line = lineOf(row)
-    if (!line) return null
-    const title = titles[row.section_ids[0] ?? '']
-    return title ? line.replace(`- ${row.section_ids[0]}:`, `- ${title}:`) : line
-  }).filter((line): line is string => line !== null)
-  if (lines.length === 0) return null
-  return [
-    RECHECK_MARK,
-    ...lines,
-    '이 고침은 이미 본문에 저장·등록돼 있다. 등록된 사실·출처와 대조해라.',
-    '맞으면 인용·근거 위치만 새 문장에 맞춰 다시 등록하고, 어긋나면 학생 문장을 임의로 되돌리지 말고 무엇이 다른지 학생에게 물어라.'
-  ].join('\n')
+  return recheckPlan(rows, titles).memo
 }
 
 /**

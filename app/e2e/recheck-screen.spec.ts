@@ -150,7 +150,9 @@ test('목록 맨 위 지금 확인받기 — 메모만 담은 메시지를 바�
     await page.getByRole('button', { name: /^직접 고친 곳/ }).click()
     await expect(page.locator('.edit-asknow')).toBeVisible({ timeout: 15_000 })
     await expect(page.locator('.popover')).toContainText('확인 전')
-    // 목록 안 단추가 눌리는 순간 그 건이 닫혀 목록이 다시 그려진다 — 요소가 곧 사라지므로 직접 누른다.
+    // 학생이 실제로 누를 수 있는지 먼저 단언한다(검토 B-R1 권고 1) — 실패하면 우회하지 말고 원인을 본다.
+    await page.locator('.edit-asknow button').click({ trial: true })
+    // 누르는 순간 그 건이 닫혀 목록이 다시 그려진다 — 요소가 곧 사라지므로 직접 누른다.
     await page.locator('.edit-asknow button').evaluate((el) => (el as HTMLElement).click())
 
     // 메모만 담긴 메시지 — 학생이 쓴 본문이 없으므로 표지 줄로 시작한다.
@@ -191,8 +193,12 @@ test('목록의 다시 확인 요청 — 그 건이 확인 전으로 돌아가 �
     await page.getByRole('button', { name: /^직접 고친 곳/ }).click()
     const again = page.getByRole('button', { name: '다시 확인 요청' })
     await expect(again).toBeVisible({ timeout: 15_000 })
-    // 누르는 순간 그 건이 `pending` 이 되면서 이 단추는 **사라진다** — Playwright 의 안정성
-    // 대기는 영영 끝나지 않는다(요소가 DOM 에서 떨어짐). 그래서 요소의 click() 을 직접 부른다.
+    // 학생이 실제로 누를 수 있는 상태인지 **먼저** 단언한다(검토 B-R1 권고 1). 가려짐·잠김·
+    // 계속 다시 붙기 때문이 아니라, 누르는 순간 그 줄이 `pending` 으로 바뀌어 단추가 사라지는
+    // 것 때문이라면 아래 trial 은 통과한다. 여기서 실패하면 우회하지 말고 원인을 봐야 한다.
+    await again.click({ trial: true })
+    // 누르는 순간 그 건이 `pending` 이 되면서 이 단추는 DOM 에서 떨어진다 — 그래서 요소의
+    // click() 을 직접 부른다(판정은 위 trial 이 한다).
     await again.evaluate((el) => (el as HTMLElement).click())
     await page.keyboard.press('Escape')
     // 칩이 다시 뜨고, 다음 메시지에 메모가 또 실린다.

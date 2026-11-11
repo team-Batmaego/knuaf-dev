@@ -47,6 +47,8 @@ function rpcModel(script: { edits?: (root: string) => Promise<unknown> | unknown
 }
 
 test.beforeEach(() => {
+  // `reset()` 이 턴 묶음·유실 표시(모듈 전역)까지 비운다 — 시험 사이에 남지 않게 여기서 부른다.
+  useEdits.getState().reset()
   useEdits.setState({ rows: [], notices: [], error: null, loading: false, root: null, available: null, seq: 0 })
 })
 
@@ -264,7 +266,7 @@ test('B — 전달이 받아들여지면 pending → sent, 서버가 실패해�
   }
   await withWindow(model, async () => {
     useEdits.setState({ rows: [editRow('e1', 'pending'), editRow('e2', 'pending')] as never })
-    await useEdits.getState().markSent('/A', ['e1', 'e2'])
+    await useEdits.getState().markSent('/A', useEdits.getState().attach(''), 'turn-A')
     // 서버 실패 — 그래도 다시 보내지 않게 화면은 이미 `sent`.
     expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['sent', 'sent'])
     failed = false
@@ -277,12 +279,12 @@ test('B — 턴이 정상으로 끝나면 sent 가 answered 가 되고, pending 
   await withWindow(model, async () => {
     useEdits.setState({ rows: [editRow('e1', 'pending'), editRow('e2', 'pending')] as never })
     // 전송 실패 상황: markSent 를 부르지 않았다 → 둘 다 pending 이고 닫히면 안 된다.
-    await useEdits.getState().markTurnDone('/A')
+    await useEdits.getState().markTurnDone('/A', 'turn-A')
     expect(useEdits.getState().rows.map((r) => r.answered)).toEqual([false, false])
     expect(calls).toEqual([])
 
-    await useEdits.getState().markSent('/A', ['e1', 'e2'])
-    await useEdits.getState().markTurnDone('/A')
+    await useEdits.getState().markSent('/A', useEdits.getState().attach(''), 'turn-A')
+    await useEdits.getState().markTurnDone('/A', 'turn-A')
     expect(useEdits.getState().rows.map((r) => r.answered)).toEqual([true, true])
     // 마지막 호출이 `turn_done:true` 를 실은 sent 표시다 — 이 두 번째 인자가 없으면 sidecar 가
     // `answered` 로 닫지 않는다(`methods_edit.py` `section_edits_mark`).
@@ -295,7 +297,7 @@ test('B — 이미 answered 인 건은 턴이 또 끝나도 다시 닫지 않는
   const model = { knuaf: { call: async (method: string) => { calls.push(method); return { result: null } } } }
   await withWindow(model, async () => {
     useEdits.setState({ rows: [{ ...editRow('e1', 'pending'), answered: true }] as never })
-    await useEdits.getState().markTurnDone('/A')
+    await useEdits.getState().markTurnDone('/A', 'turn-A')
     expect(calls).toEqual([])
   })
 })
@@ -314,7 +316,7 @@ test('B — 보내는 사이 새로 저장된 고침은 sent 가 되지 않고 �
     expect(sent1.ids).toEqual(['e1'])
     // 응답을 기다리는 사이 학생이 하나 더 고쳐 저장했다 — 이 건은 **메모에 안 붙었다**.
     useEdits.setState((s) => ({ rows: [...s.rows, editRow('e3', 'pending')] as never }))
-    await useEdits.getState().markSent('/A', sent1.ids)
+    await useEdits.getState().markSent('/A', sent1, 'turn-1')
     // 붙인 것만 닫힌다. e3 는 pending 그대로 — 다음 메시지에 붙어야 한다.
     expect(useEdits.getState().rows.map((r) => [r.edit_id, r.state])).toEqual([['e1', 'sent'], ['e2', 'plain'], ['e3', 'pending']])
     expect(calls).toEqual([['e1']])
@@ -361,8 +363,8 @@ test('B — 저장이 끝나며 뜬 늦은 목록 읽기가 방금 닫은 건을
     await useEdits.getState().load('/A')
     expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['pending'])
     const late = useEdits.getState().load('/A')     // 저장이 부른 읽기 — 아직 응답 없음
-    const ids = useEdits.getState().attach('보내기').ids
-    await useEdits.getState().markSent('/A', ids)
+    const plan = useEdits.getState().attach('보내기')
+    await useEdits.getState().markSent('/A', plan, 'turn-A')
     expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['sent'])
     // 그제야 옛 원장(pending)이 도착한다 — 되돌리면 칩이 되살아나고 메모가 또 붙는다.
     stale.resolve({ edits: [editRow('e1', 'pending')], notices: [] })
@@ -372,5 +374,89 @@ test('B — 저장이 끝나며 뜬 늦은 목록 읽기가 방금 닫은 건을
     fresh.resolve({ edits: [editRow('e1', 'sent')], notices: [] })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['sent'])
+  })
+})
+
+// ── 고침1: 턴 단위 answered · uncertain → pending · 유실 행은 화면에서만 닫기 ─────
+
+test('고침1 — 메모 실린 턴이 실패하면 그 건은 pending 으로 돌아오고 다음 턴이 정상 끝나도 answered 가 아니다', async () => {
+  const marks: { ids: string[]; state: string; turn: boolean }[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits_mark') marks.push({ ids: (p.edit_ids as string[]) ?? [], state: String(p.state), turn: p.turn_done === true })
+    return { result: null }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.setState({ rows: [editRow('e1', 'pending')] as never })
+    const plan = useEdits.getState().attach('메모 턴')
+    const turnA = 'turn-A'
+    await useEdits.getState().markSent('/A', plan, turnA)
+    expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['sent'])
+
+    // 그 턴이 실패로 끝났다 → 그 turn 에 묶인 건만 되돌린다.
+    await useEdits.getState().turnFailed('/A', turnA)
+    expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['pending'])
+    expect(marks.at(-1)).toEqual({ ids: ['e1'], state: 'pending', turn: false })
+
+    // 다음 턴이 정상으로 끝나도 **이 건은 닫히지 않는다** — 그 턴에 메모가 실리지 않았다.
+    await useEdits.getState().markTurnDone('/A', 'turn-B')
+    expect(useEdits.getState().rows.map((r) => r.answered)).toEqual([false])
+  })
+})
+
+test('고침1 — 정상으로 끝난 그 턴에만 answered 가 켜진다', async () => {
+  const model = { knuaf: { call: async () => ({ result: null }) } }
+  await withWindow(model, async () => {
+    useEdits.setState({ rows: [editRow('e1', 'pending'), editRow('e2', 'pending')] as never })
+    // A 턴에는 e1 만 메모에 실린다(둘 다 pending 이지만 e2 는 그 뒤에 저장된 것으로 둔다).
+    const planA = { ids: ['e1'], marks: ['e1'], localOnly: [], memo: null }
+    await useEdits.getState().markSent('/A', planA, 'turn-A')
+    const planB = { ids: ['e2'], marks: ['e2'], localOnly: [], memo: null }
+    await useEdits.getState().markSent('/A', planB, 'turn-B')
+    // A 턴이 정상 종료 → e1 만 answered.
+    await useEdits.getState().markTurnDone('/A', 'turn-A')
+    expect(useEdits.getState().rows.map((r) => [r.edit_id, r.answered])).toEqual([['e1', true], ['e2', false]])
+    // B 턴이 정상 종료 → e2 answered.
+    await useEdits.getState().markTurnDone('/A', 'turn-B')
+    expect(useEdits.getState().rows.map((r) => r.answered)).toEqual([true, true])
+  })
+})
+
+test('고침1 — 전달이 uncertain 이면 sent 로 닫지 않고 pending 그대로 둔다 (§6-3)', async () => {
+  const model = { knuaf: { call: async () => ({ result: null }) } }
+  await withWindow(model, async () => {
+    useEdits.setState({ rows: [editRow('e1', 'pending')] as never })
+    const plan = useEdits.getState().attach('불확실')
+    await useEdits.getState().markSent('/A', plan, 'turn-A', 'uncertain')
+    expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['pending'])
+  })
+})
+
+test('고침1 — 유실 행은 서버로 안 보내고 화면에서만 닫으며, 다시 읽어도 같은 세션에 되살아나지 않는다', async () => {
+  const lost: never = { ...editRow('app:student-edit:sec-02:xyz', 'pending'), edits: [], section_ids: ['sec-02'], lost_record: true } as never
+  const marks: string[][] = []
+  const calls: string[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits_mark') { marks.push((p.edit_ids as string[]) ?? []); calls.push(String(p.state)) }
+    // `section.edits` 는 서버 상태대로 유실 행 + 정상 행을 계속 돌려준다(원장에 유실 행이 없다).
+    // `edits_mark` 가 오면 서버 상태가 바뀐 것처럼 다음 읽기에 반영한다(실제 원장 동작).
+    if (method === 'section.edits') {
+      const e1State = marks.flat().includes('e1') && calls.some((c) => c === 'sent') ? 'sent' : 'pending'
+      return { result: { edits: [lost, editRow('e1', e1State)], notices: [] } }
+    }
+    return { result: null }
+  } } }
+  await withWindow(model, async () => {
+    await useEdits.getState().load('/A')
+    const plan = useEdits.getState().attach('유실 + 정상')
+    expect(plan.ids).toHaveLength(2)
+    await useEdits.getState().markSent('/A', plan, 'turn-A')
+    // 서버에는 정상 건만 — 유실 id 를 섞으면 `not_found` 로 호출 전체가 거절된다.
+    expect(marks).toEqual([['e1']])
+    // 화면에서는 둘 다 닫힌다 — 유실 행을 그대로 두면 매 메시지에 같은 메모가 되풀이된다.
+    expect(useEdits.getState().rows.map((r) => r.state)).toEqual(['sent', 'sent'])
+
+    // 같은 세션에서 다시 읽어도 유실 행은 되살아나지 않는다(이번 세션에 이미 메모에 실었다).
+    await useEdits.getState().load('/A')
+    expect(useEdits.getState().rows.map((r) => [r.edit_id, r.state])).toEqual([['app:student-edit:sec-02:xyz', 'sent'], ['e1', 'sent']])
   })
 })
