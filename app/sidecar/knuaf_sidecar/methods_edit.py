@@ -418,6 +418,7 @@ def _request_id(items: list[dict]) -> str:
 
 RESTORED_NOTICE = "앱이 갑자기 꺼져서 마지막 고침이 저장되지 않았어요. 원고는 고치기 전 그대로예요."
 KEPT_NOTICE = "다른 프로그램이 같은 장을 동시에 고쳤어요. 그 내용은 지우지 않고 따로 보관했어요."
+MISSING_NOTICE = "원고 파일을 찾지 못했어요."
 RESTORE_PENDING_NOTICE = (
     "원고를 제자리에 돌려놓지 못했어요. 디스크 공간을 확인하고 앱을 다시 켜 주세요. "
     "원고는 보관 폴더에 그대로 있어요."
@@ -578,9 +579,10 @@ def _recover_pending(core, root: Path) -> list[dict]:
 def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
     """`writing` 줄 하나를 §4-5-2 표대로 처분하고 끝줄을 적는다.
 
-    표 일곱 줄: 등록 전이면 원래대로(restored), 손댈 수 없으면 남긴다(left → `kept`),
+    표 여덟 줄: 등록 전이면 원래대로(restored), 손댈 수 없으면 남긴다(left → `kept`),
     이미 A 면 아무것도 안 한다(nothing), 등록됐으면 확정 줄만 채운다. 못 돌려놓으면
-    줄을 닫지 않고 `restore_pending` 알림을 낸다.
+    줄을 닫지 않고 `restore_pending` 알림을 낸다. 자리가 비었는데 돌려놓을 것도 없으면
+    줄은 닫되 `missing: true` + 알림으로 남긴다 — 원고가 빈 채 조용히 끝나면 안 된다.
     """
     edit_id = row["edit_id"]
     bundle = _bundle_path(root, edit_id)
@@ -592,7 +594,7 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
     registered = bool(row.get("request_id")) and row["request_id"] in (p.get("requests") or {})
     restored = False
     left = False
-    pending = False
+    missing = False
     for entry in files:
         n = entry["n"]
         try:
@@ -610,7 +612,7 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
                                    data={"backup": str(bundle)}) from None
                 continue
             if registered:
-                pending = True  # 자리가 비었고 new 가 내 글도 아니다 — 손댈 수 없다
+                missing = True  # 자리가 비었고 new 가 내 글도 아니다 — 돌려놓을 것이 없다
                 continue
             try:
                 outcome = _restore_file(bundle, n, path, sha_a, sha_c)
@@ -618,7 +620,7 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
                 raise RpcError("restore_pending", RESTORE_PENDING_NOTICE,
                                data={"backup": str(bundle)}) from None
             if outcome == "nothing":
-                pending = True  # 돌려놓을 것이 없다 — '복구함'으로 적지 않는다
+                missing = True  # 자리가 비었고 돌려놓을 것이 없다 — 다시 해도 같다
             elif outcome == "left":
                 left = True
             else:
@@ -637,15 +639,17 @@ def _recover_one(core, root: Path, row: dict, rows: list[dict]) -> list[dict]:
             left = True  # 남의 글·내 글이 자리에 남았다 — A 는 보존 폴더에 그대로
         elif outcome == "restored":
             restored = True
-        else:
-            pending = True
+        # `nothing` 인데 자리에 파일이 있다 — 알릴 것이 없다(§4-5-2 보정 3)
     state = "pending" if registered else "aborted"
     notice = None
-    if not registered and left:
+    if missing:
+        # 더 급한 알림이다 — `kept`·`restored` 와 겹치면 이것 하나만 싣는다(§4-5-2 참고).
+        notice = {"kind": "missing", "message": MISSING_NOTICE, "path": str(bundle), "edit_id": edit_id}
+    elif not registered and left:
         notice = {"kind": "kept", "message": KEPT_NOTICE, "path": str(bundle), "edit_id": edit_id}
     elif not registered and restored:
         notice = {"kind": "restored", "message": RESTORED_NOTICE, "edit_id": edit_id}
-    closing = dict(row, state=state, at=_now(), left=left, restore_pending=pending)
+    closing = dict(row, state=state, at=_now(), left=left, missing=missing)
     if registered:
         closing["revision_after"] = closing.get("revision_after") or p.get("revision")
     if notice is not None:
@@ -1051,8 +1055,13 @@ def section_edits(ctx, params):
             "answered": False,
             "lost_record": True,
         })
-    notices.extend(_unseen_notices(rows))
-    notices.extend(_stuck_notices(rows))
+    # 방금 복구가 낸 알림은 끝줄에 적혀 `_unseen_notices` 가 다시 집는다 — 같은 알림을
+    # 두 번 싣지 않도록 (종류, 건) 으로 한 번만 남긴다.
+    for notice in _unseen_notices(rows) + _stuck_notices(rows):
+        key = (notice.get("kind"), notice.get("edit_id"))
+        if any((n.get("kind"), n.get("edit_id")) == key for n in notices):
+            continue
+        notices.append(notice)
     return {"edits": out, "notices": notices}
 
 

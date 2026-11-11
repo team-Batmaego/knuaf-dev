@@ -1258,3 +1258,98 @@ def test_removed_surfaces_are_really_gone():
     methods_edit.register(server)
     server_names.update(server.methods)
     assert "section.edit_undo" not in server_names
+
+
+# ── FIX4: 빈 원고 자리는 조용히 닫지 않는다 (§4-5-2 마지막 줄) ─────────────
+
+
+def _writing_row(root, registered, seat_exists, new_is_c=False, extra_edits=None):
+    """미완료 `writing` 줄 하나와 보존 폴더를 세운다. 등록 여부·자리·보존본을 손으로 고른다."""
+    p = core.load(root)
+    request_id = "app:student-edit:sec-01:%d:deadbeefdead" % p["revision"]
+    if registered:
+        core.apply(root, {"request_id": request_id, "ops": []}, p["revision"])
+        p = core.load(root)
+    edit_id = "edit-fix4-%s" % ("reg" if registered else "new")
+    raw = ("# Ⅰ. 머리말\n\n%s\n%s\n%s\n" % (START, BODY, END)).encode()
+    new = ("# Ⅰ. 머리말\n\n%s\n%s\n%s\n" % (START, TYPED, END)).encode()
+    bundle = methods_edit._backup_root(root) / edit_id
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "new-0").write_bytes(new if new_is_c else b"some other bytes")
+    path = root / "sections" / "01.md"
+    if not seat_exists:
+        path.unlink()
+    methods_edit._append_ledger(root, {
+        "edit_id": edit_id,
+        "request_id": request_id,
+        "at": "2020-01-01T00:00:00+00:00",
+        "revision_before": p["revision"],
+        "revision_after": None,
+        "edits": [{"section_id": "sec-01", "before_block": BODY, "after_block": TYPED}],
+        "needs_check": None,
+        "new_issues": [],
+        "state": "writing",
+        "files": [{"n": 0, "section_id": "sec-01", "path": "sections/01.md",
+                   "sha_a": hashlib.sha256(raw).hexdigest(),
+                   "sha_c": hashlib.sha256(new).hexdigest()}],
+        **(extra_edits or {}),
+    })
+    return edit_id, bundle
+
+
+def test_a_registered_row_with_no_seat_and_no_matching_new_is_announced(tmp_path):
+    """(가) 등록됨 + 자리 빔 + `new` 가 내 글 아님 → `pending` + `missing: true` + 알림."""
+    root = _crash_project(tmp_path, "fix4reg")
+    edit_id, bundle = _writing_row(root, registered=True, seat_exists=False)
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    assert [n["kind"] for n in listed["notices"]] == ["missing"]
+    assert listed["notices"][0]["path"] == str(bundle)
+    closing = [r for r in _ledger(root) if r["edit_id"] == edit_id][-1]
+    assert closing["state"] == "pending"
+    assert closing["missing"] is True
+    assert "restore_pending" not in closing
+
+
+def test_an_unregistered_row_with_no_seat_and_nothing_to_restore_is_announced(tmp_path):
+    """(나) 미등록 + 자리 빔 + 돌려놓을 것 없음 → `aborted` + `missing: true` + 알림."""
+    root = _crash_project(tmp_path, "fix4new")
+    edit_id, bundle = _writing_row(root, registered=False, seat_exists=False)
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    assert [n["kind"] for n in listed["notices"]] == ["missing"]
+    assert listed["notices"][0]["path"] == str(bundle)
+    closing = [r for r in _ledger(root) if r["edit_id"] == edit_id][-1]
+    assert closing["state"] == "aborted"
+    assert closing["missing"] is True
+
+
+def test_a_seat_that_still_has_someone_elses_text_is_not_called_missing(tmp_path):
+    """자리에 파일이 있으면 '찾지 못함'이 아니다 — `kept`(A 는 보존 폴더에)."""
+    root = _crash_project(tmp_path, "fix4seat")
+    edit_id, bundle = _writing_row(root, registered=False, seat_exists=True)
+    (root / "sections" / "01.md").write_bytes(b"B: outside writer")
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    kinds = [n["kind"] for n in listed["notices"]]
+    assert "missing" not in kinds
+    closing = [r for r in _ledger(root) if r["edit_id"] == edit_id][-1]
+    assert closing.get("missing") is not True
+    assert (bundle / "displaced-1-0").exists() is False  # 밀어낸 적이 없다
+
+
+def test_missing_wins_over_kept_when_both_apply(tmp_path):
+    """알림이 겹치면 더 급한 `missing` 하나만 싣는다(§4-5-2 참고)."""
+    root = _crash_project(tmp_path, "fix4both")
+    edit_id, bundle = _writing_row(root, registered=False, seat_exists=True)
+    # 첫 파일은 자리에 남의 글이 있고(→ left/kept), 둘째 파일은 자리가 비었다(→ missing).
+    second = root / "sections" / "02.md"
+    raw2 = ("# Ⅱ. 본문\n\n%s\n%s\n%s\n" % (START, "농장A는 600평 규모다.", END)).encode()
+    rows = methods_edit._read_ledger(root)
+    row = [r for r in rows if r["edit_id"] == edit_id][-1]
+    row["files"].append({"n": 1, "section_id": "sec-02", "path": "sections/02.md",
+                         "sha_a": hashlib.sha256(raw2).hexdigest(),
+                         "sha_c": hashlib.sha256(b"other").hexdigest()})
+    methods_edit._append_ledger(root, row)
+    second.unlink()
+
+    listed = methods_edit.section_edits(None, {"root": str(root)})
+    kinds = [n["kind"] for n in listed["notices"]]
+    assert kinds == ["missing"]
