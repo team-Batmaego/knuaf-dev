@@ -3,18 +3,22 @@
 // IMPL-T1 §4-2. **electron을 import하지 않는다** — node 시험(`e2e/progress-file.spec.ts`)이
 // 이 모듈을 그대로 import해 F1~F4·F9를 잠근다. IPC 배선은 `./index.ts` 몫.
 //
-// 읽기 안전(중요 5, Roh 1회째 [차단] 고침):
+// 읽기 안전(중요 5, Roh 1회째 [차단] → 2회째 확인 FAIL 고침):
 // - 렌더러가 준 경로는 없다. main이 연 논문 root 아래 **고정 이름** 하나만 연다.
-// - 판정은 **연 fd 기준**이다. 경로를 두 번 푸는(확인 → 열기 → 확인) 구조는 그 사이 교체에 뚫린다:
-//   `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`로 열고 → `fstat(fd)`(일반 파일·64KB 이하·하드 링크 아님) →
-//   읽은 **뒤** `<rootReal>/.knuaf-progress.json`을 다시 lstat해 그 dev/ino가 fd와 같고,
-//   열기 전 잡아 둔 폴더(realpath)의 dev/ino도 그대로인지 본다. 하나라도 다르면 결과를 버린다.
+// - 판정은 **연 fd 기준**이고, **읽기 전**에 끝난다(Roh 2회째). 순서:
+//   ① `realpath(root)`의 dev/ino를 기억한다 ② `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`로 연다
+//   ③ **읽기 전에** `fstat(fd)`(일반 파일·64KB 이하·하드 링크 아님) + `lstat(<rootReal>/.knuaf-progress.json)`의
+//     dev/ino == `fstat(fd)`의 dev/ino + `lstat(rootReal)`의 dev/ino == ①의 값 — 하나라도 다르면
+//     **읽지 않고** 닫고 `null` ④ 통과하면 그 fd에서 읽는다. fd는 이미 검증된 파일 객체라
+//     이후 경로가 바뀌어도 읽는 바이트는 그 검증된 파일의 것이다(폴더 밖 내용이 섞이지 않는다).
+// - 이전 구조(읽은 **뒤** 검사)는 폴더 밖 파일을 읽고 나서 버렸다 — 값은 안 새지만 "한 바이트도
+//   읽지 않음" 기준을 못 채웠다(Roh 반례: 외부 260바이트가 실제로 읽힘). 그래서 순서를 뒤집었다.
 // - `O_NOFOLLOW` — 마지막 요소가 심볼릭 링크면 열기 자체가 실패한다(리눅스·맥).
 // - `O_NONBLOCK` — 자리에 FIFO가 있으면 동기 open이 **멈춘다**(Roh 1회째 [중요]). 논블록으로 열어
 //   fstat에서 일반 파일이 아님을 보고 즉시 거절한다. 일반 파일에는 아무 효과가 없다.
 // - 윈도우는 `O_NOFOLLOW`·`O_NONBLOCK`이 없다(POSIX FIFO도 없다 — 이름 있는 파이프는 경로 open으로
 //   열리지 않는다). 그래서 열기 전 `lstat`(링크·정션 거부)을 한 번 더 하고, 최종 판정은 위의
-//   '연 뒤 fd 신원 대조'가 한다 — open이 링크를 따라가도 경로의 inode와 fd의 inode가 달라 걸린다.
+//   '읽기 전 fd 신원 대조'가 한다 — open이 링크를 따라가도 경로의 inode와 fd의 inode가 달라 걸린다.
 // - 어느 검사든 실패하면 `null` — "파일 없음"과 똑같이 다룬다(파서 → 저장값).
 import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, watch } from 'node:fs'
 import type { FSWatcher, Stats } from 'node:fs'
@@ -63,18 +67,20 @@ function readBounded(fd: number): string | null {
 }
 
 /**
- * 읽은 **뒤** 판정 — 지금 이 경로가 여전히 열었던 그 파일이고, 폴더도 그대로인가.
- * `fd`의 dev/ino와 경로의 dev/ino가 같아야 한다. 폴더가 바뀌었으면(교체) 통째로 버린다.
+ * **읽기 전** 판정 — 지금 이 경로가 열어 둔 그 파일이고, 폴더도 그대로인가.
+ * `fd`의 dev/ino와 경로의 dev/ino가 같아야 한다. 폴더가 바뀌었으면(교체) 통째로 거절한다.
+ * 통과하면 이후 경로가 바뀌어도 fd가 가리키는 객체는 그대로이므로 읽기가 안전하다.
+ * `opened`는 호출자가 이미 받아 둔 `fstat(fd)` — 두 번 재지 않는다.
  */
-function stillTheSameFile(fd: number, path: string, rootReal: string, rootIdentity: Identity): boolean {
-  let fdIdentity: Identity
-  try {
-    const opened = fstatSync(fd)
-    if (!opened.isFile()) return false
-    fdIdentity = identityOf(opened)
-  } catch {
-    return false
-  }
+function verifiedBeforeRead(
+  opened: Stats, path: string, rootReal: string, rootIdentity: Identity
+): boolean {
+  if (!opened.isFile()) return false
+  if (opened.size > PROGRESS_FILE_MAX_BYTES) return false
+  // 이름이 둘 이상인 파일(하드 링크)은 폴더 밖 내용일 수 있다 — 읽지 않는다.
+  // `0`은 링크 수를 못 세는 파일시스템이므로 >1만 거부한다(정상 파일 nlink=1).
+  if (opened.nlink > 1) return false
+  const fdIdentity = identityOf(opened)
   try {
     const file = lstatSync(path)
     if (file.isSymbolicLink() || !file.isFile()) return false
@@ -91,8 +97,10 @@ function stillTheSameFile(fd: number, path: string, rootReal: string, rootIdenti
 export interface ReadProgressHooks {
   /** 열기 직전. 시험용: 이 시점에 상위 폴더를 바꿔 치기한다. 제품 경로는 넘기지 않는다. */
   beforeOpen?: (path: string) => void
-  /** 열기 직후·읽기 전. 시험용: 바꿔 치기를 곧바로 되돌린다(Roh 반례 그대로). */
+  /** 열기 직후·검증 전. 시험용: 바꿔 치기를 곧바로 되돌린다(Roh 반례 그대로). */
   afterOpen?: (path: string) => void
+  /** 검증을 통과한 뒤 실제 바이트를 읽는 함수. 시험용: 호출 횟수로 '읽기 0회'를 단언한다. */
+  read?: (fd: number) => string | null
 }
 
 /**
@@ -137,16 +145,11 @@ export function readProgressFile(root: string, hooks: ReadProgressHooks = {}): P
   try {
     hooks.afterOpen?.(path)
     const opened = fstatSync(fd)
-    // 폴더·FIFO·소켓·장치 — `O_NONBLOCK`이라 열려도 여기서 즉시 거절한다(멈추지 않는다).
-    if (!opened.isFile()) return null
-    if (opened.size > PROGRESS_FILE_MAX_BYTES) return null
-    // 이름이 둘 이상인 파일(하드 링크)은 폴더 밖 내용일 수 있다 — 읽지 않는다.
-    // `0`은 링크 수를 못 세는 파일시스템이므로 >1만 거부한다(정상 파일 nlink=1).
-    if (opened.nlink > 1) return null
+    // 판정은 **읽기 전**에 끝난다 — 통과해야 그 fd에서 읽는다(Roh 2회째 [차단]).
     if (expected !== null && !sameIdentity(identityOf(opened), expected)) return null
-    const text = readBounded(fd)
+    if (!verifiedBeforeRead(opened, path, rootReal, rootIdentity)) return null
+    const text = (hooks.read ?? readBounded)(fd)
     if (text === null) return null
-    if (!stillTheSameFile(fd, path, rootReal, rootIdentity)) return null
     return parseProgressFile(text)
   } catch {
     return null

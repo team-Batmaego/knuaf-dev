@@ -7,7 +7,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { linkSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -300,65 +300,111 @@ test('파일 없음 — 1단계 그대로: 대화 없으면 저장값, 저장값
 /* ------------------------------------------- Roh 1회째 [차단] 확인↔열기 교체 */
 
 /**
+ * 시험이 `read` 훅으로 감싸 쓸 실제 읽기. 제품 경로의 `readBounded`와 같은 일을 하지만
+ * main 모듈이 그 함수를 내보내지 않으므로 시험 쪽에 최소판을 둔다(검증 통과 뒤에만 불린다).
+ */
+function readBoundedForTest(fd: number): string | null {
+  const buffer = Buffer.alloc(4096)
+  const chunks: Buffer[] = []
+  let total = 0
+  while (total <= 64 * 1024) {
+    const read = readSync(fd, buffer, 0, buffer.length, null)
+    if (read === 0) break
+    total += read
+    if (total > 64 * 1024) return null
+    chunks.push(Buffer.from(buffer.subarray(0, read)))
+  }
+  return Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '')
+}
+
+/**
  * Roh 반례 그대로: 확인과 열기 **사이**에 논문 폴더를 바꿔 치고, 열린 직후 되돌린다.
- * 옛 구조(확인 → 열기 → 확인)는 이 창을 통과했다(VM에서 폴더 밖 376바이트를 읽었다).
- * 지금은 연 fd와 읽은 뒤의 경로·폴더 신원이 모두 맞아야 하므로 결과가 버려져야 한다.
+ * 옛 구조(읽은 뒤 검사)는 폴더 밖 260바이트를 **실제로 읽고서** 버렸다 — 값은 안 샜지만
+ * "폴더 밖 내용을 한 바이트도 읽지 않음" 기준을 못 채웠다(Roh 2회째 [차단]).
+ * 지금은 신원 확인이 read **앞**이므로 읽기 함수가 한 번도 불리지 않아야 한다.
  * 폴더 이름 바꾸기는 POSIX에서만 안전하다(윈도우는 열린 파일이 든 폴더 이름을 못 바꾼다).
  */
-test('F10 확인↔열기 사이 논문 폴더 교체 — 폴더 밖 값(revision 77)이 새지 않는다', () => {
+test('F10 확인↔열기 사이 폴더 교체 — 폴더 밖 값을 읽지도 않는다(읽기 0회)', () => {
   test.skip(process.platform === 'win32', '폴더 이름 바꾸기 반례는 POSIX 시험')
   const root = scratch()
   const outside = scratch()
   try {
     const secret = join(outside, 'secret.json')
-    writeFileSync(secret, JSON.stringify(fileJson({ revision: 77 })))
+    writeFileSync(secret, JSON.stringify(fileJson({
+      revision: 77,
+      next: 'OUTSIDE_SECRET_20261111'.repeat(12)
+    })))
 
-    // ① 바꾼 폴더를 **그대로 둔 채** 읽는다 — 폴더 신원이 달라 걸린다.
-    writeFile(root, fileJson({ revision: 1 }))
-    const moved = `${root}.moved`
-    const swapped = readProgressFile(root, {
-      beforeOpen: (path) => {
-        renameSync(root, moved)
-        mkdirSync(root)
-        // 링크가 아니라 **복사본**을 둔다 — O_NOFOLLOW로 걸리지 않는 가장 센 반례.
-        writeFileSync(path, JSON.stringify(fileJson({ revision: 77 })))
+    /**
+     * 바꿔 치는 동안 읽기 함수 호출을 센다. `restoreAfterOpen`이면 열린 직후 원래 폴더로
+     * 되돌린다(Roh 원문 반례) — 경로상으로는 멀쩡해 보이는 가장 센 경우다.
+     */
+    const attempt = (restoreAfterOpen: boolean): { result: ProgressFile | null; reads: number } => {
+      writeFile(root, fileJson({ revision: 1 }))
+      const moved = `${root}.moved`
+      let reads = 0
+      const countRead = (fd: number): string | null => {
+        reads += 1
+        return readBoundedForTest(fd)
       }
-    })
-    expect(swapped).toBeNull()
-    rmSync(root, { recursive: true, force: true })
-    renameSync(moved, root)
-
-    // ② 열린 직후 원래 폴더를 되돌린다 — fd의 파일과 경로의 파일이 달라 걸린다.
-    const restored = readProgressFile(root, {
-      beforeOpen: (path) => {
-        renameSync(root, moved)
-        mkdirSync(root)
-        writeFileSync(path, JSON.stringify(fileJson({ revision: 77 })))
-      },
-      afterOpen: () => {
+      const result = readProgressFile(root, {
+        beforeOpen: (path) => {
+          renameSync(root, moved)
+          mkdirSync(root)
+          // 링크가 아니라 **복사본**을 둔다 — O_NOFOLLOW로 걸리지 않는 가장 센 반례.
+          writeFileSync(path, JSON.stringify(fileJson({ revision: 77 })))
+        },
+        afterOpen: restoreAfterOpen
+          ? () => {
+            rmSync(root, { recursive: true, force: true })
+            renameSync(moved, root)
+          }
+          : undefined,
+        read: countRead
+      })
+      if (restoreAfterOpen) {
+        // 이미 되돌렸다 — 정리만 남는다.
+      } else {
         rmSync(root, { recursive: true, force: true })
         renameSync(moved, root)
       }
-    })
-    expect(restored).toBeNull()
+      return { result, reads }
+    }
+
+    // ① 바꾼 폴더를 **그대로 둔 채** — 폴더 신원이 달라 걸리고, 읽기는 0회.
+    const kept = attempt(false)
+    expect(kept.result, '폴더를 바꾼 채로는 값이 없다').toBeNull()
+    expect(kept.reads, '폴더 밖 파일은 한 바이트도 읽지 않는다').toBe(0)
+
+    // ② 열린 직후 원래 폴더를 되돌린다 — fd↔경로 신원이 달라 걸리고, 읽기는 0회.
+    const restored = attempt(true)
+    expect(restored.result, '열린 직후 원복해도 값이 없다').toBeNull()
+    expect(restored.reads, '원복 경우에도 읽지 않는다').toBe(0)
+
     // 원래 파일은 멀쩡하다 — 거절이 원본을 망가뜨리지 않는다.
     expect(readProgressFile(root)?.revision).toBe(1)
 
     // ③ 폴더 대신 파일 자리에 심볼릭 링크 — O_NOFOLLOW가 열기 자체를 막는다.
     rmSync(join(root, PROGRESS_FILE_NAME))
     symlinkSync(secret, join(root, PROGRESS_FILE_NAME))
+    let linkReads = 0
     const linked = readProgressFile(root, {
-      beforeOpen: () => {/* 링크는 이미 있다 */}
+      read: (fd) => { linkReads += 1; return readBoundedForTest(fd) }
     })
     expect(linked).toBeNull()
+    expect(linkReads, '심볼릭 링크도 읽지 않는다').toBe(0)
 
-    // ④ 폴더 밖 파일로의 **하드 링크** — 이름이 둘이므로(nlink > 1) 거절.
+    // ④ 폴더 밖 파일로의 **하드 링크** — 이름이 둘이므로(nlink > 1) 읽지 않고 거절.
     rmSync(join(root, PROGRESS_FILE_NAME))
     const hard = join(outside, 'hard.json')
     writeFileSync(hard, JSON.stringify(fileJson({ revision: 78 })))
     try {
       linkSync(hard, join(root, PROGRESS_FILE_NAME))
-      expect(readProgressFile(root)).toBeNull()
+      let hardReads = 0
+      expect(readProgressFile(root, {
+        read: (fd) => { hardReads += 1; return readBoundedForTest(fd) }
+      })).toBeNull()
+      expect(hardReads, '하드 링크도 읽지 않는다').toBe(0)
     } catch {
       // 파일시스템이 하드 링크를 막으면(권한·네트워크) 이 갈래는 건너뛴다.
     }
