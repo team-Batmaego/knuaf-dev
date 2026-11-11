@@ -26,6 +26,7 @@ import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
 import { skillSwitch } from '../update/switch'
 import { agentActivity } from '../update/activity'
+import { shutdownWithin } from '../shutdown'
 /** 저장된 대화 기록을 읽고 모양을 확인한다 — 망가졌으면 던진다. */
 function parseChat(text: string, provider: Provider): ChatSnapshot {
   const v = JSON.parse(text) as ChatSnapshot
@@ -34,6 +35,11 @@ function parseChat(text: string, provider: Provider): ChatSnapshot {
 }
 
 const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
+/**
+ * `close()` 가 진행 중인 턴을 기다리는 상한. 정상 턴은 `chat.stop`(학생 중단)이나 연결 stop 으로
+ * 곧 끝나고, 이 상한에 걸리는 것은 **종료 뒤에도 안 끝난 턴**뿐이다(그 자체가 결함 신호).
+ */
+const CLOSE_RUN_DEADLINE_MS = 5_000
 // 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
@@ -1560,7 +1566,18 @@ export class ChatService {
     await this.stopJobs()
     const connections = new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])
     const results = await Promise.allSettled([...connections].map(connection => connection.stop()))
-    await Promise.all(this.runs.values())
+    /**
+     * 진행 중인 턴을 기다리되 **상한**을 둔다. 예전에는 `await Promise.all(this.runs.values())`
+     * 였는데, 턴 하나가 안 끝나면 앱 종료가 영원히 매달렸다(윈도우 e2e 종료 멈춤). 남은 턴은
+     * 기록만 남기고 넘긴다 — 버퍼에 남은 마지막 답이 잘릴 수는 있지만, 다음 실행의
+     * `snapshot()` 이 `running`/`permission` 상태를 `interrupted` 로 복구한다(service.ts:212-215).
+     */
+    const runs = [...this.runs.entries()]
+    const outcome = await shutdownWithin(
+      runs.map(([key, run]) => ({ name: `run:${key.replace(/\0/g, '/')}`, promise: run })),
+      CLOSE_RUN_DEADLINE_MS
+    )
+    if (outcome.pending.length) console.error(`[shutdown] close: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 ${outcome.pending.length}건 — ${outcome.pending.join(', ')}`)
     this.connections.clear()
     this.globals.clear()
     this.closingConnections.clear()

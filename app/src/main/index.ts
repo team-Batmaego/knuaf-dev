@@ -11,6 +11,7 @@ import { installMenu, type MenuAction } from './menu'
 import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { defaultWindowSize } from '../shared/window'
+import { openHandles, shutdownWithin } from './shutdown'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
@@ -22,6 +23,12 @@ let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
 let chat: ChatService | null = null
 let quitting = false
+/**
+ * 종료 정리를 기다리는 상한. Playwright 의 시험 상한(90초)과 워커 정리(같은 값) 안에 넉넉히
+ * 들어오면서, 진행 중 턴·늦은 사이드카 작업을 기다려 줄 만큼은 길다(관측된 최장 정리: 31초짜리
+ * doctor 종료 + 6초 sidecar 마감). 넘기면 `app.exit()` 로 확실히 끝낸다.
+ */
+const SHUTDOWN_DEADLINE_MS = 10_000
 const isMac = process.platform === 'darwin'
 // e2e 숨김 실행(`KNUAF_E2E_HIDDEN=1`, `e2e/helpers.ts` 가 기본으로 켠다): 창은 만들고 렌더는
 // 유지하되 화면·Dock·⌘Tab·앱 활성화에는 나타나지 않는다. 이 변수가 없으면 앱 동작은 전과 같다.
@@ -137,8 +144,28 @@ else {
       chat?.beginShutdown()
       if (win && !win.isDestroyed()) win.webContents.send('app:quitting')
       e.preventDefault()
-      void Promise.allSettled([sidecar.stop(), chat?.close() ?? Promise.resolve()]).then((results) => {
-        for (const result of results) if (result.status === 'rejected') console.error('Shutdown failed:', result.reason)
+      /**
+       * 정리에는 **마감**이 있다. 예전에는 이 약속들이 끝나기를 상한 없이 기다려서, 하나라도
+       * 안 끝나면(진행 중인 턴·늘어진 사이드카 큐 작업) 창을 닫아도 앱이 안 꺼졌다 — 윈도우 e2e
+       * 에서 `electronApp.close()` 가 44초 멈춘 그 자리다. 마감에 남은 정리 이름을 1줄 남기고
+       * `app.exit()` 로 확실히 끝낸다(남은 자식은 종료 시 OS 가 회수한다).
+       */
+      void shutdownWithin([
+        { name: 'sidecar.stop', promise: sidecar.stop() },
+        { name: 'chat.close', promise: chat?.close() ?? Promise.resolve() }
+      ], SHUTDOWN_DEADLINE_MS).then((outcome) => {
+        for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, failure.reason)
+        if (outcome.pending.length) {
+          // 무엇이 안 끝났는지, 무엇이 아직 살아 있는지 남긴다 — 다음 재발 때 이 줄이 원인 지점을 가리킨다.
+          console.error(`[shutdown] ${SHUTDOWN_DEADLINE_MS}ms 안에 끝나지 않은 정리: ${outcome.pending.join(', ')}`)
+          console.error(`[shutdown] 남은 핸들: ${openHandles() || '(없음)'}`)
+          /**
+           * 강제 종료는 **우리 몫의 정리**에만 쓴다. 다른 청취자가 before-quit 에 걸려 있으면
+           * (`listenerCount > 1` — 진단·시험이 종료를 일부러 붙잡는 자리) 그 veto 를 무시하지 않고
+           * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
+           */
+          if (app.listenerCount('before-quit') === 1) { app.exit(0); return }
+        }
         app.quit()
       })
     }
