@@ -3,6 +3,7 @@ import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 import type { ProgressFile } from '../shared/progress-file'
+import type { LinkOpenReply } from '../shared/link'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -194,6 +195,11 @@ const api = {
     get: (): Promise<{ result: ProgressFile | null }> => ipcRenderer.invoke('progress:get'),
     onChanged: (fn: (payload: { root: string; progress: ProgressFile | null }) => void): (() => void) =>
       subscribe('progress:changed', fn)
+  },
+  // link (v0.6.4): 답변 속 http(s) 주소 하나를 기본 브라우저로. 검사는 main이 다시 한다 —
+  // 화면은 주소만 넘기고, 열지 못한 이유(`scheme`·`credentials`·`malformed`…)만 돌려받는다.
+  link: {
+    open: (url: string): Promise<LinkOpenReply> => ipcRenderer.invoke('link:open', url)
   }
 }
 

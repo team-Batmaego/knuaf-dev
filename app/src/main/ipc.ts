@@ -6,6 +6,8 @@ import { basename, dirname, extname, join, relative, resolve, sep } from 'node:p
 import { insideByFileId } from './file-identity'
 // progress (v0.6.4 2단계): 진행 파일 IPC — 새 폴더 `main/progress/`, 채널 접두어 `progress:`.
 import { registerProgressIpc } from './progress'
+// link (v0.6.4 ⑤): 대화 속 http(s) 주소 열기 — 채널 하나(`link:open`), main이 주소를 다시 본다.
+import { registerLinkIpc } from './links'
 import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
@@ -80,6 +82,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
+  // link (v0.6.4 ⑤): 대화의 http(s) 주소 하나를 기본 브라우저로. 검사는 이 모듈 안에서 다시 한다.
+  registerLinkIpc((url) => shell.openExternal(url), ipcMain)
   /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
   let openSeq = 0
   /** Published visit survives failed open attempts; openSeq still rejects stale successes. */
