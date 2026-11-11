@@ -98,7 +98,7 @@ export function plantStaleLock(root: string): void {
   writeFileSync(join(root, '.gg-lock', 'owner.json'), JSON.stringify({ pid: 999999, host: require('node:os').hostname(), token: 'x', acquired_at: Date.now() / 1000 - 3600 }))
 }
 
-export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; splash?: 'keep'; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page }> {
+export async function launch(opts: { userData?: string; colorScheme?: 'light' | 'dark'; reducedMotion?: 'reduce' | 'no-preference'; env?: Record<string, string>; intro?: boolean; splash?: 'keep'; onboarded?: boolean; permissionPrompt?: boolean; waitFor?: string } = {}): Promise<{ electronApp: ElectronApplication; page: Page; appLog: string }> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'kd-userdata-'))
   /**
    * Every app launch shows its startup splash. Ordinary E2E tests send Escape after the overlay
@@ -127,6 +127,14 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   const doctorTrace = test.info().outputPath(`doctor-${Date.now()}.jsonl`)
   mkdirSync(join(doctorTrace, '..'), { recursive: true })
   env.KNUAF_E2E_DOCTOR_TRACE = doctorTrace
+  /**
+   * 종료 진단 로그 — **항상 켠다**(추가 플래그 없음). 앱은 `KNUAF_APP_LOG` 가 지정됐을 때만 쓰고,
+   * 미지정 실행에서는 완전 무동작이다. `electronApp.close()` 가 안 돌아와도 이 파일에는 마지막
+   * 단계가 남는다(PR #102 윈도우 CI 가 바로 그 경우였다).
+   */
+  const appLog = test.info().outputPath('app-log.txt')
+  mkdirSync(join(appLog, '..'), { recursive: true })
+  env.KNUAF_APP_LOG = appLog
   delete env.ELECTRON_RUN_AS_NODE
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).
@@ -154,7 +162,7 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
     await page.keyboard.press('Escape')
     await splash.waitFor({ state: 'detached' })
   }
-  return { electronApp, page }
+  return { electronApp, page, appLog }
 }
 
 /** 앱 화면이 준비됐다는 표시 — v5 에는 "내 논문" h1 이 없다(대화 칸 자체가 그 화면이다). */

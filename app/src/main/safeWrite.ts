@@ -1,4 +1,5 @@
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { diag } from './diagLog'
 
 /**
  * 학생 논문 폴더에 파일을 남기는 **공용 쓰기** (WIN-ONEDRIVE).
@@ -91,11 +92,16 @@ export function writeFileAtomic(file: string, data: string, opts: SafeWriteOptio
   let attempt = 0
   const retry = (e: unknown): boolean => {
     if (!RETRY_CODES.has(codeOf(e)) || attempt >= delays.length) return false
-    sleepSync(delays[attempt++])
+    const wait = delays[attempt++]
+    // 진단: 이 대기는 **main 스레드를 동기로 막는다**(Atomics.wait). 종료 경로에서 돌면 마감이 늦어진다.
+    // `log` 가 아니라 진단 파일로 보낸다 — 시험의 stdout 문구 계약(`safe-write.spec.ts`)을 건드리지 않는다.
+    diag(`safeWrite:retry ${file} code=${codeOf(e)} wait=${wait}ms attempt=${attempt}/${delays.length}`)
+    sleepSync(wait)
     return true
   }
   const fail = (e: unknown, note: string): WriteResult => {
     const error = asError(e)
+    diag(`safeWrite:fail ${file} code=${codeOf(error) || error.message} note=${note}`)
     log(`[knuaf] 파일을 저장하지 못했어요: ${file} (${codeOf(error) || error.message}) — ${note}`)
     return { ok: false, error }
   }

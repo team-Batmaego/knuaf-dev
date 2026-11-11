@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { launch, openProject, synthProject } from './helpers'
+import { captureAppLog } from './diag'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeCliShim } from './fixtures/fake-codex'
 
 /** 메인 프로세스의 stderr — `[shutdown]` 진단이 여기로 나온다. */
@@ -65,8 +66,9 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
   pidWritingShim(bin, pidFile)
   const root = synthProject()
   seedChat(root, [{ id: 'previous', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
-  const { electronApp, page } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' } }) })
+  const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' } }) })
   const log = mainLog(electronApp)
+  const diagLog = captureAppLog(electronApp, appLog)
   let closed = false
   let enginePid = 0
   try {
@@ -81,7 +83,9 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
     expect(alive(enginePid), '가짜 엔진이 살아 있지 않다').toBe(true)
 
     const started = Date.now()
+    diagLog.mark('close:start')
     await electronApp.close()
+    diagLog.mark('close:end')
     closed = true
     const elapsed = Date.now() - started
     // 마감 10초 + 자식 회수 관측 1.5초 + 여유. 예전 배선이면 여기서 영원히 매달렸다.
@@ -108,14 +112,17 @@ test('마감을 넘기면 회수·강제 종료 분기를 실제로 밟는다 �
   const dir = scratch(), bin = join(dir, 'bin')
   const env = fakeCodexEnv(bin, { FAKE_CODEX_HOLD: '1', KNUAF_E2E_QUIT_STALL: '1' })
   const root = synthProject()
-  const { electronApp, page } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
+  const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
+  const diagLog = captureAppLog(electronApp, appLog)
   let closed = false
   try {
     // 사이드카를 실제로 띄운다 — 그래야 회수 대상 pid 가 있고, "죽였는가"를 관측할 수 있다.
     await openProject(page, root)
     const log = mainLog(electronApp)
     const started = Date.now()
+    diagLog.mark('close:start')
     await electronApp.close()
+    diagLog.mark('close:end')
     closed = true
     const text = log.read()
     // 마감(10초) + 회수 관측(1.5초) 안에 끝나야 한다.
@@ -136,7 +143,8 @@ test('추가 before-quit 청취자가 있으면 강제 종료하지 않고 그 �
   // 시험은 그 청취자를 **일부러 막는** 것으로 두고, 우리 마감이 끝난 뒤에도 앱이 살아 있음을 본다.
   const dir = scratch(), bin = join(dir, 'bin')
   const env = fakeCodexEnv(bin, { FAKE_CODEX_HOLD: '1' })
-  const { electronApp, page } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
+  const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
+  const diagLog = captureAppLog(electronApp, appLog)
   let released = false
   try {
     await electronApp.evaluate(({ app }) => {
@@ -156,7 +164,9 @@ test('추가 before-quit 청취자가 있으면 강제 종료하지 않고 그 �
     expect(after, '앱이 아직 실행 중이어야 한다').toBe(true)
     await electronApp.evaluate(() => { Reflect.get(globalThis, 'vetoProbe').release = true })
     released = true
+    diagLog.mark('close:start')
     await electronApp.close()
+    diagLog.mark('close:end')
   } finally {
     if (!released) {
       try { await electronApp.evaluate(() => { Reflect.get(globalThis, 'vetoProbe').release = true }) } catch { /* already gone */ }

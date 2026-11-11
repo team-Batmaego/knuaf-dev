@@ -15,7 +15,7 @@ import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { ChatService } from '../src/main/chat/service'
+import { ChatService, QUIT_FLUSH_DELAYS_MS } from '../src/main/chat/service'
 import { skillSource } from '../src/main/agent'
 import { readRecoverable, renameWithRetry, writeFileAtomic, type SafeWriteFs, type WriteResult } from '../src/main/safeWrite'
 import type { ChatSnapshot } from '../src/shared/chat'
@@ -351,6 +351,29 @@ test('빈 초안의 삭제가 막혀도 보낸 글이 되살아나지 않는다 
   svc.flushDrafts()                                       // 대기가 남아 있어 다시 지운다
   expect(existsSync(draft), '잠금이 풀린 뒤에도 지우지 않았다').toBe(false)
   expect(svc.draft(root)).toBe('')
+})
+
+test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 — 재시도 예산이 줄어 있다 (RT3)', () => {
+  // 멈춤 후보 1a: `flushDrafts()` 는 **동기**다. 재시도 대기(Atomics.wait)를 안고 돌면 그 시간만큼
+  // main 스레드가 서고, 그동안 종료 마감 타이머도 서 있다. 그래서 종료 경로는 `QUIT_FLUSH_DELAYS_MS`
+  // (합계 50ms)로 부르고, 기본 예산(300ms)은 타이머 flush 에만 쓴다.
+  const { root, draft } = project()
+  let blocked = true
+  const svc = service(() => {}, faultyFs({ write: (p) => (blocked && p.startsWith(draft) ? eacces() : null) }))
+  svc.setDraft(root, '쓰다 만 글')
+  const started = Date.now()
+  expect(() => svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })).not.toThrow()
+  const elapsed = Date.now() - started
+  expect(elapsed, '종료 경로가 기본 예산(300ms)만큼 main 스레드를 세웠다').toBeLessThan(200)
+  expect(svc.draft(root), '저장에 실패했는데 메모리 값까지 잃었다').toBe('쓰다 만 글')
+  expect(existsSync(draft)).toBe(false)
+  // 잠금이 풀리면 다음 flush 가 남긴다 — 예산을 줄인 것이 "덜 남긴다"는 뜻은 아니다.
+  blocked = false
+  svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })
+  expect(readFileSync(draft, 'utf8')).toBe('쓰다 만 글')
+  const again = Date.now()
+  svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })      // 남은 대기 없음 — 즉시 돌아온다
+  expect(Date.now() - again).toBeLessThan(200)
 })
 
 test('초안 rename 이 막히면 .tmp 에 남고, 다음 실행이 되살려 제자리로 옮긴다', () => {

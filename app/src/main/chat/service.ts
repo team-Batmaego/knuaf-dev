@@ -14,6 +14,7 @@ import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 import { skillSwitch } from '../update/switch'
 import { agentActivity } from '../update/activity'
 import { shutdownWithin } from '../shutdown'
+import { diag } from '../diagLog'
 /** 저장된 대화 기록을 읽고 모양을 확인한다 — 망가졌으면 던진다. */
 function parseChat(text: string, provider: Provider): ChatSnapshot {
   const v = JSON.parse(text) as ChatSnapshot
@@ -27,6 +28,19 @@ const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AU
  * 곧 끝나고, 이 상한에 걸리는 것은 **종료 뒤에도 안 끝난 턴**뿐이다(그 자체가 결함 신호).
  */
 const CLOSE_RUN_DEADLINE_MS = 5_000
+/**
+ * 연결 정리(`connection.stop()`)의 상한. 종료(`close`)와 업데이트 인계(`closeForUpdate`)가 같이 쓴다.
+ *
+ * 예전에는 이 기다림이 **마감 밖**이었다: 연결 하나가 안 끝나면 바깥 10초 마감도 걸리지 않고
+ * `electronApp.close()` 가 영원히 돌아오지 않았다(PR #102 윈도우 CI, 멈춤 후보 1b).
+ */
+const CLOSE_CONNECTION_DEADLINE_MS = 3_000
+/**
+ * 종료 중 초안 쓰기의 재시도 예산. 정상 경로(300ms, `safeWrite.ts`)를 그대로 쓰면 main 스레드가
+ * 그만큼 막히고, **그 루프가 돌아야** 종료 마감 타이머가 울린다 — 막는 시간이 곧 마감 지연이다.
+ * 한 번의 재시도(20+30=50ms)면 OneDrive 같은 순간 잠금은 넘기고, 오래 막히지는 않는다.
+ */
+export const QUIT_FLUSH_DELAYS_MS = [20, 30]
 // 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
@@ -174,8 +188,17 @@ export class ChatService {
     this.draftTimer = setTimeout(() => this.flushDrafts(), 250)
     return true
   }
-  /** 대기 중인 초안을 지금 쓴다. 종료 직전에도 불리므로 동기다. */
-  flushDrafts(): void {
+  /**
+   * 대기 중인 초안을 지금 쓴다. 종료 직전에도 불리므로 동기다.
+   *
+   * `delaysMs` 는 재시도 예산이다 — 종료 경로는 `QUIT_FLUSH_DELAYS_MS` 로 줄여 부른다. 이 함수가
+   * 동기라서, 예산만큼 main 스레드가 서고 그동안 종료 마감 타이머도 서 있는다(멈춤 후보 1a).
+   */
+  flushDrafts(opts: { delaysMs?: number[] } = {}): void {
+    // 진단: 이 함수는 before-quit 마다 동기로 돌고, 재시도 대기(safeWrite)를 안고 있다 — 멈춤 후보 1a.
+    const startedAt = Date.now()
+    const traced = this.draftPending.size > 0
+    if (traced) diag(`drafts:flush:start n=${this.draftPending.size} shuttingDown=${this.shuttingDown}`)
     if (this.draftTimer) { clearTimeout(this.draftTimer); this.draftTimer = null }
     for (const [root, text] of this.draftPending) {
       const file = this.draftFile(root)
@@ -196,8 +219,11 @@ export class ChatService {
       try { mkdirSync(dirname(file), { recursive: true }) } catch { /* 아래 쓰기가 같은 이유로 실패한다 */ }
       // 던지지 않는 공용 쓰기(WIN-ONEDRIVE). **성공한 것만** 지운다 — 실패하면 대기 값으로 남겨
       // 다음 flush 가 다시 시도하고, 그 사이 `draft()` 는 최신 글을 계속 돌려준다.
-      if (writeFileAtomic(file, text, { mode: 0o600, fs: this.writeFs }).ok) this.draftPending.delete(root)
+      const at = Date.now()
+      if (writeFileAtomic(file, text, { mode: 0o600, fs: this.writeFs, delaysMs: opts.delaysMs }).ok) this.draftPending.delete(root)
+      diag(`drafts:flush:file elapsed=${Date.now() - at}ms pending=${this.draftPending.size}`)
     }
+    if (traced) diag(`drafts:flush:end elapsed=${Date.now() - startedAt}ms 남음=${this.draftPending.size}`)
   }
   /**
    * 대화 기록을 남기고 화면으로 내보낸다.
@@ -565,12 +591,39 @@ export class ChatService {
     if (!s.permission) s.state = 'running'
     this.publish(s)
   }
+  /**
+   * 연결 정리 하나를 상한 안에서 기다린다.
+   *
+   * `shutdownWithin` 은 던지지 않으므로, **정착한 거절은 종전처럼 다시 던진다**(IPC 오류 문구가
+   * 그대로 살아야 한다). 마감을 넘긴 것은 이름만 남기고 넘어간다 — 여기서 기다림이 끝나지 않으면
+   * 그 호출자(중단 버튼·앱 종료)가 영원히 매달린다(멈춤 후보 1b).
+   */
+  private async stopConnectionWithin(name: string, connection: AgentConnection, deadlineMs: number, label: string): Promise<void> {
+    const outcome = await shutdownWithin([{ name, start: () => connection.stop() }], deadlineMs)
+    if (outcome.failed.length) throw outcome.failed[0].reason
+    if (outcome.pending.length) console.error(`[shutdown] ${label}: ${deadlineMs}ms 안에 끝나지 않은 연결 — ${outcome.pending.join(', ')}`)
+  }
   async stop(root: string, provider: Provider) {
     const key = this.key(root, provider), s = this.snapshots.get(key)
+    // 진단: 예전에는 아래 두 기다림이 마감 밖이었다 — 멈춤 후보 1b.
+    const startedAt = Date.now()
     if (s && this.runs.has(key)) { s.state = 'stopped'; s.error = undefined; this.publish(s) }
     // 멈춘 연결은 버린다 — 다음 send/status 가 새 연결을 열어야 '다시 확인'이 살아난다.
-    await this.connections.get(key)?.stop(); this.connections.delete(key)
-    await this.runs.get(key)
+    const connection = this.connections.get(key)
+    diag(`stop:connection:start provider=${provider} has=${connection ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
+    if (connection) await this.stopConnectionWithin(`stop:${provider}`, connection, CLOSE_CONNECTION_DEADLINE_MS, '중단')
+    this.connections.delete(key)
+    diag(`stop:connection:end provider=${provider} elapsed=${Date.now() - startedAt}ms`)
+    const run = this.runs.get(key)
+    diag(`stop:run:start provider=${provider} has=${run ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
+    if (run) {
+      // 턴도 상한을 둔다. 마감을 넘긴 턴은 상태가 이미 `stopped` 라 화면은 멈췄고,
+      // 실행기 쪽 정리는 그 연결의 stop 이 맡는다 — 여기서 더 기다려 봐야 호출자만 막힌다.
+      const outcome = await shutdownWithin([{ name: `run:${provider}`, start: () => run }], CLOSE_RUN_DEADLINE_MS)
+      if (outcome.failed.length) throw outcome.failed[0].reason
+      if (outcome.pending.length) console.error(`[shutdown] 중단: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 — ${outcome.pending.join(', ')}`)
+    }
+    diag(`stop:run:end provider=${provider} elapsed=${Date.now() - startedAt}ms`)
   }
   /** Reversible handoff teardown: never sets shuttingDown; dead connection objects are not reused. */
   async closeForUpdate(confirmStopped: () => Promise<void>): Promise<void> {
@@ -578,16 +631,40 @@ export class ChatService {
     this.connections.clear()
     this.globals.clear()
     this.reauthenticating.clear()
-    const results = await Promise.allSettled([...this.closingConnections].map(connection => connection.stop()))
+    // 진단: 예전에는 이 기다림이 마감 밖이었다 — 멈춤 후보 1b.
+    const startedAt = Date.now()
+    diag(`closeForUpdate:stop:start n=${this.closingConnections.size}`)
+    const stopped = await shutdownWithin(
+      // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — 순번만.
+      [...this.closingConnections].map((connection, i) => ({ name: `stop:${i}`, start: () => connection.stop() })),
+      CLOSE_CONNECTION_DEADLINE_MS
+    )
+    diag(`closeForUpdate:stop:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+    if (stopped.pending.length) console.error(`[shutdown] 연결 정리: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
     await confirmStopped()
-    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    diag(`closeForUpdate:confirm:end elapsed=${Date.now() - startedAt}ms`)
+    const failed = stopped.failed[0]
     if (failed) throw failed.reason
     this.closingConnections.clear()
   }
   async close() {
+    const startedAt = Date.now()
+    diag(`close:start runs=${this.runs.size} connections=${this.connections.size} globals=${this.globals.size} closing=${this.closingConnections.size}`)
     this.beginShutdown()
     const connections = new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])
-    const results = await Promise.allSettled([...connections].map(connection => connection.stop()))
+    /**
+     * 연결 정리에도 **상한**을 둔다. 예전에는 이 `Promise.allSettled` 가 `shutdownWithin` **밖**이라
+     * 바깥 10초 마감이 걸리지 않았다: 연결 하나의 `stop()` 이 안 끝나면 정리 전체가 마감 없이
+     * 매달렸다(멈춤 후보 1b). 정착한 거절은 종전처럼 나중에 다시 던진다.
+     */
+    diag(`close:connections:start n=${connections.size}`)
+    const stopped = await shutdownWithin(
+      // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — 순번만.
+      [...connections].map((connection, i) => ({ name: `stop:${i}`, start: () => connection.stop() })),
+      CLOSE_CONNECTION_DEADLINE_MS
+    )
+    diag(`close:connections:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+    if (stopped.pending.length) console.error(`[shutdown] close: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
     /**
      * 진행 중인 턴을 기다리되 **상한**을 둔다. 예전에는 `await Promise.all(this.runs.values())`
      * 였는데, 턴 하나가 안 끝나면 앱 종료가 영원히 매달렸다(윈도우 e2e 종료 멈춤). 남은 턴은
@@ -595,15 +672,22 @@ export class ChatService {
      * `snapshot()` 이 `running`/`permission` 상태를 `interrupted` 로 복구한다(service.ts:212-215).
      */
     const runs = [...this.runs.entries()]
+    diag(`close:runs:start n=${runs.length} elapsed=${Date.now() - startedAt}ms`)
     const outcome = await shutdownWithin(
-      runs.map(([key, run]) => ({ name: `run:${key.replace(/\0/g, '/')}`, start: () => run })),
+      runs.map(([key, run], i) => {
+        // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — provider/role 만.
+        const name = `run:${key.split('\0').slice(1).join('/') || i}`
+        return { name, start: () => { diag(`close:run:start ${name} elapsed=${Date.now() - startedAt}ms`); void run.then(() => diag(`close:run:end ${name} elapsed=${Date.now() - startedAt}ms`)); return run } }
+      }),
       CLOSE_RUN_DEADLINE_MS
     )
+    diag(`close:runs:end elapsed=${Date.now() - startedAt}ms done=${outcome.done.length} pending=${outcome.pending.length} 내부경과=${outcome.elapsedMs}ms`)
     if (outcome.pending.length) console.error(`[shutdown] close: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 ${outcome.pending.length}건 — ${outcome.pending.join(', ')}`)
     this.connections.clear()
     this.globals.clear()
     this.closingConnections.clear()
-    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    diag(`close:end elapsed=${Date.now() - startedAt}ms`)
+    const failed = stopped.failed[0]
     if (failed) throw failed.reason
   }
 }

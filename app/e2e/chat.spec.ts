@@ -39,6 +39,16 @@ function service(conn: AgentConnection, over: { sidecarBusy?: (root: string) => 
 }
 
 /**
+ * 시험 자체의 상한 — 고침이 없으면 여기서 90초 시험 상한까지 매달린다.
+ * 상한이 걸리면 문자열 `'timeout'` 이 돌아오고, 그 단언이 실패 메시지로 원인을 말한다.
+ */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  const { promise: expired, resolve } = Promise.withResolvers<'timeout'>()
+  const timer = setTimeout(() => resolve('timeout'), ms)
+  try { return await Promise.race([promise, expired]) } finally { clearTimeout(timer) }
+}
+
+/**
  * PATH 값 읽기. 윈도우는 이름의 대소문자를 구분하지 않고 실제 키가 `Path` 인 경우가 많으므로
  * 대소문자 무시로 찾는다. 맥·리눅스에서는 `PATH` 와 `Path` 가 **서로 다른 변수**이므로 그대로
  * `PATH` 만 읽는다 — 여기서 대소문자를 무시하면 맥 시험이 거짓 실패한다(검토 W1D-R1-01).
@@ -258,6 +268,22 @@ test('sending the same requestId twice keeps a single message', async () => {
 
 // GUI 감사 GUI-05 — 학생이 누른 "중단"과 앱이 죽은 것은 다른 일이다. 둘 다 interrupted
 // 를 쓰는 바람에 화면이 멀쩡히 살아 있는 앱을 두고 "앱이 작업 도중 종료됐어요"라고 했다.
+test('학생 중단도 끝나지 않는 연결 정리 앞에서 상한 안에 돌아온다 (RT3)', async () => {
+  // 같은 결함의 세 번째 자리: `stop()` 은 중단 버튼이 부르는 경로다. 예전에는 연결 `stop()` 을
+  // 마감 없이 기다려, 연결이 안 끝나면 버튼이 눌린 채로 화면이 멈췄다(멈춤 후보 1b).
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const hung = Promise.withResolvers<void>()
+  const svc = service(fake({
+    status: async () => ({ installed: true, connected: true, version: '0.0.0-test', detail: 'fake' }),
+    stop: () => hung.promise
+  }))
+  await svc.status(root, 'codex')
+  const started = Date.now()
+  expect(await within(svc.stop(root, 'codex').then(() => 'done' as const), 20_000), 'stop() 이 끝나지 않는 연결 앞에서 매달렸다').toBe('done')
+  expect(Date.now() - started, 'stop() 이 연결 마감을 넘겨 매달렸다').toBeLessThan(6_000)
+  hung.resolve()
+})
+
 test('a student stop is not reported as the app dying', async () => {
   const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
   let release: () => void = () => {}
@@ -495,6 +521,34 @@ test('close() 는 끝나지 않는 턴 앞에서도 상한 안에 끝난다 (RT2
   expect(elapsed, 'close 가 마감을 넘겨 매달렸다').toBeLessThan(10_000)
   // 연결은 여전히 정리된다(진행 중 턴만 넘긴다).
   expect(svc.snapshot(root, 'codex').state).toBe('running')
+  hung.resolve()
+})
+
+test('close() 는 끝나지 않는 연결 정리 앞에서도 상한 안에 끝난다 (RT3)', async () => {
+  // 멈춤 후보 1b: `close()` 의 연결 정리는 `shutdownWithin` **밖**의 `Promise.allSettled` 였다.
+  // 바깥 10초 마감은 이 대기에는 걸리지 않으므로, 연결 하나의 `stop()` 이 안 끝나면 종료 전체가
+  // 매달렸다 — 윈도우 e2e 에서 `electronApp.close()` 가 안 돌아온 자리다.
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const hung = Promise.withResolvers<void>()
+  const svc = service(fake({ stop: () => hung.promise }))
+  await svc.status(root, 'codex')                          // 연결을 만들어 둔다
+  const started = Date.now()
+  expect(await within(svc.close().then(() => 'done' as const), 20_000), 'close() 가 끝나지 않는 연결 앞에서 매달렸다').toBe('done')
+  // 연결 마감은 3초(CLOSE_CONNECTION_DEADLINE_MS) — 넉넉히 잡아 6초로 잠근다.
+  expect(Date.now() - started, 'close() 가 연결 마감을 넘겨 매달렸다').toBeLessThan(6_000)
+  hung.resolve()
+})
+
+test('closeForUpdate() 도 끝나지 않는 연결 정리 앞에서 상한 안에 끝난다 (RT3)', async () => {
+  // 인계(업데이트) 경로의 같은 결함. 여기서는 마감을 넘긴 연결을 **실패로 올리지 않는다** —
+  // 정착한 거절만 던진다(`app-update.spec.ts` 의 `/old connection/` 계약).
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const hung = Promise.withResolvers<void>()
+  const svc = service(fake({ stop: () => hung.promise }))
+  await svc.status(root, 'codex')
+  const started = Date.now()
+  expect(await within(svc.closeForUpdate(async () => {}).then(() => 'done' as const), 20_000), 'closeForUpdate() 가 끝나지 않는 연결 앞에서 매달렸다').toBe('done')
+  expect(Date.now() - started, 'closeForUpdate() 가 연결 마감을 넘겨 매달렸다').toBeLessThan(6_000)
   hung.resolve()
 })
 
