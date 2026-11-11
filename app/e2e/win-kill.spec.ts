@@ -7,8 +7,31 @@ import { expect, test } from '@playwright/test'
 import { spawn, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { killTree } from '../src/main/win'
+
+/**
+ * 윈도우 `taskkill.exe` 대역의 bootstrap 스크립트 줄.
+ *
+ * **왜 `process.argv` 가 아니라 원시 명령줄인가**(윈도우 CI 실패 cf87c99, `win-kill.spec.ts:124,159`):
+ * node 는 첫 인자를 실행할 스크립트 경로로 해석하고 `process.argv[1]` 을 **절대 경로로 바꿔 넣는다**
+ * (`/pid` -> `D:\pid`). 제품이 `/pid` 를 정확히 넘겼는데도 대역이 `D:\pid` 로 적어 단언이 깨졌다.
+ * `process.report.getReport().header.commandLine` 은 OS 가 넘긴 그대로다 — 맥 실측:
+ * `["<node>","/pid","6436","/T","/F"]` (argv[1] 은 `/private/tmp/.../pid`).
+ */
+function taskkillBootstrap(o: { argsFile: string; marker: string; doneFile: string; ms: number; exitCode: number }): string[] {
+  return [
+    `const { writeFileSync } = require('node:fs')`,
+    `const cmd = process.report.getReport().header.commandLine`,
+    // 첫 항목은 실행 파일(대역 자신)이다 — 제품이 넘긴 인자만 남긴다.
+    `writeFileSync(${JSON.stringify(o.argsFile)}, cmd.slice(1).join('\\n') + '\\n')`,
+    `writeFileSync(${JSON.stringify(o.marker)}, 'ran')`,
+    // 동기 대기 — 제품이 기다리지 않는다는 것이 이 시험의 요점이다.
+    `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${Math.max(0, Math.round(o.ms))})`,
+    `writeFileSync(${JSON.stringify(o.doneFile)}, 'done')`,
+    `process.exit(${o.exitCode})`
+  ]
+}
 
 /**
  * `taskkill.exe` 대역 — `killTree` 가 보는 `<SystemRoot>\System32\taskkill.exe` 자리에 둔다.
@@ -51,17 +74,7 @@ function fakeTaskkill(ms: number, exitCode = 0): {
   if (process.platform === 'win32') {
     mkdirSync(join(root, 'System32'), { recursive: true })   // 윈도우는 실제 폴더가 필요하다
     const bootstrap = join(root, 'taskkill-bootstrap.cjs')
-    writeFileSync(bootstrap, [
-      `const { writeFileSync } = require('node:fs')`,
-      // node 실행 파일을 **인자와 함께** 부르면 node 는 argv[1] 을 실행할 스크립트로 읽는다.
-      // 우리 bootstrap 은 그 전에 exit 하므로, 인자는 argv.slice(1) 가 제품이 넘긴 전부다.
-      `writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(1).join('\\n') + '\\n')`,
-      `writeFileSync(${JSON.stringify(marker)}, 'ran')`,
-      // 동기 대기 — 제품이 기다리지 않는다는 것이 이 시험의 요점이다.
-      `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${Math.max(0, Math.round(ms))})`,
-      `writeFileSync(${JSON.stringify(doneFile)}, 'done')`,
-      `process.exit(${exitCode})`
-    ].join('\n'), 'utf-8')
+    writeFileSync(bootstrap, taskkillBootstrap({ argsFile, marker, doneFile, ms, exitCode }).join('\n'), 'utf-8')
     // node 실행 파일을 그 자리에 둔다 — 하드링크 우선(복사 비용 없음), 안 되면 복사.
     try { linkSync(process.execPath, exe) } catch { copyFileSync(process.execPath, exe) }
     return {
@@ -82,6 +95,8 @@ function fakeTaskkill(ms: number, exitCode = 0): {
   mkdirSync(root, { recursive: true })   // POSIX 에서는 `System32\taskkill.exe` 가 **파일 이름 하나**다
   writeFileSync(exe, [
     '#!/bin/sh',
+    // 셸은 인자를 손대지 않고 그대로 넘긴다(`$@`). 윈도우 대역이 원시 명령줄에서 실행 파일을
+    // 빼고 적는 것과 같은 모양이 되도록 여기서도 제품이 넘긴 인자만 적는다.
     `printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}`,
     `: > ${JSON.stringify(marker)}`,
     `sleep ${(ms / 1000).toFixed(3)}`,
@@ -193,4 +208,43 @@ test('맥 경로는 그대로 child.kill 이다 (동작 불변)', () => {
   const signals: (NodeJS.Signals | undefined)[] = []
   killTree({ pid: 4242, kill: (signal) => { signals.push(signal); return true } }, 'SIGTERM', { platform: 'darwin', env: {} })
   expect(signals).toEqual(['SIGTERM'])
+})
+
+test('윈도 대역은 node 가 재해석한 argv 가 아니라 **원시 명령줄**로 인자를 적는다 (cf87c99 윈도 실패)', () => {
+  // 윈도우 CI 실패: 제품은 `/pid` 를 넘겼는데 대역이 `D:\pid` 로 적었다. node 는 첫 인자를 실행할
+  // 스크립트 경로로 보고 `argv[1]` 을 절대 경로로 바꿔 넣기 때문이다. 이 시험은 그 재해석이 실제로
+  // 일어나는지, 그리고 대역의 기록 방식이 그와 무관한지를 **맥에서** 잰다(윈도 전용 분기를 맥에서
+  // 처음으로 검증하는 자리다). 대역 스크립트 자체를 실제 node 로 돌려 관측한다.
+  const root = mkdtempSync(join(tmpdir(), 'kd-argv-'))
+  const argsFile = join(root, 'args.txt')
+  const marker = join(root, 'ran.txt')
+  const doneFile = join(root, 'done.txt')
+  const bootstrap = join(root, 'boot.cjs')
+  writeFileSync(bootstrap, taskkillBootstrap({ argsFile, marker, doneFile, ms: 0, exitCode: 0 }).join('\n'), 'utf-8')
+
+  // 대역 스크립트를 실제 node 로 두 번 돌려 비교한다: 지금 방식(원시 명령줄)과 옛 방식(argv).
+  const run = (recorded: 'raw' | 'argv', argvTail: string[]): string[] => {
+    const script = recorded === 'raw'
+      ? taskkillBootstrap({ argsFile, marker, doneFile, ms: 0, exitCode: 0 })
+      // 옛 방식 그대로: argv[1] 을 쓴다.
+      : [`const { writeFileSync } = require('node:fs')`,
+         `writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(1).join('\\n') + '\\n')`]
+    writeFileSync(bootstrap, script.join('\n'), 'utf-8')
+    try { unlinkSync(argsFile) } catch { /* 없으면 그만 */ }
+    spawnSync(process.execPath, argvTail, {
+      env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(bootstrap)}` }, stdio: 'ignore'
+    })
+    return readFileSync(argsFile, 'utf-8').trim().split('\n')
+  }
+
+  // ① 대역이 쓰는 방식은 제품이 넘긴 인자를 **그대로** 남긴다 — 단언이 보는 값이 이것이다.
+  expect(run('raw', ['/pid', '6436', '/T', '/F']), '원시 명령줄 기록이 제품 인자를 그대로 남기지 않았다')
+    .toEqual(['/pid', '6436', '/T', '/F'])
+  // ② 옛 방식(argv)이 실제로 첫 인자를 **바꿔 놓는지**를 상대 경로 인자로 관측한다. 맥에서는
+  //    `/pid` 가 이미 절대 경로라 값이 그대로여서 이 결함이 보이지 않았다(맥 초록·윈도 실패의 이유).
+  //    윈도우에서는 같은 규칙이 `/pid` -> `D:\\pid` 를 만든다.
+  expect(run('raw', ['pid', '6436'])[0], '원시 명령줄이 상대 인자를 바꿨다').toBe('pid')
+  const legacy = run('argv', ['pid', '6436'])[0]
+  expect(legacy, '옛 방식이 첫 인자를 절대 경로로 바꾸지 않았다 — 이 시험이 결함을 구별하지 못한다').not.toBe('pid')
+  expect(isAbsolute(legacy), `옛 방식이 만든 값이 절대 경로가 아니다: ${legacy}`).toBe(true)
 })
