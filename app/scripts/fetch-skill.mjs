@@ -1,5 +1,5 @@
 // Shared dependency/build input. No floating branch or implicit alternate source.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
@@ -7,6 +7,20 @@ import { parseArgs } from 'node:util'
 import { checkSource } from './compose-skill.mjs'
 
 const app = resolve(import.meta.dirname, '..')
+
+/** Names the actual cache state: one message for three very different causes hides the fix. */
+export function cacheMissReason(cache, upstream, source) {
+  // Temporary `.checkout-*` folders belong to a clone in flight, not to a cached pin.
+  const pins = existsSync(cache) ? readdirSync(cache, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.')).map(entry => entry.name).sort() : null
+  const cause = pins === null ? `cache directory ${cache} does not exist (fresh worktree or never populated)`
+    : pins.length === 0 ? `cache directory ${cache} exists but holds no pinned source (interrupted clone or manual removal)`
+      : `cache directory ${cache} holds other pins only: ${pins.join(', ')}`
+  return `Offline pinned source cache miss: ${source.tag}@${source.commit}; expected ${upstream}. ` +
+    `Cause: ${cause}. ` +
+    'Populate this cache online first, or set KNUAF_SKILL_UPSTREAM to a clean matching checkout.'
+}
+
 export function fetchPinnedSkill({ offline = false } = {}) {
   const source = JSON.parse(readFileSync(join(app, 'skill-source.json'), 'utf8'))
   if (source.repo !== 'starceas/knuaf-doc' || !/^v\d+\.\d+\.\d+$/.test(source.tag) || !/^[a-f0-9]{40}$/.test(source.commit)) {
@@ -22,10 +36,7 @@ export function fetchPinnedSkill({ offline = false } = {}) {
     checkSource(source, upstream)
     return upstream
   }
-  if (offline) {
-    throw new Error(`Offline pinned source cache miss: ${source.tag}@${source.commit}; expected ${upstream}. ` +
-      'Populate this cache online first, or set KNUAF_SKILL_UPSTREAM to a clean matching checkout.')
-  }
+  if (offline) throw new Error(cacheMissReason(cache, upstream, source))
   mkdirSync(cache, { recursive: true })
   const temp = mkdtempSync(join(cache, '.checkout-'))
   try {
