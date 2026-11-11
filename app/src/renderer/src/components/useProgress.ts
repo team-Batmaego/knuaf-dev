@@ -23,7 +23,8 @@ import { chooseProgress, type ProgressFile } from '../../../shared/progress-file
  * - 저장값은 localStorage `knuaf.progress.v1:<root>` — 앱을 다시 켜도 남는다.
  *   **파일 값은 저장하지 않는다**(파일이 정본이라 저장할 이유가 없다).
  * - 대화 값이 더 늦을 때만 저장값을 덮는다. 동률이면 messageId·provider가
- *   둘 다 같을 때만 대화 값, 하나라도 다르면 저장값 유지.
+ *   둘 다 같고 **단계 상태 서명도 바뀌었을 때만** 대화 값, 그 밖에는 저장값 유지
+ *   (같은 답이 같은 시각으로 1→4단계로 자라나는 스트리밍 갱신을 놓치지 않는다).
  * - 깨진 저장값은 지우고 "시작 전"으로 떨어진다.
  *
  * 순수 부분(`chooseProgress`·`pickProgress`)은 `shared/` — node 시험으로 잠근다.
@@ -201,7 +202,15 @@ export function useProgress(): UseProgressResult {
     if (previous !== null) {
       const older = Date.parse(previous.at)
       const newer = Date.parse(pick.at)
-      if (!(newer > older)) return
+      if (!(newer > older)) {
+        // 같은 답이 같은 시각으로 1→4단계로 자라나는 스트리밍 갱신은 `at`이 안 움직인다.
+        // (Roh fix2 [중요] — id·at만 보면 이 갱신이 저장되지 않아 재시작 뒤 1단계로 되돌아갔다.)
+        // 그래서 **답이 같고 내용(서명)이 바뀐 동률**만 저장한다. 답이 다르거나 시각이 더 이른
+        // 늦은 응답은 여기서 버려 저장값이 뒤로 가지 않는다.
+        const sameAnswer = previous.messageId === pick.messageId && previous.provider === pick.provider
+        const contentMoved = progressSignature(previous) !== progressSignature(pick)
+        if (!(newer === older && sameAnswer && contentMoved)) return
+      }
     }
     try {
       window.localStorage.setItem(KEY(root), value)
