@@ -8,7 +8,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
-import { cutAtLine, formFold, progressGroups, stripLines } from '../src/shared/chat-fold'
+import { cutAtLine, formFold, hiddenChars, progressGroups, stripLines } from '../src/shared/chat-fold'
 import type { ChatMessage } from '../src/shared/chat'
 
 const at = (n: number): string => new Date(Date.UTC(2026, 10, 9, 0, 0, n)).toISOString()
@@ -176,7 +176,7 @@ test('표가 한도 뒤에 있으면 문단 경계에서 자르고, 한 줄이 �
   const cut = cutAtLine(text, 300)
   expect(cut.length).toBeLessThanOrEqual(300)
   expect(cut.trimEnd()).not.toContain('|')
-  // 펜스 안쪽은 자를 자리가 아니고, 한 줄이 한도보다 길면 한도에서 자른다(내용은 "더 보기"로).
+  // 펜스 안쪽은 자를 자리가 아니고, 한 줄이 한도보다 길면 한도에서 자른다(내용은 잘림 표시 뒤로).
   const fence = ['앞 문단입니다.', '', '```py', ...Array.from({ length: 400 }, (_, i) => `print(${i})`), '```'].join('\n')
   const fenced = cutAtLine(fence, 1000)
   expect(fenced.length).toBeLessThanOrEqual(1000)
@@ -198,18 +198,91 @@ test('한도가 코드 블록 한가운데에 걸리면 완전한 코드 줄에�
   expect(lastCode).toMatch(/^print\("줄 \d+"\)$/)
   // 닫는 펜스 + 미완성 표시.
   expect(lines[lines.length - 2]).toBe('```')
-  expect(cut).toContain('더 보기')
+  expect(cut).toContain('코드가 더 있어요')
   // 원문에서 이 줄까지의 접두다(내용을 지어내지 않는다).
   expect(text.startsWith(lines.slice(0, -3).join('\n'))).toBe(true)
   // 코드 한 줄이 한도보다 길면 반쪽 명령도 빈 펜스도 남기지 않고, 잘렸음만 밝힌다.
   const wide = cutAtLine('```bash\n' + 'y'.repeat(4000), 2000)
   expect(wide.length).toBeLessThanOrEqual(2000)
-  expect(wide).toBe('… (이하 더 보기)')
+  expect(wide).toBe('… 코드가 더 있어요')
   // 한도가 코드 줄 경계에 딱 맞아도 열린 펜스를 남기지 않는다.
   const tight = Array.from({ length: 60 }, (_, i) => `print("줄 ${i}")`)
   const tightText = ['```bash', ...tight, '```'].join('\n')
   const tightEnd = tightText.split('\n').slice(0, 20).join('\n').length
   const tightCut = cutAtLine(tightText, tightEnd)
   expect(tightCut.length).toBeLessThanOrEqual(tightEnd)
-  expect(tightCut.endsWith('```\n… (이하 더 보기)')).toBe(true)
+  expect(tightCut.endsWith('```\n… 코드가 더 있어요')).toBe(true)
+})
+
+test('네 글자 펜스 안의 세 글자 펜스는 닫는 펜스가 아니다 — 백틱·물결표', () => {
+  // Roh 1회째 중요1 반례: ```` ~~~~ 안의 ``` ~~~ 를 종료로 읽으면 코드가 펜스 밖으로 나가
+  // 한도에서 다시 잘리고, 잘림 표시가 코드 블록 안으로 들어간다.
+  const rows = Array.from({ length: 300 }, (_, i) => `echo step ${i}`)
+  const backtick = ['````md', '```', ...rows, '````'].join('\n')
+  const tilde = ['~~~~', '~~~', ...rows, '~~~~'].join('\n')
+  for (const [text, mark, inner] of [[backtick, '````', '```'], [tilde, '~~~~', '~~~']] as const) {
+    expect(text.length, '한도가 펜스 안에 걸리는 조건이어야 한다').toBeGreaterThan(2000)
+    const cut = cutAtLine(text, 2000)
+    expect(cut.length).toBeLessThanOrEqual(2000)
+    // 안쪽 세 글자 펜스는 코드 내용 그대로 남는다 — 닫는 펜스로 읽히지 않았다.
+    expect(cut, '안쪽 펜스를 닫는 펜스로 읽었다').toContain(`\n${inner}\n`)
+    // 닫는 펜스는 여는 펜스와 같은 문자·같은 길이다.
+    expect(cut.endsWith(`\n${mark}\n… 코드가 더 있어요`), '닫는 펜스가 여는 펜스와 다르다').toBe(true)
+    // 남긴 코드는 전부 온전한 줄이고, 잘린 글은 원문의 접두다(안쪽 펜스 줄 하나까지).
+    const kept = cut.split('\n').slice(0, -2)
+    expect(kept.slice(2).filter((l) => !/^(echo step \d+|```|~~~)$/.test(l))).toEqual([])
+    expect(text.startsWith(kept.join('\n'))).toBe(true)
+  }
+})
+
+test('사건 시각을 사이에 둔 중간말은 묶음을 가르고, A → 사건 → B 순서가 선다', () => {
+  // Roh 1회째 중요2 반례: A → PaperEvent → B → 최종 답. 사건 줄은 messages 에 없어 시각만 넘어온다.
+  const messages = [
+    msg('u1', 'user', '질문', 1),
+    msg('a1', 'assistant', 'A: 살펴볼게요', 2),
+    msg('a2', 'assistant', 'B: 절을 고쳤어요', 4),
+    msg('a3', 'assistant', '최종 답', 6)
+  ]
+  const groups = progressGroups(messages, [Date.parse(at(3))])
+  expect(groups).toHaveLength(2)
+  expect([...groups[0].ids]).toEqual(['a1'])
+  expect([...groups[1].ids]).toEqual(['a2'])
+  const rows = [
+    ...groups.map((g) => ({ id: [...g.ids][0], t: g.at })),
+    { id: 'ev', t: Date.parse(at(3)) },
+    { id: 'a3', t: Date.parse(at(6)) }
+  ]
+  expect(rows.sort((x, y) => x.t - y.t).map((r) => r.id)).toEqual(['a1', 'ev', 'a2', 'a3'])
+  // 사건이 묶음 밖(앞·뒤)에 있으면 끊지 않는다 — 두 중간말 **사이**일 때만 경계다.
+  expect(progressGroups(messages, [Date.parse(at(1)), Date.parse(at(2))])).toHaveLength(1)
+  expect(progressGroups(messages, [Date.parse(at(5)), Date.parse(at(9))])).toHaveLength(1)
+  // 경계 시각이 없으면 예전 그대로 한 묶음이다.
+  expect(progressGroups(messages)).toHaveLength(1)
+})
+
+test('첫 줄이 빈 코드 블록은 빈 상자를 만들지 않고 펜스 앞에서 자른다', () => {
+  // Roh 1회째 권고2 반례: 펜스 첫 줄이 빈 줄이고 그 뒤 명령이 한도보다 길다.
+  const text = ['앞 문단입니다.', '', '```bash', '', 'x'.repeat(3000), '```'].join('\n')
+  const cut = cutAtLine(text, 2000)
+  expect(cut.length).toBeLessThanOrEqual(2000)
+  expect(cut).not.toContain('```')
+  expect(cut).toBe(`앞 문단입니다.\n… 코드가 더 있어요`)
+  // 빈 줄이 아닌 첫 코드 줄이 들어가면 그 줄까지는 남는다(빈 상자가 아니면 자르지 않는다).
+  const roomy = cutAtLine(['```bash', 'echo hi', 'x'.repeat(3000), '```'].join('\n'), 2000)
+  expect(roomy.startsWith('```bash\necho hi')).toBe(true)
+  expect(roomy.endsWith('```\n… 코드가 더 있어요')).toBe(true)
+})
+
+test('"N자 더 보기"의 N 은 원문 기준이다 — 붙인 표시·닫는 펜스는 세지 않는다', () => {
+  // Roh 1회째 권고1: 예전 `text.length - shown.length` 는 합성 문구 길이만큼 N 을 작게 셌다.
+  const text = ['```bash', ...Array.from({ length: 400 }, (_, i) => `python build.py --step ${i}`), '```'].join('\n')
+  const cut = cutAtLine(text, 2000)
+  const tail = '\n```\n… 코드가 더 있어요'
+  expect(cut.endsWith(tail), '펜스 잘림 모양이 아니면 이 시험이 의미 없다').toBe(true)
+  const kept = cut.length - tail.length
+  expect(hiddenChars(text, cut)).toBe(text.length - kept)
+  // 예전 셈은 표시가 붙은 만큼 작았다 — 그 차이를 못 박는다.
+  expect(text.length - cut.length).toBeLessThan(hiddenChars(text, cut))
+  // 자르지 않은 글은 0 이다.
+  expect(hiddenChars('짧음', '짧음')).toBe(0)
 })

@@ -34,11 +34,14 @@ export interface ProgressGroup {
  *    앞말 A·뒤말 B 가 한 묶음이 되면 묶음이 A 의 시각에 서서, 펼쳤을 때 B 가 알림보다 **먼저** 보인다.
  *    화면은 묶음과 시스템 줄을 각자의 `at` 으로 정렬하므로(`Chat.tsx` `thread.sort`), 경계에서 끊기만
  *    하면 A → 알림 → B 순서가 그대로 선다.
+ *  - **종이 사건 줄(`PaperEvent`)도 같은 이유로 경계다**(검토 Roh 1회째 중요2). 사건 줄은 `messages`
+ *    가 아니라 `store/project.ts` 에 있어 여기서 읽을 수 없으므로, 화면이 사건들의 시각을
+ *    `boundaryAts` 로 넘긴다(`Chat.tsx` 657행). 두 중간말 사이에 그 시각이 있으면(양끝 제외) 끊는다 —
+ *    한 묶음이면 묶음이 앞말 시각에 서서 사건이 뒤로 밀린다.
  *
- * 종이 사건 줄(`PaperEvent`)은 `messages` 가 아니라 `store/project.ts` 에 있어 여기서 보이지 않는다 —
- * 경계로 쓸 수 있는 것은 스냅샷에 함께 실리는 시스템 줄뿐이다.
+ * 경계 시각이 없으면(기본값) 시스템 줄만으로 끊는다 — 예전 호출부도 그대로 뜻이 통한다.
  */
-export function progressGroups(messages: readonly ChatMessage[]): ProgressGroup[] {
+export function progressGroups(messages: readonly ChatMessage[], boundaryAts: readonly number[] = []): ProgressGroup[] {
   const out: ProgressGroup[] = []
   let i = 0
   while (i < messages.length) {
@@ -62,7 +65,12 @@ export function progressGroups(messages: readonly ChatMessage[]): ProgressGroup[
       for (let k = i + 1; k < last; k++) {
         const m = messages[k]
         if (m.role === 'system') { flush(); continue }
-        if (m.role === 'assistant') hidden.push(m)
+        if (m.role !== 'assistant') continue
+        // 바로 앞 대화 줄과 이 중간말 **사이**(양끝 제외)에 사건 시각이 있으면 여기서 끊는다.
+        const from = Date.parse(messages[k - 1].at) || 0
+        const to = Date.parse(m.at) || 0
+        if (boundaryAts.some((b) => b > from && b < to)) flush()
+        hidden.push(m)
       }
       flush()
     }
@@ -142,7 +150,49 @@ export function stripLines(text: string, spans: readonly FoldSpan[]): string {
 }
 
 /** 잘린 코드 블록 끝에 붙는 표시 — 잘린 조각이 완성된 명령처럼 보이지 않게 한다. */
-const MORE = '… (이하 더 보기)'
+const MORE = '… 코드가 더 있어요'
+
+/**
+ * 여는 펜스 — 앞 들여쓰기 0~3칸, 백틱 3개 이상 또는 물결표 3개 이상.
+ * 백틱 펜스의 정보 문자열(` ```bash `)에는 백틱이 올 수 없다(CommonMark).
+ */
+const FENCE_OPEN = /^( {0,3})(`{3,}|~{3,})(.*)$/
+/** 닫는 펜스 — 같은 문자, 여는 펜스 **길이 이상**, 뒤에는 공백·탭만(CommonMark). */
+const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/
+
+interface Fence { ch: string; len: number; mark: string; start: number }
+
+/** 이 줄이 여는 펜스면 펜스 문자열을, 아니면 `null`. */
+function openFence(row: string): string | null {
+  const m = FENCE_OPEN.exec(row)
+  if (!m) return null
+  if (m[2][0] === '`' && m[3].includes('`')) return null
+  return m[2]
+}
+
+/** 이 줄이 지금 열린 펜스를 닫는지 — 네 글자 펜스 안의 세 글자 펜스는 닫지 못한다. */
+function closesFence(f: Fence, row: string): boolean {
+  const m = FENCE_CLOSE.exec(row)
+  return !!m && m[2][0] === f.ch && m[2].length >= f.len
+}
+
+/**
+ * 자른 조각이 원문에서 실제로 덮는 글자 수 — 붙인 표시(`MORE`)와 닫는 펜스는 원문 글자가 아니다.
+ * 화면 글은 **원문 접두 + 합성 꼬리**이므로, 접두가 맞을 때까지 꼬리 줄을 덜어 낸다.
+ */
+function keptChars(text: string, shown: string): number {
+  let body = shown.endsWith(MORE) ? shown.slice(0, shown.length - MORE.length) : shown
+  while (body && !text.startsWith(body)) body = body.slice(0, Math.max(0, body.lastIndexOf('\n')))
+  return body.length
+}
+
+/**
+ * "N자 더 보기"의 N — **원문 기준** 남은 글자 수(검토 Roh 1회째 권고1). 화면에 붙인 표시는 세지 않는다.
+ * 예전에는 `text.length - shown.length` 로 세서, 닫는 펜스·표시를 붙인 만큼 N 이 작게 나왔다.
+ */
+export function hiddenChars(text: string, shown: string): number {
+  return Math.max(0, text.length - keptChars(text, shown))
+}
 
 /**
  * 긴 답을 자를 자리 — 2,000자 한도가 표·문단 한가운데를 가르지 않게 **블록 경계**에서 자른다.
@@ -154,18 +204,21 @@ const MORE = '… (이하 더 보기)'
  *
  * 한도가 **펜스(```, ~~~) 안**에 걸리면 한도에서 그냥 자르지 않는다(검토 Roh v0.6.2 권고2) — 그러면
  * 코드 줄이 명령 한가운데서 끊겨 잘린 조각이 멀쩡한 명령처럼 보인다. 대신 펜스 안에서 한도에 맞는
- * **마지막 완전한 코드 줄**까지 남기고, 닫는 펜스와 `… (이하 더 보기)` 표시를 붙여 잘렸음을 밝힌다.
+ * **마지막 완전한 코드 줄**까지 남기고, 닫는 펜스와 `… 코드가 더 있어요` 표시를 붙여 잘렸음을 밝힌다.
  * 붙이는 글자까지 한도 안에 들어간다. 한도가 여는 펜스 줄 자체를 가르면(남길 코드 줄이 없다) 펜스
  * 앞에서 자른다 — 반쪽짜리 펜스 줄을 내보내지 않는다. 한도가 코드 줄 경계나 닫는 펜스 줄에 **딱**
  * 닿아도 열린 펜스를 남기지 않는다(닫지 않으면 잘린 조각이 뒤따르는 글로 번진다).
+ *
+ * 펜스 판정은 CommonMark 규칙 그대로다(검토 Roh 1회째 중요1) — 닫는 펜스는 여는 펜스와 **같은 문자**로
+ * **같은 길이 이상**, 뒤에는 공백만. 그래서 네 글자 펜스(````) 안의 세 글자 펜스(```)는 코드일 뿐
+ * 닫는 펜스가 아니다. 남길 코드 줄이 **내용 줄**(빈 줄 아님) 하나도 없으면 빈 코드 상자를 만들지 않고
+ * 펜스 앞에서 자른다(검토 Roh 1회째 권고2).
  */
 export function cutAtLine(text: string, limit: number): string {
   if (text.length <= limit) return text
   const floor = Math.floor(limit * 0.6)
   const rows = text.split('\n')
-  let fence: string | null = null
-  let fenceMark = ''
-  let fenceStart = 0
+  let fence: Fence | null = null
   let pos = 0
   let blank = -1
   let line = -1
@@ -178,25 +231,24 @@ export function cutAtLine(text: string, limit: number): string {
   for (const [i, row] of rows.entries()) {
     if (pos > limit) break
     const next = pos + row.length
-    const marker = /^\s*(`{3,}|~{3,})/.exec(row)?.[1]
+    const open: string | null = fence === null ? openFence(row) : null
+    const closes = fence !== null && closesFence(fence, row)
     if (pos < limit && limit < next) {
-      if (fence !== null) cutFence = { mark: fenceMark, start: fenceStart }
-      else if (marker) cutFenceRow = pos
+      if (fence !== null) cutFence = { mark: fence.mark, start: fence.start }
+      else if (open) cutFenceRow = pos
     }
-    if (marker) {
-      if (fence === null) { fence = marker[0]; fenceMark = marker; fenceStart = pos }
-      else if (marker[0] === fence) { fence = null; fenceMark = '' }
-    }
+    if (open) fence = { ch: open[0], len: open.length, mark: open, start: pos }
+    else if (closes) fence = null
     const tableRow = fence === null && /^\s*\|/.test(row)
     if (next <= limit) {
-      if (marker) { /* 펜스 줄 자체는 자를 자리가 아니다 */ }
-      else if (fence !== null) codeEnds.push({ end: next, fenceStart })
+      if (open || closes) { /* 펜스 줄 자체는 자를 자리가 아니다 */ }
+      else if (fence !== null) { if (row.trim()) codeEnds.push({ end: next, fenceStart: fence.start }) }
       else if (tableRow) rowEnd = next
       else if (!row.trim()) blank = pos
       else line = next
     }
     pos = next + (i < rows.length - 1 ? 1 : 0)
-    if (pos >= limit && fence !== null && !fenceAtLimit) fenceAtLimit = { mark: fenceMark, start: fenceStart }
+    if (pos >= limit && fence !== null && !fenceAtLimit) fenceAtLimit = { mark: fence.mark, start: fence.start }
   }
   // 한도가 코드 줄 경계나 닫는 펜스 줄에 **딱** 맞아 위 조건이 안 걸려도, 자른 글이 열린 펜스로
   // 끝나면 안 된다 — 닫지 않으면 잘린 조각이 뒤따르는 글로 번진다.
@@ -209,8 +261,8 @@ export function cutAtLine(text: string, limit: number): string {
     let best = -1
     for (const e of codeEnds) if (e.fenceStart === cutFence.start && e.end <= budget) best = e.end
     if (best > 0) return text.slice(0, best) + suffix
-    // 한 줄도 안 들어간다(코드 한 줄이 한도보다 길다) — 반쪽 코드 줄도, 빈 펜스도 내보내지 않고
-    // 블록 앞까지만 남긴 뒤 잘렸음을 밝힌다.
+    // 내용 줄이 한 줄도 안 들어간다(코드 한 줄이 한도보다 길거나 첫 줄이 빈 줄이다) — 반쪽 코드 줄도,
+    // 빈 펜스도 내보내지 않고 블록 앞까지만 남긴 뒤 잘렸음을 밝힌다.
     const head = text.slice(0, cutFence.start).trimEnd()
     const marked = head ? head + `\n${MORE}` : MORE
     return marked.length <= limit ? marked : head

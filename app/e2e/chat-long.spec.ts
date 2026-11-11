@@ -56,7 +56,7 @@ test('긴 답변은 접히고, 펼치면 전문이 그대로 있다 (발견 10)'
 
 /**
  * 검토 Roh v0.6.2 권고2 — 2,000자 한도가 코드 블록 한가운데에 걸려도 자른 조각이 완성된 명령처럼
- * 보이면 안 된다. 접힌 화면은 코드 줄 경계에서 끊기고 닫는 펜스 + "… (이하 더 보기)" 를 달며,
+ * 보이면 안 된다. 접힌 화면은 코드 줄 경계에서 끊기고 닫는 펜스 + "… 코드가 더 있어요" 를 달며,
  * 펼치면 원문 명령이 전부 돌아온다.
  */
 test('한도가 코드 블록을 가르면 반쪽 명령 대신 닫는 펜스와 잘림 표시를 보여 준다', async () => {
@@ -71,7 +71,7 @@ test('한도가 코드 블록을 가르면 반쪽 명령 대신 닫는 펜스와
     const pre = bubble.locator('pre').first()
     await expect(pre).toBeVisible()
     // 잘렸음을 밝힌다 — 표시는 닫는 펜스 **뒤**의 글로 남는다(코드로 읽히지 않는다).
-    await expect(bubble).toContainText('… (이하 더 보기)')
+    await expect(bubble).toContainText('… 코드가 더 있어요')
     // 반쪽 명령이 남지 않는다 — 코드 블록 안의 줄은 전부 온전한 명령이다.
     const codeLines = (await pre.locator('code').innerText()).split('\n').filter((l) => l.trim())
     expect(codeLines.length, '코드가 통째로 사라졌다').toBeGreaterThan(0)
