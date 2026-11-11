@@ -331,8 +331,8 @@ export async function navTo(page: Page, label: string): Promise<void> {
     return
   }
   if (label === '점검') {
-    await page.locator('.titlebar .tbtn.now').click()
-    await page.locator('.titlebar .popover').getByRole('button', { name: /제출 점검·마무리/ }).click()
+    await page.locator('.titlebar .tbtn.stg').click()
+    await page.locator('.titlebar .popover').getByRole('button', { name: '제출 전 점검' }).click()
     return
   }
   if (label === '자료' || label === '결과물') {

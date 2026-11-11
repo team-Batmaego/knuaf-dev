@@ -5,6 +5,7 @@ import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
 import { cutAtLine, formFold as formFoldOf, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { mergeFoldSpans, progressHide } from '../../../shared/progress-list'
 import { ChatMarkdown } from '../components/ChatMarkdown'
 import { ProgressFold } from '../components/ProgressFold'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
@@ -85,13 +86,22 @@ function Delivery({ m, sending, onResend }: { m: ChatMessage; sending: boolean; 
   return null
 }
 
-function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMessage; onResend?: () => void; onFileLink?: (relative: string) => void; fold?: FoldOptions; sending?: boolean }) {
+function Message({ m, onResend, onFileLink, fold, hide, sending = false }: { m: ChatMessage; onResend?: () => void; onFileLink?: (relative: string) => void; fold?: FoldOptions; hide?: { start: number; end: number }[]; sending?: boolean }) {
   const [open, setOpen] = useState(false)
   const [unfolded, setUnfolded] = useState(false)
   const projectRoot = useProject((s) => s.root)
   if (m.role === 'system') return <div className="chat-msg system"><span className="caption">{m.text}</span></div>
   const folding = !!fold && !unfolded
-  const text = folding && fold ? stripLines(m.text, fold.spans) : m.text
+  // 진행 목록 덩어리는 안내 줄 없이 조용히 걷는다(IMPL-T1 §3-1). 카드 접기와 원문 줄 번호
+  // 기준으로 합쳐 `stripLines`를 한 번 부른다 — 겹침·맞닿음 줄은 한 번만 걷힌다.
+  // unfold("여기에 펼치기")는 카드 접기만 풀고, 진행 덩어리는 계속 숨겨 둔다 — 진행 표시는 제목줄 하나다.
+  const combined = (() => {
+    const cardSpans = folding && fold ? fold.spans : []
+    const hideSpans = hide ?? []
+    if (cardSpans.length === 0 && hideSpans.length === 0) return null
+    return mergeFoldSpans([...cardSpans, ...hideSpans])
+  })()
+  const text = combined ? stripLines(m.text, combined) : m.text
   const long = text.length > LONG_MESSAGE
   // 한도가 표·목록 한가운데를 가르지 않게 **줄 경계**에서 자른다. "더 보기"의 수는 자르기 전이
   // 아니라 **접힌 뒤 실제로 남은 글** 기준이다(예전에는 원문 길이를 써서 실제보다 크게 보였다).
@@ -652,8 +662,11 @@ export function Chat() {
       ? zone.kind === 'question' ? { spans: [zone.card.span], count: zone.card.options.length, kind: 'options' as const }
         : formFold
       : null
+    // 도우미 답의 진행 목록 덩어리는 제목줄에만 보인다(IMPL-T1 §3-1) — 본문에서 조용히 걷는다.
+    // 무효 덩어리는 감추지 않는다(글이 사라지면 안 됨). `다음 작업`·`지금 확인할 것` 줄은 구간 밖이라 남는다.
+    const hide = m.role === 'assistant' ? progressHide(m.text) : []
     return <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onFileLink={openFileLink} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
-      fold={span ?? undefined} />
+      fold={span ?? undefined} hide={hide.length ? hide : undefined} />
   }
   // 한 묶음은 첫 말 자리에 한 번만 선다 — 두 번째 말에서 또 만들면 같은 묶음이 여러 번 그려진다.
   const placed = new Set<string>()
