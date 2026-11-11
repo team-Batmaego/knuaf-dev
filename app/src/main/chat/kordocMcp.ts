@@ -66,9 +66,11 @@ export const DENY_OUTSIDE_ROOT = '한글 문서 도구는 논문 폴더 안의 �
 /**
  * §3.6 지시문. `mcpSpec`이 붙은 세션에서만 기존 문장(엑셀·문서 읽기 = 스킬 스크립트)을 이 문장으로 바꾼다.
  * 미부착 세션에 이 문장을 넣으면 없는 도구를 찾게 된다.
+ * 끝의 OCR 문장은 설계 §3.6 밖의 추가다(책임자 결정): `ocr` 생략 호출이 PDF마다 ~1 GiB·30초를 쓰므로
+ * 미요청 호출에 `ocr:false`를 명시하고, "텍스트 0자" 경고 때만 `ocr:true`로 1회 재시도하게 한다.
  */
 export const LEGACY_DOC_READ_INSTRUCTION = '엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요.'
-export const MCP_DOC_READ_INSTRUCTION = '한글 문서(HWP·HWPX)·PDF 읽기는 kordoc 도구(`parse_document`·`parse_table`·`compare_documents` 등)를 먼저 쓰고, 엑셀 읽기와 논문 HWPX 산출(`build_hwpx.py`)은 스킬의 스크립트를 쓰세요. 폴더 밖 파일은 도구가 거절해요.'
+export const MCP_DOC_READ_INSTRUCTION = '한글 문서(HWP·HWPX)·PDF 읽기는 kordoc 도구(`parse_document`·`parse_table`·`compare_documents` 등)를 먼저 쓰고, 엑셀 읽기와 논문 HWPX 산출(`build_hwpx.py`)은 스킬의 스크립트를 쓰세요. 폴더 밖 파일은 도구가 거절해요. `parse_document`는 `ocr:false`를 꼭 넣어 부르고, 결과 글자가 0자라는 경고가 나올 때만 `ocr:true`로 한 번 더 부르세요.'
 
 /**
  * kordoc 실행 환경 — **값은 v0.6.0 ③이 정한다**(Node 미동봉 유력안: kordoc 빌드 동봉 + Electron을

@@ -13,6 +13,7 @@ import type { ConnectionStatus } from '../../shared/chat'
 import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 import { tokenRecord, claudeTokens } from './jobs/tokens'
 import { appendTokenRecord } from './jobs/token-log'
+import { claudeMcpOptions, mcpPolicy, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, type KordocMcpSpec } from './kordocMcp'
 
 export class ClaudeAuthenticationError extends Error {
   constructor() { super(CLAUDE_AUTH_COPY.required) }
@@ -1120,7 +1121,11 @@ export class ClaudeConnection implements AgentConnection {
   get loginConfirmed(): boolean { return !this.loginUnconfirmed }
   private controller?: AbortController
   private approvals = new Map<string, (allow: boolean) => void>()
+  /** 이 턴에 붙일 kordoc MCP 사양(§3.3). 미부착이면 undefined/null — Claude 는 턴마다 새로 뜬다. */
+  private mcpSpec?: KordocMcpSpec | null
   constructor(private options: AgentOptions) {}
+  /** 다음 `run()` 부터 반영된다. Claude CLI 는 턴마다 새 프로세스라 재기동 절차가 없다. */
+  async setMcpSpec(spec: KordocMcpSpec | null): Promise<void> { this.mcpSpec = spec }
   /**
    * 한 턴(`result`)의 토큰 사용량을 대화별 JSONL 한 줄로 남긴다. 숫자와 식별자만 담고
    * 학생 글은 담지 않는다. 기록은 비동기·best-effort 라 대화를 막지 않는다(token-log.ts).
@@ -1261,13 +1266,16 @@ export class ClaudeConnection implements AgentConnection {
       // `project` 는 남긴다 — 스킬·CLAUDE.md 발견이 이 소스에 걸려 있다. 그 대신 쓰기는
       // autoAllow 가 막고, 이미 있는 project 설정은 inspectAgentSettings 가 학생에게 알린다.
       env: this.options.env, settingSources: ['project'], strictMcpConfig: true,
+      // kordoc MCP(§3.3): spec 이 있을 때만 서버 3키를 얹는다. `strictMcpConfig` 는 위의
+      // true 를 덮지 않는 같은 값이고, `disallowedTools` 가 쓰기 12개를 모델 눈에서 지운다.
+      ...(this.mcpSpec ? claudeMcpOptions(this.mcpSpec) : {}),
       resume: sessionId, abortController: this.controller, permissionMode: 'default',
       // 모델·추론 강도 핀. 미설정이면 CLI 기본값을 그대로 쓴다 — 학생 설정을 덮지 않는다.
       // (live 스펙이 sonnet 으로 비용을 낮추는 데도 같은 통로를 쓴다.)
       ...(this.options.env.KNUAF_CLAUDE_MODEL ? { model: this.options.env.KNUAF_CLAUDE_MODEL } : {}),
       ...(CLAUDE_EFFORTS.has(this.options.env.KNUAF_CLAUDE_EFFORT ?? '')
         ? { effort: this.options.env.KNUAF_CLAUDE_EFFORT as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 서브에이전트를 백그라운드로 띄우지 마세요(run_in_background 금지). 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.' },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). ' + (this.mcpSpec ? MCP_DOC_READ_INSTRUCTION : LEGACY_DOC_READ_INSTRUCTION) + ' 서브에이전트를 백그라운드로 띄우지 마세요(run_in_background 금지). 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.' },
       // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
       // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
       // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
@@ -1277,6 +1285,10 @@ export class ClaudeConnection implements AgentConnection {
       // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
       canUseTool: async (name, input, options): Promise<PermissionResult> => {
         if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
+        // kordoc MCP 는 앱의 허용 목록이 먼저다(§3.4) — 폴더 밖·쓰기·모르는 도구는 trust 여부와
+        // 무관하게 거절. `autoAllowed`·`trusted()` 뒤에 두면 아래 기본 '묻지 않기' 통로로 새어 나간다.
+        const mcp = mcpPolicy(this.options.root, name, input)
+        if (mcp) return mcp.behavior === 'allow' ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: mcp.message }
         // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
         // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
         // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재

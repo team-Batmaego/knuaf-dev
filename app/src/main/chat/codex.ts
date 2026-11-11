@@ -10,6 +10,8 @@ import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
+import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, type KordocMcpSpec } from './kordocMcp'
+import { McpSafetyError, verifyCodexKordoc } from './kordocMcpVerify'
 
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
@@ -91,6 +93,10 @@ export class CodexConnection implements AgentConnection {
   private messages = new Map<string, string>()
   private fileChanges = new Map<string, PermissionFileChange[]>()
   private pendingFileApprovals = new Map<string, { key: string; reason: unknown }>()
+  /** 이 프로세스에 붙일 kordoc MCP 사양(§3.3). 미부착이면 undefined/null. */
+  private mcpSpec?: KordocMcpSpec | null
+  /** MCP 기동 검증(§3.3 4단계)을 이미 통과한 프로세스 — 프로세스당 1회만 부른다. */
+  private verifiedOn?: JsonRpcProcess
   /**
    * 최신 CLI 는 평문 `app-server`; 실패하면 옛 `--listen stdio://` 로 한 번 재시도한다.
    * 앞의 `-c` 는 전역 knuaf-dev 스킬 사본을 끄는 config 오버라이드 — ~/.codex/skills 등에
@@ -105,6 +111,31 @@ export class CodexConnection implements AgentConnection {
   private turnTokens?: { key: string; model: string; effort: string | null }
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
+  }
+  /**
+   * 이 프로세스에 실제로 넘길 argv. kordoc 사양이 있으면 `-c` 6쌍을 subcommand(`app-server`)
+   * **앞에** 끼운다 — 옛 CLI 재시도(`--listen`)가 뒤에 붙어도 자리는 그대로다(§3.3).
+   */
+  private spawnArgs(): string[] {
+    if (!this.mcpSpec) return this.serverArgs
+    const at = this.serverArgs.lastIndexOf('app-server')
+    if (at < 0) return [...this.serverArgs, ...codexMcpArgs(this.mcpSpec)]
+    return [...this.serverArgs.slice(0, at), ...codexMcpArgs(this.mcpSpec), ...this.serverArgs.slice(at)]
+  }
+  /**
+   * `setMcpSpec` — 다음 프로세스부터 새 인자로 뜨게 한다. **턴이 도는 중에는 바꾸지 않고**
+   * 던진다(service 가 MCP 를 포기하고 대화는 계속한다). `stopped` 는 건드리지 않는다 —
+   * 그 플래그는 앱 종료 뜻이고, 여기서는 rpc 만 닫아 다음 `run()` 이 재기동하게 한다(§3.3).
+   */
+  async setMcpSpec(spec: KordocMcpSpec | null): Promise<void> {
+    if (this.turn) throw new Error('턴이 진행 중이라 한글 문서 도구를 지금 붙일 수 없어요.')
+    this.mcpSpec = spec
+    this.verifiedOn = undefined
+    this.retriedWithoutMcp = false
+    if (this.rpc && !this.rpc.closed) {
+      await this.rpc.stop().catch(() => {})
+      this.rpc = undefined
+    }
   }
   /**
    * `thread/tokenUsage/updated` 알림 하나를 대화별 JSONL 한 줄로 남긴다. `last`(이번 턴)와
@@ -154,7 +185,8 @@ export class CodexConnection implements AgentConnection {
     // 인자는 Codex CLI 쪽 사정이라 고정할 수 없다. 최신 CLI 의 `app-server` 에는
     // --listen 이 없어서(0.155 에서 확인) 그 인자로 띄우면 아무 말 없이 즉시 끝난다.
     // 구버전에는 필요했으므로 평문을 먼저 쓰고 실패하면 옛 인자로 한 번 더 시도한다.
-    const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.serverArgs, this.options.root, this.options.env)
+    const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.spawnArgs(), this.options.root,
+      { ...this.options.env, ...(this.mcpSpec ? codexMcpEnv(this.mcpSpec) : {}) })
     rpc.onNotification = (method, p) => {
       if (method === 'account/login/completed' && this.loginPending && typeof p?.loginId === 'string') {
         if (!this.loginInfo) this.earlyLogin = { id: p.loginId, success: p.success === true }
@@ -346,7 +378,32 @@ export class CodexConnection implements AgentConnection {
     await this.stop()
   }
   private loginInfo?: { id: string; url: string }
+  /** MCP 검증 실패 뒤 같은 텍스트로 한 번만 다시 돌기 위한 표식 — 재귀를 막는다(E8). */
+  private retriedWithoutMcp = false
+  /**
+   * 한 턴. kordoc 기동 검증(§3.3)이 실패하면 `McpSafetyError` 가 올라오므로 여기서 받아
+   * **MCP만 끄고** 같은 텍스트로 한 번 더 돈다. `service.ts` 는 이 예외를 모르고(일반 오류로
+   * 처리해 대화를 error 로 남긴다) 연결 객체를 버리는 처분도 하지 않으므로, 같은 처분을
+   * 연결 안에서 한다 — 실패한 rpc 를 닫고 spec 을 비우면 다음 `runTurn` 이 MCP 없이 뜬다.
+   */
   async run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+    try {
+      return await this.runTurn(text, sessionId, events, replayHistory)
+    } catch (e) {
+      if (!(e instanceof McpSafetyError)) throw e
+      this.mcpSpec = null
+      this.verifiedOn = undefined
+      await this.rpc?.stop().catch(() => {})
+      this.rpc = undefined
+      events.note('안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요')
+      if (this.retriedWithoutMcp) throw e
+      this.retriedWithoutMcp = true
+      // 검증 실패는 `turn/start` 앞이라 그 대화에는 아무 턴도 없다 — 같은 입력으로 새 프로세스에서
+      // 다시 시작한다(새 대화면 빈 thread 하나가 남지만 학생 기록에는 아무것도 안 남는다).
+      return this.runTurn(text, sessionId, events, replayHistory)
+    }
+  }
+  private async runTurn(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
     const rpc = await this.connect()
     if (!(await this.status()).connected) throw new Error('Codex에서 ChatGPT 계정 로그인을 먼저 완료해 주세요.')
     this.events = events
@@ -359,9 +416,16 @@ export class CodexConnection implements AgentConnection {
     const skills = await rpc.request('skills/list', { cwds: [this.options.root], forceReload: true })
     if (!skills.data?.some((entry: any) => entry.skills?.some((s: any) => realOrSelf(s.path) === want && s.enabled))) throw new Error('Codex가 프로젝트의 knuaf-dev 스킬을 찾지 못했어요.')
     events.skill()
-    const args = { cwd: this.options.root, approvalPolicy: 'on-request', sandbox: 'workspace-write', developerInstructions: '이 세션은 knuaf-dev 개인용 GUI입니다. 제공된 knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 같은 이름의 사용자·전역 스킬 사본이 보여도 무시하고 이 프로젝트의 스킬만 따르세요. 질문은 채팅 텍스트로 제시하세요. 인터뷰 원문과 해석은 스킬의 로그 계약대로 기록하세요. GUI의 첨부는 사용자 답변의 일부이며 현재 작성물 채택은 스킬의 확인 절차를 따르세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요.' }
+    const args = { cwd: this.options.root, approvalPolicy: 'on-request', sandbox: 'workspace-write', developerInstructions: '이 세션은 knuaf-dev 개인용 GUI입니다. 제공된 knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 같은 이름의 사용자·전역 스킬 사본이 보여도 무시하고 이 프로젝트의 스킬만 따르세요. 질문은 채팅 텍스트로 제시하세요. 인터뷰 원문과 해석은 스킬의 로그 계약대로 기록하세요. GUI의 첨부는 사용자 답변의 일부이며 현재 작성물 채택은 스킬의 확인 절차를 따르세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). ' + (this.mcpSpec ? MCP_DOC_READ_INSTRUCTION : LEGACY_DOC_READ_INSTRUCTION) }
     const r = sessionId ? await rpc.request('thread/resume', { ...args, threadId: sessionId }) : await rpc.request('thread/start', args)
-    this.thread = r.thread.id; events.session(r.thread.id)
+    const threadId: string = r.thread.id
+    this.thread = threadId; events.session(threadId)
+    // Codex 쪽 승인 정책의 전부는 이 검증이다(§3.3) — 프로세스당 1회, `turn/start` 앞.
+    // 하나라도 못 채우면 `McpSafetyError` 로 올려 보내 MCP 를 끄고 같은 텍스트를 다시 돈다.
+    if (this.mcpSpec && this.verifiedOn !== rpc) {
+      await verifyCodexKordoc(rpc, { threadId, root: this.options.root, spec: this.mcpSpec })
+      this.verifiedOn = rpc
+    }
     this.threadModel = typeof r.model === 'string' && r.model ? r.model : null
     this.threadEffort = typeof r.reasoningEffort === 'string' && r.reasoningEffort ? r.reasoningEffort : null
     if (!sessionId) { this.overridden = false; this.resumeChecked = false }
