@@ -675,6 +675,51 @@ test('F13 main push도 A → B → A 뒤 옛 A 감시 이벤트를 버린다', (
   expect(sent.map((p) => p.root + ':' + String(p.progress?.revision))).toEqual(['/papers/a:4'])
 })
 
+/* --------------------------------- 검토 권고 1 — `progress:get`도 '연 순간의 신원'을 쓴다 */
+
+/**
+ * S7 재현: 감시를 건 뒤 **조상 폴더를 바꿔치기**하고 get을 부른다.
+ * 감시 경로는 감시 시작 신원을 쓰므로 바깥 값을 안 읽는데, get이 호출 시점 신원을 잡으면
+ * 같은 순간에 get만 바깥 값을 낸다(검토 권고 1). 고친 뒤에는 둘 다 `null`이어야 한다.
+ */
+test('F15 감시 뒤 조상 바꿔치기 — `progress:get`도 감시 시작 신원을 써서 바깥 값을 안 읽는다', () => {
+  const home = scratch()
+  const root = join(home, 'paper')
+  const outside = scratch()
+  try {
+    mkdirSync(root)
+    writeFile(root, fileJson({ revision: 13 }))
+    writeFile(outside, fileJson({ revision: 777 }))
+
+    const handlers = new Map<string, () => unknown>()
+    const ipc = registerProgressIpc(
+      () => root,
+      () => null,
+      { handle: (ch, fn) => handlers.set(ch, fn) },
+      // 감시는 걸지 않는다 — get이 감시 시점 신원을 쓰는지만 본다.
+      () => () => {},
+    )
+    const get = (): unknown => handlers.get('progress:get')!()
+
+    // 감시 전 — 아직 신원이 없으니 호출 시점 기준으로 읽는다(정상값).
+    expect(get()).toEqual({ result: expect.objectContaining({ revision: 13 }) })
+
+    ipc.follow(root)
+    expect(get()).toEqual({ result: expect.objectContaining({ revision: 13 }) })
+
+    // 조상(`paper`)을 바꿔치기: 진짜 폴더는 옆으로 옮기고, 같은 이름 자리에 바깥 폴더를 심는다.
+    // 그러면 `realpathSync(root)`가 바깥 폴더를 가리키고, 호출 시점 신원을 잡는 옛 코드는
+    // 바깥 값을 읽는다(감시는 감시 시작 신원과 달라 거절).
+    renameSync(root, join(home, 'paper-moved'))
+    symlinkSync(outside, root)
+
+    expect(get(), '조상이 바뀌었으면 get도 읽지 않는다').toEqual({ result: null })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
 /* ------------------------------------------- Roh 1회째 [중요] written_at 시간대 */
 
 test('F14 written_at — 끝이 Z 또는 ±hh:mm인 ISO만 유효', () => {

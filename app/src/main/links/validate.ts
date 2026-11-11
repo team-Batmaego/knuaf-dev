@@ -19,15 +19,22 @@ export type LinkCheck = { ok: true; url: string } | { ok: false; reason: LinkRej
 /**
  * `%2e` 로 적은 점 조각이 경로에 있나 — `/%2e%2e/x` 는 파서가 `..` 로 풀어 **다른 자원**을 연다.
  * 화면에 보인 주소와 실제 요청의 경로가 달라지므로 받지 않는다(Roh ⑤ [중요]: 보인 그대로 연다).
+ *
+ * 판정은 **파서가 실제로 지운 `%2e` 개수**로 한다 — 원문 경로의 `%2e` 수보다 `url.pathname` 의
+ * `%2e` 수가 적으면 파서가 그중 일부를 점 조각으로 풀어 경로가 달라졌다는 뜻이다(거부).
+ * 구분자를 하나씩 세지 않는 이유: 파서는 `/` 뿐 아니라 `\`(맥·리눅스에서도)·탭·개행·CR 을
+ * 구분자로 보고, `https:ex.com/…` 처럼 슬래시가 빠진 형태까지 정규화한다 — 나열하면 또 빠뜨린다.
  * 나머지 이스케이프(`%26`·`%3D`·`%23`·`%2F`·`%20` 등)는 `href` 에 **바이트 그대로** 남는다.
  */
-function hasEscapedDotSegment(text: string): boolean {
-  const afterScheme = text.slice(text.indexOf('://') + 3)
-  const slash = afterScheme.search(/[/?#]/)
-  if (slash < 0) return false
-  const path = afterScheme.slice(slash).split(/[?#]/)[0]
-  if (!/%2e/i.test(path)) return false
-  return /(?:^|\/)\.\.?(?:\/|$)/.test(path.replace(/%2e/gi, '.'))
+function hasEscapedDotSegment(text: string, url: URL): boolean {
+  // 파서는 탭·개행·CR 을 주소에서 지운다 — 원문 경로도 같은 기준으로 본다(`%2\te` → `%2e`).
+  const stripped = text.replace(/[\t\n\r]/g, '')
+  const afterScheme = stripped.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:/, '').replace(/^[/\\]+/, '')
+  const cut = afterScheme.search(/[/\\?#]/)
+  const rawPath = cut < 0 ? '' : afterScheme.slice(cut).split(/[?#]/)[0]
+  const escapes = (s: string): number => (s.match(/%2e/gi) ?? []).length
+  const raw = escapes(rawPath)
+  return raw > 0 && escapes(url.pathname) < raw
 }
 
 /**
@@ -52,6 +59,6 @@ export function checkExternalLink(input: unknown): LinkCheck {
   // 실제 목적지가 다르다 — 그런 주소는 열지 않는다.
   if (url.username !== '' || url.password !== '') return { ok: false, reason: 'credentials' }
   if (!url.hostname) return { ok: false, reason: 'malformed' }
-  if (hasEscapedDotSegment(text)) return { ok: false, reason: 'malformed' }
+  if (hasEscapedDotSegment(text, url)) return { ok: false, reason: 'malformed' }
   return { ok: true, url: url.href }
 }

@@ -175,6 +175,49 @@ test('main: %2e 로 적은 점 조각은 다른 자원을 열므로 거부한다
   }
 })
 
+test('main: 구분자가 `\\`·탭·개행이어도 파서가 지운 `%2e` 는 거부한다(검토 권고 3)', () => {
+  // 파서는 `\`·탭·개행을 구분자/제거 대상으로 보고 점 조각을 풀어 다른 경로로 만든다.
+  // 옛 검사는 `/` 로만 조각을 나눠 이 넷을 통과시켰다(실제로는 `https://ex.invalid/b` 를 연다).
+  const counterexamples = [
+    'https://ex.invalid/a\\%2e%2e\\b',
+    'https://ex.invalid/a/%2e%2e\\b',
+    'https://ex.invalid\\%2e%2e/b',
+    'https://ex.invalid/a/%2\te%2e/b'
+  ]
+  for (const url of counterexamples) {
+    expect(checkExternalLink(url), `${url} 는 거부`).toEqual({ ok: false, reason: 'malformed' })
+  }
+  // 같은 구멍의 이웃들 — 개행·CR·슬래시 없는 스킴 형태도 같은 판정.
+  for (const url of [
+    'https://ex.invalid/a/%2e%2\ne/b',
+    'https://ex.invalid/a/%2e\n%2e/b',
+    'https:ex.invalid/a/%2e%2e/b',
+    'https://ex.invalid/a%2eb/%2e%2e/c'
+  ]) {
+    expect(checkExternalLink(url), `${url} 는 거부`).toEqual({ ok: false, reason: 'malformed' })
+  }
+
+  // 반대쪽: 파서가 건드리지 않는 `%2e` 는 그대로 통과하고 바이트도 그대로다(오거부 금지).
+  for (const url of [
+    'https://ex.invalid/%2e%2e%2fetc',
+    'https://ex.invalid/...%2e/x',
+    'https://ex.invalid/a%2Eb/c',
+    'https://ex.invalid/a/%2e%2f/b',
+    'https://ex.invalid/s?q=%2e%2e',
+    'https://ex.invalid/p#/%2e%2e/x',
+    'https://ex.invalid/file%2ejson'
+  ]) {
+    const check = checkExternalLink(url)
+    expect(check.ok, `${url} 는 허용`).toBe(true)
+    expect(check.ok && check.url, `${url} 는 바이트 그대로`).toBe(url)
+  }
+  // 리터럴 `..` 는 파서가 정상적으로 접는 것이고 `%2e` 와 무관하다 — 통과해야 한다(오거부 금지).
+  expect(checkExternalLink('https://ex.invalid/a/../b%2ejs')).toEqual({
+    ok: true,
+    url: 'https://ex.invalid/b%2ejs'
+  })
+})
+
 test('렌더러: 디코딩으로 숨은 스킴이 드러나 단추가 되지 않는다', () => {
   // `https%3A%2F%2Fevil…` 는 디코딩하면 `https://evil…` 이 된다 — 원문 기준이면 스킴이 없다.
   const hidden = 'https%3A%2F%2Fevil.invalid%2Fx'
