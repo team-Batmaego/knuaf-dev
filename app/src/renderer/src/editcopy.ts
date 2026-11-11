@@ -23,6 +23,9 @@ export const EDIT = {
   /** 저장 뒤 한 줄(§3-3, §4-5-6 — 되돌리기 단추는 없다). */
   saved: '고쳤어요.',
   savedNeedsCheck: '고쳤어요. 자료와 연결된 문장이라, 다음에 도우미에게 말을 걸 때 맞는지 함께 확인해요.',
+  /** 제출 전 점검 안내(설계 §6-5, §4-5-8 07). 가벼운 고침에도 붙는다. */
+  saveRecheck: '이 장은 제출 전에 도우미 점검을 한 번 받아야 해요.',
+  listRecheck: (titles: string) => `제출 전 점검이 필요한 장: ${titles}`,
   /** 목록·점(§3-3). */
   listButton: (n: number) => `직접 고친 곳 ${n}`,
   listTitle: '직접 고친 곳',
@@ -36,6 +39,9 @@ export const EDIT = {
   askHelper: '도우미에게 맡기기',
   keep: '그대로',
   fixTogetherLead: (n: number) => `${n}군데 고치기`,
+  /** 목록 안에서만 저장한다(§3-4, Roh 03). 목록 제목·머리. */
+  sameWordListTitle: '같이 고칠 곳',
+  sameWordListNone: '고칠 곳을 모두 뺐어요.',
   askHelperDraft: (word: string) => `논문 전체에서 '${word}' 내용을 빼 줘`,
   /** 복구·보관 알림(§4-5-6). 문구는 sidecar 가 준 `message` 를 그대로 쓴다. */
   noticeTitle: '원고 확인',

@@ -210,11 +210,13 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  */
 let sectionHashes: Record<string, string> | null = null
 /**
- * 학생이 **방금 직접 고친** 절. 다음 읽기 한 번만 '바뀐 절'에서 뺀다 — 그 절의 새 지문은
- * 우리가 만든 것이므로 도우미가 쓴 장이 아니다(설계 §3-3). 묶음 저장은 응답이 첫 절의
- * 지문 하나뿐이라 지문을 미리 적을 수 없다 — 그래서 지문이 아니라 절 ID 로 기억한다.
+ * 학생이 **방금 직접 고친** 절과 그때 저장한 지문. 다음 읽기 한 번만 '바뀐 절'에서 뺀다.
+ *
+ * **지문이 같을 때만** 뺀다(설계 §4-5-8 05). 절 ID 만 보고 빼면, 저장 직후 도우미가 그 절을
+ * 다시 쓴 경우에도 그 변경을 삼켜 버린다(그러면 채팅 알림도 접힌 종이 알림도 사라진다).
+ * 지문을 모르는 절은 **빼지 않는다** — 알림이 한 번 더 뜨는 쪽이 변경을 잃는 것보다 낫다.
  */
-const ownEdited = new Set<string>()
+const ownEdited = new Map<string, string>()
 let sectionRequest = 0
 let listRequest = 0
 /** 읽는 중에 또 읽지 않는다 — 감시 타이머가 사이드카를 겹쳐 띄우지 않게. */
@@ -329,12 +331,14 @@ export const useProject = create<ProjectState>((set, get) => ({
   noteOwnEdit: (sectionIds, draftHash) => {
     const ids = typeof sectionIds === 'string' ? [sectionIds] : sectionIds
     if (ids.length === 0) return
-    // 이 절들은 다음 읽기에서 '도우미가 고친 절'이 아니다 — 저장이 일어난 그 순간의 사실이다.
-    for (const id of ids) ownEdited.add(id)
-    // 한 절이고 그 절의 지문을 받았을 때만 미리 적는다(묶음 응답의 지문은 첫 절 것뿐).
-    if (draftHash && ids.length === 1 && sectionHashes !== null) {
-      sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
+    // 한 절이고 그 절의 지문을 받았으면 그 지문으로 기억한다(가장 정확한 기준).
+    if (draftHash && ids.length === 1) {
+      ownEdited.set(ids[0], draftHash)
+      if (sectionHashes !== null) sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
+      return
     }
+    // 지문을 모르면(묶음 응답의 `draft_hash` 는 첫 절 것뿐) **기억하지 않는다** — 절 ID 만으로
+    // 빼면 도우미 변경을 삼킨다. 알림이 한 번 더 뜨는 것이 안전한 쪽이다.
   },
   loadSections: async () => {
     const root = get().root
@@ -349,9 +353,12 @@ export const useProject = create<ProjectState>((set, get) => ({
       if (!mine()) return
       const prev = sectionHashes
       // 내가 방금 고친 절은 이번 읽기에서 '도우미가 바꾼 절'이 아니다 — 한 번만 건너뛴다.
-      const justMine = new Set(ownEdited)
+      // 내가 저장한 그 지문과 **같을 때만** '내 변경'이다 — 다르면 도우미가 그사이 다시 썼다.
+      const justMine = new Map(ownEdited)
       ownEdited.clear()
-      const changed = rows.filter((r) => !justMine.has(r.id) && (!prev || prev[r.id] !== r.draft_hash))
+      const changed = rows.filter((r) => (
+        justMine.get(r.id) !== r.draft_hash && (!prev || prev[r.id] !== r.draft_hash)
+      ))
       const events: PaperEvent[] = []
       if (changed.length) {
         const bodies = await rpc.readAllSections(root).catch(() => [])

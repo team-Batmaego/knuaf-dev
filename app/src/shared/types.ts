@@ -73,6 +73,8 @@ export interface EditRow {
   edits: EditRowEdit[]
   section_ids: string[]
   needs_check: boolean | null
+  /** 제출 전에 도우미 점검이 필요한 건(§4-5-8 07). */
+  recheck_before_submit?: boolean
   new_issues: { check_id: string; reason: string }[]
   remaining_issues: { check_id: string; reason: string }[]
   answered: boolean
@@ -94,6 +96,8 @@ export interface EditList { edits: EditRow[]; notices: EditNotice[] }
 export interface EditResult {
   revision: number
   draft_hash: string
+  /** 절 ID → 지문. 묶음에서 절마다 정확히 억제하려고 sidecar 가 더한다(§4-5-8 05). */
+  draft_hashes?: Record<string, string>
   needs_check: boolean
   new_issues: { check_id: string; reason: string }[]
   reviews_staled: number

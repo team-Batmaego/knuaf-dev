@@ -14,12 +14,14 @@ import type { EditRow } from '../../../shared/types'
  *
  * 앱은 "확인 끝·맞음"이라고 말하지 않는다(§5) — 상태는 `확인 전`·`도우미에게 전달됨`뿐이다.
  */
-export function StudentEditsList({ open, onOpenChange, rows, titles }: {
+export function StudentEditsList({ open, onOpenChange, rows, titles, recheckSections }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   rows: EditRow[]
   /** 절 id → 장 제목. 제목은 언제나 지금 목록에서 읽는다(옛 제목을 붙이지 않는다). */
   titles: Record<string, string>
+  /** 제출 전 점검이 필요한 장들(§4-5-8 07) — 그 장의 검토가 다시 유효해질 때까지 보인다. */
+  recheckSections: string[]
 }) {
   const label = EDIT.listButton(rows.length)
   const clock = (at: string | null): string => {
@@ -34,6 +36,11 @@ export function StudentEditsList({ open, onOpenChange, rows, titles }: {
       <button className="lnk" aria-expanded={open} onClick={() => onOpenChange(!open)}>{label}</button>
       <Popover open={open} onClose={() => onOpenChange(false)} align="right" width={380} label={EDIT.listTitle}>
         <PopHead>{EDIT.listTitle}</PopHead>
+        {recheckSections.length > 0 && (
+          <div className="edit-recheck" role="status">
+            {EDIT.listRecheck(recheckSections.map((id) => titles[id] ?? id).join(' · '))}
+          </div>
+        )}
         {rows.length === 0 && <PopRow>{EDIT.listEmpty}</PopRow>}
         {rows.map((row) => (
           <div className="edit-row" key={row.edit_id}>

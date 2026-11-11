@@ -93,3 +93,8 @@
 
 /* `모두 보기` — 그 자리의 낱말을 잠깐 칠한다(§3-4). 배경만 쓰고 색선은 쓰지 않는다. */
 .sameword-flash { background: var(--new); border-radius: var(--r-sm); transition: background 1.2s ease; }
+
+/* 제출 전 점검 안내 — 저장 뒤 한 줄과 목록 머리(§4-5-8 07). 색 줄 대신 글자·굵기로만. */
+.edit-line .recheck { color: var(--warn); }
+.edit-recheck { padding: var(--sp-2) 0; font-family: var(--font); font-size: 13px;
+  color: var(--warn); line-height: 1.55; }

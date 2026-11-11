@@ -118,6 +118,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const saveEdit = useEdits((s) => s.save)
   const markSeen = useEdits((s) => s.seen)
   const resetEdits = useEdits((s) => s.reset)
+  /** 고침 스토어가 지금 가리키는 논문 — 논문이 바뀌면 먼저 비운다(§4-5-8 04). */
+  const editsRoot = useEdits((s) => s.root)
   const editAvailable = useEdits((s) => s.available)
   const [docs, setDocs] = useState<Record<string, Doc>>({})
   const [fresh, setFresh] = useState<Record<string, number[]>>({})
@@ -137,6 +139,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const pane = useRef<HTMLElement>(null)
   /** 편집칸이 열려 있는가 — 폴링 재그리기를 잠깐 멈추는 판정(`load` 안에서 본다). */
   const slotRef = useRef<unknown>(null)
+  /** 편집 중에 갱신을 건너뛰었는가 — 닫을 때 다시 읽어 따라잡는다(§4-5-8 06). */
+  const skippedWhileEditing = useRef(false)
   sects.current = sections
   /** 종이에서 고른 문장 — 행동 막대가 뜰 자리와 무엇을 골랐는지(N-I03). */
   const [sel, setSel] = useState<Sel | null>(null)
@@ -158,7 +162,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const load = useCallback(async () => {
     if (!root || !sections) { setDocs({}); return }
     // 편집칸이 열려 있으면 다시 그리지 않는다 — 입력 중인 문단이 사라지면 안 된다(§3-2).
-    if (slotRef.current) return
+    // 건너뛴 사실을 적어 두고, 편집칸이 닫힐 때 한 번 다시 읽는다(§4-5-8 06).
+    if (slotRef.current) { skippedWhileEditing.current = true; return }
     // 3-A 의 `section.read_all` — 등록 순서대로 **한 번에** 읽는다(IMPL-PLAN §4-2 권장).
     // 절마다 `section.read` 를 부르던 자리이고, 읽는 곳은 여기 하나뿐이다.
     let rows: { id: string; title: string; draft: string }[]
@@ -207,8 +212,11 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   // 고침 목록·복구 알림은 폴더가 열리면 읽고, 폴더가 바뀌면 비운다.
   useEffect(() => {
     if (!root) { resetEdits(); return }
+    // 논문이 바뀌면 **먼저 비운다**(§4-5-8 04) — A→B 전환은 root 를 null 로 만들지 않으므로
+    // '없음→있음'만 보면 A 의 목록·알림이 B 화면에 남는다. 지금 스토어가 다른 논문 것이면 비운다.
+    if (editsRoot !== root) resetEdits()
     void loadEdits(root)
-  }, [root, revision, loadEdits, resetEdits])
+  }, [root, revision, editsRoot, loadEdits, resetEdits])
   useEffect(() => {
     if ((listIntent || filesOpen) && root) void loadLists()
   }, [listIntent, filesOpen, root, loadLists])
@@ -284,7 +292,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     value: string
   } | null>(null)
   /** 저장 뒤 한 줄 — 무엇을 말할지. 8초 뒤 사라지지 않는다(학생이 볼 때까지 남는다). */
-  const [savedLine, setSavedLine] = useState<{ editId: string; needsCheck: boolean } | null>(null)
+  const [savedLine, setSavedLine] = useState<{ editId: string; needsCheck: boolean; recheck: boolean } | null>(null)
   /** 저장 실패 한 줄 — 원고는 그대로다(§3-5). */
   const [failure, setFailure] = useState<{ message: string; detail?: string } | null>(null)
   const [failureOpen, setFailureOpen] = useState(false)
@@ -305,7 +313,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const found = locateSelection({
       draft: doc.draft, blockIndex: live.blockIndex,
       renderedBlock: live.renderedBlock, renderedBefore: live.renderedBefore, selectionText: live.text
-    })
+    }, renderMarkdown)
     if (!found.ok) return found.reason === 'block_missing' ? 'oneBlock' : 'needsQuote'
     return null
   }, [docs, sections, showDiff, snapshot])
@@ -320,7 +328,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const found = locateSelection({
       draft: doc.draft, blockIndex: live.blockIndex,
       renderedBlock: live.renderedBlock, renderedBefore: live.renderedBefore, selectionText: live.text
-    })
+    }, renderMarkdown)
     if (!found.ok) return
     setSlot({
       sectionId: live.sectionId, blockIndex: live.blockIndex,
@@ -339,7 +347,20 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     window.getSelection()?.removeAllRanges()
   }, [docs, editProblem, liveSelection])
 
-  const closeEdit = useCallback(() => { setSlot(null) }, [])
+  /**
+   * 편집칸을 닫는다 — 닫을 때 본문을 한 번 다시 읽는다(§4-5-8 06).
+   *
+   * 편집 중에는 폴링 재그리드를 멈추므로(`load` 첫 줄) 그동안 온 갱신은 버려졌다. 닫힘 자체가
+   * 재조회 계기가 아니면 다음 개정·수동 새로고침 전까지 종이에 옛 본문이 남는다.
+   */
+  const closeEdit = useCallback(() => {
+    setSlot(null)
+    // `slotRef` 는 effect 에서 따라오므로 여기서 **먼저** 비운다 — 그러지 않으면 바로 아래
+    // `load()` 가 '편집 중'으로 보고 그냥 돌아가, 취소해도 옛 본문이 남는다(§4-5-8 06).
+    slotRef.current = null
+    skippedWhileEditing.current = false
+    void load()
+  }, [load])
 
   // 폴링 재그리드가 편집 중인 문단을 건드리지 않게 — `load` 가 이 값을 먼저 본다.
   useEffect(() => { slotRef.current = slot }, [slot])
@@ -357,7 +378,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     if (!row || !live) return
     // 문단 전·후는 검증된 순수 함수로 만든다 — 위치 찾기를 다시 하지 않고, 표 `|`·줄바꿈·
     // 빈 문단 거절도 같은 규칙을 쓴다(§4-1 4, §3-2).
-    const built = replaceInBlock({ ...now.input, replacement: now.value })
+    const built = replaceInBlock({ ...now.input, replacement: now.value }, renderMarkdown)
     if (!built.ok) {
       setFailure({ message: EDIT.blocked.needsQuote, detail: built.reason })
       return
@@ -370,8 +391,14 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     // 채팅 이벤트 줄 억제 + 즉시 다시 읽기(§3-3).
     noteOwnEdit(now.sectionId, outcome.result.draft_hash)
     setSlot(null)
+    slotRef.current = null
     setFailure(null)
-    setSavedLine({ editId: outcome.result.edit_id, needsCheck: outcome.result.needs_check })
+    setSavedLine({
+      editId: outcome.result.edit_id,
+      needsCheck: outcome.result.needs_check,
+      // 제출 전 점검이 필요한 가벼운 고침도 있다(§4-5-8 07) — 화면이 그 사실을 말해야 한다.
+      recheck: outcome.result.recheck_before_submit
+    })
     // 같은 낱말은 **저장된 뒤의 본문**에서 찾는다(§3-4). `docs` 는 아직 저장 전 글이므로 그대로
     // 넘기면 방금 고친 자리를 '다른 곳'으로 세고, 그 옛 문단이 묶음에 들어가 sidecar 가 거절한다.
     const afterDocs = applySavedBlock(docs, now.sectionId, now.block, built.after_block)
@@ -390,9 +417,9 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const payload = edits.map((e) => ({ section_id: e.section_id, before_block: e.before_block, after_block: e.after_block }))
     const outcome = await saveEdit(rootNow, { kind: 'batch', expected_revision: live.revision, edits: payload })
     if (!outcome.ok) { setFailure({ message: outcome.message, detail: outcome.detail }); return }
-    // 묶음 응답의 `draft_hash` 는 첫 절 하나의 것 — 절 ID 로만 표시한다(지문을 적으면 둘째
-    // 장부터 틀린 값이 들어가 다음 읽기에서 이벤트 줄이 생긴다).
-    noteOwnEdit([...new Set(payload.map((e) => e.section_id))])
+    // 묶음은 절마다 정확한 지문이 필요하다 — sidecar 가 더한 `draft_hashes` 를 쓴다(§4-5-8 05).
+    // 그것이 없는 응답(옛 sidecar)이면 **기억하지 않는다** — 절 ID 만으로 빼면 도우미 변경을 삼킨다.
+    for (const [sid, hash] of Object.entries(outcome.result.draft_hashes ?? {})) noteOwnEdit(sid, hash)
     setSameword([])
     await refreshProject({ quiet: true })
   }, [root, pStatus, saveEdit, noteOwnEdit, refreshProject])
@@ -447,6 +474,17 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const materialItem = (path: string | null | undefined) => path
     ? { path: joinPath(root, path), name: path.split(/[\\/]/).pop() ?? path }
     : null
+  /**
+   * 제출 전 점검이 필요한 장(§4-5-8 07). 원장이 그 건을 `recheck_before_submit` 으로 적었고,
+   * 그 장이 아직 '검토 준비 완료'가 아니면 목록 머리에 남는다 — 검토가 다시 유효해지면
+   * (`status === 'review_ready'`) 사라진다.
+   */
+  const recheckSections = [...new Set(
+    editRows
+      .filter((r) => r.recheck_before_submit)
+      .flatMap((r) => r.section_ids)
+      .filter((id) => (sections ?? []).find((x) => x.id === id)?.status !== 'review_ready')
+  )]
   /** 지금 읽어 둔 절 본문들 — 같은 낱말 찾기의 대상(새로 읽지 않는다, §3-4). */
   const draftsNow: SectionDraft[] = Object.entries(docs).map(([id, d]) => ({ id, draft: d.draft }))
   const slotSection = questionSection(card, sections)?.id ?? null
@@ -501,7 +539,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
         {/* 직접 고친 곳 — 고침이 있을 때만 보인다. 고치지 않는 학생의 화면은 달라지지 않는다(§3-3). */}
         {editRows.length > 0 && (
           <StudentEditsList open={listOpen} onOpenChange={setListOpen} rows={editRows}
-            titles={Object.fromEntries((sections ?? []).map((x) => [x.id, x.title]))} />
+            titles={Object.fromEntries((sections ?? []).map((x) => [x.id, x.title]))}
+            recheckSections={recheckSections} />
         )}
         {/* 권하는 단추 **하나** — "지금"이 고른 행동이다(1·2단계는 없다: 대화가 이끈다).
             만들기 자체는 "파일" 팝오버에서 언제든 되지만, 화면에 권하는 것은 이 하나뿐이다. */}
@@ -540,6 +579,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
         <div className={`paper-fb edit-line${savedLine.needsCheck ? ' needs' : ''}`} role="status">
           <span className="dot" aria-hidden="true" />
           <span>{savedLine.needsCheck ? EDIT.savedNeedsCheck : EDIT.saved}</span>
+          {savedLine.recheck && <span className="recheck">{EDIT.saveRecheck}</span>}
         </div>
       )}
       {sameword.length > 0 && root && (
@@ -555,7 +595,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
                 if (!block) { sec?.scrollIntoView({ block: 'start' }); return }
                 flashWord(block, place.before_block, place.start, place.end)
               }}
-              onAskHelper={(draft) => { useChat.getState().insertPath(draft); useProject.getState().setPaneView('chat') }} />
+              onAskHelper={(draft) => { useChat.getState().insertPath(draft); useProject.getState().setPaneView('chat') }}
+              onDismiss={() => setSameword((rows) => rows.filter((r) => r.from !== suggestion.from))} />
           ))}
         </div>
       )}

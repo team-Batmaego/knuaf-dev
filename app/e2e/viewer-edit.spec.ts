@@ -10,6 +10,7 @@
  * 구역·토글·잠금 같은 다른 축은 건드리지 않는다 — 이 파일은 이 기능 하나만 잠근다.
  */
 import { expect, test, type Page } from '@playwright/test'
+import { join } from 'node:path'
 import { launch, openProject, paperReady, synthProject } from './helpers'
 
 
@@ -286,16 +287,157 @@ test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치�
     await expect(line).toBeVisible({ timeout: 30_000 })
     // 방금 고친 자리는 '다른 곳'이 아니다 — 남은 곳은 둘째 장 1군데뿐이다(§3-4).
     await expect(line).toContainText("다른 곳에도 '재배'가 1군데 있어요.")
-    // 목록에도 방금 고친 자리가 없다 — 1자리뿐이다.
-    await line.getByRole('button', { name: '모두 보기' }).click()
-    await expect(page.locator('.sameword-place')).toHaveCount(1)
-    await line.getByRole('button', { name: '같이 고치기' }).click()
 
-    // 둘째 장도 바뀐다 — 한 개정에 저장된다(§3-4). 남은 `재배`가 모두 `경작`이 된다.
+    // 03 — `같이 고치기` 첫 클릭은 **목록만 연다**. 저장 호출이 없어야 한다.
+    await line.getByRole('button', { name: '같이 고치기' }).click()
+    const list = page.locator('.sameword-list')
+    await expect(list).toBeVisible()
+    await expect(list.locator('.sameword-place')).toHaveCount(1)
+    // 아직 아무것도 안 바뀌었다 — 둘째 장은 그대로다.
+    await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도 함께 적는다.')
+
+    // 확정 — 목록 안의 `1군데 고치기`에서만 저장한다.
+    await list.getByRole('button', { name: '1군데 고치기' }).click()
     await expect(page.locator('.paperpane .sheet')).toContainText('경작 관리도 함께 적는다.', { timeout: 30_000 })
-    // 첫 장은 이미 `경작`이고, 묶음이 거절되지 않았다(거절되면 실패 한 줄이 뜬다).
     await expect(page.locator('.paper-fb.edit-line[role="alert"]')).toHaveCount(0)
-    await expect(page.locator('.paperpane .sheet')).toContainText('경작 면적')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('본문이 바뀌면 같은 낱말 제안은 접힌다 — 체크가 다른 자리로 옮겨 가지 않는다 (Roh 02)', async () => {
+  const { addSectionBody, rewriteSection } = await import('./helpers')
+  const root = synthProject()
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
+
+    await selectText(page, '재배 면적은 600평이다', '재배 면적')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('경작 면적')
+    await input.press('Enter')
+
+    const line = page.locator('.sameword')
+    await expect(line).toBeVisible({ timeout: 30_000 })
+    await line.getByRole('button', { name: '같이 고치기' }).click()
+    const list = page.locator('.sameword-list')
+    await expect(list).toBeVisible()
+    // 둘째 장 자리를 뺀다.
+    await list.locator('input[type="checkbox"]').first().uncheck()
+    await expect(list.locator('.sameword-place')).toHaveCount(1)
+
+    // 도우미가 둘째 장을 다시 쓴다 → 본문이 바뀌므로 그 제안은 낡은 것이고 접힌다.
+    // 기록 번호는 지금 정본에서 읽는다(직전 저장으로 이미 올라가 있다).
+    const { spawnSync } = await import('node:child_process')
+    const { readFileSync } = await import('node:fs')
+    const { python, scripts } = await import('./helpers')
+    const revision = (JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }).revision
+    rewriteSection(root, { id: 'sec-02', body: '경작 관리도 함께 적는다.', expected: revision })
+    void spawnSync; void python; void scripts
+    await expect(page.locator('.sameword')).toHaveCount(0, { timeout: 30_000 })
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('편집 중에 건너뛴 본문 갱신은 취소하면 따라잡는다 (Roh 06)', async () => {
+  const { rewriteSection } = await import('./helpers')
+  const root = synthProject()
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    await selectText(page, '600평', '600평')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    await expect(page.locator('.edit-slot-input')).toBeVisible({ timeout: 15_000 })
+
+    // 편집칸을 열어 둔 채 다른 경로가 원고를 고친다 — 그동안의 재조회는 건너뛴다.
+    rewriteSection(root, { body: '농장A의 재배 면적은 900평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 1 })
+    await page.waitForTimeout(2500)
+    // 취소하면 한 번 다시 읽는다 — 종이에 새 본문이 보인다.
+    await page.locator('.edit-slot-input').press('Escape')
+    await expect(page.locator('.edit-slot-input')).toHaveCount(0)
+    await expect(page.locator('.paperpane .sheet')).toContainText('900평', { timeout: 30_000 })
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('그대로를 누르면 그 낱말 제안만 닫힌다 (Roh 08)', async () => {
+  const { addSectionBody } = await import('./helpers')
+  const root = synthProject()
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
+
+    await selectText(page, '재배 면적은 600평이다', '재배 면적')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('경작 면적')
+    await input.press('Enter')
+
+    const line = page.locator('.sameword')
+    await expect(line).toBeVisible({ timeout: 30_000 })
+    await line.getByRole('button', { name: '그대로' }).click()
+    await expect(page.locator('.sameword')).toHaveCount(0)
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (Roh 07)', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const { readFileSync, writeFileSync } = await import('node:fs')
+  const { python, scripts } = await import('./helpers')
+  const root = synthProject()
+  // 검토를 **지금 본문의 실제 지문**으로 등록한다 — 그래야 다음 고침이 그 검토를 낡게 만든다.
+  // 지문은 규칙집이 계산하는 값이라 python 으로 물어본다(앱이 흉내 내지 않는다).
+  const probe = spawnSync(python, ['-c', [
+    'import json, sys; sys.path.insert(0, sys.argv[1])',
+    'import gg_core as core',
+    'root = sys.argv[2]',
+    'p = core.load(root)',
+    'refs = [{"collection": "sections", "id": "sec-01"}]',
+    'print(json.dumps(core.fingerprint(root, p, refs)))'
+  ].join('\n'), scripts, root], { encoding: 'utf-8' })
+  const fingerprint = probe.stdout.trim()
+  expect(fingerprint.length).toBeGreaterThan(0)
+  const revision = (JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }).revision
+  writeFileSync(join(root, 'change-review.json'), JSON.stringify({ request_id: 'e2e:review', ops: [
+    { collection: 'reviews', value: {
+      id: 'rev-01', review_kind: 'content', author_id: 'a', reviewer_id: 'b',
+      target_refs: [{ collection: 'sections', id: 'sec-01' }],
+      input_fingerprint: JSON.parse(fingerprint), findings: [], disposition: 'resolved', status: 'pass',
+      path: 'sections/01.md', coverage: [{ axis: 'content', locator: '전체' }]
+    } }
+  ] }), 'utf-8')
+  spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-review.json'),
+    '--expected-revision', String(revision)], { encoding: 'utf-8' })
+
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    // 오타만 고친다 — needs_check=false, 대신 그 장의 검토가 낡는다(§4-2 8).
+    await selectText(page, '600평', '600평')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('600 평')
+    await input.press('Enter')
+
+    await expect(page.locator('.paper-fb.edit-line')).toContainText('고쳤어요', { timeout: 30_000 })
+    await expect(page.locator('.paper-fb.edit-line .recheck'))
+      .toContainText('제출 전에 도우미 점검', { timeout: 15_000 })
   } finally {
     await electronApp.close()
   }

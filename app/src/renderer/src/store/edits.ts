@@ -40,6 +40,11 @@ interface EditState {
    * 물어볼 길이 없다.
    */
   available: boolean | null
+  /**
+   * 읽기 요청 번호 — 응답이 왔을 때 **가장 최근 요청**인지 이것으로 가른다(§4-5-8 04).
+   * 논문이 바뀌면(A→B 포함) `reset()` 이 번호를 올려 이전 응답을 통째로 무효로 만든다.
+   */
+  seq: number
   load: (root: string) => Promise<void>
   /** 저장 한 건·묶음. 성공하면 목록을 다시 읽는다. */
   save: (root: string, params: SaveParams) => Promise<SaveOutcome>
@@ -78,20 +83,28 @@ export const useEdits = create<EditState>((set, get) => ({
   loading: false,
   root: null,
   available: null,
+  seq: 0,
 
-  reset: () => set({ rows: [], notices: [], error: null, loading: false, root: null, available: null }),
+  reset: () => set((s) => ({
+    rows: [], notices: [], error: null, loading: false, root: null, available: null,
+    // 논문이 바뀌었다 — 도는 읽기의 응답은 이제 이 화면의 것이 아니다.
+    seq: s.seq + 1
+  })),
 
   load: async (root) => {
-    set({ loading: true })
+    // 이 읽기가 **몇 번째**인지 적어 둔다 — 응답은 그것이 아직 최신일 때만 반영한다.
+    const seq = useEdits.getState().seq + 1
+    set({ loading: true, root, seq })
+    const current = (): boolean => useEdits.getState().seq === seq && useEdits.getState().root === root
     try {
       const list = await rpc.edits(root)
-      // 읽는 사이 폴더가 바뀌었으면 버린다 — 다른 논문의 고침이 새 화면에 붙으면 안 된다.
-      if (useEdits.getState().root !== null && useEdits.getState().root !== root) return
-      set({ rows: list.edits, notices: list.notices, error: null, loading: false, root })
+      if (!current()) return // 논문이 바뀌었거나 더 새 읽기가 시작됐다 — 이 응답은 버린다
+      set({ rows: list.edits, notices: list.notices, error: null, loading: false })
     } catch (e) {
+      if (!current()) return
       // 메서드 자체가 없으면(§8-1) 단추를 안 그리는 쪽으로 굳힌다 — 다시 묻지 않는다.
       const missing = e instanceof RpcFailure && e.code === 'not_found'
-      set({ error: saveFailureText(e).message, loading: false, root, available: missing ? false : useEdits.getState().available })
+      set({ error: saveFailureText(e).message, loading: false, available: missing ? false : useEdits.getState().available })
     }
   },
 
@@ -122,6 +135,8 @@ export const useEdits = create<EditState>((set, get) => ({
 
   seen: async (root, editIds) => {
     if (editIds.length === 0) return
+    // 이 알림을 읽어 온 논문이 아니면 보내지 않는다(§4-5-8 04) — 다른 논문의 `edit_id` 를 섞지 않는다.
+    if (useEdits.getState().root !== root) return
     // 화면에서 먼저 지운다 — 서버가 실패해도 알림이 다시 튀어나오지 않게(같은 알림을 두 번 보여 주는
     // 쪽이 더 나쁘다). 실패하면 다음 읽기에서 다시 실린다.
     set((s) => ({ notices: s.notices.filter((n) => !editIds.includes(n.edit_id)) }))

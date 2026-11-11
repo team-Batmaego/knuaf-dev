@@ -94,12 +94,85 @@ export function replacementViolation(text: string): 'newline' | 'marker' | null 
   return null
 }
 
+/** 마크다운 블록 → 그려진 HTML. 앱은 `renderMarkdown`, 시험도 같은 것을 넘긴다. */
+export type RenderHtml = (markdown: string) => string
+
+/** 그려진 HTML 의 **화면 글자** — `div.blk` 의 `textContent` 와 같은 규칙(태그 없이, 엔티티는 글자로). */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
 /**
- * 선택 글자 → 그 문단 원고 안의 구간. 여러 번 맞으면 `renderedBefore` 안에서 **시작한**
- * 맞은 자리 수로 k번째를 고른다(설계 §4-1 3, 겹치는 자리 포함). 렌더 글자와 원고에서
- * 맞는 총 횟수가 다르면 거절한다.
+ * 공백을 전부 뺀 글자 — 표 칸 사이 빈 글자는 브라우저가 버리므로 화면 글자와 원고의 자리가
+ * 어긋난다. 공백을 지우면 그 차이만 사라지고 글자 차례는 그대로다(§4-5-8 01, ADD1).
  */
-export function locateSelection(input: SelectionInput): Result<Located> {
+export function squash(text: string): string {
+  return text.replace(/\s+/g, '')
+}
+
+/**
+ * 공백 덩어리를 하나로 — 화면의 빈칸 하나와 원고의 줄바꿈 하나를 같은 것으로 본다(§4-1 2).
+ * **앞뒤 공백을 떼지 않는다** — 선택 앞부분(`renderedBefore`)이 빈칸으로 끝나는 것이 곧
+ * '낱말 경계에서 골랐다'는 뜻이라, 떼면 경계 비교가 어긋난다.
+ */
+export function collapseSpace(text: string): string {
+  return text.replace(/\s+/g, ' ')
+}
+
+/**
+ * 후보 구간 하나를 **다시 그려서** 화면 선택과 대응하는지 확인한다(설계 §4-5-8 01).
+ *
+ * 원고에서 이어진 글자 수와 화면에서 보이는 횟수가 같다는 것만으로는 위치가 맞지 않는다
+ * (`가**나** 가나 [x](가나)` — 화면 `가나 가나 x`). 그래서 후보마다 그 구간을 표식 글자로
+ * 바꿔 **같은 렌더러로 다시 그리고**, 셋을 모두 만족할 때만 그 후보를 인정한다:
+ * ① 표식이 그려진 글자에 정확히 한 번 ② 표식 앞 글자 = 화면 선택의 앞 글자
+ * ③ 표식을 선택 글자로 되돌리면 화면 문단 전체와 같다.
+ */
+/**
+ * 표 문단은 다시 그린 글자에 `|` 가 없다(칸으로 나뉜다). 그래서 표는 '칸 경계를 넘지
+ * 않았는가'만 본다 — 고른 구간이 한 줄 안이고 그 줄의 `|` 를 건드리지 않으면 인정한다(§4-1 4).
+ */
+function tableCandidateOk(block: string, hit: { start: number; end: number }): boolean {
+  // 그 구간이 속한 줄의 시작·끝.
+  const before = block.slice(0, hit.start)
+  const lineStart = before.lastIndexOf('\n') + 1
+  const lineEnd = block.indexOf('\n', hit.start)
+  const end = lineEnd < 0 ? block.length : lineEnd
+  if (hit.end > end) return false
+  // 줄 안의 `|` 개수를 세어, 고른 구간이 그 `|` 를 포함하지 않는지 본다.
+  const line = block.slice(lineStart, end)
+  const bars = [...line].map((ch, i) => (ch === '|' ? lineStart + i : -1)).filter((i) => i >= 0)
+  return !bars.some((i) => i >= hit.start && i < hit.end)
+}
+
+/** 화면 글자 비교에 쓰는 '한 문단' — 표·그림 같은 구조가 있으면 비교를 접는다. */
+function candidateMatches(block: string, hit: { start: number; end: number }, input: SelectionInput,
+  text: string, marker: string, render: RenderHtml): boolean {
+  const marked = block.slice(0, hit.start) + marker + block.slice(hit.end)
+  const shown = collapseSpace(htmlToText(render(marked)))
+  const at = shown.indexOf(marker)
+  if (at < 0) return false
+  if (shown.indexOf(marker, at + 1) >= 0) return false // 표식이 둘 이상 — 어느 자리인지 모른다
+  // 화면 글자와 견줄 때 **공백을 전부 뺀다.** 마크다운 기호가 빠진 만큼 공백이 접히고, 표는
+  // 칸 사이 빈 글자를 브라우저가 버려 원고와 자리가 어긋난다 — 공백을 지우면 그 차이가 사라진다.
+  if (squash(shown.slice(0, at)) !== squash(input.renderedBefore)) return false
+  const rebuilt = squash(shown.slice(0, at) + text + shown.slice(at + marker.length))
+  return rebuilt === squash(input.renderedBlock)
+}
+
+/**
+ * 선택 글자 → 그 문단 원고 안의 구간. **후보를 다시 그려 확인**한 뒤 정확히 하나일 때만 인정한다
+ * (설계 §4-1 3 + §4-5-8 01). 0개(서식·링크 경계를 넘음)나 2개 이상(같은 글자가 여럿)이면 거절한다 —
+ * 추측해서 고르면 학생이 고르지 않은 자리가 바뀐다.
+ */
+export function locateSelection(input: SelectionInput, render: RenderHtml): Result<Located> {
   const blocks = splitBlocks(input.draft)
   const block = blocks[input.blockIndex]
   if (block === undefined) return { ok: false, reason: 'block_missing' }
@@ -108,23 +181,30 @@ export function locateSelection(input: SelectionInput): Result<Located> {
   const re = patternOf(text)
   const here = allMatches(re, block)
   if (here.length === 0) return { ok: false, reason: 'not_located' }
-  const rendered = allMatches(re, input.renderedBlock)
-  if (rendered.length !== here.length) return { ok: false, reason: 'ambiguous' }
-  // 선택이 화면 문단에서 시작하는 자리 = 앞부분 글자 수. 그 앞에서 시작한 맞은 자리를 센다 —
-  // 앞부분에서 패턴이 통째로 맞는 횟수를 세면 겹치는 글자에서 0이 되어 자리를 놓친다.
-  const selectionStart = input.renderedBefore.trimEnd().length
-  const occurrence = rendered.filter((at) => at.start < selectionStart).length
-  const hit = here[occurrence]
-  if (hit === undefined) return { ok: false, reason: 'ambiguous' }
-  return { ok: true, before_block: block, start: hit.start, end: hit.end, occurrence }
+  // 표식은 마크다운이 건드리지 않는 글자만(영숫자). 원고에 우연히 같은 글자가 있으면 한 번 바꾼다.
+  let marker = `GGEDITV${Math.random().toString(36).slice(2, 7).toUpperCase()}`
+  while (block.includes(marker)) marker = `GGEDITV${Math.random().toString(36).slice(2, 7).toUpperCase()}`
+  // 표도 **다시 그려 확인**을 반드시 거친다(§4-5-8 01 — 표를 예외로 두지 않는다).
+  // `tableCandidateOk` 는 그 위에 더하는 조건이다(칸 경계·`|` 를 건드리지 않았는가).
+  const accepted = here.filter((hit) => (
+    candidateMatches(block, hit, input, text, marker, render)
+    && (!isTableParagraph(block) || tableCandidateOk(block, hit))
+  ))
+  if (accepted.length !== 1) {
+    return { ok: false, reason: accepted.length === 0 ? 'not_located' : 'ambiguous' }
+  }
+  const hit = accepted[0]
+  return { ok: true, before_block: block, start: hit.start, end: hit.end, occurrence: here.indexOf(hit) }
 }
 
 /**
  * 선택 구간을 고친 글자로 바꾼 **문단 전체의 전·후**. 화면은 이 둘만 보낸다 —
  * sidecar 가 위치를 다시 계산하지 않게 한다(설계 §4-1 5).
  */
-export function replaceInBlock(input: SelectionInput & { replacement: string }): Result<{ before_block: string; after_block: string }> {
-  const found = locateSelection(input)
+export function replaceInBlock(
+  input: SelectionInput & { replacement: string }, render: RenderHtml
+): Result<{ before_block: string; after_block: string }> {
+  const found = locateSelection(input, render)
   if (!found.ok) return found
   const violation = replacementViolation(input.replacement)
   if (violation) return { ok: false, reason: 'invalid_replacement' }

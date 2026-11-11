@@ -180,3 +180,19 @@ test('전→후 미리보기는 바뀐 가운데만 남기고 문맥을 자른�
   expect(long.removed).toBe('600')
   expect(long.added).toBe('700')
 })
+
+test('같이 고치기는 목록을 열기만 한다 — 저장은 n군데 고치기에서 (Roh 03)', () => {
+  // 컴포넌트는 DOM 이 필요하므로 여기서는 **계약**만 잠근다: 저장에 쓰는 값은 목록에서 고른
+  // 자리들이고, 체크를 뺀 자리는 빠진다. 화면 쪽 두 단계는 `viewer-edit.spec.ts` 가 본다.
+  const sections = [{ id: 'sec-01', draft: '트랙터를 들였다. 트랙터를 팔았다.' }]
+  const places = findPlaces(sections, '트랙터')
+  expect(places).toHaveLength(2)
+  // 전부 체크면 두 건이 한 문단 한 건으로 합쳐진다.
+  expect(mergeSameWordPicks(places, '경운기')).toEqual([
+    { section_id: 'sec-01', before_block: '트랙터를 들였다. 트랙터를 팔았다.', after_block: '경운기를 들였다. 경운기를 팔았다.' }
+  ])
+  // 하나를 빼면 그 자리는 손대지 않는다 — 화면의 체크 해제가 곧 이 입력이다.
+  expect(mergeSameWordPicks([places[0]], '경운기')).toEqual([
+    { section_id: 'sec-01', before_block: '트랙터를 들였다. 트랙터를 팔았다.', after_block: '경운기를 들였다. 트랙터를 팔았다.' }
+  ])
+})
