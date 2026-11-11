@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSyn
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { composeFiles, jsonBytes, sha256, zipBytes, writeTree, fileHashes, readTree, assertLimits, overlayHash, dirtyVerdict } from '../compose-skill.mjs'
+import { composeFiles, jsonBytes, sha256, zipBytes, writeTree, fileHashes, readTree, assertLimits, overlayHash, dirtyVerdict, checkSource } from '../compose-skill.mjs'
 import { cacheMissReason } from '../fetch-skill.mjs'
 import { assertStagingOutput } from '../stage-skill.mjs'
 import { signManifest, releaseManifest, signedChannel } from '../sign-skill.mjs'
@@ -150,6 +150,36 @@ test('dirty source verdict lists the paths to clean and caps the list', () => {
   assert.equal(dirtyVerdict('?? 한글.py\n'), 'Source checkout is dirty (including ignored files): 한글.py')
 })
 
+test('a real checkout reports the first changed file name whole, leading-space status and all', t => {
+  const repo = mkdtempSync(join(tmpdir(), 'knuaf-dirty-repo-'))
+  t.after(() => rmSync(repo, { recursive: true, force: true }))
+  const git = (...args) => execFileSync('git', ['-c', 'user.email=test@example.com', '-c', 'user.name=Test',
+    '-c', 'commit.gpgsign=false', '-C', repo, ...args], { encoding: 'utf8' })
+  git('init', '--quiet', '--initial-branch=main')
+  writeFileSync(join(repo, 'tracked.txt'), 'one\n')
+  git('add', 'tracked.txt')
+  git('commit', '--quiet', '-m', 'one')
+  git('tag', 'v0.2.0')
+  const commit = git('rev-parse', 'HEAD').trim()
+  // An unstaged edit is the case that renders ` M tracked.txt` — the leading space is the X column.
+  writeFileSync(join(repo, 'tracked.txt'), 'two\n')
+  assert.equal(git('status', '--porcelain'), ' M tracked.txt\n')
+  const dirty = (() => {
+    try {
+      checkSource({ repo: 'starceas/knuaf-doc', tag: 'v0.2.0', commit }, repo)
+    } catch (error) {
+      return error
+    }
+    assert.fail('a dirty checkout must be refused')
+  })()
+  // Exactly, not merely "contains": a trimmed line would print `racked.txt`, which is a substring
+  // of the right answer and slips through any `includes` check.
+  assert.equal(dirty.message, 'Source checkout is dirty (including ignored files): tracked.txt')
+  // The verdict itself keeps every name and only drops the three-character status column.
+  assert.equal(dirtyVerdict(git('status', '--porcelain', '--ignored=matching')),
+    'Source checkout is dirty (including ignored files): tracked.txt')
+})
+
 test('staging refuses any output that overlaps the pinned source cache but keeps the default path usable', t => {
   const root = mkdtempSync(join(tmpdir(), 'knuaf-stage-guard-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -166,4 +196,48 @@ test('staging refuses any output that overlaps the pinned source cache but keeps
   // The CLI default output sits next to the cache, so the guard must not refuse it.
   const defaultOutput = resolve(import.meta.dirname, '../../resources/skill')
   assert.equal(assertStagingOutput(defaultOutput), defaultOutput)
+})
+
+test('a symlink cannot smuggle the pinned source cache past the staging guard', t => {
+  const root = mkdtempSync(join(tmpdir(), 'knuaf-stage-link-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const cache = join(root, 'resources', 'skill-upstreams'), pin = join(cache, 'a'.repeat(40))
+  mkdirSync(pin, { recursive: true })
+  writeFileSync(join(pin, 'SKILL.md'), 'pinned\n')
+  const refusal = /Refusing to stage over the pinned source cache/
+  const marker = () => readFileSync(join(pin, 'SKILL.md'), 'utf8')
+
+  // (a) the output path itself is a link onto the cache (or a pin inside it).
+  for (const [name, onto] of [['link-to-cache', cache], ['link-to-pin', pin]]) {
+    const link = join(root, name)
+    symlinkSync(onto, link, 'dir')
+    assert.throws(() => assertStagingOutput(link, root), refusal, name)
+  }
+
+  // (b) an intermediate segment of the output path is a link, so the delete lands inside the cache.
+  const viaCache = join(root, 'via-cache')
+  symlinkSync(cache, viaCache, 'dir')
+  assert.throws(() => assertStagingOutput(join(viaCache, 'bundle'), root), refusal)
+  assert.throws(() => assertStagingOutput(join(viaCache, 'nested', 'deeper'), root), refusal)
+  const viaPin = join(root, 'via-pin')
+  symlinkSync(pin, viaPin, 'dir')
+  assert.throws(() => assertStagingOutput(join(viaPin, 'bundle'), root), refusal)
+
+  // (c) the output does not exist yet: the nearest existing ancestor is the link.
+  assert.throws(() => assertStagingOutput(join(viaCache, 'not', 'created', 'yet'), root), refusal)
+
+  // A link onto the cache's parent is just as fatal — staging replaces its sibling wholesale.
+  const viaResources = join(root, 'via-resources')
+  symlinkSync(join(root, 'resources'), viaResources, 'dir')
+  assert.throws(() => assertStagingOutput(join(viaResources, 'skill-upstreams'), root), refusal)
+
+  // Control: the guard only judges. Nothing is deleted, and the pin survives every refusal above.
+  assert.equal(marker(), 'pinned\n')
+
+  // A real directory next to the cache still stages, link-free.
+  const safe = join(root, 'out', 'bundle')
+  assert.equal(assertStagingOutput(safe, root), resolve(safe))
+  const relativeLink = join(root, 'sibling-link')
+  symlinkSync(join(root, 'out'), relativeLink, 'dir')
+  assert.equal(assertStagingOutput(join(relativeLink, 'bundle'), root), resolve(join(relativeLink, 'bundle')))
 })

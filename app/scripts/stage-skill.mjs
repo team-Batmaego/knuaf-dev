@@ -1,6 +1,6 @@
 // Packaging and release use the same composition; only compatible final bytes become S0.
-import { chmodSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs'
-import { relative, resolve, isAbsolute, join, sep } from 'node:path'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { basename, dirname, relative, resolve, isAbsolute, join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseArgs } from 'node:util'
 import { pathToFileURL } from 'node:url'
@@ -12,18 +12,51 @@ const app = resolve(import.meta.dirname, '..')
 const defaultPython = process.env.PYTHON || (existsSync(resolve(app, '../.venv-dev/bin/python'))
   ? resolve(app, '../.venv-dev/bin/python') : process.platform === 'win32' ? 'python' : 'python3')
 
+/** Real path of `path`, with any not-yet-existing tail appended to its nearest existing ancestor. */
+function canonicalPath(path) {
+  const absolute = resolve(path), missing = []
+  let cursor = absolute
+  for (;;) {
+    try {
+      const real = realpathSync(cursor)
+      return missing.length ? join(real, ...missing) : real
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error
+      const parent = dirname(cursor)
+      if (parent === cursor) return absolute
+      missing.unshift(basename(cursor))
+      cursor = parent
+    }
+  }
+}
+
+const contains = (parent, child) => {
+  const rest = relative(parent, child)
+  return rest === '' || (rest !== '..' && !rest.startsWith(`..${sep}`) && !isAbsolute(rest))
+}
+
 /** `--output` must never reach the pinned source cache: staging deletes whatever it replaces. */
 export function assertStagingOutput(output, appRoot = app) {
-  const cache = resolve(appRoot, 'resources', 'skill-upstreams'), target = resolve(output)
-  const contains = (parent, child) => {
-    const rest = relative(parent, child)
-    return rest === '' || (rest !== '..' && !rest.startsWith(`..${sep}`) && !isAbsolute(rest))
-  }
-  if (contains(cache, target) || contains(target, cache)) {
-    throw new Error(`Refusing to stage over the pinned source cache: ${target} overlaps ${cache}. ` +
+  // Comparing path strings cannot see through a link, so a link onto the cache reads as a safe,
+  // unrelated directory while the delete lands inside it. Judge real paths on both sides: the cache
+  // root is canonicalised, and an output that does not exist yet is resolved through its nearest
+  // existing ancestor with the missing tail appended — that covers the output itself being a link,
+  // any intermediate segment being one, and a link above a not-yet-created directory.
+  const lexical = resolve(output)
+  const cache = resolve(appRoot, 'resources', 'skill-upstreams')
+  // A link inside the protected tree that points outward is still inside it by name; keep the
+  // lexical test so the delete never enters the cache by any spelling.
+  if (contains(cache, lexical) || contains(lexical, cache)) {
+    throw new Error(`Refusing to stage over the pinned source cache: ${lexical} overlaps ${cache}. ` +
       'Use an output outside app/resources (the default is app/resources/skill).')
   }
-  return target
+  const realCache = canonicalPath(cache), target = canonicalPath(lexical)
+  if (contains(realCache, target) || contains(target, realCache)) {
+    throw new Error(`Refusing to stage over the pinned source cache: ${lexical} resolves to ${target}, ` +
+      `which overlaps ${realCache}. A symlinked output or path segment is not a safe place to stage: ` +
+      'deletion follows the link. Use a real directory outside app/resources (the default is app/resources/skill).')
+  }
+  return lexical
 }
 
 /** Also accepts an explicit local composition for offline compatibility verification. */
