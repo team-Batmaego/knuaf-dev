@@ -25,9 +25,6 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 [data-platform="linux"] .titlebar { padding-left: var(--sp-3); }
 .titlebar .sp { flex: 1; }
 .titlebar button { -webkit-app-region: no-drag; }
-/* 가운데 "지금 · ○○ ▾" — 「지금」 글자만 코발트다(시안 ③④). */
-.tbtn.now { font-size: 13px; color: var(--ink-2); gap: 7px; }
-.tbtn.now .lbl { font-size: 12px; color: var(--accent); font-weight: 700; }
 .now-w { color: var(--accent); font-weight: 700; }
 /* 제목줄 진행 (T1) — mock r4 `.tbtn.stg`·`.ticks` 값 그대로. 눈금은 면색만(왼쪽 색선·알약 없음). */
 .tbtn.stg { gap: 8px; font-size: 13px; color: var(--ink-2); }

@@ -4,7 +4,7 @@ import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/
 import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
-import { cutAtLine, formFold as formFoldOf, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { cutAtLine, formFold as formFoldOf, hiddenChars, progressGroups, stripLines } from '../../../shared/chat-fold'
 import { mergeFoldSpans, progressHide } from '../../../shared/progress-list'
 import { ChatMarkdown } from '../components/ChatMarkdown'
 import { ProgressFold } from '../components/ProgressFold'
@@ -107,7 +107,7 @@ function Message({ m, onResend, onFileLink, fold, hide, sending = false }: { m: 
   // 아니라 **접힌 뒤 실제로 남은 글** 기준이다(예전에는 원문 길이를 써서 실제보다 크게 보였다).
   const shown = long && !open ? cutAtLine(text, LONG_MESSAGE) : text
   // 접은 줄은 "더 보기"로 되돌릴 글도 아니다 — 수는 지금 화면 기준으로 센다.
-  const hidden = text.length - shown.length
+  const hidden = hiddenChars(text, shown)
   const quoted = m.role === 'user' ? /^> ([^\n]+)\n\(([^\n]+)에서\)\n\n([\s\S]+)$/.exec(shown) : null
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
@@ -654,7 +654,7 @@ export function Chat() {
         return found ? { spans: found.spans, count: found.count, kind: 'fields' as const } : null
       })()
     : null
-  const folds = progressGroups(snapshot?.messages ?? [])
+  const folds = progressGroups(snapshot?.messages ?? [], events.map((e) => Date.parse(e.at) || 0))
   const thread: { key: string; at: number; node: ReactNode }[] = []
   const messageNode = (m: ChatMessage): ReactNode => {
     const card = cardId === m.id
