@@ -617,6 +617,50 @@ test('fix C1-12: the proposed model and effort reach the real turn', async () =>
   await svc.close()
 })
 
+// [C1-12] 판정서 재현: 인계를 준비하는 사이 학생이 칩을 바꿔도, 그 실행은 제안의 모델·깊이로 돈다.
+test('fix C1-12: a model change during handoff does not hijack the pinned turn', async () => {
+  const base = canonical(mkdtempSync(join(tmpdir(), 'kd-pin-')))
+  const root = join(base, 'thesis')
+  mkdirSync(root, { recursive: true })
+  const userData = mkdtempSync(join(tmpdir(), 'kd-pin-ud-'))
+  const choices: ({ model: string; effort: string | null } | null)[] = []
+  let stored: { model: string; effort: string | null } | null = { model: 'gpt-6.1-astra', effort: 'low' }
+  let onRun: (() => void) | null = null
+  const svc = new ChatService({
+    skillSource: () => fakeSkill(), userData, emit: () => {}, openExternal: async () => {},
+    // 실제 연결은 실행 때마다 `options.modelChoice()` 를 다시 읽는다 — 여기서도 그 통로로 본다.
+    connectionFactory: (_provider, options): AgentConnection => ({
+      status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
+      login: async () => {}, respond: () => {}, prepare: async () => {},
+      models: async () => [
+        { model: 'gpt-6.1-astra', name: 'Astra', description: '', efforts: ['low', 'high'] },
+        { model: 'gpt-6.1-sol', name: 'Sol', description: '', efforts: ['low', 'high'] }
+      ] as never,
+      run: async (_text, _sessionId, events) => {
+        // 실행 직전에 다른 카드·설정이 칩을 바꾼다(제안은 이미 승인됐다).
+        onRun?.()
+        choices.push(options.modelChoice?.() ?? null)
+        events.session('s')
+      },
+      stop: async () => {}
+    }),
+    modelChoice: () => stored,
+    modelChosen: () => true,
+    storeModelChoice: (_provider, choice) => { stored = choice }
+  })
+  // 연결이 만드는 `modelChoice` 는 실행 시점에 불린다 — 그때 바뀐 칩이 아니라 고정값을 봐야 한다.
+  onRun = () => { stored = { model: 'gpt-6.1-astra', effort: 'low' } }
+  await svc.openHandoff({
+    id: `codex\0${root}`, root,
+    entry: { company: 'codex', model: 'gpt-6.1-sol', effort: 'high', how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요', bundlePath: '/private/bundle.json',
+    signal: new AbortController().signal
+  })
+  // 실제 턴에 쓰인 값은 제안의 것 — 예전에는 Astra/low 가 전달됐다.
+  expect(choices).toEqual([{ model: 'gpt-6.1-sol', effort: 'high' }])
+  await svc.close()
+})
+
 // ⑬ [C1-11] 소유자 이전 중 공개 주문서 저장이 실패하면 소유자가 부분 커밋되지 않는다.
 test('fix C1-11: a failed public manifest write leaves the owner untouched', async () => {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-owner-')))

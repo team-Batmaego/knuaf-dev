@@ -493,7 +493,8 @@ export class ChatService {
         binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
         // 연결은 폴더·공급자마다 한 번만 만들어진다 — 선택은 전송할 때마다 다시 읽는다.
-        modelChoice: () => this.effectiveChoice(provider),
+        // [C1-12] 인계가 고정한 선택이 있으면 그것이 먼저다(그 실행에만).
+        modelChoice: () => this.effectiveChoice(provider, root),
         modelChosen: () => this.opts.modelChosen?.(provider) ?? false
       }
       if (this.opts.connectionFactory) {
@@ -526,8 +527,17 @@ export class ChatService {
   private modelLists = new Map<Provider, ChatModelInfo[]>()
   /** 선택 호출의 선후 — 느린 검증이 나중 선택을 덮지 않게 한다(검토 MC1-03). */
   private selectionSeq = new Map<Provider, number>()
+  /**
+   * [C1-12] 그 실행에 **고정한** 선택 — 인계 제안이 약속한 모델·깊이. 저장된 칩은 언제든
+   * 바뀔 수 있고(`setModel` 은 설정을 고친다), 연결은 `run` 때마다 `modelChoice` 를 다시 읽는다.
+   * 그래서 제안을 검증한 뒤 이 자리에 고정해 두고, 그 실행이 끝나면 지운다. 키는 대화 칸
+   * (`root`+`provider`)이라 같은 회사의 다른 폴더 대화는 영향받지 않는다.
+   */
+  private pinnedChoice = new Map<string, ModelChoice>()
   /** 설정의 선택을 이 계정 목록에 비춰 정규화한다 — 고른 모델이 없으면 `null`(안 골름). */
-  private effectiveChoice(provider: Provider): ModelChoice | null {
+  private effectiveChoice(provider: Provider, root?: string): ModelChoice | null {
+    const pinned = root ? this.pinnedChoice.get(this.key(root, provider)) : undefined
+    if (pinned) return pinned
     const stored = this.opts.modelChoice?.(provider) ?? null
     // 제외된 저장 선택은 해제(null)가 아니다. 명시적 재선택 전에는 전송을 차단한다.
     if (provider === 'codex' && stored?.model && isCrossProviderModelId(stored.model)) {
@@ -773,7 +783,13 @@ export class ChatService {
         if (s.state !== 'interrupted') s.state = 'error'
         s.error ??= e instanceof Error ? e.message : '작업이 완료되지 않았어요.'
       }
-    } finally { s.permission = undefined; this.waiting.delete(key); this.publish(s) }
+    } finally {
+      s.permission = undefined; this.waiting.delete(key)
+      // [C1-12] 한 턴이 끝나면 고정을 푼다 — 다음 턴은 학생의 칩 선택을 다시 읽는다. 여기서
+      // 풀어야 `run` 이 선택을 읽는 시점(첫 await 뒤일 수 있다)보다 늦다.
+      this.pinnedChoice.delete(key)
+      this.publish(s)
+    }
   }
   /** 줄 맨 앞의 요청을 카드로 올린다. 이미 하나 떠 있으면 그대로 둔다. */
   private showNextPermission(s: ChatSnapshot, key: string): void {
@@ -1391,6 +1407,9 @@ export class ChatService {
         if (!picked || picked.model !== request.entry.model) {
           throw new Error('이어 받기 모델을 이 계정에서 쓸 수 없어요.')
         }
+        // [C1-12] 검증한 값을 그 실행에 고정한다 — 이 사이 학생이 설정에서 칩을 바꿔도
+        // 제안이 약속한 모델·깊이로 돈다(예전에는 Astra/low 로 돌고 기록만 Sol/high 였다).
+        this.pinnedChoice.set(key, { model: picked.model, effort: picked.effort })
       }
       // [C1-10] 실제 실행 직전 마지막 확인 — `prepare()` 가 네트워크를 타는 동안에도 취소될 수 있다.
       if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
@@ -1464,6 +1483,8 @@ export class ChatService {
     this.connections.delete(key)
     const previous = this.handoffOpened.get(owner.id)
     this.handoffOpened.delete(owner.id)
+    // [C1-12] 열지 못한 인계의 고정은 남기지 않는다.
+    this.pinnedChoice.delete(key)
     this.runs.delete(key)
     if (previous) {
       this.snapshots.set(key, previous)
