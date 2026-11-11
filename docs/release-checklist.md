@@ -24,3 +24,21 @@
 ## 4. 시험 프로젝트
 - [ ] 새 시험 프로젝트의 `.agents/skills/knuaf-dev/SKILL.md`에 overlay가 있고 동봉본과 같은지 확인한다.
 - [ ] 기존(옛 판으로 만든) 프로젝트를 열 때 스킬이 최신으로 갱신되는지 확인한다(백업 보존 포함).
+
+## 5. 채널 PR (앱·스킬 공통)
+- [ ] 채널 PR을 **merge commit**으로 머지했다(squash/rebase 금지). 원래 갈래 커밋이 `main`에 포함되어야 다음 채널 실행이 막히지 않는다.
+- [ ] 머지 직후 남은 원격 갈래를 태그로 보관하고 지웠다. 갈래 머리의 **전체 SHA**(`<FULL>`, 원격에서 조회한 값)를 태그 대상으로 고정했다. 로컬 `origin/<branch>` 추적 참조는 옛 제안을 가리킬 수 있으므로 쓰지 않는다. 태그 이름에는 짧은 SHA(`<sha7>`)를 넣어 같은 채널을 다시 정리해도 충돌하지 않게 하고, **가벼운 태그**(annotated 금지)여야 `ls-remote`가 그 커밋의 SHA를 그대로 보여 준다. 원격 태그가 같은 전체 SHA를 가리키는 것을 확인한 뒤에만 갈래를 지운다.
+  ```bash
+  git fetch origin <FULL> \
+    && test "$(git rev-parse FETCH_HEAD)" = <FULL> \
+    && git tag archive/<branch>-<sha7> <FULL> \
+    && git push origin refs/tags/archive/<branch>-<sha7> \
+    && test "$(git ls-remote origin refs/tags/archive/<branch>-<sha7> | cut -f1)" = <FULL> \
+    && git push origin --delete <branch>
+  ```
+  `--force`·`--force-with-lease`는 쓰지 않는다. 같은 이름 태그가 다른 커밋을 가리키면 push가 거부되므로 멈추고 사람이 확인한다. `<branch>`는 `app-channel-v<V>` 또는 `skill-channel-update`. 기존 관례 `archive/app-channel-v0.6.0`·`archive/app-channel-v0.6.2`는 SHA 접미가 없던 옛 이름이고, 새 이름은 항상 `-<sha7>`가 붙는다.
+- [ ] 채널 PR을 **머지하지 않고 닫았으면** 같은 절차로 갈래를 보관·삭제한다. 닫힌 갈래를 남기면 다음 정기 실행이 "미머지 채널 제안"으로 실패한다.
+- [ ] `skill-release` 실행이 초록이면 실행 요약에 채널 경고가 없는지 확인한다. 초록 + 경고는 "게시할 새 판이 없다"는 뜻이고, 밀린 채널 정리는 여전히 남아 있다.
+- [ ] `skill-release`가 `publish` 잡에서 오래 대기하면 `skill-release` 환경 승인 화면을 확인한다. 승인 전에는 릴리스·갈래가 만들어지지 않는다.
+- [ ] `publish` 로그에 "채널 PR 자동 생성 실패"가 있으면 실행 요약부터 읽는다. `skill-channel-update`는 재사용되는 갈래라 이름만으로 이번 판이 push됐다고 보면 안 된다. 요약은 원격 갈래의 `updates/channel.json`·`app/skill-source.json` blob SHA를 이번 제안과 비교해 알려 준다: (a) 같으면 릴리스·갈래는 이번 판으로 끝났고 PR만 없으므로 `gh pr create --head skill-channel-update --base main`을 사람이 실행한다. (b) 다르면 이전 제안이 남은 것이므로 갈래에 이번 판이 반영됐는지 먼저 확인하고, 아니면 옛 갈래를 보관·삭제한 뒤 릴리스 자산을 확인하고 새 실행으로 다시 시도한다. (c) 조회 실패(403·503·통신 오류)면 존재·부재를 단정하지 말고 저장소 상태를 직접 확인하며, 갈래 부재가 확인된 경우에만 릴리스만 공개된 것으로 보고 새 실행으로 다시 시도한다(같은 판 재사용 금지).
+- [ ] `updates/channel.json`은 앱·스킬이 한 파일을 공유하므로 쪼개지 않는다. 이미 배포된 앱 0.6.1·0.6.2가 이 경로만 읽기 때문이다. 두 채널 PR을 동시에 열지 않는다.
