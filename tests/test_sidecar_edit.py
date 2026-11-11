@@ -1353,3 +1353,45 @@ def test_missing_wins_over_kept_when_both_apply(tmp_path):
     listed = methods_edit.section_edits(None, {"root": str(root)})
     kinds = [n["kind"] for n in listed["notices"]]
     assert kinds == ["missing"]
+
+
+# ── 화면 묶음 A 고침 1: sidecar 더하기 둘 (설계 §4-5-8 05·07) ──────────────
+
+
+def test_batch_result_carries_each_section_draft_hash(two_sections):
+    """05 — 묶음 결과에 절마다의 지문이 함께 온다(기존 `draft_hash` 는 첫 절 그대로)."""
+    p = core.load(two_sections)
+    r = methods_edit.section_edit_batch(None, {
+        "root": str(two_sections), "expected_revision": p["revision"], "edits": [
+            {"section_id": "sec-01", "before_block": BODY, "after_block": TYPED},
+            {"section_id": "sec-02", "before_block": "농장A는 600평 규모다.",
+             "after_block": "농장A는 700평 규모다."},
+        ],
+    })
+    after = core.load(two_sections)
+    assert r["draft_hashes"] == {
+        "sec-01": after["sections"]["sec-01"]["draft_hash"],
+        "sec-02": after["sections"]["sec-02"]["draft_hash"],
+    }
+    # 기존 계약은 그대로 — 첫 절 지문.
+    assert r["draft_hash"] == after["sections"]["sec-01"]["draft_hash"]
+
+
+def test_ledger_and_edits_response_carry_recheck_before_submit(sidecar, project):
+    """07 — `recheck_before_submit` 이 원장 줄과 `section.edits` 응답에 실린다."""
+    _register_review(project)
+    result = _ok(sidecar, project)  # 오타 한 글자 — needs_check=false, 검토는 낡는다
+    assert result["needs_check"] is False
+    assert result["recheck_before_submit"] is True
+    row = next(r for r in _ledger(project) if r["edit_id"] == result["edit_id"] and r["state"] in ("plain", "pending"))
+    assert row["recheck_before_submit"] is True
+    listed = {r["edit_id"]: r for r in sidecar.ok("section.edits", root=str(project))["result"]["edits"]}
+    assert listed[result["edit_id"]]["recheck_before_submit"] is True
+
+
+def test_a_plain_save_without_stale_reviews_is_not_marked_recheck(sidecar, project):
+    """07 — 점검이 필요 없는 저장은 `recheck_before_submit` 이 false 로 온다(거짓 안내 금지)."""
+    result = _ok(sidecar, project)
+    assert result["recheck_before_submit"] is False
+    listed = {r["edit_id"]: r for r in sidecar.ok("section.edits", root=str(project))["result"]["edits"]}
+    assert listed[result["edit_id"]]["recheck_before_submit"] is False

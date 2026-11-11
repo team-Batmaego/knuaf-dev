@@ -788,13 +788,19 @@ def _commit(core, root: Path, items: list[dict], expected_revision: int) -> dict
     state = "pending" if needs_check else "plain"
     _append_ledger(root, _row(
         p, edit_id, items, state, new_issues, needs_check,
-        revision_after=new_p["revision"], request_id=request_id,
+        revision_after=new_p["revision"], request_id=request_id, recheck=recheck,
         files=[{"n": r["n"], "section_id": r["section_id"], "path": r["rel"],
                 "sha_a": r["sha_a"], "sha_c": r["sha_c"]} for r in records],
     ))
+    # `draft_hash` 는 첫 절 하나의 지문이다(기존 계약 그대로). 묶음에서 다른 길로 — 화면이
+    # 절마다 정확히 억제하려면 그 절의 지문이 필요하다(설계 §4-5-8 05). **더하기만** 한다.
+    draft_hashes = {
+        sid: new_p["sections"][sid]["draft_hash"] for sid in manuscripts
+    }
     result = {
         "revision": new_p["revision"],
         "draft_hash": new_p["sections"][items[0]["section_id"]]["draft_hash"],
+        "draft_hashes": draft_hashes,
         "needs_check": needs_check,
         "new_issues": new_issues,
         "reviews_staled": reviews_staled,
@@ -842,7 +848,7 @@ def _replay(core, root: Path, p: dict, rows: list[dict], request_id: str) -> dic
 
 
 def _row(p: dict, edit_id: str, items: list[dict], state: str, new_issues,
-         needs_check, revision_after=None, request_id=None, files=None) -> dict:
+         needs_check, revision_after=None, request_id=None, files=None, recheck=None) -> dict:
     """원장 한 줄. 상태 변경도 **같은 `edit_id` 로 덧붙인다** — 앞 줄은 지우지 않는다."""
     row = {
         "edit_id": edit_id,
@@ -860,6 +866,9 @@ def _row(p: dict, edit_id: str, items: list[dict], state: str, new_issues,
     }
     if files is not None:
         row["files"] = files
+    # 제출 전 점검 필요 여부 — 화면이 저장 뒤 한 줄·목록 머리에 그대로 쓴다(§4-5-8 07).
+    if recheck is not None:
+        row["recheck_before_submit"] = bool(recheck)
     return row
 
 
@@ -1022,6 +1031,8 @@ def section_edits(ctx, params):
             "edits": row.get("edits") or [],
             "section_ids": sorted({e["section_id"] for e in (row.get("edits") or [])}),
             "needs_check": row.get("needs_check"),
+            # 제출 전 점검이 필요한 건 — 화면이 목록 머리에 그 장을 보여 준다(§4-5-8 07).
+            "recheck_before_submit": bool(row.get("recheck_before_submit")),
             "new_issues": row.get("new_issues") or [],
             "remaining_issues": [
                 issue for issue in (row.get("new_issues") or [])
@@ -1050,6 +1061,7 @@ def section_edits(ctx, params):
             # 재확인 메모에 `<장 제목>` 이 필요하다 — 요청 ID 꼬리에서 절 ID 를 읽어 준다.
             "section_ids": _sections_of_request(request_id),
             "needs_check": True,
+            "recheck_before_submit": False,
             "new_issues": [],
             "remaining_issues": [],
             "answered": False,
