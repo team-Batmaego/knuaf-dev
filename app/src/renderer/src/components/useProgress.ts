@@ -27,6 +27,7 @@ import { chooseProgress, type ProgressFile } from '../../../shared/progress-file
  * - 깨진 저장값은 지우고 "시작 전"으로 떨어진다.
  *
  * 순수 부분(`chooseProgress`·`pickProgress`)은 `shared/` — node 시험으로 잠근다.
+ * 파일 읽기 순서는 아래 `createProgressFeed`(DOM 없는 객체) — 늦은 응답 시험도 여기서 돈다.
  */
 
 const KEY = (root: string): string => `knuaf.progress.v1:${root}`
@@ -34,6 +35,80 @@ const KEY = (root: string): string => `knuaf.progress.v1:${root}`
 export interface UseProgressResult {
   /** null이면 "시작 전". */
   pick: ProgressPick | null
+}
+
+/** main이 렌더러에 주는 진행 파일 조회·구독(가짜 대역을 시험이 넣는다). */
+export interface ProgressIo {
+  get: () => Promise<{ result: ProgressFile | null }>
+  onChanged: (fn: (payload: { root: string; progress: ProgressFile | null }) => void) => () => void
+}
+
+export interface ProgressFeed {
+  /** 논문 전환. 이전 요청·구독을 버리고 `null`에서 시작해 새로 읽는다. `null`이면 구독하지 않는다. */
+  setRoot: (root: string | null) => void
+  /** 대화가 `running → idle`로 바뀐 순간 한 번 더 읽는다(감시 보루). 논문이 없으면 아무것도 안 한다. */
+  reread: () => void
+  dispose: () => void
+}
+
+/**
+ * 진행 파일 읽기 순서 — 훅에서 분리한 이유는 **늦은 응답 시험** 때문이다(Roh 1회째 [중요]).
+ *
+ * `progress:get`은 비동기라 **보낸 뒤 논문이 바뀔 수 있다**. A의 늦은 응답이 이미 B로 바뀐
+ * 화면에 A 값(6/7)을 덮어 B 2/7이 사라졌다. 그래서 매 요청·push에 그때의 세대를 찍고,
+ * 응답할 때 세대가 다르면 버린다. root 문자열 비교만으로는 A → B → A로 되돌아온 경우를 못 가른다.
+ */
+export function createProgressFeed(io: ProgressIo, onFile: (file: ProgressFile | null) => void): ProgressFeed {
+  /** 지금 논문 세대 — `setRoot`마다 하나 올린다. */
+  let generation = 0
+  let root: string | null = null
+  let off: (() => void) | null = null
+  let disposed = false
+
+  const load = (): void => {
+    const asked = generation
+    void io
+      .get()
+      .then((reply) => {
+        // 응답이 늦게 와도 그사이 논문이 바뀌었으면 버린다.
+        if (!disposed && asked === generation) onFile('result' in reply ? reply.result : null)
+      })
+      .catch(() => {
+        /* 읽기 실패 = 파일 없음과 같이 다룬다(파서 → 저장값) */
+      })
+  }
+
+  return {
+    setRoot: (next) => {
+      if (next === root && off !== null) return
+      off?.()
+      off = null
+      // 다시 마운트(개발 모드 StrictMode가 effect를 두 번 건다)하면 dispose 뒤에도 살아나야 한다.
+      disposed = false
+      generation += 1
+      root = next
+      onFile(null)
+      if (next === null) return
+      load()
+      off = io.onChanged((payload) => {
+        // 다른 논문의 push는 버린다. A → B → A로 되돌아온 뒤 도착하는 **옛 감시**의 이벤트는
+        // main이 보내기 전에 이미 버린다(감시 세대, `main/progress/index.ts`). 렌더러가 main의
+        // 세대 번호를 알 수 없으므로 여기서 흉내 내지 않는다 — 구독은 논문 전환 때 교체된다.
+        if (disposed) return
+        if (payload.root === root) onFile(payload.progress)
+      })
+    },
+    reread: () => {
+      if (disposed || root === null) return
+      load()
+    },
+    dispose: () => {
+      disposed = true
+      off?.()
+      off = null
+      root = null
+    }
+  }
 }
 
 export function useProgress(): UseProgressResult {
@@ -45,31 +120,20 @@ export function useProgress(): UseProgressResult {
 
   // progress (v0.6.4 2단계): main이 읽어 준 진행 파일. 논문이 바뀌면 즉시 버린다.
   const [file, setFile] = useState<ProgressFile | null>(null)
+  const feedRef = useRef<ProgressFeed | null>(null)
+  if (feedRef.current === null) {
+    feedRef.current = createProgressFeed(
+      { get: () => window.knuaf.progress.get(), onChanged: (fn) => window.knuaf.progress.onChanged(fn) },
+      setFile,
+    )
+  }
+  const feed = feedRef.current
+
   useEffect(() => {
-    setFile(null)
-    if (!root) return undefined
-    let live = true
-    const load = (): void => {
-      void window.knuaf.progress
-        .get()
-        .then((reply) => {
-          // 응답이 늦게 와도 그사이 논문이 바뀌었으면 버린다.
-          if (live) setFile('result' in reply ? reply.result : null)
-        })
-        .catch(() => {
-          /* 읽기 실패 = 파일 없음과 같이 다룬다(파서 → 저장값) */
-        })
-    }
-    load()
-    const off = window.knuaf.progress.onChanged((payload) => {
-      // 다른 논문의 늦은 push는 버린다.
-      if (live && payload.root === root) setFile(payload.progress)
-    })
-    return () => {
-      live = false
-      off()
-    }
-  }, [root])
+    feed.setRoot(root)
+  }, [feed, root])
+
+  useEffect(() => () => feed.dispose(), [feed])
 
   // 감시를 못 믿는 폴더 보루 — 대화가 끝난 순간 한 번 더 읽는다.
   const prevState = useRef<string | null>(null)
@@ -77,14 +141,7 @@ export function useProgress(): UseProgressResult {
     const now = snap && snap.root === root ? snap.state : null
     const before = prevState.current
     prevState.current = now
-    if (before === 'running' && now === 'idle' && root) {
-      void window.knuaf.progress
-        .get()
-        .then((reply) => setFile('result' in reply ? reply.result : null))
-        .catch(() => {
-          /* 무시 — 마지막 값 유지 */
-        })
-    }
+    if (before === 'running' && now === 'idle' && root) feed.reread()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snap?.state, snap?.root, root])
 
@@ -119,25 +176,38 @@ export function useProgress(): UseProgressResult {
   const convKey = conv ? `${conv.messageId}|${conv.at}|${provider}` : null
 
   useEffect(() => {
-    // 깨진 저장값은 지운다.
-    if (root && storedBroken) {
+    if (storedBroken) {
       try {
-        window.localStorage.removeItem(KEY(root))
+        window.localStorage.removeItem(KEY(root ?? ''))
       } catch {
-        /* 무시 */
-      }
-      return
-    }
-    // 대화 값이 더 늦을 때만 저장값을 덮는다. 파일 값은 저장하지 않는다(파일이 정본).
-    if (!root) return
-    if (result.kind === 'conversation' && snap?.root === root) {
-      try {
-        window.localStorage.setItem(KEY(root), JSON.stringify(result.pick))
-      } catch {
-        /* 무시 — 제목줄은 그대로 보인다 */
+        /* 저장소를 못 쓰면 그냥 넘어간다 — 화면은 이미 대화/파일 값이다. */
       }
     }
-    // valueSig(진행값 자체) + convKey(id·at·provider) — 둘 다 deps다. 한쪽이라도 바뀌면 심각해진다.
+  }, [root, storedBroken])
+
+  useEffect(() => {
+    // 파일이 정본일 때는 저장값을 건드리지 않는다(§4-2 중요 7).
+    if (!root || !conv || result.kind !== 'conversation') return
+    const pick = result.pick
+    if (!pick) return
+    const value = JSON.stringify({ block: pick.block, messageId: pick.messageId, provider: pick.provider, at: pick.at })
+    let previous: StoredProgress | null = null
+    try {
+      const raw = window.localStorage.getItem(KEY(root))
+      if (raw !== null && raw !== '') previous = parseStoredProgress(raw)
+    } catch {
+      previous = null
+    }
+    if (previous !== null) {
+      const older = Date.parse(previous.at)
+      const newer = Date.parse(pick.at)
+      if (!(newer > older)) return
+    }
+    try {
+      window.localStorage.setItem(KEY(root), value)
+    } catch {
+      /* 저장소가 가득 찼거나 막혔다 — 이번 실행은 화면 값만 쓴다. */
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root, snap?.root, provider, result.kind, valueSig, convKey])
 

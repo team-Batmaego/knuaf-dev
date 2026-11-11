@@ -61,6 +61,20 @@ const isText = (v: unknown): v is string => typeof v === 'string' && v.length <=
 const isStepState = (v: unknown): v is ProgressFileState =>
   v === 'done' || v === 'now' || v === 'todo' || v === 'unknown'
 
+/**
+ * `written_at` — **시간대가 붙은** ISO 8601만 유효(규칙집 합의, Roh 1회째 [중요]).
+ * `Z`나 `±hh:mm`으로 끝나야 한다. 시간대가 없으면 `Date.parse`가 기기 로컬 시간으로 읽어
+ * 같은 파일이 기기마다 다른 시각이 되고, 스킬이 쓴 시각과 화면이 비교할 수 없다.
+ * `+0900`(콜론 없음)·날짜만 있는 값(`2026-11-09`)도 거부한다 — 형식을 하나로 고정한다.
+ */
+const WRITTEN_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/
+
+function isWrittenAt(v: unknown): v is string {
+  if (!isText(v) || !WRITTEN_AT.test(v)) return false
+  const parsed = Date.parse(v)
+  return !Number.isNaN(parsed)
+}
+
 function readSteps(v: unknown): ProgressFileStep[] | null {
   if (!Array.isArray(v) || v.length !== 7) return null
   const steps: ProgressFileStep[] = []
@@ -120,7 +134,7 @@ export function parseProgressFile(raw: string | unknown): ProgressFile | null {
   }
   if (!isPlain(value)) return null
   if (value.schema !== PROGRESS_SCHEMA) return null
-  if (!isText(value.written_at) || Number.isNaN(Date.parse(value.written_at))) return null
+  if (!isWrittenAt(value.written_at)) return null
   const steps = readSteps(value.steps)
   if (steps === null) return null
   const flags = readFlags(value.flags)
