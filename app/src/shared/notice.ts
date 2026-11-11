@@ -39,6 +39,21 @@ export interface NoticeItem {
   what: string
   /** `4.투자계획!E24` 꼴의 칸 주소. 많으면 `…` 하나로 줄인다. */
   cells: string[]
+  /**
+   * 아래 다섯 칸은 공용 카드 계약 7판(`NOTICE-CARD-CONTRACT-DRAFT.md` §8)의 **사실 칸**이다.
+   * 전부 선택이다 — 없으면 화면은 그 줄을 빼고 지금 모양(`what · cells`) 그대로 그린다.
+   * 앱은 여기에 **문장을 조립하지 않는다**: 도구가 쓴 사실만 옮겨 그린다.
+   */
+  /** 무슨 일 — 학생이 아는 자리 이름. */
+  where?: string
+  /** 지금 값 — 그 자리에 들어 있던 것. */
+  current?: string
+  /** 왜 문제인가 — 사실에 근거한 문장. */
+  basis?: string
+  /** 어떻게 — 학생이 할 일 한 줄. */
+  how?: string
+  /** 시트 이름·칸 좌표(작은 글씨, 맨 아래). */
+  whereDetail?: string
 }
 
 export interface NoticeRow {
@@ -127,12 +142,21 @@ function readItems(raw: unknown): { items: NoticeItem[]; omitted: number } {
       }
     }
     if (more) cells.push('…')
-    items.push({
+    // 사실 칸 — 없거나 빈 값이면 **키 자체를 넣지 않는다**(화면은 `undefined` 를 "그 줄 없음"으로 읽는다).
+    const item2: NoticeItem = {
       key: typeof item.key === 'string' ? item.key : '',
       kind: item.kind === 'typo' || item.kind === 'method' ? item.kind : 'other',
       what,
       cells
-    })
+    }
+    const facts: Array<['where' | 'current' | 'basis' | 'how' | 'whereDetail', string]> = [
+      ['where', 'where'], ['current', 'current'], ['basis', 'basis'], ['how', 'how'], ['whereDetail', 'where_detail']
+    ]
+    for (const [target, source] of facts) {
+      const text = oneLine(item[source], WHAT_MAX)
+      if (text) item2[target] = text
+    }
+    items.push(item2)
   }
   return { items: items.slice(0, ITEMS_MAX), omitted: Math.max(0, items.length - ITEMS_MAX) }
 }

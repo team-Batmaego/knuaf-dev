@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   emptyNotices, NOTICE_FILE, readNoticeDocument, type NoticeDocument, type NoticeRow
@@ -74,4 +74,66 @@ export function readNotices(root: string): NoticeDocument {
     /* 읽을 수 없거나 JSON 이 아님: 알림 없음. 프로젝트 열기를 막지 않는다. */
     return emptyNotices()
   }
+}
+
+/**
+ * 닫기 기억 — **앱 데이터 폴더**(`userData`)의 별도 파일이다. 논문 폴더에 쓰지 않는다
+ * (그 폴더는 규칙집 몫이고, 학생이 옮기면 닫은 사실까지 따라갈 이유가 없다).
+ *
+ * `settings.json` 에 얹지 않는다: 설정 저장은 읽고-합치고-통째로 쓰므로 학생이 X 를 누르는
+ * 순간과 겹치면 한쪽이 사라진다. 여기 파일은 이 목적 하나뿐이라 "앞에 넣고 자른다"로 끝난다.
+ *
+ * 형식은 `string[]`(닫은 `project_id:notice_identity` 키, 최근 순). 깨졌으면 빈 목록 —
+ * 닫기 기억은 잃어도 알림이 한 번 더 뜰 뿐이고, 그 때문에 화면을 막지 않는다.
+ */
+export const DISMISSED_FILE = 'notices-dismissed.json'
+/** 상한 — 넘으면 오래된 것부터 버린다. 프로젝트당 알림 몇 건이라 실제로는 닿지 않는다. */
+const DISMISSED_MAX = 500
+/** 키 하나의 상한 — `project_id` 64 + `:` + `notice_identity` 64 에 여유를 둔다. */
+const KEY_MAX = 200
+const DISMISSED_BYTES = 256 * 1024
+
+export function dismissedFilePath(dir: string): string {
+  return join(dir, DISMISSED_FILE)
+}
+
+export function readDismissed(dir: string): string[] {
+  try {
+    const file = dismissedFilePath(dir)
+    if (!existsSync(file) || statSync(file).size > DISMISSED_BYTES) return []
+    const raw: unknown = JSON.parse(readFileSync(file, 'utf-8'))
+    if (!Array.isArray(raw)) return []
+    const out: string[] = []
+    for (const entry of raw) {
+      if (typeof entry !== 'string') continue
+      const key = entry.trim()
+      if (!key || key.length > KEY_MAX || out.includes(key)) continue
+      out.push(key)
+      if (out.length >= DISMISSED_MAX) break
+    }
+    return out
+  } catch {
+    /* 깨진 파일: 닫기 기억 없음. */
+    return []
+  }
+}
+
+/**
+ * X 한 번 — 키를 맨 앞에 넣고 상한에서 자른다. **반환값은 이번 화면이 쓸 목록**이다.
+ *
+ * 디스크 쓰기가 실패해도 새 목록을 돌려준다: 학생이 누른 X 는 지금 닫혀야 하고, 닫기 기억을
+ * 못 남긴 것은 다음에 알림이 한 번 더 뜨는 정도다(여기서 던지면 대화 화면이 멈춘다).
+ */
+export function writeDismissed(dir: string, key: string): string[] {
+  const current = readDismissed(dir)
+  const text = typeof key === 'string' ? key.trim() : ''
+  if (!text || text.length > KEY_MAX) return current
+  const next = [text, ...current.filter((existing) => existing !== text)].slice(0, DISMISSED_MAX)
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(dismissedFilePath(dir), JSON.stringify(next, null, 2), 'utf-8')
+  } catch {
+    /* 못 썼어도 지금 화면은 닫는다 — 반환값이 그 목록이다. */
+  }
+  return next
 }

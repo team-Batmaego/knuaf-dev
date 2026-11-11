@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { NoticeChoiceValue, NoticeRow } from '../shared/notice'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
@@ -13,6 +14,8 @@ export interface AppUpdateStatus {
 }
 
 type UpdateReply<T> = { result: T } | { error: { code: string; message: string } }
+/** `notices:read` 응답 — 알림(규칙집이 쓴 파일 해석) + 닫기 기억(앱 데이터 폴더). */
+export interface NoticesRead { notices: NoticeRow[]; dismissed: string[] }
 /**
  * `shell:open`·`shell:open-link` 응답. 열지 못했으면 메인이 이미 폴더에서 보여 주고
  * `revealed: true` 를 돌려준다 — `open_failed` 는 OS 열기 실패, `extension` 은 원래 열지 않는
@@ -186,6 +189,19 @@ const api = {
     const listener = (_e: unknown, entry: { stream: string; line: string }) => fn(entry)
     ipcRenderer.on('sidecar:log', listener)
     return () => ipcRenderer.removeListener('sidecar:log', listener)
+  },
+  /**
+   * 학교 재무 양식 알림 — 읽기·닫기 기억. 알림 파일은 규칙집이 쓰므로 앱은 **읽기만** 한다.
+   * 선택 기록은 전용 IPC(`notices:choose`) 한 길이다 — 메인이 열린 폴더·알림·값을 다시 검사한 뒤
+   * sidecar 로 넘기고, 정본·파일 다시 쓰기는 규칙집 몫이다. generic `rpc` 로는 그 method 가 거절된다.
+   */
+  notices: {
+    read: (root: string): Promise<{ result: NoticesRead } | { error: { code: string; message: string } }> =>
+      ipcRenderer.invoke('notices:read', root),
+    dismiss: (root: string, key: string): Promise<{ result: string[] } | { error: { code: string; message: string } }> =>
+      ipcRenderer.invoke('notices:dismiss', root, key),
+    choose: (root: string, identity: string, value: NoticeChoiceValue): Promise<RpcResult<Envelope>> =>
+      ipcRenderer.invoke('notices:choose', root, identity, value)
   }
 }
 

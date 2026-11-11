@@ -134,3 +134,58 @@ sys.exit(1)
 
     assert result["ok"] is False
     assert result["block_reason"] == "선택을 적지 못했어요(something_new)"
+
+
+def test_chosen_notice_failed_is_not_a_rejection_sentence(scripts, project):
+    """선택은 적혔지만 알림 파일을 다시 쓰지 못한 갈래 — 화면은 조용히 다시 읽는다.
+
+    이건 도구의 정상 거절(`rejected`)이 아니므로 `block_reason` 이 없어야 한다. 실패 문구를
+    달면 학생은 "선택이 안 됐다"고 오해하고 다시 고르는데, 정본에는 이미 적혀 있다.
+    """
+    write_stub(scripts, """
+import json, sys
+print(json.dumps({"status": "chosen_notice_failed", "chosen": "footnote"}))
+sys.exit(3)
+""")
+
+    result = methods_scripts.notices_choose(Ctx(), {"root": str(project), "identity": "abc123", "value": "footnote"})
+
+    assert result["ok"] is False
+    assert result["status"] == "chosen_notice_failed"
+    assert result["block_reason"] is None
+
+
+def test_chosen_is_a_plain_success(scripts, project):
+    """대조군 — 같은 초안에서 exit 0 이면 그대로 성공이다(문구도 없다)."""
+    write_stub(scripts, """
+import json, sys
+print(json.dumps({"status": "chosen", "chosen": "footnote"}))
+""")
+
+    result = methods_scripts.notices_choose(Ctx(), {"root": str(project), "identity": "abc123", "value": "footnote"})
+
+    assert result["ok"] is True
+    assert result["status"] == "chosen"
+    assert result["block_reason"] is None
+
+
+def test_plain_failed_envelope_is_not_a_saved_choice(scripts, project):
+    """v0.4.11 — 고른 값이 정본에 적히지 않은 실행 실패.
+
+    `rejected`(도구의 정상 거절)와 달리 이건 runner 가 exit 1 로 끝낸 실패다. 앱은 `ok`·`status`
+    만 보고 저장 여부를 가른다(`chosen`/`chosen_notice_failed` 가 아니면 저장 아님). 그래서 봉투가
+    `status` 를 잃거나 `ok` 가 참으로 새면 화면이 실패를 "저장됨"으로 그린다 — 그 계약을 여기서 잠근다.
+    """
+    write_stub(scripts, """
+import json, sys
+print(json.dumps({"status": "failed"}))
+sys.exit(1)
+""")
+
+    result = methods_scripts.notices_choose(Ctx(), {"root": str(project), "identity": "abc123", "value": "footnote"})
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["exit"] == 1
+    assert result["data"] == {"status": "failed"}
+    assert result["block_reason"] is None

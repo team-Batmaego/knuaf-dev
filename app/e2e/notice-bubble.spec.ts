@@ -655,3 +655,391 @@ test('알림 파일 자체가 밖을 가리키는 심볼릭 링크면 읽지 않
   writeFileSync(noticeFilePath(plain), JSON.stringify(raw), 'utf-8')
   expect(readNotices(plain).notices).toHaveLength(1)
 })
+
+/* ── 2묶음: 대화 창에 붙는 스택(NoticeStack) ─────────────────────────────────
+ * 1묶음 시험은 부품(`NoticeBubble`)을 하나씩 그려 잠갔다. 스택은 그 부품을 **여러 건** 세우고,
+ * 닫기 기억·선택 기록·다시 읽기·`forceOpen` 을 부품 밖에서 맡는다. 여기서는 `api` 를 갈아 끼워
+ * 화면이 부른 **호출 자체**(열쇠·값)를 못박는다 — Electron 없이 Node 에서 돈다.
+ */
+const NoticeStack = componentOf(loadTsx(resolve(__dirname, '../src/renderer/src/components/NoticeStack.tsx')), 'NoticeStack')
+
+interface StackApi {
+  read: (root: string) => Promise<unknown>
+  dismiss: (root: string, key: string) => Promise<unknown>
+  choose: (root: string, identity: string, value: string) => Promise<unknown>
+}
+
+interface StackProps {
+  root: string | null
+  reloadKey?: number
+  forceOpenKeys?: readonly string[]
+  onFootnote?: () => void
+  onWriteTalk?: (text: string) => void
+  api: StackApi
+}
+
+/** 기본은 "알림 없음" — 각 시험이 필요한 길만 갈아 끼운다. */
+function stackApi(over: Partial<StackApi> = {}): StackApi {
+  return {
+    read: async () => ({ result: { notices: [], dismissed: [] } }),
+    dismiss: async () => ({ result: [] }),
+    choose: async () => ({ result: { ok: true, exit: 0, status: 'chosen' } }),
+    ...over
+  }
+}
+
+function byClass(host: HostNode, name: string): HostNode[] {
+  return walk(host, (node) => node.attrs.class === name)
+}
+
+/** 스택 마운트 — `render` 로 prop 을 갈아 끼운다(다시 읽기 신호 시험). 첫 렌더는 빈 상태다. */
+interface StackMount { host: HostNode; root: BubbleRoot; render: (next: StackProps) => Promise<void> }
+
+async function paintStack(
+  document: HostDocument,
+  act: (body: () => Promise<void> | void) => Promise<void>,
+  props: StackProps
+): Promise<StackMount> {
+  const { createRoot } = real('react-dom/client') as { createRoot: (container: HostNode) => BubbleRoot }
+  const host = document.createElement('div')
+  document.body.appendChild(host)
+  const root = createRoot(host)
+  const render = async (next: StackProps): Promise<void> => {
+    await act(async () => { root.render(createElement(NoticeStack as unknown as (p: StackProps) => unknown, next)) })
+    await act(async () => { /* 읽기 프라미스 반영 */ })
+  }
+  await render(props)
+  return { host, root, render }
+}
+
+test('각주 알림의 [각주 넣어 줘] 는 초점 콜백과 함께 그 문장을 입력칸에 넘긴다', async () => {
+  await withHostDom(async (document, act) => {
+    const row = one(hortAfter)
+    let focused = 0
+    const written: string[] = []
+    const { host, root } = await paintStack(document, act, {
+      root: ROOT,
+      api: stackApi({ read: async () => ({ result: { notices: [row], dismissed: [] } }) }),
+      onFootnote: () => { focused += 1 },
+      onWriteTalk: (text) => { written.push(text) }
+    })
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    const foot = byClass(host, 'notice-foot')[0]
+    expect(foot).toBeTruthy()
+    await act(async () => pressChoice(walk(foot, (node) => node.tagName === 'BUTTON')[0]))
+    expect(focused).toBe(1)
+    // 채우는 문장은 **단추 이름 그대로** — 알림 파일에 각주 문장 칸이 없으므로 앱이 조립하지 않는다.
+    expect(written).toEqual(['각주 넣어 줘'])
+    await act(async () => root.unmount())
+  })
+})
+
+test('X 는 project_id:notice_identity 열쇠로 닫기를 저장하고 화면에서 먼저 지운다', async () => {
+  await withHostDom(async (document, act) => {
+    const row = one(hortBefore)
+    const saved = deferred()
+    const calls: Array<[string, string]> = []
+    const { host, root } = await paintStack(document, act, {
+      root: ROOT,
+      api: stackApi({
+        read: async () => ({ result: { notices: [row], dismissed: [] } }),
+        dismiss: async (at, key) => { calls.push([at, key]); await saved.promise; return { result: [key] } }
+      })
+    })
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    await act(async () => pressChoice(byClass(host, 'notice-x')[0]))
+    // 저장이 끝나기 전에 이미 사라진다 — 저장 실패로 카드가 되살아나지 않는다.
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    const fixture = hortBefore as { project_id: string; notices: Array<{ notice_identity: string }> }
+    expect(calls).toEqual([[ROOT, `${fixture.project_id}:${fixture.notices[0].notice_identity}`]])
+    // 이 견본의 열쇠는 계약 그대로 `project_id:notice_identity` 다(둘 다 hex — `:` 는 하나).
+    expect(row.key).toBe(calls[0][1])
+    await act(async () => { saved.resolve() })
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+})
+
+/**
+ * 저장 판정(판정 중요1 · 규칙집 v0.4.11 계약): `ok:true` + `status:'chosen'` 만 "저장됨"이다.
+ * 옛 `chosen_notice_failed`(v0.4.10, `ok:false` exit 3)만 호환으로 받는다. `failed`
+ * (`notice_rows_unavailable`)·정상 거절·`status:null`·모르는 봉투는 **실패**다 — 저장된 척하면
+ * 카드가 사라지고 학생은 골랐다고 믿는데 정본에는 안 적힌 채다.
+ */
+test('선택 저장은 ok:true + chosen 만 인정한다 — failed·null·rejected 는 실패 줄과 다시 열린 단추', async () => {
+  const branches: Array<{ name: string; envelope: Record<string, unknown>; saved: boolean }> = [
+    { name: 'chosen', envelope: { ok: true, exit: 0, status: 'chosen' }, saved: true },
+    { name: 'chosen_notice_failed(v0.4.10 호환)', envelope: { ok: false, exit: 3, status: 'chosen_notice_failed' }, saved: true },
+    { name: 'failed', envelope: { ok: false, exit: 1, status: 'failed', block_reason: null }, saved: false },
+    { name: 'ok:false + status:null + data:null', envelope: { ok: false, exit: 1, status: null, data: null }, saved: false },
+    { name: 'rejected', envelope: { ok: false, exit: 2, status: 'rejected', block_reason: '이미 골랐어요' }, saved: false }
+  ]
+  for (const branch of branches) {
+    await withHostDom(async (document, act) => {
+      const before = one(hortBefore)
+      let reads = 0
+      const { host, root } = await paintStack(document, act, {
+        root: ROOT,
+        api: stackApi({
+          // 규칙집 v0.4.11 은 선택이 적히면 알림 파일에서 그 알림을 지운다 — 저장된 갈래는 "파일 없음".
+          read: async () => { reads += 1; return { result: { notices: reads === 1 ? [before] : [], dismissed: [] } } },
+          choose: async () => ({ result: branch.envelope })
+        })
+      })
+      expect(visibleChoices(host), branch.name).toHaveLength(2)
+      await act(async () => pressChoice(visibleChoices(host)[1]))
+      if (branch.saved) {
+        // 저장됨 — 단추가 다시 열리지 않고, 재읽기에서 파일이 없으면 조용히 닫힌다(실패 줄 없음).
+        expect(failedLines(host), branch.name).toHaveLength(0)
+        expect(byClass(host, 'notice-card'), branch.name).toHaveLength(0)
+        expect(reads, branch.name).toBe(2)
+      } else {
+        // 실패 — 카드는 남고, 실패 줄이 뜨고, 잠금이 풀려 다시 고를 수 있다.
+        expect(failedLines(host), branch.name).toHaveLength(1)
+        expect(byClass(host, 'notice-card'), branch.name).toHaveLength(1)
+        expect(visibleChoices(host), branch.name).toHaveLength(2)
+        expect(reads, branch.name).toBe(1)
+      }
+      await act(async () => root.unmount())
+    })
+  }
+})
+
+test('실패한 선택은 잠금이 풀려 다시 누르면 저장된다', async () => {
+  await withHostDom(async (document, act) => {
+    const before = one(hortBefore)
+    let reads = 0
+    let calls = 0
+    const { host, root } = await paintStack(document, act, {
+      root: ROOT,
+      api: stackApi({
+        read: async () => { reads += 1; return { result: { notices: reads === 1 ? [before] : [], dismissed: [] } } },
+        choose: async () => {
+          calls += 1
+          // 첫 번째는 규칙집이 알림 파일을 다시 쓰지 못한 경우(v0.4.11 `failed`), 두 번째는 정상.
+          return { result: calls === 1 ? { ok: false, exit: 1, status: 'failed' } : { ok: true, exit: 0, status: 'chosen' } }
+        }
+      })
+    })
+    await act(async () => pressChoice(visibleChoices(host)[1]))
+    expect(failedLines(host)).toHaveLength(1)
+    await act(async () => pressChoice(visibleChoices(host)[1]))
+    expect(calls).toBe(2)
+    expect(failedLines(host)).toHaveLength(0)
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+})
+
+test('알림 두 건은 한 스택에 차례로 쌓인다', async () => {
+  await withHostDom(async (document, act) => {
+    const first = one(hortBefore)
+    const second = revisedNotice({ ...first, title: '다른 곳도 바로잡았어요' })
+    const { host, root } = await paintStack(document, act, {
+      root: ROOT,
+      api: stackApi({ read: async () => ({ result: { notices: [first, second], dismissed: [] } }) })
+    })
+    expect(byClass(host, 'notice-card')).toHaveLength(2)
+    expect(byClass(host, 'notice-zone')).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+})
+
+test('forceOpenKeys 는 닫은 알림을 다시 그린다 — 목록에 없으면 그대로 닫혀 있다', async () => {
+  const row = one(hortBefore)
+  const api = stackApi({ read: async () => ({ result: { notices: [row], dismissed: [row.key] } }) })
+  await withHostDom(async (document, act) => {
+    const shut = await paintStack(document, act, { root: ROOT, api })
+    expect(byClass(shut.host, 'notice-card')).toHaveLength(0)
+    await act(async () => shut.root.unmount())
+  })
+  await withHostDom(async (document, act) => {
+    const open = await paintStack(document, act, { root: ROOT, api, forceOpenKeys: [row.key] })
+    const cards = byClass(open.host, 'notice-card')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].attrs['data-force-open']).toBe('true')
+    await act(async () => open.root.unmount())
+  })
+})
+
+/**
+ * forceOpen 소비(판정 중요4) — `consumed` 는 **그 다시 보기 요청**에만 묶인다.
+ * 요청의 경계는 "열쇠가 `forceOpenKeys` 에 없다가 새로 들어옴"이다. 그래서 일반 카드의 X 는
+ * 나중에 올 다시 보기 요청을 미리 먹지 않고, 요청을 한 번 닫아도 같은 열쇠가 다시 들어오면
+ * 새 요청으로 다시 열린다. 같은 props 를 계속 유지하는 동안에는 다시 뜨지 않는다.
+ * 두 시험 모두 **한 마운트**에서 props 만 갈아 끼운다(부품을 다시 만들지 않는다).
+ */
+test('일반 카드의 X 는 뒤에 오는 다시 보기 요청을 소비하지 않는다 — X → forceOpenKeys 추가 → 카드 보임', async () => {
+  await withHostDom(async (document, act) => {
+    const row = one(hortBefore)
+    const props: StackProps = {
+      root: ROOT,
+      forceOpenKeys: [],
+      api: stackApi({
+        // 닫기 기억에는 아직 없다 — 지금 보이는 카드는 일반 카드다.
+        read: async () => ({ result: { notices: [row], dismissed: [] } }),
+        dismiss: async (_root, key) => ({ result: [key] })
+      })
+    }
+    const { host, root, render } = await paintStack(document, act, props)
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    await act(async () => pressChoice(byClass(host, 'notice-x')[0]))
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    // 같은 props 유지 — 닫기 기억으로 숨은 채다.
+    await render(props)
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    // 이제 오른쪽 창이 "다시 보기"를 누른다 — 새 요청이므로 그 열쇠는 소비 상태가 아니다.
+    await render({ ...props, forceOpenKeys: [row.key] })
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    expect(byClass(host, 'notice-card')[0].attrs['data-force-open']).toBe('true')
+    await act(async () => root.unmount())
+  })
+})
+
+test('다시 보기를 닫아도 같은 열쇠의 새 요청은 다시 연다 — 닫기 → 다시 보기 → X → 다시 보기 → X', async () => {
+  await withHostDom(async (document, act) => {
+    const row = one(hortBefore)
+    const props: StackProps = {
+      root: ROOT,
+      forceOpenKeys: [row.key],
+      api: stackApi({
+        // 닫기 기억에 이미 있는 알림 — 이 카드는 다시 보기로만 뜬다.
+        read: async () => ({ result: { notices: [row], dismissed: [row.key] } }),
+        dismiss: async (_root, key) => ({ result: [key] })
+      })
+    }
+    const { host, root, render } = await paintStack(document, act, props)
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    await act(async () => pressChoice(byClass(host, 'notice-x')[0]))
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    // 같은 열쇠가 그대로 남아 있는 "다시 보기" 목록 — 이 요청은 소비됐으므로 다시 그리지 않는다.
+    await render(props)
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    // 오른쪽 창이 목록에서 뺐다가 다시 넣는다 = 새 요청.
+    await render({ ...props, forceOpenKeys: [] })
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    await render({ ...props, forceOpenKeys: [row.key] })
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    // 새 요청도 X 로 끝난다 — 그리고 그 뒤 같은 props 로는 다시 뜨지 않는다.
+    await act(async () => pressChoice(byClass(host, 'notice-x')[0]))
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    await render({ ...props, forceOpenKeys: [row.key] })
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+})
+
+/**
+ * 재읽기(판정 중요2) — 도우미 턴이 끝날 때 `reloadKey` 가 올라가면 알림 파일을 다시 읽는다:
+ * 없음 → 생김 → 갱신(선택 채워짐·단추 없음) → 새 identity(새 알림, 단추 다시 열림).
+ */
+test('reloadKey 가 오르면 알림 파일을 다시 읽는다 — 없음 → 생김 → 갱신 → 새 identity', async () => {
+  await withHostDom(async (document, act) => {
+    const before = one(hortBefore)
+    const resolved = { ...before, choice: 'footnote' as const }
+    const fresh = revisedNotice(before)
+    let reads = 0
+    const api = stackApi({
+      read: async () => {
+        reads += 1
+        const notices = reads === 1 ? [] : reads === 2 ? [before] : reads === 3 ? [resolved] : [fresh]
+        return { result: { notices, dismissed: [] } }
+      }
+    })
+    const { host, root, render } = await paintStack(document, act, { root: ROOT, reloadKey: 0, api })
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+
+    await render({ root: ROOT, reloadKey: 1, api })
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    expect(visibleChoices(host)).toHaveLength(2)
+
+    await render({ root: ROOT, reloadKey: 2, api })
+    expect(visibleChoices(host)).toHaveLength(0)
+    expect(byClass(host, 'notice-foot')).toHaveLength(1)
+
+    await render({ root: ROOT, reloadKey: 3, api })
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    expect(visibleChoices(host)).toHaveLength(2)
+    expect(reads).toBe(4)
+    await act(async () => root.unmount())
+  })
+})
+
+/**
+ * 로컬 선택 우선(판정 중요5) — 저장이 확인된 선택은 화면이 기억한다. 알림 파일이 아직 옛 모양
+ * (`choice:null`)이어도 단추를 되살리지 않고, 각주를 골랐으면 [각주 넣어 줘] 줄이 보인다.
+ * 파일이 갱신돼 `choice` 가 채워지면 그때는 파일이 진실이고, 파일에서 사라졌으면 카드가 없다.
+ */
+test('저장된 선택은 옛 파일의 choice:null 을 이긴다 — 갱신 파일·파일 없음도 각각 맞게 그린다', async () => {
+  const cases: Array<{ name: string; after: (row: NoticeRow) => NoticeRow[]; cards: number; choices: number; foot: number }> = [
+    // 옛 파일 — 다시 읽어도 `choice:null` 이다. 화면 기억이 단추를 닫고 각주 줄을 연다.
+    { name: '옛 파일(choice:null)', after: (row) => [row], cards: 1, choices: 0, foot: 1 },
+    // 갱신 파일 — 규칙집이 `choice` 를 채워 다시 썼다.
+    { name: '갱신 파일', after: (row) => [{ ...row, choice: 'footnote' }], cards: 1, choices: 0, foot: 1 },
+    // v0.4.11 — 선택이 적히면 알림 자체가 파일에서 사라진다. 카드도 없다(실패 줄 없음).
+    { name: '파일 없음', after: () => [], cards: 0, choices: 0, foot: 0 }
+  ]
+  for (const item of cases) {
+    await withHostDom(async (document, act) => {
+      const before = one(hortBefore)
+      let reads = 0
+      const { host, root } = await paintStack(document, act, {
+        root: ROOT,
+        api: stackApi({
+          read: async () => { reads += 1; return { result: { notices: reads === 1 ? [before] : item.after(before), dismissed: [] } } },
+          choose: async () => ({ result: { ok: true, exit: 0, status: 'chosen' } })
+        })
+      })
+      await act(async () => pressChoice(visibleChoices(host)[1]))
+      expect(reads, item.name).toBe(2)
+      expect(byClass(host, 'notice-card'), item.name).toHaveLength(item.cards)
+      expect(visibleChoices(host), item.name).toHaveLength(item.choices)
+      expect(byClass(host, 'notice-foot'), item.name).toHaveLength(item.foot)
+      expect(failedLines(host), item.name).toHaveLength(0)
+      // 마운트를 새로 해도(부품 상태 초기화) 파일이 옛 모양이면 화면은 서버 진실을 따른다 — 단추가 다시 열린다.
+      await act(async () => root.unmount())
+    })
+  }
+})
+
+/* ── 03b: [자세히] 쉬운 세 줄(사실 칸이 있을 때만) ─────────────────────────── */
+test('사실 칸이 있으면 세 줄 + 칸 주소를 맨 아래에 그리고, 없으면 옛 한 줄이다', () => {
+  const base = one(hortBefore)
+  const three = painted({
+    ...base,
+    items: [{
+      key: 'k1', kind: 'typo', what: '수식을 바로잡았어요', cells: ['9.경비계획!B12'],
+      where: '경비계획 시트의 12번째 줄', current: '값이 두 번 더해져 있었어요',
+      basis: '같은 칸이 합계에 두 번 들어가면 총액이 커져요',
+      how: '합계 범위에서 그 칸을 빼 주세요', whereDetail: '9.경비계획!B12'
+    }]
+  })
+  expect(three).toContain('class="notice-easy"')
+  expect(three).toContain('<p class="w">')
+  expect(three).toContain('<p class="why">')
+  expect(three).toContain('<p class="fix">')
+  expect(three).toContain('<p class="ref">')
+  // 순서 = 무슨 일 → 왜 → 어떻게 → 칸 주소(맨 아래 작게).
+  expect(three.indexOf('class="w"')).toBeLessThan(three.indexOf('class="why"'))
+  expect(three.indexOf('class="why"')).toBeLessThan(three.indexOf('class="fix"'))
+  expect(three.indexOf('class="fix"')).toBeLessThan(three.indexOf('class="ref"'))
+  // 칸 주소는 `whereDetail` 우선 — 없으면 `cells` 로 떨어진다.
+  expect(three).toContain('9.경비계획!B12')
+
+  // 사실이 `where` 하나뿐이면 '왜' 줄을 빼고 두 줄 — 없는 이유를 앱이 지어내지 않는다.
+  const two = painted({ ...base, items: [{ key: 'k2', kind: 'typo', what: 'x', cells: [], where: '어느 자리' }] })
+  expect(two).toContain('class="notice-easy"')
+  expect(two).toContain('<p class="w">어느 자리</p>')
+  expect(two).not.toContain('class="why"')
+  expect(two).not.toContain('class="fix"')
+  // `how` 없이 칸 주소만 있어도 주소는 맨 아래에 남는다.
+  const bare = painted({ ...base, items: [{ key: 'k3', kind: 'typo', what: 'x', cells: [], where: '어느 자리', whereDetail: '4.투자계획!E24' }] })
+  expect(bare).toContain('<p class="ref">4.투자계획!E24</p>')
+  expect(bare).not.toContain('class="fix"')
+
+  // 사실 칸이 전혀 없으면 옛 모양 그대로 — `what · cells` 한 줄.
+  const legacy = painted({ ...base, items: [{ key: 'k4', kind: 'typo', what: '바로잡았어요', cells: ['9.경비계획!B12'] }] })
+  expect(legacy).toContain('class="notice-items"')
+  expect(legacy).not.toContain('class="notice-easy"')
+  expect(legacy).toContain('바로잡았어요 · 9.경비계획!B12')
+})
