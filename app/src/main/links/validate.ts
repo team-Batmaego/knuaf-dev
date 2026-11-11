@@ -17,8 +17,26 @@ export type { LinkRejectReason }
 export type LinkCheck = { ok: true; url: string } | { ok: false; reason: LinkRejectReason }
 
 /**
+ * `%2e` 로 적은 점 조각이 경로에 있나 — `/%2e%2e/x` 는 파서가 `..` 로 풀어 **다른 자원**을 연다.
+ * 화면에 보인 주소와 실제 요청의 경로가 달라지므로 받지 않는다(Roh ⑤ [중요]: 보인 그대로 연다).
+ * 나머지 이스케이프(`%26`·`%3D`·`%23`·`%2F`·`%20` 등)는 `href` 에 **바이트 그대로** 남는다.
+ */
+function hasEscapedDotSegment(text: string): boolean {
+  const afterScheme = text.slice(text.indexOf('://') + 3)
+  const slash = afterScheme.search(/[/?#]/)
+  if (slash < 0) return false
+  const path = afterScheme.slice(slash).split(/[?#]/)[0]
+  if (!/%2e/i.test(path)) return false
+  return /(?:^|\/)\.\.?(?:\/|$)/.test(path.replace(/%2e/gi, '.'))
+}
+
+/**
  * 렌더러가 보낸 값 하나를 검사한다. 통과하면 **파서가 정규화한** `href`를 돌려준다
  * (`https://example.com` → `https://example.com/`). 실패는 예외가 아니라 이유다.
+ *
+ * 정규화는 **뜻이 그대로인 것만** 한다(스킴·호스트 소문자, 기본 포트 제거, 앞뒤 공백 제거).
+ * 뜻이 달라지는 것(`%2e` 점 조각)은 정규화하지 않고 거부한다 — 아래 `hasEscapedDotSegment`.
+ * `link.target` 을 렌더러가 이미 디코딩해 보냈다면 그건 호출자 쪽 결함이다(여기서 되돌리지 않는다).
  */
 export function checkExternalLink(input: unknown): LinkCheck {
   if (typeof input !== 'string') return { ok: false, reason: 'empty' }
@@ -34,5 +52,6 @@ export function checkExternalLink(input: unknown): LinkCheck {
   // 실제 목적지가 다르다 — 그런 주소는 열지 않는다.
   if (url.username !== '' || url.password !== '') return { ok: false, reason: 'credentials' }
   if (!url.hostname) return { ok: false, reason: 'malformed' }
+  if (hasEscapedDotSegment(text)) return { ok: false, reason: 'malformed' }
   return { ok: true, url: url.href }
 }

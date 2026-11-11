@@ -110,3 +110,77 @@ test('렌더러: 누르면 주소가 IPC 통로로 그대로 간다(가짜 api, 
   await expect(openChatLink('https://example.com', { open: async () => { throw new Error('ipc gone') } }))
     .resolves.toBe(false)
 })
+
+/* ------------------------------------- Roh ⑤ [중요] 이스케이프를 풀지 않는다 */
+
+/** Roh 반례 그대로 — 검색어 값 안의 이스케이프가 다른 요청으로 바뀌면 안 된다. */
+const ESCAPED = [
+  'https://ex.invalid/s?q=a%26b',
+  'https://ex.invalid/s?q=a%3Db',
+  'https://ex.invalid/s?q=a%23b',
+  'https://ex.invalid/s?q=a%2Fb',
+  'https://ex.invalid/s?q=a%20b',
+  'https://ex.invalid/s?q=a%26b%3Dc%23d%2Fe%20f',
+  'https://ex.invalid/a%2Fb?x=a%26b#f%23g',
+  'https://ex.invalid/s?q=100%25'
+]
+
+test('렌더러: 이스케이프가 든 주소도 단추 안의 글자·title·focusKey 가 원문 그대로다', () => {
+  for (const url of ESCAPED) {
+    const html = painted(`[열기](${url})`)
+    expect(html, `${url} 는 단추다`).toContain('class="lk chat-md-link"')
+    // 화면에 보이는 주소·title·이동 표식이 모두 원문 — 디코딩된 글자가 섞이지 않는다.
+    expect(html, `${url} 주소가 원문 그대로 보인다`).toContain(url)
+    expect(html, `${url} title 도 원문`).toContain(`title="${url}"`)
+    expect(html, `${url} focusKey 도 원문`).toContain(`data-focus-key="chat-url:a1:${url}"`)
+  }
+})
+
+test('그린 단추 → IPC → 열기 직전까지 주소 바이트가 그대로다(%26·%3D·%23·%2F·%20)', async () => {
+  // 사슬을 끊지 않는다: 화면에 그려진 단추가 실제로 들고 있는 주소를 꺼내 그대로 흘려보낸다.
+  // (렌더러에서 디코딩이 끼면 여기서 꺼낸 값부터 이미 달라져 이 시험이 깨진다.)
+  const fromScreen = ESCAPED.map((url) => {
+    const html = painted(`[열기](${url})`)
+    const match = /title="([^"]*)"/.exec(html)
+    expect(match, `${url} 단추가 그려졌다`).not.toBeNull()
+    return match![1]
+  })
+  expect(fromScreen).toEqual(ESCAPED)
+
+  const seen: string[] = []
+  for (const url of fromScreen) {
+    await openChatLink(url, { open: async (u: string) => { seen.push(u); return { result: { opened: true as const } } } })
+  }
+  expect(seen).toEqual(ESCAPED)
+
+  // main 이 `openExternal` 로 넘기는 값 — 파서 정규화 뒤에도 이스케이프가 살아 있어야 한다.
+  const opened: string[] = []
+  const h = handler(async (url) => { opened.push(url) })
+  for (const url of seen) {
+    await expect(h.invoke(url), `${url} 는 열린다`).resolves.toEqual({ result: { opened: true } })
+  }
+  expect(opened).toEqual(ESCAPED)
+})
+
+test('main: %2e 로 적은 점 조각은 다른 자원을 열므로 거부한다(보인 경로 = 요청 경로)', () => {
+  // `/a/%2e%2e/b` 는 파서가 `/b` 로 풀어 **다른 자원**을 연다 — 화면에 보인 것과 달라진다.
+  expect(checkExternalLink('https://ex.invalid/a/%2e%2e/b')).toEqual({ ok: false, reason: 'malformed' })
+  expect(checkExternalLink('https://ex.invalid/a/%2E%2E/b')).toEqual({ ok: false, reason: 'malformed' })
+  expect(checkExternalLink('https://ex.invalid/%2e/b')).toEqual({ ok: false, reason: 'malformed' })
+  // 그 밖의 이스케이프는 뜻이 그대로이므로 통과하고 바이트도 그대로다.
+  for (const url of ESCAPED) {
+    const check = checkExternalLink(url)
+    expect(check.ok, `${url} 는 허용`).toBe(true)
+    expect(check.ok && check.url, `${url} 는 바이트 그대로`).toBe(url)
+  }
+})
+
+test('렌더러: 디코딩으로 숨은 스킴이 드러나 단추가 되지 않는다', () => {
+  // `https%3A%2F%2Fevil…` 는 디코딩하면 `https://evil…` 이 된다 — 원문 기준이면 스킴이 없다.
+  const hidden = 'https%3A%2F%2Fevil.invalid%2Fx'
+  const html = painted(`[a](${hidden})`)
+  expect(html, '숨은 스킴은 단추가 아니다').not.toContain('<button')
+  expect(html).toContain('a')
+  // 디코딩된 주소가 화면 어디에도 나타나지 않는다.
+  expect(html).not.toContain('https://evil.invalid')
+})

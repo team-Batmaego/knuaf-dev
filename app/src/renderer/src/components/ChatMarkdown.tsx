@@ -86,12 +86,18 @@ function isAbsolutePath(path: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|[/\\])/.test(path)
 }
 
+/**
+ * `%20` 같은 이스케이프를 되돌린다 — **파일 경로에만** 쓴다(마크다운 경로는 흔히 `%20` 으로 적힌다).
+ * 주소(http/https)에는 **쓰지 않는다**: 디코딩은 `%26`→`&`·`%23`→`#` 처럼 주소의 뜻을 바꿔,
+ * 보인 주소와 실제 요청이 달라진다(Roh ⑤ [중요]). 주소는 원문 그대로 쓰고 판정도 원문 기준이다.
+ */
 function decoded(target: string): string {
   try { return decodeURIComponent(target) } catch { return target }
 }
 
 /** 프로젝트 안 절대경로만 상대경로로 바꾼다. 밖으로 빠지는 `..` 경로는 그대로 둔다. */
 function relativeProjectPath(target: string, root: string | null): string | null {
+  // 경로는 사람이 `%20`·`%ED%95%9C` 로 적어도 실제 파일 이름으로 찾아야 하므로 여기서만 되돌린다.
   const text = decoded(target)
   if (!isAbsolutePath(text)) return INSIDE_PATH.test(text) ? text : null
   if (!root) return null
@@ -154,9 +160,13 @@ function linkTextNode(link: ParsedLink, ctx: Context, key: string): ReactNode {
       onClick: () => ctx.onFile?.(relative)
     }, label)
   }
-  const target = decoded(link.target)
+  // 주소는 **원문 그대로** 쓴다 — 판정·표시·열기가 모두 같은 문자열이어야 한다(Roh ⑤ [중요]).
+  // 여기서 `decoded()` 를 거치면 `%26`→`&`·`%23`→`#`·`%2F`→`/` 로 바뀌어, 화면에 보인 주소와
+  // 실제로 나가는 요청이 달라진다(검색어 하나가 쿼리 항목 둘로 갈라지는 그 반례).
+  // `https%3A%2F%2Fevil…` 처럼 숨은 스킴이 디코딩으로 드러나 단추가 되던 것도 함께 막힌다.
+  const target = link.target
   if (!/^https?:\/\//i.test(target)) return null
-  // 주소는 그대로 보이게 둔다(글자 + 주소). 실제 목적지·안전성 판정은 main 이 다시 한다.
+  // 실제 목적지·안전성 판정은 main 이 다시 한다(그때도 디코딩하지 않는다 — `main/links/validate.ts`).
   // 덩어리 키는 **그릴 때** 붙잡는다 — 누른 뒤에는 ctx 가 이미 다음 덩어리를 그리고 있다.
   const blockKey = ctx.blockKey
   return createElement(LinkButton, {

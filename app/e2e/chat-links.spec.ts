@@ -189,3 +189,51 @@ test('http(s) 단추: 누르면 기본 브라우저로 넘기고, 앱이 열지 
     await electronApp.close()
   }
 })
+
+test('이스케이프가 든 주소: 화면에 보인 글자 그대로 브라우저에 넘어간다(Roh ⑤ [중요])', async () => {
+  const root = synthProject()
+  // `%26` 이 `&` 로 풀리면 검색어 하나가 쿼리 항목 둘로 갈라진다 — 실제 요청이 달라진다.
+  const escaped = 'https://example.invalid/s?q=a%26b%3Dc%23d%2Fe%20f'
+  seedChat(root, `[검색 결과](${escaped}) 를 보세요.`)
+  const log = callLog()
+
+  const { electronApp, page } = await launch()
+  try {
+    await spyOpenExternal(electronApp, log)
+    await openProject(page, root)
+    await page.waitForSelector('.chat-pane', { timeout: 30_000 })
+    const link = page.getByRole('button', { name: '검색 결과' })
+    await expect(link, '이스케이프가 든 주소도 단추다').toBeVisible({ timeout: 30_000 })
+    // 화면에 보이는 주소 자체가 원문이다(디코딩된 `&`·`#` 가 섞이지 않는다).
+    await expect(link).toHaveAttribute('title', escaped)
+
+    await link.click()
+    // main 의 `new URL().href` 를 거친 뒤에도 **바이트가 그대로**여야 한다.
+    await expect.poll(() => shellCalls(log)).toEqual([`open-external\t${escaped}`])
+    // 브라우저에 넘어간 주소에 디코딩 흔적이 없다.
+    expect(shellCalls(log)[0]).not.toContain('&b=c')
+    await expect(page.locator('.chat-md-link-fail'), '열렸으므로 실패 안내는 없다').toHaveCount(0)
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('디코딩으로만 http(s) 가 되는 주소는 단추가 아니다(숨은 스킴)', async () => {
+  const root = synthProject()
+  // 원문에는 스킴이 없다 — 디코딩하면 `https://evil.invalid/x` 가 된다.
+  seedChat(root, '[평범해 보이는 글자](https%3A%2F%2Fevil.invalid%2Fx) 입니다.')
+  const log = callLog()
+
+  const { electronApp, page } = await launch()
+  try {
+    await spyOpenExternal(electronApp, log)
+    await openProject(page, root)
+    await page.waitForSelector('.chat-pane', { timeout: 30_000 })
+    await expect(page.locator('.chat-md-link'), '누를 수 있는 단추가 없다').toHaveCount(0)
+    // 감추지도 않는다 — 원문이 그대로 글자로 보인다.
+    await expect(page.locator('.chat-msg.assistant .prose').first()).toContainText('https%3A%2F%2Fevil.invalid%2Fx')
+    expect(shellCalls(log), '브라우저를 부르지 않는다').toEqual([])
+  } finally {
+    await electronApp.close()
+  }
+})
