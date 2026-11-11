@@ -24,6 +24,8 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
   const [slow, setSlow] = useState(false)
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(false)
+  /** 학생 인용만의 펼침 — 읽기 범위 [자세히]와 다른 단추다(설계 §3 뼈대 2, 검토 C2-C09). */
+  const [quoteOpen, setQuoteOpen] = useState(false)
   const folded = useRef<HTMLButtonElement>(null)
   const state = card.state
   const settled = state.kind !== 'open' && state.kind !== 'applying'
@@ -49,6 +51,10 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
   const busy = state.kind === 'applying' || (pressed !== null && !settled)
   /** §3-1 뼈대 4 — 적용 범위 한 줄. 설정 갈래는 [계속]만이라 문구가 다르다. */
   const scope = settings ? LANE_CARD.scopeSettings : LANE_CARD.scope(first)
+  /** 뼈대 2 — 인용은 40자에서 줄이고 [전체 보기]로 연다(툴팁 아님). */
+  const quoteText = (card.quote ?? '').replace(/\s+/g, ' ').trim()
+  const quoteClipped = clip(quoteText, 40)
+  const quoteLong = quoteText.length > 0 && quoteClipped !== quoteText
 
   if (settled) {
     return (
@@ -101,7 +107,16 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
       <h3 id={`lane-card-title-${card.cardId}`}>{LANE_CARD.title[card.variant]}</h3>
       {card.variant === 'first' && <p className="lead">{LANE_CARD.firstLead}</p>}
       {card.reviewDue && <p className="lead">{LANE_CARD.reviewDue}</p>}
-      {card.quote && <p className="quote">{LANE_CARD.quote(card.quote)}</p>}
+      {card.quote && (
+        <p className="quote">
+          {quoteOpen ? LANE_CARD.quote(card.quote) : LANE_CARD.quote(quoteClipped)}
+          {quoteLong && (
+            <button type="button" className="lk" aria-expanded={quoteOpen} onClick={() => setQuoteOpen(!quoteOpen)}>
+              {quoteOpen ? LANE_CARD.quoteLess : LANE_CARD.quoteMore}
+            </button>
+          )}
+        </p>
+      )}
       <CardBody card={card} detail={detail} setDetail={setDetail} />
       {card.fastDrain && <p className="scope">ⓘ {LANE_CARD.fastDrain}</p>}
       <div className="lane-actions">

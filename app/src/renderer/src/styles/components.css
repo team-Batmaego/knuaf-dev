@@ -697,6 +697,8 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .lane-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
 .lane-card .lead { margin: 0 0 10px; color: var(--ink-2); font-size: 13.5px; }
 .lane-card .quote { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+/* 인용 [전체 보기] — 읽기 범위 [자세히]와 다른 단추이고 같은 작은 크기를 쓴다(검토 C2-C09). */
+.lane-card .quote .lk { margin-left: 4px; font-size: 12.5px; white-space: nowrap; }
 .lane-dl { display: grid; grid-template-columns: 84px 1fr; gap: 6px 12px; margin: 0 0 10px; }
 .lane-dl dt { color: var(--muted); font-size: 13.5px; }
 .lane-dl dd { margin: 0; font-size: 14px; }
