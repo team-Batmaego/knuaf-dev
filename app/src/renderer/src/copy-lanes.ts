@@ -1,4 +1,4 @@
-import { MODEL_PICKER, PROVIDER_NAME, objectParticle } from './copy'
+import { MODEL_PICKER, PROVIDER_NAME } from './copy'
 import { WORK_LANES, type Provider, type WorkLane } from '../../shared/chat'
 import type { CardVariant, JobStatus, ModelRef } from '../../shared/lanes-ipc'
 
@@ -86,18 +86,69 @@ export function minutesSince(iso: string | null | undefined, now: number): numbe
 }
 
 /**
- * 주격 조사 `이/가` — 로마자 이름은 마지막 글자로 정한다.
- * (Sol·Sonnet → 이, Astra·Terra·Luna·Opus·Haiku → 가). 고정 목록 밖은 모음 끝이면 가.
+ * 조사는 **소리**가 정한다 — 글자 모양이 아니라. 그래서 한글 음절·숫자·이 제품에 나오는
+ * 영문 이름만 판정하고, 모르는 영문 낱말은 `null`(판정 불가)로 둔다.
+ * (검토 C2-C08: `objectParticle` 은 마지막 한글 음절만 보고, 옛 `subjectParticle` 은 끝 로마자만 봤다.)
  */
-const PARTICLE: Record<string, '이' | '가'> = {
-  Sol: '이', Sonnet: '이', Astra: '가', Terra: '가', Luna: '가', Opus: '가', Haiku: '가'
+const CLOSING = /[\s)\]}>"'”’」』】.,!?…·:;]+$/
+
+/** 숫자 읽기 받침 — 영·일·삼·육·칠·팔은 있고 이·사·오·구는 없다(21 → 일, 24 → 사). */
+const DIGIT: Record<string, boolean> = {
+  '0': true,
+  '1': true,
+  '2': false,
+  '3': true,
+  '4': false,
+  '5': false,
+  '6': true,
+  '7': true,
+  '8': true,
+  '9': false
 }
 
+/** 제품에 나오는 영문 이름의 한국어 읽기 받침 — 솔·소넷·챗만 있고 나머지는 없다. */
+const LATIN: Record<string, boolean> = {
+  chatgpt: false,
+  claude: false,
+  codex: false,
+  gemini: false,
+  sol: true,
+  sonnet: true,
+  astra: false,
+  terra: false,
+  luna: false,
+  opus: false,
+  haiku: false,
+  data: false,
+  chat: true
+}
+
+/**
+ * 마지막 글자에 받침이 있는가 — 없으면 `false`, 판정할 수 없으면 `null`.
+ * 닫는 괄호·따옴표·줄임표는 조사를 정하지 않으므로 **안쪽** 마지막 글자를 본다
+ * (`초안(수정본)` → `본` → 받침 있음).
+ */
+function finalConsonant(word: string): boolean | null {
+  const bare = word.trim().replace(CLOSING, '')
+  const last = bare.slice(-1)
+  if (!last) return null
+  const code = last.charCodeAt(0)
+  if (code >= 0xac00 && code <= 0xd7a3) return (code - 0xac00) % 28 > 0
+  if (DIGIT[last] !== undefined) return DIGIT[last]
+  const latin = bare.toLowerCase().match(/[a-z]+$/)
+  if (latin) return LATIN[latin[0]] ?? null
+  return null
+}
+
+/**
+ * 주격 조사 `이/가`. 회사·모델 이름에만 쓴다 — 모르는 영문은 옛 규칙(모음 끝이면 `가`)으로
+ * 남긴다. 임의의 학생 글에는 쓰지 않는다(`objectOf`).
+ */
 export function subjectParticle(name: string): '이' | '가' {
-  // "Claude Opus"·"ChatGPT Astra" 처럼 회사 이름이 앞에 붙는다 — 조사는 **끝 낱말**이 정한다.
+  // "ChatGPT Sol" 처럼 회사 이름이 앞에 붙어도 조사는 **끝 낱말**이 정한다.
   const word = name.trim().split(/\s+/).pop() ?? ''
-  const fixed = PARTICLE[word]
-  if (fixed) return fixed
+  const consonant = finalConsonant(word)
+  if (consonant !== null) return consonant ? '이' : '가'
   const last = word.slice(-1).toLowerCase()
   if (!last) return '가'
   return 'aeiou'.includes(last) ? '가' : '이'
@@ -109,11 +160,25 @@ export function subjectOf(name: string): string {
 }
 
 /**
- * 보조사 `은/는` — 받침 판정은 `copy.ts` 의 `objectParticle` 과 같은 규칙이라 그 결과를 뒤집어 쓴다.
- * "반복 작업"처럼 받침으로 끝나는 이름에 `는` 을 붙이면 "작업는"이 된다.
+ * 목적격 `을/를` — 판정할 수 없는 끝(모르는 영문 낱말)에는 **조사를 붙이지 않는다**(`''`).
+ * 틀린 조사를 찍는 대신 `“plan” 끝내 도우미에게 넘겼어요`처럼 조사 없이 읽히게 한다.
+ * 학생이 쓴 임의의 요약이 오는 자리는 여기뿐이다(`delivered`).
  */
-export function topicParticle(word: string): '은' | '는' {
-  return objectParticle(word) === '을' ? '은' : '는'
+export function objectOf(word: string): string {
+  const consonant = finalConsonant(word)
+  if (consonant === null) return ''
+  return consonant ? '을' : '를'
+}
+
+/**
+ * 보조사 `은/는` — 같은 판정을 뒤집어 쓴다. "반복 작업"처럼 받침으로 끝나면 "작업는"이 되므로
+ * 글자 모양이 아니라 소리로 고른다(`Sol` → 솔 → `Sol은`).
+ */
+export function topicParticle(word: string): '은' | '는' | '' {
+  if (!word.trim()) return ''
+  const consonant = finalConsonant(word)
+  if (consonant === null) return ''
+  return consonant ? '은' : '는'
 }
 
 export function clip(text: string, max = 40): string {
@@ -254,9 +319,10 @@ export const LANE_SAY = {
 export const LANE_EVENT = {
   delivered: (lane: string, by: string, task: string) => {
     const text = clip(task)
-    return `${lane} 담당(${by})이 “${text}”${objectParticle(text)} 끝내 도우미에게 넘겼어요`
+    // 학생이 쓴 임의의 요약에는 조사를 찍지 않는다 — 판정 못 하는 끝이면 조사만 빠진다(C08).
+    return `${lane} 담당(${by})이 “${text}”${objectOf(text)} 끝내 도우미에게 넘겼어요`
   },
-  continued: (lane: string, by: string) => `${lane}${objectParticle(lane)} ${subjectOf(by)} 이어 받아 끝내 도우미에게 넘겼어요`,
+  continued: (lane: string, by: string) => `${lane}${objectOf(lane)} ${subjectOf(by)} 이어 받아 끝내 도우미에게 넘겼어요`,
   notRun: (lane: string, reason: 'limit' | 'auth' | 'unknown' | 'error') => {
     const word = reason === 'limit' ? '한도' : reason === 'auth' ? '로그인' : reason === 'unknown' ? '사용량 모름' : '오류'
     return `${lane} 담당이 하지 못했어요(${word}) — 도우미에게 알렸어요`

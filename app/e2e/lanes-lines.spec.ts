@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test'
 import type { JobDetail, LaneEvent, LaneLine } from '../src/shared/lanes-ipc'
-import { eventView, lineView, sayText, stopLabel, tierGroups } from '../src/renderer/src/laneLines'
+import { appliedText, entryText, eventView, isDirect, lineView, sayText, stopLabel, tierGroups } from '../src/renderer/src/laneLines'
 import {
+  LANE_CARD,
   LANE_EVENT,
   LANE_LINE,
   LANE_NAME,
@@ -13,8 +14,10 @@ import {
   depthName,
   modelLabel,
   modelName,
+  objectOf,
   subjectParticle,
-  subjectOf
+  subjectOf,
+  topicParticle
 } from '../src/renderer/src/copy-lanes'
 
 /**
@@ -267,11 +270,27 @@ test('이름·조사·자르기 — 표 밖 이름도 읽을 수 있게', () => 
   expect(subjectOf('ChatGPT Sol')).toBe('ChatGPT Sol이')
   expect(subjectOf('Claude Opus')).toBe('Claude Opus가')
 
+  // C08 반례 — 괄호·숫자·영문 끝에서 옛 규칙이 틀린 조사를 찍었다.
+  expect(subjectOf('Astra(아스트라)')).toBe('Astra(아스트라)가')
+  expect(subjectOf('2')).toBe('2가')
+  expect(objectOf('plan')).toBe('')
+  expect(objectOf('1')).toBe('을')
+  expect(objectOf('초안(수정본)')).toBe('을')
+  expect(objectOf('감초 도매·소매 가격 조사')).toBe('를')
+  expect(topicParticle('Sol')).toBe('은')
+  expect(topicParticle('자료 찾기')).toBe('는')
+  expect(topicParticle('반복 작업')).toBe('은')
+
   // 목적격·보조사는 한글 받침으로 고른다 — "조사"는 받침이 없어 `를`, "작업"은 있어 `은`.
   expect(LANE_EVENT.delivered('자료 찾기', 'ChatGPT Astra', '감초 도매·소매 가격 조사'))
     .toBe('자료 찾기 담당(ChatGPT Astra)이 “감초 도매·소매 가격 조사”를 끝내 도우미에게 넘겼어요')
   expect(LANE_EVENT.delivered('글쓰기', 'ChatGPT Sol', '3장 초안'))
     .toBe('글쓰기 담당(ChatGPT Sol)이 “3장 초안”을 끝내 도우미에게 넘겼어요')
+  // 판정할 수 없는 영문 끝에는 조사를 붙이지 않는다 — 틀린 조사보다 조사 없음이 낫다.
+  expect(LANE_EVENT.delivered('자료 찾기', 'ChatGPT Astra', 'draft plan'))
+    .toBe('자료 찾기 담당(ChatGPT Astra)이 “draft plan” 끝내 도우미에게 넘겼어요')
+  expect(LANE_EVENT.delivered('자료 찾기', 'ChatGPT Astra', '1'))
+    .toBe('자료 찾기 담당(ChatGPT Astra)이 “1”을 끝내 도우미에게 넘겼어요')
   expect(LANE_LINE.limitOfferFoot('자료 찾기')).toBe('나중에: 이번 자료 찾기는 건너뛰어요')
   expect(LANE_LINE.limitOfferFoot('반복 작업')).toBe('나중에: 이번 반복 작업은 건너뛰어요')
   expect(LANE_EVENT.handoffEnd('ChatGPT Sol')).toBe('한도로 멈췄어요 — ChatGPT Sol이 이어 받았어요')
