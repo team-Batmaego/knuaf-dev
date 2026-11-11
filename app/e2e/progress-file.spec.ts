@@ -7,7 +7,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { linkSync, mkdirSync, mkdtempSync, readSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, lstatSync, mkdirSync, mkdtempSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -318,73 +318,139 @@ function readBoundedForTest(fd: number): string | null {
 }
 
 /**
- * Roh 반례 그대로: 확인과 열기 **사이**에 논문 폴더를 바꿔 치고, 열린 직후 되돌린다.
- * 옛 구조(읽은 뒤 검사)는 폴더 밖 260바이트를 **실제로 읽고서** 버렸다 — 값은 안 샜지만
- * "폴더 밖 내용을 한 바이트도 읽지 않음" 기준을 못 채웠다(Roh 2회째 [차단]).
- * 지금은 신원 확인이 read **앞**이므로 읽기 함수가 한 번도 불리지 않아야 한다.
+ * 책임자 지적의 ABA 순서를 그대로 재현한다. 옛 구조는 이 순서에 뚫렸다:
+ *   ⓪ 조상 폴더를 바깥으로 바꿔치기 ① open(fd = 바깥 파일) ② `lstat(경로)`도 바뀐 상태라
+ *   fd와 일치 ③ 원복 ④ `realpath`·root 신원 재확인도 원래대로라 통과 ⑤ 바깥 바이트 read.
+ * 지금은 **폴더 객체를 붙잡아**(chdir) 열기·검사·읽기가 모두 그 안에서만 일어나므로, 조상이
+ * 무엇으로 바뀌든 ①의 open이 바깥을 가리킬 수 없다. 기준은 `reads === 0`이 아니라
+ * **`reads === 0`이고 값이 바깥 것이 아님**이다 — 붙잡은 폴더가 정상이면 읽어도 안전하다.
  * 폴더 이름 바꾸기는 POSIX에서만 안전하다(윈도우는 열린 파일이 든 폴더 이름을 못 바꾼다).
  */
 test('F10 확인↔열기 사이 폴더 교체 — 폴더 밖 값을 읽지도 않는다(읽기 0회)', () => {
   test.skip(process.platform === 'win32', '폴더 이름 바꾸기 반례는 POSIX 시험')
   const root = scratch()
   const outside = scratch()
+  /** 읽기 전 옮긴 cwd가 끝나고 원래대로 돌아오는지 단언할 기준값. */
+  const originalCwd = process.cwd()
   try {
     const secret = join(outside, 'secret.json')
-    writeFileSync(secret, JSON.stringify(fileJson({
-      revision: 77,
-      next: 'OUTSIDE_SECRET_20261111'.repeat(12)
-    })))
+    const outsidePayload = fileJson({ revision: 77, next: 'OUTSIDE_SECRET_20261111'.repeat(12) })
+    writeFileSync(secret, JSON.stringify(outsidePayload))
+
+    /** 조상을 바꿔치기하고(되돌리지 않은 채) 바깥 값을 심는다 — 반례를 만드는 기본 동작. */
+    const swapAncestor = (): string => {
+      const moved = `${root}.real`
+      renameSync(root, moved)
+      mkdirSync(root)
+      // 링크가 아니라 **복사본**을 둔다 — O_NOFOLLOW로 걸리지 않는 가장 센 반례.
+      writeFileSync(join(root, PROGRESS_FILE_NAME), JSON.stringify(outsidePayload))
+      return moved
+    }
 
     /**
-     * 바꿔 치는 동안 읽기 함수 호출을 센다. `restoreAfterOpen`이면 열린 직후 원래 폴더로
-     * 되돌린다(Roh 원문 반례) — 경로상으로는 멀쩡해 보이는 가장 센 경우다.
+     * 바꿔치기했다가 **곧바로 원복**하는 변형(ABA — 경로 문자열이 같아진다).
+     * 읽기 호출 횟수를 세고, 읽는 동안의 cwd도 남긴다(cwd 고정 단언용).
      */
-    const attempt = (restoreAfterOpen: boolean): { result: ProgressFile | null; reads: number } => {
+    const attempt = (
+      when: 'beforeChdir' | 'beforeOpen' | 'afterOpen'
+    ): { result: ProgressFile | null; reads: number; cwdDuringRead: string | null } => {
       writeFile(root, fileJson({ revision: 1 }))
-      const moved = `${root}.moved`
       let reads = 0
-      const countRead = (fd: number): string | null => {
-        reads += 1
-        return readBoundedForTest(fd)
-      }
-      const result = readProgressFile(root, {
-        beforeOpen: (path) => {
-          renameSync(root, moved)
-          mkdirSync(root)
-          // 링크가 아니라 **복사본**을 둔다 — O_NOFOLLOW로 걸리지 않는 가장 센 반례.
-          writeFileSync(path, JSON.stringify(fileJson({ revision: 77 })))
-        },
-        afterOpen: restoreAfterOpen
-          ? () => {
-            rmSync(root, { recursive: true, force: true })
-            renameSync(moved, root)
-          }
-          : undefined,
-        read: countRead
-      })
-      if (restoreAfterOpen) {
-        // 이미 되돌렸다 — 정리만 남는다.
-      } else {
+      let cwdDuringRead: string | null = null
+      const swapAndUndo = (): void => {
+        const moved = swapAncestor()
         rmSync(root, { recursive: true, force: true })
         renameSync(moved, root)
       }
-      return { result, reads }
+
+      const result = readProgressFile(root, {
+        beforeChdir: when === 'beforeChdir' ? swapAndUndo : undefined,
+        beforeOpen: when === 'beforeOpen' ? swapAndUndo : undefined,
+        afterOpen: when === 'afterOpen' ? swapAndUndo : undefined,
+        read: (fd) => {
+          reads += 1
+          cwdDuringRead = process.cwd()
+          return readBoundedForTest(fd)
+        }
+      })
+      return { result, reads, cwdDuringRead }
     }
 
-    // ① 바꾼 폴더를 **그대로 둔 채** — 폴더 신원이 달라 걸리고, 읽기는 0회.
-    const kept = attempt(false)
-    expect(kept.result, '폴더를 바꾼 채로는 값이 없다').toBeNull()
-    expect(kept.reads, '폴더 밖 파일은 한 바이트도 읽지 않는다').toBe(0)
+    /** 원복하지 않은 변형 — swap 결과를 정리해야 한다. */
+    const attemptKeptSwap = (
+      when: 'beforeChdir' | 'beforeOpen' | 'afterOpen'
+    ): { result: ProgressFile | null; reads: number; cwdAfter: string } => {
+      writeFile(root, fileJson({ revision: 1 }))
+      let reads = 0
+      let moved: string | null = null
+      const swap = (): void => {
+        moved = swapAncestor()
+      }
+      const result = readProgressFile(root, {
+        beforeChdir: when === 'beforeChdir' ? swap : undefined,
+        beforeOpen: when === 'beforeOpen' ? swap : undefined,
+        afterOpen: when === 'afterOpen' ? swap : undefined,
+        read: (fd) => { reads += 1; return readBoundedForTest(fd) }
+      })
+      if (moved !== null) {
+        rmSync(root, { recursive: true, force: true })
+        renameSync(moved, root)
+      }
+      return { result, reads, cwdAfter: process.cwd() }
+    }
 
-    // ② 열린 직후 원래 폴더를 되돌린다 — fd↔경로 신원이 달라 걸리고, 읽기는 0회.
-    const restored = attempt(true)
-    expect(restored.result, '열린 직후 원복해도 값이 없다').toBeNull()
-    expect(restored.reads, '원복 경우에도 읽지 않는다').toBe(0)
+    // ① chdir **전** 조상 교체(그대로 둠) — chdir이 바뀐 곳으로 들어가므로 `lstat('.')` 대조에서 걸린다.
+    const chdirKept = attemptKeptSwap('beforeChdir')
+    expect(chdirKept.result, 'chdir 전 교체(유지): 값이 없다').toBeNull()
+    expect(chdirKept.reads, 'chdir 전 교체(유지): 읽기 0회').toBe(0)
+    expect(chdirKept.cwdAfter, 'cwd는 원래대로 돌아온다').toBe(originalCwd)
 
-    // 원래 파일은 멀쩡하다 — 거절이 원본을 망가뜨리지 않는다.
+    // ② chdir **전** 교체 후 곧바로 원복 — 들어간 폴더는 원래 그 폴더다. 정상 값을 읽는다.
+    const chdirRestored = attempt('beforeChdir')
+    expect(chdirRestored.result?.revision, 'chdir 전 교체 후 원복: 붙잡은 폴더 값').toBe(1)
+    expect(chdirRestored.reads, '원복 뒤에는 정상 폴더를 읽는다').toBe(1)
+    expect(process.cwd(), 'cwd 원복').toBe(originalCwd)
+
+    // ③ chdir 뒤·열기 전 교체(그대로 둠) — 고정된 cwd 안에서 열리므로 값은 원래 폴더 것이고,
+    //    읽기 직전 경로 재확인이 조상 불일치를 잡아 읽지도 않는다.
+    const beforeOpenKept = attemptKeptSwap('beforeOpen')
+    expect(beforeOpenKept.result, '열기 전 교체(유지): 값이 없다').toBeNull()
+    expect(beforeOpenKept.reads, '열기 전 교체(유지): 읽기 0회').toBe(0)
+    expect(beforeOpenKept.cwdAfter, 'cwd 원복').toBe(originalCwd)
+
+    // ④ **책임자의 ABA 순서**: 열기 전 교체 → 열기 → 검사도 바뀐 상태라 일치 → 원복 → 재확인 통과.
+    //    붙잡은 폴더가 정상이므로 읽는 값은 정상 값이어야 한다(바깥 payload가 절대 아니다).
+    const aba = attempt('beforeOpen')
+    expect(aba.result?.revision, 'ABA: 바깥 값이 아니라 붙잡은 폴더 값').not.toBe(77)
+    expect(aba.cwdDuringRead, '읽는 동안 cwd는 논문 폴더').toBe(realpathSync(root))
+    expect(process.cwd(), 'cwd 원복').toBe(originalCwd)
+
+    // ⑤ 열린 직후 교체(그대로 둠) — 열기·검사·읽기 모두 붙잡은 폴더 안. 바깥 값은 안 나온다.
+    const afterOpenKept = attemptKeptSwap('afterOpen')
+    if (afterOpenKept.result !== null) {
+      expect(afterOpenKept.result.revision, '열린 뒤 교체: 바깥 값이 아니다').not.toBe(77)
+    }
+    expect(afterOpenKept.cwdAfter, 'cwd 원복').toBe(originalCwd)
+
+    // 원래 파일은 멀쩡하다 — 거절·교체가 원본을 망가뜨리지 않는다.
     expect(readProgressFile(root)?.revision).toBe(1)
 
-    // ③ 폴더 대신 파일 자리에 심볼릭 링크 — O_NOFOLLOW가 열기 자체를 막는다.
+    // ⑥ 조상이 감시 시작 뒤 바뀐 경우 — 감시가 기억한 신원과 달라 걸린다(감시 경로).
+    const anchorStat = lstatSync(root)
+    const movedAgain = `${root}.real2`
+    renameSync(root, movedAgain)
+    mkdirSync(root)
+    writeFileSync(join(root, PROGRESS_FILE_NAME), JSON.stringify(outsidePayload))
+    let watchedReads = 0
+    expect(readProgressFile(root, {
+      rootIdentity: { dev: anchorStat.dev, ino: anchorStat.ino },
+      read: (fd) => { watchedReads += 1; return readBoundedForTest(fd) }
+    }), '조상이 바뀌면 감시 쪽 읽기도 거절').toBeNull()
+    expect(watchedReads, '감시 쪽도 읽기 0회').toBe(0)
+    rmSync(root, { recursive: true, force: true })
+    renameSync(movedAgain, root)
+
+    // ⑦ 폴더 대신 파일 자리에 심볼릭 링크 — O_NOFOLLOW가 열기 자체를 막는다.
     rmSync(join(root, PROGRESS_FILE_NAME))
     symlinkSync(secret, join(root, PROGRESS_FILE_NAME))
     let linkReads = 0
@@ -394,7 +460,7 @@ test('F10 확인↔열기 사이 폴더 교체 — 폴더 밖 값을 읽지도 �
     expect(linked).toBeNull()
     expect(linkReads, '심볼릭 링크도 읽지 않는다').toBe(0)
 
-    // ④ 폴더 밖 파일로의 **하드 링크** — 이름이 둘이므로(nlink > 1) 읽지 않고 거절.
+    // ⑧ 폴더 밖 파일로의 **하드 링크** — 이름이 둘이므로(nlink > 1) 읽지 않고 거절.
     rmSync(join(root, PROGRESS_FILE_NAME))
     const hard = join(outside, 'hard.json')
     writeFileSync(hard, JSON.stringify(fileJson({ revision: 78 })))
@@ -410,7 +476,9 @@ test('F10 확인↔열기 사이 폴더 교체 — 폴더 밖 값을 읽지도 �
     }
   } finally {
     rmSync(root, { recursive: true, force: true })
-    rmSync(`${root}.moved`, { recursive: true, force: true })
+    for (const suffix of ['.real', '.real2', '.moved']) {
+      rmSync(`${root}${suffix}`, { recursive: true, force: true })
+    }
     rmSync(outside, { recursive: true, force: true })
   }
 })
