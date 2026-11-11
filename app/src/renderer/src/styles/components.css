@@ -56,7 +56,8 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .project-remove { border: 0; background: transparent; color: var(--muted); padding: 6px; }
 .project-drawer-toggle, .project-drawer-backdrop { display: none; }
 .new-chat { flex: 1; width: min(760px, 100%); min-height: 0; margin: 0 auto; padding: 12vh 24px 24px; overflow-y: auto; }
-.new-chat h1 { font-family: var(--serif); text-align: center; }
+/* 인앱 화면 글꼴은 Pretendard 하나다(설계 SUR-04). 신명조는 논문 종이(`.paperpane .sheet`)에만. */
+.new-chat h1 { font-family: var(--font); text-align: center; }
 .new-chat > p { text-align: center; color: var(--muted); }
 .new-chat .chat-composer { margin-top: 24px; }
 .first-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
@@ -165,7 +166,8 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .pop-row .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-row .c b { font-weight: 600; }
 .pop-row .c small { color: var(--muted); font-size: 12.5px; }
-.pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--serif); text-align: center; }
+/* 단계 번호·보관 번호 같은 인앱 목록 낱말도 Pretendard 다(신명조는 논문 종이에만). */
+.pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--font); text-align: center; }
 .pop-sep { height: var(--hairline); background: var(--line); margin: 6px 4px; }
 .pop-empty { padding: 6px 10px 10px; }
 .pop-make { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; }
