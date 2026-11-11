@@ -4,6 +4,9 @@ import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 
 const APP_BRANCH = /^app-channel-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/
+// Node's default stdout buffer is 1 MiB and a paginated pull-request list can exceed it; the limit
+// is a single constant so diagnostics always print the value in force.
+export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 const CHANNEL_HEADS = name => name === 'skill-channel-update' || name.startsWith('app-channel-')
 
 export function assertNoPendingChannelUpdates(openPullRequests, branchComparisons) {
@@ -17,15 +20,26 @@ export function assertNoPendingChannelUpdates(openPullRequests, branchComparison
   }
 }
 
-function run(command, args) {
-  return execFileSync(command, args, { encoding: 'utf8' }).trim()
+export function run(command, args, label) {
+  try {
+    return execFileSync(command, args, { encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES }).trim()
+  } catch (error) {
+    if (!label) throw error
+    // ENOBUFS here means the limit, not a GitHub failure; name the branch, the command and the
+    // configured limit so the fix is a one-line change and the next failure is self-describing.
+    const reason = error instanceof Error ? error.message : String(error)
+    const limit = `${MAX_OUTPUT_BYTES / 1024 / 1024} MiB`
+    throw new Error(`${label} failed while running \`${command} ${args.join(' ')}\` ` +
+      `(maxBuffer ${limit}): ${reason}`)
+  }
 }
 
 function main() {
   const repository = process.env.GITHUB_REPOSITORY
   if (!repository || !process.env.GH_TOKEN) throw new Error('GitHub repository context is required')
 
-  const pages = JSON.parse(run('gh', ['api', '--paginate', '--slurp', `repos/${repository}/pulls?state=open&per_page=100`]))
+  const pages = JSON.parse(run('gh', ['api', '--paginate', '--slurp', `repos/${repository}/pulls?state=open&per_page=100`],
+    'Open pull request list'))
   const pullRequests = pages.flat().map(pr => pr.head?.ref).filter(name => typeof name === 'string')
   if (process.env.GITHUB_EVENT_NAME === 'schedule' && pullRequests.some(CHANNEL_HEADS)) {
     appendFileSync(process.env.GITHUB_OUTPUT, 'skip=true\n')
@@ -42,7 +56,8 @@ function main() {
     const [sha, ref] = line.split('\t')
     const name = ref?.replace(/^refs\/heads\//, '')
     if (!/^[a-f0-9]{40}$/.test(sha) || !name || !CHANNEL_HEADS(name)) throw new Error('Unexpected channel branch reference; stop for review')
-    const comparison = JSON.parse(run('gh', ['api', `repos/${repository}/compare/${sha}...${mainSha}`]))
+    const comparison = JSON.parse(run('gh', ['api', `repos/${repository}/compare/${sha}...${mainSha}`],
+      `Channel branch comparison for ${name}`))
     return { name, status: comparison.status }
   }) : []
 
