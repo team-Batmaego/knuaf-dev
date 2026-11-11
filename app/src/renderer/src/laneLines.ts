@@ -4,6 +4,7 @@ import type { JobLane } from '../../shared/lanes-ipc'
 import type { ZoneTone } from './components/ZoneLine'
 import {
   JOB_STATUS_NAME,
+  LANE_CARD,
   LANE_EVENT,
   LANE_LINE,
   LANE_NAME,
@@ -11,8 +12,10 @@ import {
   LANE_ACTION,
   LANE_STOP_LABEL,
   clockKo,
+  depthName,
   minutesSince,
   modelLabel,
+  modelName,
   providerName,
   subjectOf
 } from './copy-lanes'
@@ -362,9 +365,42 @@ export function eventView(event: LaneEvent): LaneEventView | null {
 // §3 카드 줄 — 접힌 카드 한 줄
 // =====================================================================================
 
+/** 카드·설정 표가 함께 쓰는 값 모양 — `LaneEntry`·`CardRow` 양쪽이 만족한다. */
+export type LaneTextEntry = {
+  company: 'claude' | 'codex'
+  model: string | null
+  effort: string | null
+  how: 'main' | 'sub' | 'relay'
+}
+
+/**
+ * 도우미가 직접 하는 줄인가 — `how:'main'` 만으로는 부족하다(설계 차선도 `how:'main'` 이면서
+ * 모델이 있다). 회사·모델 없이 본대화가 하는 줄만 여기 해당한다.
+ */
+export function isDirect(entry: { model: string | null; how: 'main' | 'sub' | 'relay' }): boolean {
+  return entry.how === 'main' && entry.model === null
+}
+
+function directOr(entry: LaneTextEntry, value: () => string): string {
+  return isDirect(entry) ? LANE_CARD.direct : value()
+}
+
+/**
+ * 카드 줄·설정 표·[이번만] 줄의 값 — "ChatGPT · Astra · 높게 · 새 대화".
+ * 도우미가 직접 하는 줄은 회사·모델·깊이가 없으므로 `도우미가 직접` 하나다.
+ * `relay`(새 대화에 맡기는 추천 배치)도 새 대화에서 하므로 `sub` 와 같이 적는다(검토 C2-V03).
+ */
+export function entryText(entry: LaneTextEntry): string {
+  return directOr(entry, () => {
+    const parts = [providerName(entry.company), modelName(entry.model) || '기본', depthName(entry.effort)]
+    if (entry.how !== 'main') parts.push('새 대화')
+    return parts.join(' · ')
+  })
+}
+
 /** 적용된 줄을 "자료 찾기 Claude Sonnet"(깊이는 빼고)으로. 접힘 문구는 §3-5 원문. */
-export function appliedText(lane: JobLane | 'design', entry: { company: 'claude' | 'codex'; model: string | null }): string {
-  return `${LANE_NAME[lane]} ${modelLabel(entry)}`
+export function appliedText(lane: JobLane | 'design', entry: LaneTextEntry): string {
+  return `${LANE_NAME[lane]} ${directOr(entry, () => modelLabel(entry))}`
 }
 
 /** 접힌 카드가 "적용 안 함"으로 적을 줄 — `검토(새 대화 규칙)` 꼴. */

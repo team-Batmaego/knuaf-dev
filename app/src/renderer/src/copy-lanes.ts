@@ -365,6 +365,8 @@ export const LANE_CARD = {
   quoteLess: '접기',
   chipref: (recommended: string | null) =>
     `설계는 지금처럼 아래 칩에서 골라요${recommended ? ` — 추천 ${recommended}` : ''}`,
+  /** 도우미가 직접 하는 줄 — 회사·모델·깊이·"새 대화"가 모두 없다(설계 §5 표). */
+  direct: '도우미가 직접',
   /** 읽기 범위 — "…만 읽어요" 금지(설계 §3 뼈대 5). */
   readScope: '맡기면 그 회사의 새 대화가 열려요. 담당은 파일을 읽을 수 있지만 논문 파일을 고치지는 못해요.',
   readScopeDetail:

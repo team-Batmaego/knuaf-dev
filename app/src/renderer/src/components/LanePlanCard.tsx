@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { CardAction, CardInvalidReason, CardRow, LaneCard } from '../../../shared/lanes-ipc'
-import type { LaneEntry } from '../../../shared/lanes'
-import { LANE_CARD, LANE_NAME, depthName, modelLabel, modelName, providerName } from '../copy-lanes'
-import { appliedText, rejectedText } from '../laneLines'
+import { LANE_CARD, LANE_NAME, clip, modelLabel, providerName } from '../copy-lanes'
+import { CHAT } from '../copy'
+import { appliedText, entryText, rejectedText } from '../laneLines'
 import { Icon } from './Icon'
 
 /**
@@ -42,7 +42,11 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
 
   const first = card.variant === 'first' || card.variant === 'settings-enable'
   const settings = card.variant === 'settings-enable' || card.variant === 'settings-revert'
-  const busy = state.kind === 'applying' || (pressed !== null && state.kind === 'open' && !slow)
+  /**
+   * 결과가 확정되기 전에는 승인 단추를 잠근다(설계 §3-5). 10초가 지나 `slow` 가 켜져도 마찬가지다 —
+   * 결과를 모르는 채 다시 누르면 같은 변경을 두 번 요청하게 된다. 복구는 [다시 확인] 하나뿐이다.
+   */
+  const busy = state.kind === 'applying' || (pressed !== null && !settled)
   /** §3-1 뼈대 4 — 적용 범위 한 줄. 설정 갈래는 [계속]만이라 문구가 다르다. */
   const scope = settings ? LANE_CARD.scopeSettings : LANE_CARD.scope(first)
 
@@ -114,7 +118,7 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
         ))}
       </div>
       {busy && <p className="data" role="status">{LANE_CARD.acting}</p>}
-      {slow && state.kind === 'open' && (
+      {slow && (state.kind === 'open' || state.kind === 'applying') && (
         <p className="data" role="alert">
           {LANE_CARD.unknown}{' '}
           <button type="button" className="lk" onClick={() => onStatus(card.cardId)}>{LANE_CARD.recheck}</button>
@@ -132,18 +136,17 @@ function CardBody({ card, detail, setDetail, readOnly = false }: {
   setDetail: (value: boolean) => void
   readOnly?: boolean
 }) {
-  const design = card.rows.find((row) => row.lane === 'design')
-  const rows = card.rows.filter((row) => row.lane !== 'design')
+  const designRow = card.rows.find((row) => row.lane === 'design')
   const missing = card.fees.filter((fee) => !fee.consented)
   const consentedOnly = missing.length === 0 && card.fees.length > 0
   return (
     <>
-      {rows.length > 0 && (
+      {(card.rows.length > 0 || card.variant === 'first') && (
         <dl className="lane-dl">
-          {rows.map((row) => (
+          {card.rows.map((row) => (
             <Fragment key={row.lane}><Row row={row} /></Fragment>
           ))}
-          {(design || card.variant === 'first') && (
+          {card.variant === 'first' && (
             <div className="chipref">
               {LANE_CARD.chipref(card.recommendedDesign ? modelLabel(card.recommendedDesign) : null)}
             </div>
@@ -186,7 +189,7 @@ function CardBody({ card, detail, setDetail, readOnly = false }: {
           ))}
         </div>
       )}
-      {design?.designSwitchTo && <p className="scope">{LANE_CARD.designSwitch(providerName(design.designSwitchTo))}</p>}
+      {designRow?.designSwitchTo && <p className="scope">{LANE_CARD.designSwitch(providerName(designRow.designSwitchTo))}</p>}
     </>
   )
 }
@@ -218,14 +221,6 @@ function Row({ row }: { row: CardRow }) {
       </dd>
     </>
   )
-}
-
-/** "ChatGPT · Astra · 높게" + 새 대화에서 하는 역할이면 "· 새 대화". */
-function entryText(entry: LaneEntry): string {
-  const model = modelName(entry.model) || '기본'
-  const parts = [providerName(entry.company), model, depthName(entry.effort)]
-  if (entry.how === 'sub') parts.push('새 대화')
-  return parts.join(' · ')
 }
 
 /** 접힌 카드 한 줄 — 설계 §3-5 원문. `card.rows` 하나만 읽어 실제로 바뀐 줄을 나열한다(적용 = `rejected === null`). */

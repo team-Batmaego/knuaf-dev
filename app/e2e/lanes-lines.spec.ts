@@ -313,3 +313,33 @@ test('설정 표 문구 — 설계 §5 원문 그대로', () => {
   expect(LANES_SETTINGS.colWhere).toBe('어디서')
   expect(LANES_SETTINGS.consentYes).toBe('동의')
 })
+
+test('C03: 카드 줄 문구 — 직접 맡기기와 새 대화를 실행 방식으로 구별한다', () => {
+  // 설계 차선은 how:'main' 이면서 모델이 있다 — how 만 보면 설계 모델이 사라진다.
+  expect(isDirect({ how: 'main', model: 'claude-opus-4' })).toBe(false)
+  expect(isDirect({ how: 'main', model: null })).toBe(true)
+  expect(isDirect({ how: 'sub', model: null })).toBe(false)
+  expect(isDirect({ how: 'relay', model: null })).toBe(false)
+
+  // 도우미가 직접 하는 줄: 회사·모델·깊이·"새 대화"가 모두 없다(설계 §5 "도우미가 직접 맡아요").
+  const direct = entryText({ company: 'claude', model: null, effort: null, how: 'main' })
+  expect(direct).toBe(LANE_CARD.direct)
+  expect(direct).not.toContain('기본')
+  expect(direct).not.toContain('새 대화')
+
+  expect(entryText({ company: 'codex', model: 'gpt-6.1-astra', effort: 'high', how: 'sub' }))
+    .toBe('ChatGPT · Astra · 높게 · 새 대화')
+  // 추천 배치의 실제 값은 relay 다 — 카드에서도 새 대화로 적어야 표와 어긋나지 않는다(C2-V03).
+  expect(entryText({ company: 'codex', model: 'gpt-6.1-astra', effort: 'high', how: 'relay' }))
+    .toBe('ChatGPT · Astra · 높게 · 새 대화')
+  expect(entryText({ company: 'claude', model: 'claude-opus-4', effort: 'high', how: 'main' }))
+    .toBe('Claude · Opus · 높게')
+  expect(entryText({ company: 'claude', model: null, effort: null, how: 'sub' }))
+    .toBe('Claude · 기본 · 기본 · 새 대화')
+
+  // 접힌 줄도 같은 판정을 쓴다 — "설계 Claude" 처럼 본대화 모델을 잃지 않는다.
+  expect(appliedText('design', { company: 'claude', model: 'claude-opus-4', effort: 'high', how: 'main' }))
+    .toBe('설계 Claude Opus')
+  expect(appliedText('repeat', { company: 'claude', model: null, effort: null, how: 'main' }))
+    .toBe(`반복 작업 ${LANE_CARD.direct}`)
+})
