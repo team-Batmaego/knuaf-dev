@@ -8,6 +8,7 @@ import { expect, test } from '@playwright/test'
 import {
   bodyMask,
   changedSpans,
+  editPreview,
   findPlaces,
   isWordCandidate,
   mergeSameWordPicks,
@@ -155,4 +156,27 @@ test('구분자 경계를 정확히 읽는다 — 긴 백틱 묶음·escape 괄�
   // 짝이 안 맞는 주소도 줄 끝까지 숨긴다(애매하면 안 세는 쪽).
   expect(findPlaces([{ id: 'sec-01', draft: '[자료](https://example.test/(x 트랙터.png' }], '트랙터'))
     .toEqual([])
+})
+
+test('전→후 미리보기는 바뀐 가운데만 남기고 문맥을 자른다', () => {
+  // 낱말 하나만 바뀐 경우 — 앞뒤 문맥은 짧아 그대로 남는다.
+  expect(editPreview('농장A의 재배 면적은 600평이다.', '농장A의 재배 면적은 700평이다.'))
+    .toEqual({ lead: '농장A의 재배 면적은 ', removed: '600', added: '700', trail: '평이다.' })
+  // 바뀐 곳이 없으면 문맥만 남고 바뀐 글은 비어 있다(깨지지 않는다).
+  const same = editPreview('같은 글이다.', '같은 글이다.')
+  expect(same.removed).toBe('')
+  expect(same.added).toBe('')
+  expect(same.lead + same.trail).toBe('같은 글이다.')
+  // 문단 전체가 딴 글이면 문맥이 비고 바뀐 글이 그대로 보인다(앞뒤가 전혀 다름).
+  const whole = editPreview('옛 문단 전체.', '새 문단 전체.')
+  expect(whole.lead).toBe('')
+  expect(whole.removed).toBe('옛')
+  expect(whole.added).toBe('새')
+  expect(whole.trail).toBe(' 문단 전체.')
+  // 긴 문맥은 잘라내고 `…` 로 표시한다.
+  const long = editPreview('가'.repeat(40) + '600' + '나'.repeat(40), '가'.repeat(40) + '700' + '나'.repeat(40))
+  expect(long.lead).toBe('…' + '가'.repeat(12))
+  expect(long.trail).toBe('나'.repeat(12) + '…')
+  expect(long.removed).toBe('600')
+  expect(long.added).toBe('700')
 })

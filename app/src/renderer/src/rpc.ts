@@ -1,4 +1,4 @@
-import type { ArtifactItem, DependencyReport, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -126,6 +126,18 @@ export const rpc = {
   buildTree: (root: string) => call<StageBuildTree>('fs.build_tree', { root }),
   materials: (root: string) => call<MaterialsData>('materials.list', { root }),
   artifacts: (root: string) => call<{ items: ArtifactItem[] }>('artifact.list', { root }),
+  /**
+   * 뷰어 직접 수정(설계 §4-2·§5). `section.edit_undo` 는 v0.6.4에 없다(§4-5-1) — 부르지 않는다.
+   * `section.edit`·`edit_batch` 는 정본을 쓰므로 `WRITE_METHODS` 에 들어 있어야 화면의
+   * "저장·검사를 마치는 중" 한 줄이 걸린다.
+   */
+  editSection: (root: string, params: { id: string; expected_revision: number; expected_draft_hash?: string | null; before_block: string; after_block: string }) =>
+    call<EditResult>('section.edit', { root, ...params }),
+  editBatch: (root: string, params: { expected_revision: number; edits: { section_id: string; before_block: string; after_block: string; expected_draft_hash?: string | null }[] }) =>
+    call<EditResult>('section.edit_batch', { root, ...params }),
+  edits: (root: string) => call<EditList>('section.edits', { root }),
+  editsMark: (root: string, params: { edit_ids?: string[]; state?: 'sent' | 'pending'; turn_done?: boolean; notices_seen?: string[] }) =>
+    call<{ marked: string[]; state: 'sent' | 'pending' | null }>('section.edits_mark', { root, ...params }),
   init: (root: string) => call<{ project: unknown }>('project.init', { root }),
   /** Long-running script; pass a `clientId` from `newClientId()` to be able to `cancel` it. */
   script,

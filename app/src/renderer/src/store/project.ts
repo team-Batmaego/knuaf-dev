@@ -109,6 +109,18 @@ interface ProjectState {
   sections: SectionRow[] | null
   loadSections: () => Promise<void>
   /**
+   * 학생이 직접 고친 절을 **내가 고친 절**로 표시한다(설계 §3-3 정제 3-4).
+   *
+   * 다음 `loadSections` 가 그 절을 '도우미가 바뀐 절'로 세지 않게 한다 — 채팅에
+   * `N곳을 고쳤어요` 줄이 생기지 않는다. 지문을 미리 적어 두는 길(`draftHash`)은 한 절일
+   * 때만 쓸 수 있다: 묶음 저장의 응답 `draft_hash` 는 **첫 절 하나의 지문**이라, 둘째 장부터
+   * 틀린 지문을 적으면 오히려 다음 읽기에서 이벤트 줄이 생긴다. 그래서 묶음은 절 ID 만
+   * 표시하고, 그 절의 새 지문은 다음 읽기가 조용히 받아들인다.
+   *
+   * 메모리에만 남는다(앱을 다시 켜면 처음부터).
+   */
+  noteOwnEdit: (sectionIds: string | string[], draftHash?: string) => void
+  /**
    * 자료·결과물 목록. 종이 머리의 "자료 N · 파일 N"과 팝오버, 그리고 시트가 **같은 것**을
    * 본다 — 화면마다 따로 읽으면 한 곳만 갱신되고 숫자가 어긋난다.
    */
@@ -197,6 +209,12 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  * 앱을 켠 직후 첫 읽기에서는 아무 일도 알리지 않는다.
  */
 let sectionHashes: Record<string, string> | null = null
+/**
+ * 학생이 **방금 직접 고친** 절. 다음 읽기 한 번만 '바뀐 절'에서 뺀다 — 그 절의 새 지문은
+ * 우리가 만든 것이므로 도우미가 쓴 장이 아니다(설계 §3-3). 묶음 저장은 응답이 첫 절의
+ * 지문 하나뿐이라 지문을 미리 적을 수 없다 — 그래서 지문이 아니라 절 ID 로 기억한다.
+ */
+const ownEdited = new Set<string>()
 let sectionRequest = 0
 let listRequest = 0
 /** 읽는 중에 또 읽지 않는다 — 감시 타이머가 사이드카를 겹쳐 띄우지 않게. */
@@ -308,6 +326,16 @@ export const useProject = create<ProjectState>((set, get) => ({
     await get().open(gate.root)
   },
   cancelFirstProjectGate: () => set({ firstProjectGate: null, loading: false }),
+  noteOwnEdit: (sectionIds, draftHash) => {
+    const ids = typeof sectionIds === 'string' ? [sectionIds] : sectionIds
+    if (ids.length === 0) return
+    // 이 절들은 다음 읽기에서 '도우미가 고친 절'이 아니다 — 저장이 일어난 그 순간의 사실이다.
+    for (const id of ids) ownEdited.add(id)
+    // 한 절이고 그 절의 지문을 받았을 때만 미리 적는다(묶음 응답의 지문은 첫 절 것뿐).
+    if (draftHash && ids.length === 1 && sectionHashes !== null) {
+      sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
+    }
+  },
   loadSections: async () => {
     const root = get().root
     if (!root) { set({ sections: null }); return }
@@ -320,7 +348,10 @@ export const useProject = create<ProjectState>((set, get) => ({
       const rows = await rpc.sections(root)
       if (!mine()) return
       const prev = sectionHashes
-      const changed = rows.filter((r) => !prev || prev[r.id] !== r.draft_hash)
+      // 내가 방금 고친 절은 이번 읽기에서 '도우미가 바꾼 절'이 아니다 — 한 번만 건너뛴다.
+      const justMine = new Set(ownEdited)
+      ownEdited.clear()
+      const changed = rows.filter((r) => !justMine.has(r.id) && (!prev || prev[r.id] !== r.draft_hash))
       const events: PaperEvent[] = []
       if (changed.length) {
         const bodies = await rpc.readAllSections(root).catch(() => [])

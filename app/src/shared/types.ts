@@ -56,6 +56,53 @@ export interface LockInfo {
 export interface OwnerCleanup extends LockInfo { owner_cleaned: boolean }
 export interface HistoryRow { revision: number; hash: string; request_id: string | null; snapshot_path: string | null; snapshot_ok: boolean | null; current?: boolean }
 export interface SectionRow { id: string; title: string; order: number; path: string; status: string; revision: number; draft_hash: string; draft_hash_ok: boolean; draft_chars?: number; claims: number | null; error?: string }
+/**
+ * 뷰어 직접 수정 — `section.edits`(설계 §5, §4-5-3).
+ *
+ * `state`: `plain`(가벼운 고침)·`pending`(확인 전)·`sent`(도우미에게 전달됨).
+ * sidecar 는 "확인 끝·맞음"이라고 말하지 않는다 — 앱이 아는 것은 전달과 기계 검사 결과뿐이다.
+ */
+export type EditState = 'plain' | 'pending' | 'sent'
+export interface EditRowEdit { section_id: string; before_block: string; after_block: string }
+export interface EditRow {
+  edit_id: string
+  at: string | null
+  state: EditState
+  revision_before: number | null
+  revision_after: number | null
+  edits: EditRowEdit[]
+  section_ids: string[]
+  needs_check: boolean | null
+  new_issues: { check_id: string; reason: string }[]
+  remaining_issues: { check_id: string; reason: string }[]
+  answered: boolean
+  /** 원장에 확정 줄이 없어 정본 요청 원장에서 되살린 건(§5 유실 복구). */
+  lost_record?: boolean
+}
+/** 복구·보관 알림 — 학생이 `확인`을 누를 때까지 `section.edits`가 매번 싣는다(§4-5-3). */
+export type EditNoticeKind = 'restored' | 'kept' | 'missing' | 'restore_pending'
+export interface EditNotice {
+  kind: EditNoticeKind
+  /** sidecar 가 준 문구 그대로 — 화면은 다시 쓰지 않는다. */
+  message: string
+  edit_id: string
+  /** 보존 폴더 위치(있으면 화면이 함께 보여 준다). */
+  path?: string | null
+}
+export interface EditList { edits: EditRow[]; notices: EditNotice[] }
+/** `section.edit`·`section.edit_batch`의 결과(설계 §4-2 8). */
+export interface EditResult {
+  revision: number
+  draft_hash: string
+  needs_check: boolean
+  new_issues: { check_id: string; reason: string }[]
+  reviews_staled: number
+  recheck_before_submit: boolean
+  edit_id: string
+  cleanup_warning?: string
+  replayed?: boolean
+}
+
 export interface Envelope {
   ok: boolean; exit: number; status: string | null; data: unknown; path: string | null; block_reason: string | null
   stdout: string; stderr: string; argv: string[]; python: string; duration_ms: number; venv_python?: string | null

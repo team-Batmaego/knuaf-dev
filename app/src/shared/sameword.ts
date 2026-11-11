@@ -330,3 +330,51 @@ export function mergeSameWordPicks(picks: Place[], to: string): BatchEdit[] {
   }
   return out
 }
+
+/** 전→후 한 줄 미리보기 — 바뀐 가운데와 그 앞뒤 문맥. */
+export interface EditPreview {
+  /** 바뀐 곳 앞의 같은 글자(잘랐으면 앞에 `…`). */
+  lead: string
+  removed: string
+  added: string
+  /** 바뀐 곳 뒤의 같은 글자(잘랐으면 뒤에 `…`). */
+  trail: string
+}
+
+/**
+ * `직접 고친 곳` 목록의 전→후 한 줄 (설계 §3-3, ADD4 1번).
+ *
+ * 문단 전체를 보여 주면 무엇이 바뀌었는지 학생이 찾아야 한다. 앞뒤에서 같은 글자를 떼어
+ * **바뀐 가운데만** 남기고 그 앞뒤로 문맥을 조금만 붙인다.
+ *
+ * 깨지지 않아야 하는 경우:
+ * - 바뀐 곳이 없으면(같은 글) `removed`·`added` 가 비고 문맥만 남는다.
+ * - 문단이 통째로 바뀌면 문맥이 비고 전체가 바뀐 글이 된다.
+ * - 두 글자 열이 아주 길면 문맥만 `context` 자로 자르고 `…` 를 붙인다.
+ */
+export function editPreview(before: string, after: string, context = 12): EditPreview {
+  // 앞에서 같은 글자 수 — `changedSpans` 와 같은 규칙(공통 접두·접미)이되 자리도 돌려준다.
+  const limit = Math.min(before.length, after.length)
+  let head = 0
+  while (head < limit && before[head] === after[head]) head += 1
+  let tail = 0
+  while (tail < limit - head && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail += 1
+  // 바뀐 **낱말**을 보여 준다 — `600`→`700` 이 `6`→`7` 로 보이면 `6700` 처럼 읽힌다.
+  // 바뀐 글자와 **같은 종류**(숫자/글자)인 바로 뒤 글자까지 바뀐 쪽에 넣어 낱말을 통째로 보여
+  // 주고, 다른 종류(공백·문장부호·한글↔숫자)에서 멈춘다.
+  const kind = (ch: string | undefined): 'd' | 'l' | null =>
+    !ch ? null : /[0-9]/.test(ch) ? 'd' : /[A-Za-z가-힣]/.test(ch) ? 'l' : null
+  const changedKind = kind(before[head]) ?? kind(after[head])
+  let tail2 = tail
+  while (tail2 > 0 && changedKind && kind(before[before.length - tail2]) === changedKind) tail2 -= 1
+  const removed = before.slice(head, before.length - tail2)
+  const added = after.slice(head, after.length - tail2)
+  const leadFull = before.slice(0, head)
+  const trailFull = before.slice(before.length - tail2)
+  return {
+    lead: leadFull.length > context ? '…' + leadFull.slice(-context) : leadFull,
+    removed,
+    added,
+    trail: trailFull.length > context ? trailFull.slice(0, context) + '…' : trailFull
+  }
+}
