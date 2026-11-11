@@ -306,8 +306,14 @@ test('E8: 쓰기 12개는 폴더 안 경로를 줘도 정책이 거절한다', (
     { behavior: 'deny', message: DENY_NOT_READ })
 })
 
-/** codex app-server 대역. 검증 실패를 흉내 내려면 `failVerify`. */
-function fakeRpc({ root, skill, failVerify, failSkills, log }) {
+/**
+ * codex app-server 대역. 검증 실패를 흉내 내려면 `failVerify`.
+ * `userKordoc` 은 학생 사용자 층(`~/.codex/config.toml`)의 같은 이름 서버 —
+ * `config/read` 병합 결과에 쓰기 도구·/tmp root 로 나타나고, 스레드 config 로 끄지 않으면
+ * 상태 목록에서 `connected` 로 되살아난다(Roh 재현). `lockIgnored` 는 그 잠금이 조용히
+ * 무시되는 경우(f 실측 — 요청은 성공하는데 효력이 없다)를 흉내 낸다.
+ */
+function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false, lockIgnored = false, holdTurnStart = false }) {
   // 검증은 `realpathSync(root)` 로 탐침한다 — /var → /private/var 를 흉내 쪽에서도 맞춘다.
   const rootReal = realpathSync(root)
   const rpc = {
@@ -318,6 +324,9 @@ function fakeRpc({ root, skill, failVerify, failSkills, log }) {
     onClose: null,
     sent: [],
     stopped: false,
+    /** `thread/start`|`thread/resume` 에 실려 온 `params.config` — 잠금이 실제로 나갔는지 본다. */
+    threadConfig: undefined,
+    kordocStatus: undefined,
     send(message) { this.sent.push(message) },
     async stop() { this.stopped = true; this.closed = true },
     async request(method, params) {
@@ -328,16 +337,40 @@ function fakeRpc({ root, skill, failVerify, failSkills, log }) {
         case 'skills/list':
           if (failSkills) throw new Error('스킬 목록을 읽지 못했어요')
           return { data: [{ skills: [{ path: realpathSync(join(skill, 'SKILL.md')), enabled: true }] }] }
-        case 'thread/start': return { thread: { id: 'thread-1' } }
-        case 'thread/resume': return { thread: { id: params.threadId } }
-        case 'mcpServerStatus/list':
+        // 병합된 설정 — `mcp_servers` 는 항상 있고(없으면 `{}`), 사용자 층 표가 그대로 보인다.
+        case 'config/read':
+          return { config: { mcp_servers: userKordoc
+            ? {
+                kordoc: {
+                  command: '/bin/false',
+                  args: ['/tmp/kordoc/dist/mcp.js'],
+                  enabled: true,
+                  enabled_tools: ['generate_document', 'parse_document'],
+                  env: { KORDOC_ROOT: '/tmp' }
+                },
+                foreign: { command: '/bin/false', args: ['/tmp/other.js'], enabled: true }
+              }
+            : {} } }
+        case 'thread/start':
+        case 'thread/resume':
+          rpc.threadConfig = params.config
+          return { thread: { id: method === 'thread/start' ? 'thread-1' : params.threadId } }
+        case 'mcpServerStatus/list': {
           if (failVerify) throw new Error('MCP 서버가 떠오르지 않았어요')
-          return { data: [{
-            runtimeStatus: 'connected',
-            serverInfo: { name: 'kordoc', version: '4.24.39' },
-            tools: [...READ_TOOLS],
-            toolsError: null
-          }] }
+          const off = rpc.threadConfig?.mcp_servers?.kordoc?.enabled === false && !lockIgnored
+          if (!userKordoc) {
+            return { data: [{ runtimeStatus: 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }] }
+          }
+          // 잠갔으면 프로세스가 뜨지 않는다 — 목록에는 `disabled` 로만 남는다(실측 fix1-filter).
+          rpc.kordocStatus = off ? 'disabled' : 'connected'
+          return { data: [
+            off
+              ? { name: 'kordoc', runtimeStatus: 'disabled', tools: {}, toolsError: null }
+              : { name: 'kordoc', runtimeStatus: 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS, 'generate_document'], toolsError: null },
+            // 다른 이름의 학생 MCP 는 건드리지 않는다(설계 §3.3 현상 유지).
+            { name: 'foreign', runtimeStatus: 'connected', tools: [], toolsError: null }
+          ] }
+        }
         case 'mcpServer/tool/call': {
           const path = params.arguments.file_path
           // safePath 실측 순서(realpath → 경계 → 확장자): 폴더는 경계를 지나 확장자에서 걸린다.
@@ -346,6 +379,18 @@ function fakeRpc({ root, skill, failVerify, failSkills, log }) {
             : { content: [{ type: 'text', text: `허용된 작업 디렉토리(KORDOC_ROOT) 밖의 경로입니다: ${path}` }], isError: true }
         }
         case 'turn/start':
+          // `holdTurnStart` 면 응답을 보류한다 — M2-R1-02 의 "턴 id 를 받기 전" 구간을 만든다.
+          if (holdTurnStart) {
+            rpc.turnStartPending = params
+            return new Promise((resolve) => {
+              rpc.releaseTurnStart = () => {
+                resolve({ turn: { id: 'turn-1' } })
+                setTimeout(() => rpc.onNotification?.('turn/completed', {
+                  threadId: params.threadId, turn: { id: 'turn-1', status: 'completed' }
+                }), 0)
+              }
+            })
+          }
           // 턴 완료는 알림으로만 온다 — threadId 가 현재 스레드와 같아야 처리된다.
           setTimeout(() => rpc.onNotification?.('turn/completed', {
             threadId: params.threadId, turn: { id: 'turn-1', status: 'completed' }
@@ -362,8 +407,9 @@ function fakeRpc({ root, skill, failVerify, failSkills, log }) {
 /**
  * codex.ts 의 E8 재시도: 검증이 실패하면 **MCP 만 끄고** 같은 텍스트로 한 번 더 돈다.
  * 실패한 프로세스는 닫히고, 두 번째 프로세스는 `mcp_servers.kordoc` 인자 없이 뜬다.
+ * `userKordoc` 이면 학생 사용자 층에 같은 이름 서버가 있는 합성 HOME(반례 M2-R1-01)이다.
  */
-async function runCodexRetryScenario(scenario) {
+async function runCodexRetryScenario(scenario, { userKordoc = false, lockIgnored = false } = {}) {
   const { root } = fixtures(`e8-retry-${scenario}`)
   const skill = join(root, 'skill')
   mkdirSync(skill, { recursive: true })
@@ -376,7 +422,7 @@ async function runCodexRetryScenario(scenario) {
     // 재시도 턴이 다른 이유로 깨지는 경우(검증이 아닌 오류)도 한 번만 돌아야 한다.
     const failSkills = scenario === 'retry-error' && rpcs.length > 0
     const log = []
-    const rpc = fakeRpc({ root, skill, failVerify, failSkills, log })
+    const rpc = fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc, lockIgnored })
     rpc.argv = argv
     rpc.env = env
     rpc.log = log
@@ -390,7 +436,7 @@ async function runCodexRetryScenario(scenario) {
   await connection.setMcpSpec(specFor(root))
   const ev = events()
   const run = connection.run('논문 읽어 줘', 'session-1', ev)
-  return { run, rpcs, ev, connection, root }
+  return { run, rpcs, ev, connection, root, home }
 }
 
 test('E8: 검증이 실패하면 MCP 를 끄고 한 번 다시 돌아 턴이 끝난다', async (t) => {
@@ -408,8 +454,11 @@ test('E8: 검증이 실패하면 MCP 를 끄고 한 번 다시 돌아 턴이 끝
   assert.deepEqual(ev.calls.note, ['안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요'])
   // 스킬 확인은 `runTurn` 마다 한 번이라 두 번 — 재시도가 스킬 단계를 건너뛰지 않는다.
   assert.equal(ev.calls.skill, 2)
-  // 두 번째 프로세스가 실제로 턴을 돌았다(검증 → turn/start).
-  assert.ok(rpcs[1].log.includes('mcpServerStatus/list') === false, 'MCP 가 꺼졌으면 검증도 없다')
+  // 재시도는 인자를 빼는 데 그치지 않고 **병합 설정을 먼저 본다**(M2-R1-01). 여기 설정에는
+  // kordoc 이 없으므로 잠글 이름도, 확인할 상태도 없다 — 그래도 턴은 정상으로 돈다.
+  assert.equal(rpcs[1].log.includes('config/read'), true)
+  assert.equal(rpcs[1].threadConfig, undefined, '설정에 없는 이름은 잠금 키를 만들지 않는다')
+  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), false, '잠글 이름이 없으면 상태 조회도 없다')
   assert.ok(rpcs[1].log.includes('turn/start'))
 })
 
@@ -424,17 +473,83 @@ test('E8: 재시도 턴이 다른 오류로 깨지면 그 오류가 그대로 �
   assert.deepEqual(ev.calls.note, ['안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요'])
 })
 
-test('E8: 검증이 실패한 연결은 다시 검증하지 않는다 — 두 번째 프로세스는 곧바로 턴을 돈다', async (t) => {
+test('E8: 재시도 프로세스는 §3.3 기동 검증을 다시 하지 않는다(잠금 확인만 한다)', async (t) => {
   t.after(() => { rpcFactory = null })
   const { run, rpcs, ev, connection } = await runCodexRetryScenario('once')
   await run
 
-  // 첫 프로세스만 관문을 지난다. 재시도 프로세스는 mcpSpec 이 비어 있어 검증 자체를 부르지 않는다.
+  // 첫 프로세스만 §3.3 관문(도구 탐침 포함)을 지난다. 재시도 프로세스는 mcpSpec 이 비어 있고
+  // 대신 잠금 확인(M2-R1-01)만 한다 — 그 확인은 도구를 부르지 않는다.
   assert.equal(rpcs[0].log.includes('mcpServerStatus/list'), true)
-  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), false)
   assert.equal(rpcs[1].log.includes('mcpServer/tool/call'), false)
   assert.equal(rpcs[1].log.includes('turn/start'), true)
   // 재시도가 끝나도 spec 은 꺼진 채 남는다(같은 연결로 다음 턴도 MCP 없이).
   assert.equal(connection.mcpSpec, null)
   assert.equal(ev.calls.note.length, 1)
+})
+
+// ------------------------------------------------- M2-R1-02: turn/start 응답 대기 구간
+
+test('M2-R1-02: turn/start 응답을 기다리는 동안에도 setMcpSpec 은 거절한다', async (t) => {
+  t.after(() => { rpcFactory = null })
+  const { root } = fixtures('r1-02')
+  const skill = join(root, 'skill')
+  mkdirSync(skill, { recursive: true })
+  writeFileSync(join(skill, 'SKILL.md'), '# knuaf-dev\n')
+  const home = tempDir('r1-02-home')
+  let held
+  rpcFactory = (binary, argv, cwd, env) => {
+    const log = []
+    held = fakeRpc({ root, skill, failVerify: false, failSkills: false, log, holdTurnStart: true })
+    held.log = log
+    return held
+  }
+  const connection = new codex.CodexConnection({
+    binary: 'codex', root, skill, env: { HOME: home },
+    openExternal: async () => {}, modelChosen: () => false
+  })
+  const spec = specFor(root)
+  await connection.setMcpSpec(spec)
+  const run = connection.run('논문 읽어 줘', 'session-1', events())
+  // 턴 id 를 받기 전(= `turn/start` 응답 보류 중)에 사양을 내리려 한다.
+  for (let i = 0; i < 200 && !held?.turnStartPending; i++) await new Promise((r) => setTimeout(r, 5))
+  assert.ok(held?.turnStartPending, 'turn/start 는 나갔고 응답은 보류 중이다')
+  assert.equal(connection.turn, undefined, '아직 턴 id 가 없다 — 이 구간이 결함이었다')
+  await assert.rejects(connection.setMcpSpec(null), /턴이 진행 중/)
+  assert.equal(connection.mcpSpec, spec, '거절된 호출은 사양을 바꾸지 않는다')
+  assert.equal(held.stopped, false, '진행 중인 RPC 를 닫지 않는다')
+  // 응답을 풀어 턴을 정상 종료시킨다 — 거절이 턴을 망가뜨리지 않았는지까지 본다.
+  held.releaseTurnStart()
+  await run
+})
+
+test('M2-R1-01: 사용자 층에 같은 이름 kordoc 이 있어도 재시도 턴은 그 서버 없이 돈다', async (t) => {
+  t.after(() => { rpcFactory = null })
+  // 학생 사용자 층: kordoc enabled + 쓰기 도구 + 폴더 밖 root(/tmp) — Roh 재현 그대로.
+  const { run, rpcs, ev, connection, root } = await runCodexRetryScenario('user-layer', { userKordoc: true })
+  await run
+
+  assert.equal(rpcs.length, 2)
+  assert.equal(rpcs[1].argv.join(' ').includes('mcp_servers.kordoc'), false, '인자로는 여전히 안 붙는다')
+  assert.equal(rpcs[1].argv.join(' ').includes(root), false)
+  // 잠금이 스레드 config 로 실제로 나갔다 — 사용자 층 표를 덮는 유일한 채널(fix1-lock 실측).
+  assert.deepEqual(plain(rpcs[1].threadConfig), { mcp_servers: { kordoc: { enabled: false } } })
+  // 그리고 끈 사실을 **상태 목록으로 확인한 뒤에만** 턴을 열었다.
+  assert.equal(rpcs[1].kordocStatus, 'disabled')
+  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), true)
+  assert.equal(rpcs[1].log.includes('turn/start'), true)
+  assert.equal(rpcs[1].log.includes('mcpServer/tool/call'), false, '검증되지 않은 도구를 탐침하지도 않는다')
+  assert.deepEqual(ev.calls.note, ['안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요'])
+  assert.equal(connection.mcpSpec, null)
+})
+
+test('M2-R1-01: 잠금이 조용히 무시되면(서버가 살아 있으면) 재시도 턴을 열지 않는다', async (t) => {
+  t.after(() => { rpcFactory = null })
+  const { run, rpcs, ev } = await runCodexRetryScenario('user-layer-live', { userKordoc: true, lockIgnored: true })
+  await assert.rejects(run, /재시도 턴에서 kordoc MCP가 꺼지지 않았어요\(kordoc: connected\)/)
+
+  assert.equal(rpcs.length, 2, '세 번째 시도는 없다 — 확인 실패는 실패로 끝난다')
+  assert.equal(rpcs[1].kordocStatus, 'connected', '요청이 성공해도 상태가 살아 있으면 통과가 아니다')
+  assert.equal(rpcs[1].log.includes('turn/start'), false, '턴을 열지 않는다')
+  assert.equal(ev.calls.note.length, 1, '안내는 여전히 한 줄')
 })

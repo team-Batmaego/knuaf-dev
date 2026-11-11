@@ -293,6 +293,100 @@ async function probe(
   return judged
 }
 
+/** 살아 있는(= 턴에 도구를 내놓는) 상태. 하나라도 보이면 그 턴은 거부다. */
+const LIVE_STATUS: Record<string, true> = { connected: true, starting: true }
+
+/**
+ * **살아 있지 않다고 확인된** 상태. 목록에 아예 없거나 모르는 상태 문자열은 통과가 아니다 —
+ * "확인하지 못했다"를 "꺼졌다"로 바꾸지 않는 것이 이 함수의 전부다.
+ */
+const OFF_STATUS: Record<string, true> = {
+  disabled: true, failed: true, cancelled: true, authenticationRequired: true
+}
+
+export interface AbsentOptions {
+  /** `thread/start`|`thread/resume` 이 방금 만든 그 스레드. */
+  threadId: string
+  /** 스레드 config 로 끈 이름들. 비면 확인할 것이 없다(설정에 그 이름이 없었다는 뜻). */
+  names: string[]
+  /** 기본 600ms — 스레드 직후의 빈 목록(읽기 경쟁)을 몇 번 더 본다. */
+  pollMs?: number
+  sleep?: (ms: number) => Promise<void>
+  now?: () => number
+  /** 기본 20초. 이 함수 전체의 상한이다. */
+  startupTimeoutMs?: number
+}
+
+/**
+ * **폴백(재시도) 턴의 관문** — 스레드 config 로 끈 이름들이 실제로 꺼졌는지 `turn/start` 앞에서 본다.
+ *
+ * 왜 `config/read` 가 아니라 상태 목록인가: 스레드 `config` 는 스레드에만 적용되고 `config/read`
+ * 는 **병합된 원래 설정**을 그대로 돌려준다(실측 `fix1-lock.log` — `enabled=True` 로 보이는데
+ * 서버는 `disabled`). 그래서 판정은 `mcpServerStatus/list` 의 `runtimeStatus` 로만 한다.
+ *
+ * 왜 `disabled` 를 **양성 증거**로 요구하나: `data: []` 는 "설정에 없음"과 "아직 안 읽힘"을
+ * 구분하지 못한다. 실측(`fix1-filter.log`)에서 끈 서버는 목록에 `disabled` 로 **나타나고**
+ * 프로세스는 뜨지 않았다(marker=0). 살아 있는 값이 보이면 즉시 실패(재시도 없음),
+ * 꺼진 값이 확인될 때까지 재조회하고 상한에서 실패한다.
+ */
+export async function verifyKordocAbsent(request: JsonRpcLike, opts: AbsentOptions): Promise<void> {
+  if (!opts.names.length) return
+  if (typeof opts.threadId !== 'string' || !opts.threadId) {
+    throw new McpSafetyError('threadId 없이는 kordoc MCP가 꺼졌는지 확인할 수 없어요', 'no-thread')
+  }
+  const timeout = opts.startupTimeoutMs ?? 20_000
+  const pollMs = opts.pollMs ?? 600
+  const sleep = opts.sleep ?? DEFAULT_SLEEP
+  const call = budgeted(request, opts.now ?? Date.now, timeout)
+  const maxRounds = Math.ceil(timeout / Math.max(pollMs, 1)) + 2
+  let unresolved: string[] = [...opts.names]
+  for (let round = 0; round < maxRounds; round++) {
+    const servers: unknown[] = []
+    const seen = new Set<string>()
+    let cursor: string | null = null
+    do {
+      const page = await call.request('mcpServerStatus/list', {
+        threadId: opts.threadId,
+        detail: 'toolsAndAuthOnly',
+        ...(cursor ? { cursor } : {})
+      }, 'retry-status-list')
+      const parsed = statusPages(page)
+      servers.push(...parsed.servers)
+      cursor = parsed.cursor
+      if (cursor) {
+        if (seen.has(cursor)) throw new McpSafetyError('kordoc MCP 상태 목록의 cursor가 반복돼요', 'pagination-loop')
+        seen.add(cursor)
+        if (seen.size > MAX_PAGES) throw new McpSafetyError('kordoc MCP 상태 목록 페이지가 너무 많아요', 'pagination-loop')
+      }
+    } while (cursor)
+
+    const byName = new Map<string, Record<string, unknown>>()
+    for (const entry of servers) {
+      const rec = asRecord(entry)
+      if (!rec) continue
+      const name = typeof rec.name === 'string' ? rec.name : asRecord(rec.serverInfo)?.name
+      if (typeof name === 'string' && opts.names.includes(name) && !byName.has(name)) byName.set(name, rec)
+    }
+    for (const name of opts.names) {
+      const status = byName.get(name)?.runtimeStatus
+      if (typeof status === 'string' && LIVE_STATUS[status]) {
+        throw new McpSafetyError(`재시도 턴에서 kordoc MCP가 꺼지지 않았어요(${name}: ${status})`, 'retry-mcp-live')
+      }
+    }
+    unresolved = opts.names.filter((name) => {
+      const status = byName.get(name)?.runtimeStatus
+      return typeof status !== 'string' || !OFF_STATUS[status]
+    })
+    if (!unresolved.length) return
+    if (call.expired()) break
+    await sleep(pollMs)
+  }
+  throw new McpSafetyError(
+    `재시도 턴에서 kordoc MCP가 꺼졌는지 확인하지 못했어요: ${unresolved.join(', ')}`,
+    'retry-mcp-unconfirmed'
+  )
+}
+
 /**
  * §3.3 기동 뒤 검증 전체. 통과하면 `void`, 하나라도 못 채우면 `McpSafetyError`.
  * 호출자는 이 오류를 받으면 그 연결 객체를 버리고 MCP 없는 새 연결로 같은 턴을 다시 돌린다.

@@ -10,8 +10,8 @@ import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
-import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, type KordocMcpSpec } from './kordocMcp'
-import { McpSafetyError, verifyCodexKordoc } from './kordocMcpVerify'
+import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
+import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
 
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
@@ -109,6 +109,12 @@ export class CodexConnection implements AgentConnection {
   private stopped = false
   /** 이 턴에 **실제로 적용된** model·effort 와 턴 식별자 — 기록의 귀속 기준(검토 CT-02). */
   private turnTokens?: { key: string; model: string; effort: string | null }
+  /**
+   * 응답 대기 구간까지 포함한 "턴이 도는 중" 표식(검토 M2-R1-02). `this.turn` 은 서버가 턴 id 를
+   * 준 뒤에야 채워지므로, 그 전에 `setMcpSpec` 이 들어오면 RPC 를 닫아 **진행 중인 턴을 끊었다**.
+   * 계약("턴 중에는 바꾸지 않는다")은 id 를 받기 전 구간도 포함해야 한다.
+   */
+  private turnActive = false
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
   }
@@ -128,10 +134,11 @@ export class CodexConnection implements AgentConnection {
    * 그 플래그는 앱 종료 뜻이고, 여기서는 rpc 만 닫아 다음 `run()` 이 재기동하게 한다(§3.3).
    */
   async setMcpSpec(spec: KordocMcpSpec | null): Promise<void> {
-    if (this.turn) throw new Error('턴이 진행 중이라 한글 문서 도구를 지금 붙일 수 없어요.')
+    if (this.turn || this.turnActive) throw new Error('턴이 진행 중이라 한글 문서 도구를 지금 붙일 수 없어요.')
     this.mcpSpec = spec
     this.verifiedOn = undefined
     this.retriedWithoutMcp = false
+    this.mcpLocked = false
     if (this.rpc && !this.rpc.closed) {
       await this.rpc.stop().catch(() => {})
       this.rpc = undefined
@@ -381,10 +388,18 @@ export class CodexConnection implements AgentConnection {
   /** MCP 검증 실패 뒤 같은 텍스트로 한 번만 다시 돌기 위한 표식 — 재귀를 막는다(E8). */
   private retriedWithoutMcp = false
   /**
+   * 재시도 턴에서 kordoc MCP 를 **끈 채로** 돌린다는 표식(검토 M2-R1-01).
+   * 실패한 프로세스를 닫고 인자 없이 새로 띄우면, 학생 사용자 층(`~/.codex/config.toml`)에
+   * 같은 이름의 서버가 있으면 그것이 **검증 없이 되살아난다**(Roh 실측). 그래서 재시도부터는
+   * 스레드 `config` 로 그 이름을 끄고, 끈 사실을 턴 앞에서 확인한다.
+   */
+  private mcpLocked = false
+  /**
    * 한 턴. kordoc 기동 검증(§3.3)이 실패하면 `McpSafetyError` 가 올라오므로 여기서 받아
    * **MCP만 끄고** 같은 텍스트로 한 번 더 돈다. `service.ts` 는 이 예외를 모르고(일반 오류로
    * 처리해 대화를 error 로 남긴다) 연결 객체를 버리는 처분도 하지 않으므로, 같은 처분을
    * 연결 안에서 한다 — 실패한 rpc 를 닫고 spec 을 비우면 다음 `runTurn` 이 MCP 없이 뜬다.
+   * 인자를 빼는 것만으로는 부족하므로 잠금 표식을 함께 세운다(아래 `mcpLocked`).
    */
   async run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
     try {
@@ -393,17 +408,49 @@ export class CodexConnection implements AgentConnection {
       if (!(e instanceof McpSafetyError)) throw e
       this.mcpSpec = null
       this.verifiedOn = undefined
+      this.mcpLocked = true
       await this.rpc?.stop().catch(() => {})
       this.rpc = undefined
-      events.note('안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요')
+      // 재시도가 없으면 안내도 없다 — 대화는 error 로 남고 그 문장이 오해를 부른다.
       if (this.retriedWithoutMcp) throw e
+      events.note('안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요')
       this.retriedWithoutMcp = true
       // 검증 실패는 `turn/start` 앞이라 그 대화에는 아무 턴도 없다 — 같은 입력으로 새 프로세스에서
       // 다시 시작한다(새 대화면 빈 thread 하나가 남지만 학생 기록에는 아무것도 안 남는다).
       return this.runTurn(text, sessionId, events, replayHistory)
     }
   }
+  /**
+   * 재시도 턴의 스레드 `config` — kordoc 을 끈다. **설정에 그 이름이 실제로 보일 때만** 싣는다:
+   * `-c`/config 의 부분 표기는 그 이름의 표를 통째로 갈아 끼우므로, 어느 층에도 없는 이름을
+   * 부르면 기동이 `invalid transport` 로 죽는다(실측 j-names `t-ghost-partial`). 빈 `{}` 도
+   * 아무것도 지우지 않으므로(실측 `t-empty-servers`) 이름이 없으면 키 자체를 넣지 않는다.
+   * 다른 이름의 MCP(foreign)는 설계 §3.3대로 건드리지 않는다 — 이 잠금은 kordoc 하나다.
+   */
+  private async mcpLockParams(rpc: JsonRpcProcess): Promise<{ config?: { mcp_servers: Record<string, { enabled: false }> }; locked: string[] }> {
+    if (!this.mcpLocked) return { locked: [] }
+    let merged: unknown
+    try {
+      // `cwd` 를 줘야 프로젝트 층까지 병합된, 스레드가 실제로 받는 그 설정이 온다.
+      merged = await rpc.request('config/read', { cwd: this.options.root })
+    } catch (e) {
+      throw new McpSafetyError(`재시도 턴에서 한글 문서 도구 설정을 읽지 못했어요: ${(e as Error)?.message ?? String(e)}`, 'retry-config-read')
+    }
+    const servers = (merged as { config?: { mcp_servers?: unknown } } | undefined)?.config?.mcp_servers
+    const present = servers && typeof servers === 'object' && !Array.isArray(servers) ? Object.keys(servers) : []
+    if (!present.includes(MCP_SERVER_NAME)) {
+      // 설정 어디에도 kordoc 이 없다 = 새 프로세스가 그 서버를 띄울 수 없다. 잠글 것도, 확인할 것도 없다.
+      return { locked: [] }
+    }
+    return { config: { mcp_servers: { [MCP_SERVER_NAME]: { enabled: false } } }, locked: [MCP_SERVER_NAME] }
+  }
+  /** 한 턴 전체(기동 검증·턴 시작·완료 대기)를 "진행 중"으로 표시하고 본문을 돈다(M2-R1-02). */
   private async runTurn(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+    this.turnActive = true
+    try { return await this.turnBody(text, sessionId, events, replayHistory) }
+    finally { this.turnActive = false }
+  }
+  private async turnBody(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
     const rpc = await this.connect()
     if (!(await this.status()).connected) throw new Error('Codex에서 ChatGPT 계정 로그인을 먼저 완료해 주세요.')
     this.events = events
@@ -417,7 +464,8 @@ export class CodexConnection implements AgentConnection {
     if (!skills.data?.some((entry: any) => entry.skills?.some((s: any) => realOrSelf(s.path) === want && s.enabled))) throw new Error('Codex가 프로젝트의 knuaf-dev 스킬을 찾지 못했어요.')
     events.skill()
     const args = { cwd: this.options.root, approvalPolicy: 'on-request', sandbox: 'workspace-write', developerInstructions: '이 세션은 knuaf-dev 개인용 GUI입니다. 제공된 knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 같은 이름의 사용자·전역 스킬 사본이 보여도 무시하고 이 프로젝트의 스킬만 따르세요. 질문은 채팅 텍스트로 제시하세요. 인터뷰 원문과 해석은 스킬의 로그 계약대로 기록하세요. GUI의 첨부는 사용자 답변의 일부이며 현재 작성물 채택은 스킬의 확인 절차를 따르세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). ' + (this.mcpSpec ? MCP_DOC_READ_INSTRUCTION : LEGACY_DOC_READ_INSTRUCTION) }
-    const r = sessionId ? await rpc.request('thread/resume', { ...args, threadId: sessionId }) : await rpc.request('thread/start', args)
+    const { config: lockConfig, locked } = await this.mcpLockParams(rpc)
+    const r = sessionId ? await rpc.request('thread/resume', { ...args, ...(lockConfig ? { config: lockConfig } : {}), threadId: sessionId }) : await rpc.request('thread/start', { ...args, ...(lockConfig ? { config: lockConfig } : {}) })
     const threadId: string = r.thread.id
     this.thread = threadId; events.session(threadId)
     // Codex 쪽 승인 정책의 전부는 이 검증이다(§3.3) — 프로세스당 1회, `turn/start` 앞.
@@ -426,6 +474,10 @@ export class CodexConnection implements AgentConnection {
       await verifyCodexKordoc(rpc, { threadId, root: this.options.root, spec: this.mcpSpec })
       this.verifiedOn = rpc
     }
+    // 재시도 폴백의 관문(M2-R1-01): 스레드 config 로 끈 kordoc 이 **실제로 꺼졌는지** 턴 앞에서
+    // 확인한다. 스레드 config 는 서버가 스레드를 처음 적재할 때만 먹으므로(f 실측) 요청의 성공은
+    // 증거가 아니다 — 상태 목록이 유일한 판정 근거다. 확인 못 하면 턴을 열지 않는다(재시도 없음).
+    if (this.mcpLocked) await verifyKordocAbsent(rpc, { threadId, names: locked })
     this.threadModel = typeof r.model === 'string' && r.model ? r.model : null
     this.threadEffort = typeof r.reasoningEffort === 'string' && r.reasoningEffort ? r.reasoningEffort : null
     if (!sessionId) { this.overridden = false; this.resumeChecked = false }
