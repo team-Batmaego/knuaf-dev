@@ -119,6 +119,15 @@ function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
  * 교체·취소해도 **15초 안에서는** 진행 중 요청과 겹치지 않고, 15초가 지나면 그 요청을 버린 것으로
  * 보고 다음 tick 이 다시 묻는다(영영 잠기지 않음). 만료된 옛 tick 은 잠금도, 완료 판정도,
  * 감시 종료도 건드리지 않는다 — 그래야 '버렸다'는 말이 시험으로 잠긴다.
+ *
+ * **180초 마감의 정확한 계약**(검토 CI1-FIXCHECK 차단 잔여):
+ *  - 마감 시각(180초)에 감시의 interval·deadline 타이머는 **0**, 새 tick 도 **0**(마감을 지난 뒤에는
+ *    어떤 tick 도 시작되지 않는다).
+ *  - 진행 중 조회의 **잠금 만료 타이머는 최대 15초 더 남는다** — 마감은 감시만 끝내고 이미 나간
+ *    요청은 취소할 수 없기 때문이다. 그 타이머를 마감에서 지우면 '15초 안 겹침 0'이 깨진다.
+ *  - 그래서 **195초(= 180 + 15)에는 타이머가 전부 0** 이다.
+ * 마감 시각에 interval 과 deadline 이 **동시에** 도래하면 둘 중 무엇이 먼저 도는지는 런타임에
+ * 달렸다 — 그래서 계약은 '마감을 지난 뒤'를 말하고, 시험도 그 경계(180초 + 1ms)에서 단언한다.
  */
 function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void {
   clearPoll(map, provider)

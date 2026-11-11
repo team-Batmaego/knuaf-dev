@@ -4,8 +4,8 @@
 // 최대 10초 막았고, 그래서 "종료 마감 10초"가 이벤트 루프 안에서 지켜지지 않았다. 이 시험은
 // **같은 이벤트 루프가 그 사이 돌 수 있는지**를 본다 — 맥에서도 가짜 taskkill 로 결정적으로.
 import { expect, test } from '@playwright/test'
-import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { killTree } from '../src/main/win'
@@ -35,13 +35,17 @@ function fakeTaskkill(ms: number, exitCode = 0): {
   const doneFile = join(root, 'done.txt')
   const finished = Promise.withResolvers<void>()
   // 완료 표시를 기다리는 **유일한** 감시 — 시험이 시간 여유를 늘리지 않고 실행 완료를 알 수 있게 한다.
-  const doneWatch = setInterval(() => {
-    if (!existsSync(doneFile)) return
-    clearInterval(doneWatch)
-    finished.resolve()
-  }, 5)
-  doneWatch.unref?.()
-  const stopWatching = (): void => { clearInterval(doneWatch) }
+  // `run()` 이 준비 단계에서 켠다(준비 단계의 예열 실행이 표식을 남기기 때문).
+  let doneWatch: ReturnType<typeof setInterval> | undefined
+  const startWatching = (): void => {
+    doneWatch = setInterval(() => {
+      if (!existsSync(doneFile)) return
+      clearInterval(doneWatch)
+      finished.resolve()
+    }, 5)
+    doneWatch.unref?.()
+  }
+  const stopWatching = (): void => { if (doneWatch) clearInterval(doneWatch) }
   const exe = process.platform === 'win32' ? join(root, 'System32', 'taskkill.exe') : `${root}\\System32\\taskkill.exe`
   const previous = process.env.NODE_OPTIONS
   if (process.platform === 'win32') {
@@ -62,7 +66,13 @@ function fakeTaskkill(ms: number, exitCode = 0): {
     try { linkSync(process.execPath, exe) } catch { copyFileSync(process.execPath, exe) }
     return {
       root,
-      run: async () => { process.env.NODE_OPTIONS = `--require ${JSON.stringify(bootstrap)}` },
+      run: async () => {
+        process.env.NODE_OPTIONS = `--require ${JSON.stringify(bootstrap)}`
+        // 예열(위 POSIX 주석과 같은 이유) — 윈도우는 node 사본의 첫 실행이 더 느리다.
+        spawnSync(exe, ['warmup'], { stdio: 'ignore', windowsHide: true })
+        for (const f of [marker, argsFile, doneFile]) { try { unlinkSync(f) } catch { /* 없으면 그만 */ } }
+        startWatching()
+      },
       restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; stopWatching() },
       ran: () => { try { return existsSync(marker) } catch { return false } },
       args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } },
@@ -80,7 +90,14 @@ function fakeTaskkill(ms: number, exitCode = 0): {
   ].join('\n'), { mode: 0o755 })
   return {
     root,
-    run: async () => { /* POSIX 는 환경 준비가 필요 없다 */ },
+    run: async () => {
+      // 예열: 새로 만든 스크립트의 **첫 실행**은 OS 콜드 스타트로 ~450ms 가 걸린다(실측).
+      // 그 비용은 제품의 시간 계약이 아니라 시험 환경 비용이므로, 준비 단계에서 한 번 돌려
+      // 데운 뒤 표식을 지운다 — 그래야 관측 창(시작 기준 700ms)이 '한 예산'으로 유지된다.
+      spawnSync(exe, ['warmup'], { stdio: 'ignore' })
+      for (const f of [marker, argsFile, doneFile]) { try { unlinkSync(f) } catch { /* 없으면 그만 */ } }
+      startWatching()
+    },
     restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; stopWatching() },
     ran: () => { try { return existsSync(marker) } catch { return false } },
     args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } },
@@ -105,7 +122,11 @@ const settle = async (done: Promise<void>, budgetMs: number): Promise<boolean> =
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
 
 test('윈도우 트리 종료는 동기로 기다리지 않는다 — 같은 이벤트 루프가 그 사이 돈다 (RT2-02)', async () => {
-  const fake = fakeTaskkill(600)
+  // 지연 400ms: 완료 신호까지 **한 예산(700ms)** 안에 들어와야 하므로, 가짜 실행 파일의
+  // 자기 지연 + 프로세스 시작이 그 안에 맞아야 한다(600ms 였을 때는 시작 여유가 100ms 뿐이라
+  // 부하에서 거의 항상 실패했다 — 실측). 400ms 도 타이머 5회(20ms)보다 훨씬 길어 루프 생존을
+  // 증명하기에 충분하고, 관측 창 자체는 700ms 로 늘리지 않는다.
+  const fake = fakeTaskkill(400)
   // 죽이면 안 되는 관측 대상 — 이 시험은 "막히지 않았는가"만 본다.
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
   await new Promise<void>((resolve) => child.once('spawn', resolve))
@@ -118,13 +139,15 @@ test('윈도우 트리 종료는 동기로 기다리지 않는다 — 같은 이
     const callMs = Date.now() - started
     // 호출 자체가 바로 돌아와야 한다 — taskkill 이 끝나기를 기다리면 여기서 600ms 가 걸린다.
     expect(callMs, `killTree 가 ${callMs}ms 동기로 막았다`).toBeLessThan(250)
-    // 그리고 그 600ms 동안 타이머가 여러 번 돌아야 한다(루프가 살아 있었다는 뜻).
-    await new Promise((resolve) => setTimeout(resolve, 700))
+    // 관측 창과 완료 신호 대기는 **하나의 예산**이다(검토 CI1-FIXCHECK 중요 2) — 시작 시각 기준
+    // 700ms 까지만 기다린다. 예전에는 700ms 를 자고 나서 다시 700ms 를 기다려 약 1,400ms 가 됐다.
+    // 그 700ms 안에 타이머가 여러 번 돌아야 하고(루프 생존), 가짜 실행 파일도 끝나야 한다.
+    const remaining = 700 - (Date.now() - started)
+    expect(await settle(fake.finished, Math.max(0, remaining)), '가짜 taskkill 이 시작 후 700ms 안에 끝나지 않았다').toBe(true)
+    const observed = Date.now() - started
+    expect(observed, `관측 창이 700ms 를 넘었다(${observed}ms)`).toBeLessThanOrEqual(750)
     clearInterval(ticker)
     expect(ticks, '이벤트 루프가 막혀 타이머가 돌지 못했다').toBeGreaterThan(5)
-    // 실제로 띄웠는지 — 시간 여유를 두지 않고 **가짜 실행 파일의 완료 신호**를 기다린다.
-    // 예산은 바로 위 관측 창과 같은 700ms 다(600ms 지연 + 시작이 그 안에 들어와야 한다).
-    expect(await settle(fake.finished, 700), '가짜 taskkill 이 700ms 안에 끝나지 않았다').toBe(true)
     expect(fake.ran(), 'taskkill 을 아예 띄우지 않았다').toBe(true)
     expect(fake.args(), 'pid·트리 인자로 부르지 않았다').toEqual(['/pid', String(child.pid), '/T', '/F'])
   } finally {
@@ -144,7 +167,8 @@ test('taskkill 이 거절하면 직접 kill 로 넘어간다 (RT2-02)', async ()
     killTree({ pid, kill: (signal) => { signals.push(signal); return true } }, 'SIGTERM', { platform: 'win32', env: { SystemRoot: fake.root } })
     // 가짜 실행 파일이 **실제로 실행돼 끝났는지** 먼저 증명한다 — 이게 없으면 "실행 자체가
     // 실패해 직접 kill 로 갔다"와 "실행은 됐고 종료 코드 1 이었다"를 구별할 수 없다(검토 중요 1).
-    expect(await settle(fake.finished, 700), '가짜 taskkill 이 700ms 안에 끝나지 않았다').toBe(true)
+    // 예산은 호출 시각 기준 700ms 하나다(누적 없음).
+    expect(await settle(fake.finished, 700), '가짜 taskkill 이 호출 후 700ms 안에 끝나지 않았다').toBe(true)
     expect(fake.ran(), 'taskkill 을 아예 띄우지 않았다').toBe(true)
     expect(fake.args(), 'pid·트리 인자로 부르지 않았다').toEqual(['/pid', String(pid), '/T', '/F'])
     // 직접 kill 로 넘어가는 것은 제품이 taskkill 의 **종료 코드**를 받은 뒤라, 실행 완료 표시
