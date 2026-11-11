@@ -18,6 +18,8 @@ export interface SectionDraft {
   id: string
   /** 그 절의 DRAFT 구획(`section.read`의 `draft`). */
   draft: string
+  /** 장 제목 — 목록이 '어느 장인지'를 보여 준다(§4-5-8 03). 없어도 찾기·바꾸기는 된다. */
+  title?: string
 }
 
 /** 사라진 낱말 하나와 그 자리에 새로 들어간 낱말(지움이면 빈 문자열). */

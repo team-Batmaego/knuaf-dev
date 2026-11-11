@@ -89,6 +89,8 @@
 .sameword-list { display: grid; gap: var(--sp-1); max-height: 260px; overflow: auto; }
 .sameword-place { display: flex; gap: var(--sp-2); align-items: flex-start; padding: var(--sp-1) 0; }
 .sameword-place small { display: block; color: var(--muted); font-size: 12px; }
+/* 어느 장인지 — 목록 항목 안 작은 글자 한 줄(형님이 확정한 모양은 그대로, §4-5-7). */
+.sameword-place small.where { color: var(--ink-2); font-weight: 500; }
 .sameword-place .ctx { color: var(--ink-2); font-size: 13px; }
 
 /* `모두 보기` — 그 자리의 낱말을 잠깐 칠한다(§3-4). 배경만 쓰고 색선은 쓰지 않는다. */

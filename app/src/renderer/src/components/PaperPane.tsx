@@ -118,8 +118,6 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const saveEdit = useEdits((s) => s.save)
   const markSeen = useEdits((s) => s.seen)
   const resetEdits = useEdits((s) => s.reset)
-  /** 고침 스토어가 지금 가리키는 논문 — 논문이 바뀌면 먼저 비운다(§4-5-8 04). */
-  const editsRoot = useEdits((s) => s.root)
   const editAvailable = useEdits((s) => s.available)
   const [docs, setDocs] = useState<Record<string, Doc>>({})
   const [fresh, setFresh] = useState<Record<string, number[]>>({})
@@ -197,6 +195,16 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     // 본문이 실제로 바뀌면(저장·절 교체) 종이의 DOM 이 다시 그려진다 — 그때 담아 둔 선택은
     // 더 이상 그 글자가 아니다. 묵은 막대가 엉뚱한 자리에 뜨지 않게 지운다.
     if (contentChanged) setSel(null)
+    // 본문이 바뀌었으면 같은 낱말 제안은 낡은 것이다 — 다시 계산해 이어 붙이지 않고 접는다
+    // (§4-5-8 02). 자리 열쇠는 문단 번호·글자 위치라, 앞 문단이 지워지면 다른 자리를 가리킨다.
+    // 스탬프도 **본문 글자**라, 견줄 때도 글자(지금 쓰는 정규화)를 쓴다 — 지문과 견주면 늘
+    // 달라서 내 저장 직후의 첫 읽기에 바로 접힌다.
+    if (contentChanged && samewordStamps.current) {
+      const norm = (text: string): string => text.replace(/\s+/g, ' ').trim()
+      const stale = Object.entries(samewordStamps.current)
+        .some(([id, draft]) => prevDocs.current[id] !== undefined && norm(prevDocs.current[id].draft) !== norm(draft))
+      if (stale) { setSameword([]); samewordStamps.current = null }
+    }
     if (Object.keys(freshNow).length) {
       setFresh(freshNow)
       timers.current.forEach(clearTimeout)
@@ -214,12 +222,23 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     if (!root) { resetEdits(); return }
     // 논문이 바뀌면 **먼저 비운다**(§4-5-8 04) — A→B 전환은 root 를 null 로 만들지 않으므로
     // '없음→있음'만 보면 A 의 목록·알림이 B 화면에 남는다. 지금 스토어가 다른 논문 것이면 비운다.
-    if (editsRoot !== root) resetEdits()
+    // `editsRoot` 는 **의존성에 넣지 않는다** — `loadEdits` 가 스토어의 root 를 채우므로 그것을
+    // 의존성으로 두면 effect 가 스스로를 다시 불러 끝없이 읽는다(그러면 화면이 계속 다시 그려져
+    // 학생이 누른 단추가 DOM 에서 떨어져 나간다).
+    const storeRoot = useEdits.getState().root
+    if (storeRoot !== null && storeRoot !== root) resetEdits()
     void loadEdits(root)
-  }, [root, revision, editsRoot, loadEdits, resetEdits])
+  }, [root, revision, loadEdits, resetEdits])
   useEffect(() => {
     if ((listIntent || filesOpen) && root) void loadLists()
   }, [listIntent, filesOpen, root, loadLists])
+  // 기록이 오르면 정본도 다시 읽는다 — 목록 머리의 '검토가 유효한가'(§4-5-8 07)가 지금 값이어야
+  // 한다. 예전에는 팝오버를 열 때만 읽어서, 저장 직후 검토가 낡아도 옛 판정이 남았다.
+  useEffect(() => {
+    if (!root) return
+    const t = setTimeout(() => { void loadLists() }, 0)
+    return () => clearTimeout(t)
+  }, [root, revision, loadLists])
 
   // 대화 이벤트 줄의 "종이에서 보기" — 그 장으로 간다.
   useEffect(() => {
@@ -299,6 +318,13 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const [listOpen, setListOpen] = useState(false)
   /** 같은 낱말 제안 — 저장 결과에서 뽑는다(§3-4). */
   const [sameword, setSameword] = useState<Suggestion[]>([])
+  /**
+   * 같은 낱말 제안을 띄운 **그 순간의 본문 글자들**(절 ID → DRAFT 글자). 제안은 그 본문에 대한
+   * 것이므로, 그 뒤에 어느 장이든 본문이 바뀌면 접는다(§4-5-8 02). 글자를 들고 견디는 이유:
+   * 내 저장 직후의 첫 읽기는 같은 글자라 접히지 않고, 그 뒤 도우미가 고친 읽기에서만 달라진다.
+   * 지문(`hash`)과 견주면 단위가 달라 늘 '바뀐 것'으로 보인다.
+   */
+  const samewordStamps = useRef<Record<string, string> | null>(null)
   const noteOwnEdit = useProject((s) => s.noteOwnEdit)
   const refreshProject = useProject((s) => s.refresh)
 
@@ -344,6 +370,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     // 새 고침을 시작하면 지난 저장 한 줄·같은 낱말 제안은 지금 고침의 말이 아니다.
     setSavedLine(null)
     setSameword([])
+    samewordStamps.current = null
     window.getSelection()?.removeAllRanges()
   }, [docs, editProblem, liveSelection])
 
@@ -403,9 +430,15 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     // 넘기면 방금 고친 자리를 '다른 곳'으로 세고, 그 옛 문단이 묶음에 들어가 sidecar 가 거절한다.
     const afterDocs = applySavedBlock(docs, now.sectionId, now.block, built.after_block)
     setDocs(afterDocs)
-    const postDrafts: SectionDraft[] = Object.entries(afterDocs).map(([id, d]) => ({ id, draft: d.draft }))
+    const postDrafts: SectionDraft[] = Object.entries(afterDocs).map(([id, d]) => ({ id, draft: d.draft, title: d.title }))
     const suggestions = sameWordSuggestions(postDrafts, now.block, built.after_block)
     setSameword(suggestions)
+    // 이 제안이 대한 **본문 글자**를 그대로 기억한다 — 다음 읽기의 글자와 다르면 접는다.
+    // 지문(hash)은 이 사본에서 아직 저장 전 값이라 스탬프로 쓸 수 없다. 글자는 지금 화면의
+    // 저장 결과 그대로이므로, 그 뒤 누가 그 장을 다시 쓰면 곧바로 달라진다.
+    samewordStamps.current = Object.fromEntries(
+      Object.entries(afterDocs).map(([id, d]) => [id, d.draft])
+    )
     await refreshProject({ quiet: true })
   }, [slot, root, sections, pStatus, docs, saveEdit, noteOwnEdit, refreshProject])
 
@@ -421,6 +454,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     // 그것이 없는 응답(옛 sidecar)이면 **기억하지 않는다** — 절 ID 만으로 빼면 도우미 변경을 삼킨다.
     for (const [sid, hash] of Object.entries(outcome.result.draft_hashes ?? {})) noteOwnEdit(sid, hash)
     setSameword([])
+    samewordStamps.current = null
     await refreshProject({ quiet: true })
   }, [root, pStatus, saveEdit, noteOwnEdit, refreshProject])
 
@@ -475,18 +509,30 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     ? { path: joinPath(root, path), name: path.split(/[\\/]/).pop() ?? path }
     : null
   /**
-   * 제출 전 점검이 필요한 장(§4-5-8 07). 원장이 그 건을 `recheck_before_submit` 으로 적었고,
-   * 그 장이 아직 '검토 준비 완료'가 아니면 목록 머리에 남는다 — 검토가 다시 유효해지면
-   * (`status === 'review_ready'`) 사라진다.
+   * 제출 전 점검이 필요한 장(§4-5-8 07).
+   *
+   * 원장이 그 건을 `recheck_before_submit` 으로 적었고, **그 장의 검토가 지금 유효하지 않으면**
+   * 목록 머리에 남는다. '유효'는 `section.status` 가 아니라 **정본의 검토 기록**으로 판정한다 —
+   * 검토가 낡아도 절 상태는 `review_ready` 그대로라 그것으로는 알 수 없다(Roh 2회째 07).
+   * 그 장을 대상으로 하는 **통과 검토 중 낡지 않은 것**이 하나라도 있으면 다시 유효하다.
+   * `projectLoad` 는 정본 전체(`project.load`)라 `reviews` 와 그 `stale` 이 이미 들어 있다.
    */
+  const reviews = ((projectLoad?.project as { reviews?: Record<string, unknown> } | undefined)?.reviews ?? {}) as Record<string, {
+    status?: string; stale?: boolean; target_refs?: { collection?: string; id?: string }[]
+  }>
+  const reviewValid = (sectionId: string): boolean => Object.values(reviews).some((review) => (
+    review?.status === 'pass'
+    && review.stale !== true
+    && (review.target_refs ?? []).some((ref) => ref?.collection === 'sections' && ref.id === sectionId)
+  ))
   const recheckSections = [...new Set(
     editRows
       .filter((r) => r.recheck_before_submit)
       .flatMap((r) => r.section_ids)
-      .filter((id) => (sections ?? []).find((x) => x.id === id)?.status !== 'review_ready')
+      .filter((id) => !reviewValid(id))
   )]
   /** 지금 읽어 둔 절 본문들 — 같은 낱말 찾기의 대상(새로 읽지 않는다, §3-4). */
-  const draftsNow: SectionDraft[] = Object.entries(docs).map(([id, d]) => ({ id, draft: d.draft }))
+  const draftsNow: SectionDraft[] = Object.entries(docs).map(([id, d]) => ({ id, draft: d.draft, title: d.title }))
   const slotSection = questionSection(card, sections)?.id ?? null
   const writing = sections?.find((s) => s.status === 'drafting') ?? null
   /** 바뀐 절이 하나라도 있어야 "고친 부분 보기"가 켜진다(발주 §③). */
@@ -596,7 +642,11 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
                 flashWord(block, place.before_block, place.start, place.end)
               }}
               onAskHelper={(draft) => { useChat.getState().insertPath(draft); useProject.getState().setPaneView('chat') }}
-              onDismiss={() => setSameword((rows) => rows.filter((r) => r.from !== suggestion.from))} />
+              onDismiss={() => setSameword((rows) => {
+                const left = rows.filter((r) => r.from !== suggestion.from)
+                if (left.length === 0) samewordStamps.current = null
+                return left
+              })} />
           ))}
         </div>
       )}

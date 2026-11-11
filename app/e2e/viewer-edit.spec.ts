@@ -438,6 +438,13 @@ test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (
     await expect(page.locator('.paper-fb.edit-line')).toContainText('고쳤어요', { timeout: 30_000 })
     await expect(page.locator('.paper-fb.edit-line .recheck'))
       .toContainText('제출 전에 도우미 점검', { timeout: 15_000 })
+
+    // 목록 머리 — 장 상태는 `review_ready` 그대로지만 **검토가 낡았으므로** 안내가 보여야 한다.
+    // (e647475 는 `section.status === 'review_ready'` 로 걸러 이 안내를 숨겼다 — Roh 2회째 07.)
+    await page.locator('.paper-head').getByRole('button', { name: /직접 고친 곳/ }).click()
+    const head = page.locator('.edit-recheck')
+    await expect(head).toBeVisible({ timeout: 15_000 })
+    await expect(head).toContainText('Ⅰ. 머리말')
   } finally {
     await electronApp.close()
   }
@@ -487,6 +494,155 @@ test('체크를 뺀 자리는 확정 뒤에도 원고 그대로다 (Roh 03)', as
     // 체크한 자리는 바뀌고, 뺀 자리는 원고 그대로다.
     await expect(page.locator('.paperpane .sheet')).toContainText('경작 관리도 함께 적는다.', { timeout: 30_000 })
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 기록은 따로 남긴다.')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (Roh 02)', async () => {
+  const { rewriteSection } = await import('./helpers')
+  const { readFileSync } = await import('node:fs')
+  const root = synthProject()
+  const revision = (): number =>
+    (JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }).revision
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    // 세 문단 — 가운데·끝에 같은 낱말이 있고, 앞 문단을 지우면 뒤 자리의 block_index 가 밀린다.
+    rewriteSection(root, { body: '지울 재배 문장.\n\n남길 재배 문장.\n\n꼬리 재배 문장.', expected: 1 })
+    await expect(page.locator('.paperpane .sheet')).toContainText('꼬리 재배 문장.', { timeout: 30_000 })
+
+    // 앞 문단의 낱말을 바꾼다 → 사라진 `재배` 제안이 뜨고, 남은 자리는 둘(가운데·끝).
+    await selectText(page, '지울 재배 문장', '지울 재배 문장')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('지울 경작 문장.')
+    await input.press('Enter')
+
+    const line = page.locator('.sameword')
+    await expect(line).toBeVisible({ timeout: 30_000 })
+    // 저장 직후의 다시 읽기가 같은 낱말 줄을 한 번 더 그린다 — 그 재그리드가 끝난 뒤 누른다.
+    await page.waitForTimeout(1500)
+    await line.getByRole('button', { name: '같이 고치기' }).click()
+    const list = page.locator('.sameword-list')
+    await expect(list).toBeVisible()
+    const places = list.locator('.sameword-place')
+    await expect(places).toHaveCount(2)
+
+    // 끝 문단(꼬리 …)의 체크를 끈다.
+    const target = places.filter({ hasText: '꼬리 재배 문장.' })
+    await expect(target).toHaveCount(1)
+    await target.locator('input[type="checkbox"]').uncheck()
+    await expect(target.locator('input[type="checkbox"]')).not.toBeChecked()
+
+    // 도우미가 **앞 문단을 지운** 본문을 등록한다 → 남은 자리의 block_index 가 밀린다.
+    // 그 순간 그 제안은 낡은 것이므로 접혀야 한다(§4-5-8 02) — 되살아나면 체크가 엉뚱한 자리를 가리킨다.
+    // 주의: `rewriteSection` 은 요청 ID 가 고정이라 두 번째 호출이 중복 제거된다. 그래서 여기서는
+    // 고유 요청 ID 로 직접 등록한다(그러지 않으면 정본이 바뀌지 않아 이 시험이 다른 것을 잰다).
+    const { spawnSync } = await import('node:child_process')
+    const { writeFileSync } = await import('node:fs')
+    const { python, scripts } = await import('./helpers')
+    writeFileSync(join(root, 'sections', '01.md'),
+      '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n남길 재배 문장.\n\n꼬리 재배 문장.\n<!-- gg:draft:end -->\n', 'utf-8')
+    writeFileSync(join(root, 'change-drop.json'), JSON.stringify({ request_id: `e2e:drop:${revision()}`, ops: [
+      { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
+    ] }), 'utf-8')
+    const dropped = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-drop.json'),
+      '--expected-revision', String(revision())], { encoding: 'utf-8' })
+    expect(dropped.status, dropped.stdout + dropped.stderr).toBe(0)
+    await expect(page.locator('.sameword')).toHaveCount(0, { timeout: 30_000 })
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('같이 고치기 목록에 장 제목이 보인다 (Roh 03)', async () => {
+  const { addSectionBody } = await import('./helpers')
+  const root = synthProject()
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 2 })
+    await expect(page.locator('.paperpane .sheet')).toContainText('Ⅲ. 결론', { timeout: 30_000 })
+
+    await selectText(page, '재배 면적은 600평이다', '재배 면적')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('경작 면적')
+    await input.press('Enter')
+
+    const line = page.locator('.sameword')
+    await expect(line).toBeVisible({ timeout: 30_000 })
+    await line.getByRole('button', { name: '같이 고치기' }).click()
+    const list = page.locator('.sameword-list')
+    await expect(list).toBeVisible()
+    // 각 자리가 어느 장인지 보인다 — 문맥만으로는 학생이 어느 장인지 모른다(§4-5-8 03).
+    await expect(list).toContainText('Ⅱ. 본문')
+    await expect(list).toContainText('Ⅲ. 결론')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('검토가 낡은 장은 목록 머리에 남고, 검토가 다시 유효해지면 사라진다 (Roh 07)', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const { readFileSync, writeFileSync } = await import('node:fs')
+  const { python, scripts } = await import('./helpers')
+  const root = synthProject()
+  // 준비 — ①status 를 review_ready 로, ②그 상태의 **실제 지문**으로 통과 검토를 등록한다.
+  // 두 op 를 한 번에 보내면 검증에서 거절되므로(같은 apply 안의 상호 참조) 차례로 보낸다.
+  const applyOps = (ops: unknown[]): void => {
+    const project = JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }
+    writeFileSync(join(root, 'change-ready.json'), JSON.stringify({ request_id: `e2e:ready:${project.revision}`, ops }), 'utf-8')
+    const out = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-ready.json'),
+      '--expected-revision', String(project.revision)], { encoding: 'utf-8' })
+    expect(out.status, out.stdout + out.stderr).toBe(0)
+  }
+  const readProject = (): { sections: Record<string, Record<string, unknown>> } =>
+    JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { sections: Record<string, Record<string, unknown>> }
+  applyOps([{ collection: 'sections', value: { ...readProject().sections['sec-01'], status: 'review_ready' } }])
+  const probe = spawnSync(python, ['-c', [
+    'import json, sys; sys.path.insert(0, sys.argv[1])',
+    'import gg_core as core',
+    'root = sys.argv[2]',
+    'p = core.load(root)',
+    'refs = [{"collection": "sections", "id": "sec-01"}]',
+    'print(json.dumps(core.fingerprint(root, p, refs)))'
+  ].join('\n'), scripts, root], { encoding: 'utf-8' })
+  expect(probe.status, probe.stderr).toBe(0)
+  applyOps([{ collection: 'reviews', value: {
+    id: 'rev-01', review_kind: 'content', author_id: 'a', reviewer_id: 'b',
+    target_refs: [{ collection: 'sections', id: 'sec-01' }],
+    input_fingerprint: JSON.parse(probe.stdout.trim()), findings: [], disposition: 'resolved', status: 'pass',
+    path: 'sections/01.md', coverage: [{ axis: 'content', locator: '전체' }]
+  } }])
+
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    // 오타만 고친다 — needs_check=false, 대신 그 장의 검토가 낡는다(§4-2 8).
+    await selectText(page, '600평', '600평')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('600 평')
+    await input.press('Enter')
+
+    await expect(page.locator('.paper-fb.edit-line')).toContainText('고쳤어요', { timeout: 30_000 })
+    await expect(page.locator('.paper-fb.edit-line .recheck'))
+      .toContainText('제출 전에 도우미 점검', { timeout: 15_000 })
+
+    // 목록 머리 — 장 상태는 `review_ready` 그대로지만 **검토가 낡았으므로** 안내가 보여야 한다.
+    // e647475 는 `section.status === 'review_ready'` 로 걸러 이 안내를 숨겼다(Roh 2회째 07).
+    await page.locator('.paper-head').getByRole('button', { name: /직접 고친 곳/ }).click()
+    await expect(page.locator('.edit-recheck')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.edit-recheck')).toContainText('Ⅰ. 머리말')
   } finally {
     await electronApp.close()
   }

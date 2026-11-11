@@ -77,6 +77,8 @@ export function SameWordLine({ suggestion, sections, busy, onBatch, onShowPlace,
                 <input type="checkbox" checked={unchecked[placeKey(place)] !== true} onChange={() => toggle(place)} />
               </label>
               <span>
+                {/* 어느 장의 자리인가 — 문맥만으로는 학생이 그 장을 찾지 못한다(§4-5-8 03). */}
+                <small className="where">{sections.find((x) => x.id === place.section_id)?.title ?? place.section_id}</small>
                 <span className="ctx">{place.context}</span>
                 <small>
                   <button type="button" className="lnk" onClick={() => onShowPlace(place)}>{EDIT.showAll}</button>
