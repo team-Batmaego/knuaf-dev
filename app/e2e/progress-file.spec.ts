@@ -6,11 +6,14 @@
  * electron을 **타입으로만** import하므로 여기서 그대로 불려도 electron이 필요 없다.
  */
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { linkSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readProgressFile, watchProgressFile } from '../src/main/progress/watch'
 import { registerProgressIpc, type ProgressChanged } from '../src/main/progress/index'
+import { createProgressFeed, type ProgressIo } from '../src/renderer/src/components/useProgress'
 import type { BrowserWindow } from 'electron'
 import {
   chooseProgress,
@@ -292,4 +295,290 @@ test('파일 없음 — 1단계 그대로: 대화 없으면 저장값, 저장값
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+/* ------------------------------------------- Roh 1회째 [차단] 확인↔열기 교체 */
+
+/**
+ * Roh 반례 그대로: 확인과 열기 **사이**에 논문 폴더를 바꿔 치고, 열린 직후 되돌린다.
+ * 옛 구조(확인 → 열기 → 확인)는 이 창을 통과했다(VM에서 폴더 밖 376바이트를 읽었다).
+ * 지금은 연 fd와 읽은 뒤의 경로·폴더 신원이 모두 맞아야 하므로 결과가 버려져야 한다.
+ * 폴더 이름 바꾸기는 POSIX에서만 안전하다(윈도우는 열린 파일이 든 폴더 이름을 못 바꾼다).
+ */
+test('F10 확인↔열기 사이 논문 폴더 교체 — 폴더 밖 값(revision 77)이 새지 않는다', () => {
+  test.skip(process.platform === 'win32', '폴더 이름 바꾸기 반례는 POSIX 시험')
+  const root = scratch()
+  const outside = scratch()
+  try {
+    const secret = join(outside, 'secret.json')
+    writeFileSync(secret, JSON.stringify(fileJson({ revision: 77 })))
+
+    // ① 바꾼 폴더를 **그대로 둔 채** 읽는다 — 폴더 신원이 달라 걸린다.
+    writeFile(root, fileJson({ revision: 1 }))
+    const moved = `${root}.moved`
+    const swapped = readProgressFile(root, {
+      beforeOpen: (path) => {
+        renameSync(root, moved)
+        mkdirSync(root)
+        // 링크가 아니라 **복사본**을 둔다 — O_NOFOLLOW로 걸리지 않는 가장 센 반례.
+        writeFileSync(path, JSON.stringify(fileJson({ revision: 77 })))
+      }
+    })
+    expect(swapped).toBeNull()
+    rmSync(root, { recursive: true, force: true })
+    renameSync(moved, root)
+
+    // ② 열린 직후 원래 폴더를 되돌린다 — fd의 파일과 경로의 파일이 달라 걸린다.
+    const restored = readProgressFile(root, {
+      beforeOpen: (path) => {
+        renameSync(root, moved)
+        mkdirSync(root)
+        writeFileSync(path, JSON.stringify(fileJson({ revision: 77 })))
+      },
+      afterOpen: () => {
+        rmSync(root, { recursive: true, force: true })
+        renameSync(moved, root)
+      }
+    })
+    expect(restored).toBeNull()
+    // 원래 파일은 멀쩡하다 — 거절이 원본을 망가뜨리지 않는다.
+    expect(readProgressFile(root)?.revision).toBe(1)
+
+    // ③ 폴더 대신 파일 자리에 심볼릭 링크 — O_NOFOLLOW가 열기 자체를 막는다.
+    rmSync(join(root, PROGRESS_FILE_NAME))
+    symlinkSync(secret, join(root, PROGRESS_FILE_NAME))
+    const linked = readProgressFile(root, {
+      beforeOpen: () => {/* 링크는 이미 있다 */}
+    })
+    expect(linked).toBeNull()
+
+    // ④ 폴더 밖 파일로의 **하드 링크** — 이름이 둘이므로(nlink > 1) 거절.
+    rmSync(join(root, PROGRESS_FILE_NAME))
+    const hard = join(outside, 'hard.json')
+    writeFileSync(hard, JSON.stringify(fileJson({ revision: 78 })))
+    try {
+      linkSync(hard, join(root, PROGRESS_FILE_NAME))
+      expect(readProgressFile(root)).toBeNull()
+    } catch {
+      // 파일시스템이 하드 링크를 막으면(권한·네트워크) 이 갈래는 건너뛴다.
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(`${root}.moved`, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+})
+
+/* --------------------------------------- Roh 1회째 [중요] FIFO·소켓에서 멈추지 않는다 */
+
+function fifoAt(path: string): boolean {
+  // FIFO는 POSIX에만 있다(윈도우 없음). 맥·리눅스의 `mkfifo`를 쓴다.
+  const made = spawnSync('mkfifo', [path], { encoding: 'utf8' })
+  return made.status === 0
+}
+
+test('F11 진행 파일 자리에 FIFO — 읽기가 멈추지 않고 즉시 null(2.5초 제한)', () => {
+  test.skip(process.platform === 'win32', 'POSIX FIFO')
+  const root = scratch()
+  try {
+    expect(fifoAt(join(root, PROGRESS_FILE_NAME))).toBe(true)
+    const started = Date.now()
+    expect(readProgressFile(root)).toBeNull()
+    // Roh 반례는 2.5초 안에 안 돌아왔다. 지금은 O_NONBLOCK이라 fstat에서 바로 걸린다.
+    expect(Date.now() - started).toBeLessThan(1_000)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('F11b 진행 파일 자리에 유닉스 소켓 — 즉시 null(감시·읽기 모두 안 멈춘다)', async () => {
+  test.skip(process.platform === 'win32', '유닉스 도메인 소켓 경로')
+  // 맥 유닉스 소켓 경로 상한(104바이트) — 기본 임시 폴더(`/var/folders/…`) 아래는 넘는다. 짧은 뿌리를 쓴다.
+  let root: string
+  try {
+    root = mkdtempSync(join('/tmp', 'kp-'))
+  } catch {
+    root = mkdtempSync(join(tmpdir(), 'kp-'))
+  }
+  const path = join(root, PROGRESS_FILE_NAME)
+  test.skip(Buffer.byteLength(path) > 100, `소켓 경로 상한 초과(${Buffer.byteLength(path)}바이트)`)
+  const server = createServer()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(path, () => resolve())
+    })
+    const started = Date.now()
+    expect(readProgressFile(root)).toBeNull()
+    expect(Date.now() - started).toBeLessThan(1_000)
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('F11c 폴더·링크·없는 파일 — 여전히 null(회귀)', () => {
+  const root = scratch()
+  try {
+    expect(readProgressFile(root)).toBeNull()
+    mkdirSync(join(root, PROGRESS_FILE_NAME))
+    expect(readProgressFile(root)).toBeNull()
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------------- Roh 1회째 [중요] 늦은 재조회·늦은 push (세대 규칙) */
+
+/** 가짜 `progress:get`/`onChanged` — 어느 요청의 응답이 먼저 도착할지 시험이 정한다. */
+function fakeIo(): {
+  io: ProgressIo
+  reply: (index: number, file: ProgressFile | null) => void
+  push: (root: string, file: ProgressFile | null) => void
+  gets: number
+} {
+  const pending = new Map<number, (f: ProgressFile | null) => void>()
+  let listening: ((p: { root: string; progress: ProgressFile | null }) => void) | null = null
+  let gets = 0
+  return {
+    get gets() { return gets },
+    io: {
+      get: () => {
+        const index = gets++
+        return new Promise<{ result: ProgressFile | null }>((resolve) => {
+          pending.set(index, (f) => resolve({ result: f }))
+        })
+      },
+      onChanged: (fn) => {
+        listening = fn
+        return () => { listening = null }
+      }
+    },
+    reply: (index, file) => {
+      const settle = pending.get(index)
+      if (!settle) throw new Error(`요청 #${index}이 없다`)
+      pending.delete(index)
+      settle(file)
+    },
+    push: (root, file) => {
+      if (!listening) throw new Error('구독이 없다')
+      listening({ root, progress: file })
+    }
+  }
+}
+
+const rev = (n: number): ProgressFile => parseProgressFile(fileJson({ revision: n }))!
+
+test('F12 논문 A → B 전환 — 늦은 A 응답(6/7)이 B(2/7)를 덮지 않는다', async () => {
+  const t = fakeIo()
+  const seen: (number | null)[] = []
+  const feed = createProgressFeed(t.io, (f) => seen.push(f ? f.revision : null))
+
+  feed.setRoot('/papers/a')
+  const aReq = t.gets
+  feed.setRoot('/papers/b')           // A 응답 전에 B로 전환(사용자가 폴더를 바꿈)
+  expect(t.gets).toBe(aReq + 1)
+
+  t.reply(1, rev(2))                  // B 2/7 도착
+  await new Promise((r) => setTimeout(r, 0))
+  t.reply(0, rev(6))                  // 그 뒤 A 6/7 도착 — 버려져야 한다
+  await new Promise((r) => setTimeout(r, 0))
+
+  expect(seen.filter((x) => x !== null)).toEqual([2])
+
+  // push도 같은 규칙: 옛 A push는 지금 B 화면에 못 들어간다.
+  t.push('/papers/a', rev(6))
+  expect(seen.filter((x) => x !== null)).toEqual([2])
+  t.push('/papers/b', rev(3))
+  expect(seen.filter((x) => x !== null)).toEqual([2, 3])
+  feed.dispose()
+})
+
+test('F12b A → B → A로 되돌아와도 첫 A의 늦은 응답은 버린다(지금 A 응답은 받는다)', async () => {
+  const t = fakeIo()
+  const seen: (number | null)[] = []
+  const feed = createProgressFeed(t.io, (f) => seen.push(f ? f.revision : null))
+
+  feed.setRoot('/papers/a')   // 요청 0
+  feed.setRoot('/papers/b')   // 요청 1
+  feed.setRoot('/papers/a')   // 요청 2 — root 문자열은 0번과 같다(문자열 비교로는 못 가른다)
+
+  t.reply(2, rev(1))          // 지금 A의 새 응답 — 받는다
+  await new Promise((r) => setTimeout(r, 0))
+  t.reply(0, rev(9))          // 첫 A의 늦은 응답 — 버린다
+  await new Promise((r) => setTimeout(r, 0))
+
+  expect(seen.filter((x) => x !== null)).toEqual([1])
+
+  // push 쪽 세대 판정은 main 몫이다(F13) — main이 이미 보내지 않았으므로 렌더러는 root만 본다.
+  // 지금 구독에 온 정상 A push는 받는다.
+  t.push('/papers/a', rev(3))
+  expect(seen.filter((x) => x !== null)).toEqual([1, 3])
+  feed.dispose()
+})
+
+test('F12c running → idle 재조회도 늦으면 버린다(같은 root, 다른 세대)', async () => {
+  const t = fakeIo()
+  const seen: (number | null)[] = []
+  const feed = createProgressFeed(t.io, (f) => seen.push(f ? f.revision : null))
+  feed.setRoot('/papers/a')
+  feed.reread()                    // 재조회 1
+  feed.setRoot('/papers/b')        // 그사이 전환
+  feed.setRoot('/papers/a')        // 되돌아옴
+  t.reply(3, rev(4))               // 지금 세대 응답
+  await new Promise((r) => setTimeout(r, 0))
+  t.reply(1, rev(5))               // 늦은 재조회 응답 — 버린다
+  await new Promise((r) => setTimeout(r, 0))
+  expect(seen.filter((x) => x !== null)).toEqual([4])
+  feed.dispose()
+})
+
+test('F13 main push도 A → B → A 뒤 옛 A 감시 이벤트를 버린다', () => {
+  const sent: ProgressChanged[] = []
+  const handlers = new Map<string, () => unknown>()
+  const fakeWin = { webContents: { send: (_c: string, p: ProgressChanged) => sent.push(p) } } as unknown as BrowserWindow
+  // follow마다 감시 하나씩 — onChange를 잡아 두고 시험이 늦은 이벤트를 직접 민다.
+  const watches: { root: string; onChange: (p: ProgressFile | null) => void; stopped: boolean }[] = []
+  const ipc = registerProgressIpc(
+    () => null,
+    () => fakeWin,
+    { handle: (ch, fn) => handlers.set(ch, fn) },
+    ({ root, onChange }) => {
+      const entry = { root, onChange, stopped: false }
+      watches.push(entry)
+      return () => { entry.stopped = true }
+    },
+  )
+  ipc.follow('/papers/a')
+  ipc.follow('/papers/b')
+  ipc.follow('/papers/a')
+  expect(watches.map((w) => w.root)).toEqual(['/papers/a', '/papers/b', '/papers/a'])
+  expect(watches[0]!.stopped).toBe(true)
+
+  watches[0]!.onChange(rev(9)) // 첫 A 감시의 늦은 이벤트 — 세대가 다르다
+  expect(sent).toEqual([])
+  watches[2]!.onChange(rev(4)) // 지금 A 감시
+  expect(sent.map((p) => p.root + ':' + String(p.progress?.revision))).toEqual(['/papers/a:4'])
+})
+
+/* ------------------------------------------- Roh 1회째 [중요] written_at 시간대 */
+
+test('F14 written_at — 끝이 Z 또는 ±hh:mm인 ISO만 유효', () => {
+  const ok = [
+    '2026-11-09T06:12:00Z',
+    '2026-11-09T06:12:00+09:00',
+    '2026-11-09T06:12:00-05:00',
+    '2026-11-09T06:12:00.123Z',
+    '2026-11-09T06:12Z',
+  ]
+  const bad = [
+    '2026-11-09T06:12:00',      // 시간대 없음
+    '2026-11-09T06:12:00+0900', // 콜론 없는 오프셋
+    '2026-11-09',               // 날짜만
+    '2026-11-09 06:12:00Z',     // `T` 대신 공백
+    '2026-11-09T06:12:00Zjunk',
+    '',
+  ]
+  for (const w of ok) expect(parseProgressFile(fileJson({ written_at: w })), w).not.toBeNull()
+  for (const w of bad) expect(parseProgressFile(fileJson({ written_at: w })), w).toBeNull()
 })

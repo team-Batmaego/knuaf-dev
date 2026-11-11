@@ -27,17 +27,27 @@ export interface ProgressIpc {
   follow: (root: string) => void
 }
 
+/** 감시를 거는 함수 — 시험이 늦은 이벤트 순서를 강제하려고 바꿔 끼운다(제품 경로는 기본값). */
+export type WatchFactory = typeof watchProgressFile
+
 /**
  * IPC 등록 + 감시 관리. `getRoot`는 지금 열린 논문 폴더(main만 안다).
  * 등록하는 채널은 `progress:` 접두어 두 개뿐이다.
+ * `watch`는 주입 지점이다 — 제품은 기본값(`watchProgressFile`)을 쓰고, node 시험만 자기 것을 넣는다.
  */
 export function registerProgressIpc(
   getRoot: () => string | null,
   win: () => BrowserWindow | null,
   host: ProgressIpcHost,
+  watch: WatchFactory = watchProgressFile,
 ): ProgressIpc {
   let watchedRoot: string | null = null
   let stopWatch: (() => void) | null = null
+  /**
+   * 감시 세대 — `follow`마다 하나 올린다(IMPL-T1 §4-2, Roh 1회째 [중요]).
+   * root만 비교하면 A → B → A로 되돌아온 뒤 **옛 A 감시**의 늦은 이벤트가 새 A로 통과한다.
+   */
+  let watchGeneration = 0
 
   host.handle('progress:get', () => {
     const root = getRoot()
@@ -49,10 +59,12 @@ export function registerProgressIpc(
       if (watchedRoot === root) return
       stopWatch?.()
       watchedRoot = root
-      stopWatch = watchProgressFile({
+      const generation = ++watchGeneration
+      stopWatch = watch({
         root,
         onChange: (progress) => {
-          // 늦게 도착한 옛 폴더 이벤트는 버린다(감시를 이미 바꿨다면 root가 다르다).
+          // 늦게 도착한 옛 감시 이벤트는 버린다(감시를 이미 바꿨다면 세대가 다르다).
+          if (watchGeneration !== generation) return
           if (watchedRoot !== root) return
           const payload: ProgressChanged = { root, progress }
           win()?.webContents.send('progress:changed', payload)
