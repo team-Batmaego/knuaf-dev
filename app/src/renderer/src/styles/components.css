@@ -25,10 +25,23 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 [data-platform="linux"] .titlebar { padding-left: var(--sp-3); }
 .titlebar .sp { flex: 1; }
 .titlebar button { -webkit-app-region: no-drag; }
-/* 가운데 "지금 · ○○ ▾" — 「지금」 글자만 코발트다(시안 ③④). */
-.tbtn.now { font-size: 13px; color: var(--ink-2); gap: 7px; }
-.tbtn.now .lbl { font-size: 12px; color: var(--accent); font-weight: 700; }
 .now-w { color: var(--accent); font-weight: 700; }
+/* 제목줄 진행 (T1) — mock r4 `.tbtn.stg`·`.ticks` 값 그대로. 눈금은 면색만(왼쪽 색선·알약 없음). */
+.tbtn.stg { gap: 8px; font-size: 13px; color: var(--ink-2); }
+.tbtn.stg b { color: var(--ink); font-weight: 650; }
+.ticks { display: inline-flex; gap: 3px; flex: none; }
+.ticks i { width: 12px; height: 5px; border-radius: 2px; background: var(--line); }
+.ticks i.d { background: color-mix(in srgb, var(--ok) 55%, var(--panel)); }
+.ticks i.n { background: var(--accent); }
+/* 진행 펼침 — mock `.ic`·`.steps` 같은 상태 기호 + "그 뒤"·기준 시각. */
+.pop-head-sub { padding: 2px 10px 6px; color: var(--muted); }
+.pop-after { padding: 8px 10px; color: var(--muted); }
+.pop-after span { display: block; }
+.pop-row .ic { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; }
+.pop-row .ic.done { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.pop-row .ic.now { background: var(--accent); }
+.pop-row .ic.todo { border: 1.5px solid var(--line-strong); }
+.pop-row .ic.flag { color: var(--attn); }
 .tbtn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; border-radius: 8px; padding: 6px 9px; font-size: 13.5px; color: var(--ink); }
 .tbtn:hover { background: var(--hover); }
 .tbtn.title { font-weight: 650; }
@@ -56,7 +69,8 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .project-remove { border: 0; background: transparent; color: var(--muted); padding: 6px; }
 .project-drawer-toggle, .project-drawer-backdrop { display: none; }
 .new-chat { flex: 1; width: min(760px, 100%); min-height: 0; margin: 0 auto; padding: 12vh 24px 24px; overflow-y: auto; }
-.new-chat h1 { font-family: var(--serif); text-align: center; }
+/* 첫 화면 제목은 종이가 아니다 — 앱 글꼴(Pretendard)을 그대로 받는다. */
+.new-chat h1 { text-align: center; }
 .new-chat > p { text-align: center; color: var(--muted); }
 .new-chat .chat-composer { margin-top: 24px; }
 .first-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
@@ -165,7 +179,8 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .pop-row .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-row .c b { font-weight: 600; }
 .pop-row .c small { color: var(--muted); font-size: 12.5px; }
-.pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--serif); text-align: center; }
+/* 차례 줄의 장 번호도 앱 글꼴 — 종이(paperpane .sheet) 안이 아니다. */
+.pop-row .rn { width: 22px; flex: none; color: var(--muted); text-align: center; }
 .pop-sep { height: var(--hairline); background: var(--line); margin: 6px 4px; }
 .pop-empty { padding: 6px 10px 10px; }
 .pop-make { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; }

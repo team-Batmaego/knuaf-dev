@@ -286,7 +286,9 @@ jobs:
       # live-*.spec.ts need a real Claude/Codex login and are excluded without KNUAF_LIVE=1.
       # 창 촬영(window-shots)은 맥 전용 `screencapture` 라 config 의 testIgnore 가 뺀다.
       # 화면 캡처(screenshots.spec.ts 포함)는 CI 에서도 돌려 `KNUAF_SHOT_DIR` 에 남기고 아래에서
-      # 아티팩트로 올린다 — 사람이 내려받아 시안과 나란히 본다. 로컬 기본값은 docs/images 그대로다.
+      # 아티팩트로 올린다 — 사람이 내려받아 시안과 나란히 본다. 로컬 기본값은 `app/test-results/
+      # ui-shots`(git 에 안 들어감)라 시험 실행이 추적되는 `docs/images` 를 덮어쓰지 않는다.
+      # 안내서 사진을 갱신할 때만 `KNUAF_SHOT_DIR=../docs/images` 로 명시해 돌린다.
       #
       # e2e runs on macOS and Windows alike. `KNUAF_PYTHON` must be an absolute path — the app
       # tests `existsSync(KNUAF_PYTHON)` in choosePython, so a bare name is ignored and it falls

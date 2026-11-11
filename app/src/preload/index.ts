@@ -3,6 +3,8 @@ import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import type { NoticeChoiceValue, NoticeRow } from '../shared/notice'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
+import type { ProgressFile } from '../shared/progress-file'
+import type { LinkOpenReply } from '../shared/link'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -202,6 +204,18 @@ const api = {
       ipcRenderer.invoke('notices:dismiss', root, key),
     choose: (root: string, identity: string, value: NoticeChoiceValue): Promise<RpcResult<Envelope>> =>
       ipcRenderer.invoke('notices:choose', root, identity, value)
+  },
+  // progress (v0.6.4 2단계): 논문 폴더의 진행 파일(main이 검증해 읽은 값). 경로 인자 없음 —
+  // main이 지금 열린 논문만 읽는다. `onChanged`는 논문이 바뀌거나 파일이 다시 쓰일 때 온다.
+  progress: {
+    get: (): Promise<{ result: ProgressFile | null }> => ipcRenderer.invoke('progress:get'),
+    onChanged: (fn: (payload: { root: string; progress: ProgressFile | null }) => void): (() => void) =>
+      subscribe('progress:changed', fn)
+  },
+  // link (v0.6.4): 답변 속 http(s) 주소 하나를 기본 브라우저로. 검사는 main이 다시 한다 —
+  // 화면은 주소만 넘기고, 열지 못한 이유(`scheme`·`credentials`·`malformed`…)만 돌려받는다.
+  link: {
+    open: (url: string): Promise<LinkOpenReply> => ipcRenderer.invoke('link:open', url)
   }
 }
 

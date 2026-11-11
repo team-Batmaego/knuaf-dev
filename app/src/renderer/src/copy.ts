@@ -1377,6 +1377,46 @@ export const TITLEBAR = {
 } as const
 
 // ---------------------------------------------------------------------------
+// 진행 목록 (IMPL-T1 §3-1, 시안 progress-r4 T1)
+// ---------------------------------------------------------------------------
+
+/**
+ * 제목줄 "창업논문 진행" — 도우미 답 안의 진행 목록 덩어리를 읽은 표시.
+ * 앱 5단계(`shared/stage`)는 이제 화면에 이름으로 나오지 않는 내부 판정으로만 남는다.
+ */
+export const PROGRESS = {
+  /** 닫힌 단추 낭독 이름 — open/closed는 StageMenu가 바꾼다. */
+  buttonLabelOpen: '창업논문 진행 보기',
+  buttonLabelClose: '창업논문 진행 닫기',
+  /** 시작 전(한 번도 없음) — 단추 글자. */
+  started: '시작 전',
+  /** 시작 전 펼침 안내. */
+  empty: '도우미가 첫 진행 목록을 쓰면 채워져요',
+  /** 펼침 머리의 제목. */
+  head: '창업논문 진행',
+  /** 펼침 머리 한 줄 — "7단계 중 n단계 · 독립 내용검토 전"의 검토 앞부분. */
+  ofSteps: (n: number) => `7단계 중 ${n}단계`,
+  reviewPending: '독립 내용검토 전',
+  /** 펼침 머리 한 줄 — "{시각} 답 기준". */
+  basis: (when: string) => `${when} 답 기준`,
+  /** "그 뒤" 줄 머리 — 파싱한 실제 문구가 뒤에 온다. */
+  afterHead: '그 뒤',
+  check: '제출 전 점검',
+  /** 낭독 "7단계 중 n단계, {이름}" */
+  readAloud: (n: number, name: string) => `7단계 중 ${n}단계, ${name}`,
+  /** 모두 ✓ — "7/7 워드 검토본 · 다 씀" */
+  allDone: '다 씀',
+  /** uncertain 메모의 펼침 표시 — "확인 필요". */
+  uncertain: '확인 필요',
+  /** 시각 표시 — 오늘(방금 전)은 "오후 3:12", 그 외 "11월 12일 오후 4:05". */
+  timeToday: (h: number, m: number) => `오후 ${h}:${pad2(m)}`,
+  timeTodayAm: (h: number, m: number) => `오전 ${h}:${pad2(m)}`,
+  timeOther: (mo: number, d: number, h: number, m: number, pm: boolean) => `${mo}월 ${d}일 ${pm ? '오후' : '오전'} ${h}:${pad2(m)}`,
+  /** 콘솔 전용 — 사용자 오류 표시는 없다. */
+  invalidLog: (reason: string) => `progress-list: invalid (${reason})`,
+} as const
+
+// ---------------------------------------------------------------------------
 // 종이 칸 (DESIGN §2, 시안 ④~⑯)
 // ---------------------------------------------------------------------------
 
@@ -1404,31 +1444,6 @@ export const PAPER = {
   filesCount: (n: number) => `파일 ${n}`,
   /** 파일에 다시 만들어야 할 것이 있을 때만 옆에 붙는 호박색 점의 이름(낭독용). */
   staleTitle: '다시 만들어야 할 파일이 있어요'
-} as const
-
-/**
- * 다섯 단계 (DESIGN §2, 시안 ⑬) — "지금"은 하나다. 번호 원 스테퍼·퍼센트·등간격 게이지는
- * 쓰지 않는다: 제목줄 한 줄 + 열면 목록.
- *
- * 사실 한 줄은 **이미 아는 것만** 말한다(단계 판정 입력과 같은 것들이다) — 모르는 개수를
- * 지어내지 않는다. 그래서 2단계는 질문 수/장 상태로, 5단계는 한글 마무리 개수로 말한다.
- */
-export const STAGES = {
-  names: ['준비', '인터뷰·장 쓰기', '검토본', '결과물', '제출 점검·마무리'],
-  head: '전체 과정 — 꼭 한 칸씩만 가지는 않아요',
-  fact: {
-    ready: (connected: boolean, hasProject: boolean) =>
-      `${connected ? 'AI 연결됨' : 'AI 연결 안 됨'} · ${hasProject ? '논문 폴더 있음' : '논문 폴더 없음'}`,
-    write: (questions: number, allReady: boolean) =>
-      questions > 0 ? `도우미 질문 ${questions}개가 답을 기다려요`
-        : allReady ? '장 초안을 다 썼어요'
-          : '도우미와 장을 쓰는 중',
-    review: (reviewExport: number | null) =>
-      reviewExport !== null ? `${reviewExport}번째 기록 기준으로 만들었어요` : '아직 안 만들었어요',
-    output: (stale: boolean, hasDocx: boolean) =>
-      stale ? '고친 내용이 파일에 빠져 있어요' : hasDocx ? '논문 파일을 만들었어요' : '아직 안 만들었어요',
-    finish: (n: number) => `한글에서 직접 할 것 ${n}개 · 확인 네 가지`
-  }
 } as const
 
 /**
@@ -1676,4 +1691,13 @@ export const NOTICE = {
   footnoteAction: '각주 넣어 줘',
   footnoteNote: '논문에 적을 문장을 입력칸에 채워 드려요.',
   choiceNote: '계산 방식을 다르게 한 곳은 알려 주셔야 해요.'
+} as const
+
+/**
+ * link (v0.6.4 ⑤): 답변 속 http(s) 주소 단추. 열지 못했을 때만 나오는 한 줄이다 —
+ * 주소가 이상하거나(앱이 열지 않는 형태·사용자 정보 포함) 브라우저가 없을 수 있어,
+ * 원인을 단정하지 않고 주소를 확인해 달라고만 한다(파일 열기 실패 안내와 같은 결).
+ */
+export const CHAT_LINK = {
+  openFailed: '주소를 열지 못했어요. 주소를 확인하거나 브라우저 설정을 확인해 주세요.'
 } as const
