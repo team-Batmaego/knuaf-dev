@@ -26,10 +26,22 @@ function fakeTaskkill(ms: number, exitCode = 0): {
   restore: () => void
   ran: () => boolean
   args: () => string[]
+  /** 가짜 실행 파일이 **끝까지 돌아** 완료 표식을 남길 때 resolve — 시간 대기 대신 이 신호를 쓴다. */
+  finished: Promise<void>
 } {
   const root = mkdtempSync(join(tmpdir(), 'kd-win-kill-'))
   const marker = join(root, 'ran.txt')
   const argsFile = join(root, 'args.txt')
+  const doneFile = join(root, 'done.txt')
+  const finished = Promise.withResolvers<void>()
+  // 완료 표시를 기다리는 **유일한** 감시 — 시험이 시간 여유를 늘리지 않고 실행 완료를 알 수 있게 한다.
+  const doneWatch = setInterval(() => {
+    if (!existsSync(doneFile)) return
+    clearInterval(doneWatch)
+    finished.resolve()
+  }, 5)
+  doneWatch.unref?.()
+  const stopWatching = (): void => { clearInterval(doneWatch) }
   const exe = process.platform === 'win32' ? join(root, 'System32', 'taskkill.exe') : `${root}\\System32\\taskkill.exe`
   const previous = process.env.NODE_OPTIONS
   if (process.platform === 'win32') {
@@ -43,6 +55,7 @@ function fakeTaskkill(ms: number, exitCode = 0): {
       `writeFileSync(${JSON.stringify(marker)}, 'ran')`,
       // 동기 대기 — 제품이 기다리지 않는다는 것이 이 시험의 요점이다.
       `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${Math.max(0, Math.round(ms))})`,
+      `writeFileSync(${JSON.stringify(doneFile)}, 'done')`,
       `process.exit(${exitCode})`
     ].join('\n'), 'utf-8')
     // node 실행 파일을 그 자리에 둔다 — 하드링크 우선(복사 비용 없음), 안 되면 복사.
@@ -50,9 +63,10 @@ function fakeTaskkill(ms: number, exitCode = 0): {
     return {
       root,
       run: async () => { process.env.NODE_OPTIONS = `--require ${JSON.stringify(bootstrap)}` },
-      restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous },
+      restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; stopWatching() },
       ran: () => { try { return existsSync(marker) } catch { return false } },
-      args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } }
+      args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } },
+      finished: finished.promise
     }
   }
   mkdirSync(root, { recursive: true })   // POSIX 에서는 `System32\taskkill.exe` 가 **파일 이름 하나**다
@@ -61,15 +75,31 @@ function fakeTaskkill(ms: number, exitCode = 0): {
     `printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}`,
     `: > ${JSON.stringify(marker)}`,
     `sleep ${(ms / 1000).toFixed(3)}`,
+    `: > ${JSON.stringify(doneFile)}`,
     `exit ${exitCode}`
   ].join('\n'), { mode: 0o755 })
   return {
     root,
     run: async () => { /* POSIX 는 환경 준비가 필요 없다 */ },
-    restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous },
+    restore: () => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; stopWatching() },
     ran: () => { try { return existsSync(marker) } catch { return false } },
-    args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } }
+    args: () => { try { return readFileSync(argsFile, 'utf-8').trim().split('\n') } catch { return [] } },
+    finished: finished.promise
   }
+}
+
+/**
+ * 완료 신호를 **정해진 예산 안에서만** 기다린다. 예산을 넘기면 false —
+ * 실행되지 않은 것을 시간 초과가 아니라 단언 실패로 드러내기 위한 것이고,
+ * 예산 자체는 예전 20ms×50(=1000ms) 관측보다 **길지 않다**(늘리지 않는다).
+ */
+const settle = async (done: Promise<void>, budgetMs: number): Promise<boolean> => {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), budgetMs) })
+  const finished = done.then(() => true)
+  const result = await Promise.race([finished, timeout])
+  if (timer) clearTimeout(timer)
+  return result
 }
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
@@ -92,8 +122,9 @@ test('윈도우 트리 종료는 동기로 기다리지 않는다 — 같은 이
     await new Promise((resolve) => setTimeout(resolve, 700))
     clearInterval(ticker)
     expect(ticks, '이벤트 루프가 막혀 타이머가 돌지 못했다').toBeGreaterThan(5)
-    // 실제로 띄웠는지 — 윈도우는 node 대역이 NODE_OPTIONS bootstrap 으로 마커를 남긴다.
-    for (let i = 0; i < 50 && !fake.ran(); i++) await new Promise((r) => setTimeout(r, 20))
+    // 실제로 띄웠는지 — 시간 여유를 두지 않고 **가짜 실행 파일의 완료 신호**를 기다린다.
+    // 예산은 바로 위 관측 창과 같은 700ms 다(600ms 지연 + 시작이 그 안에 들어와야 한다).
+    expect(await settle(fake.finished, 700), '가짜 taskkill 이 700ms 안에 끝나지 않았다').toBe(true)
     expect(fake.ran(), 'taskkill 을 아예 띄우지 않았다').toBe(true)
     expect(fake.args(), 'pid·트리 인자로 부르지 않았다').toEqual(['/pid', String(child.pid), '/T', '/F'])
   } finally {
@@ -111,8 +142,15 @@ test('taskkill 이 거절하면 직접 kill 로 넘어간다 (RT2-02)', async ()
     await fake.run()
     const signals: (NodeJS.Signals | undefined)[] = []
     killTree({ pid, kill: (signal) => { signals.push(signal); return true } }, 'SIGTERM', { platform: 'win32', env: { SystemRoot: fake.root } })
-    // 거절은 비동기로 관측되므로 잠깐 기다린다(동기 대기가 아니라는 것도 함께 증명된다).
-    for (let i = 0; i < 50 && !signals.length; i++) await new Promise((r) => setTimeout(r, 20))
+    // 가짜 실행 파일이 **실제로 실행돼 끝났는지** 먼저 증명한다 — 이게 없으면 "실행 자체가
+    // 실패해 직접 kill 로 갔다"와 "실행은 됐고 종료 코드 1 이었다"를 구별할 수 없다(검토 중요 1).
+    expect(await settle(fake.finished, 700), '가짜 taskkill 이 700ms 안에 끝나지 않았다').toBe(true)
+    expect(fake.ran(), 'taskkill 을 아예 띄우지 않았다').toBe(true)
+    expect(fake.args(), 'pid·트리 인자로 부르지 않았다').toEqual(['/pid', String(pid), '/T', '/F'])
+    // 직접 kill 로 넘어가는 것은 제품이 taskkill 의 **종료 코드**를 받은 뒤라, 실행 완료 표시
+    // 다음에 온다. 아래는 그 신호를 기다리는 짧은 상한(≤100ms)이다 — '실행됐는가'의 허용 시간을
+    // 늘리는 대기가 아니다(그 증명은 바로 위에서 이미 끝났다).
+    for (let i = 0; i < 20 && !signals.length; i++) await new Promise((r) => setTimeout(r, 5))
     expect(signals, 'taskkill 실패 뒤 직접 kill 이 없었다').toEqual(['SIGTERM'])
     expect(alive(pid), '시험용 자식이 죽었다 — 이 시험은 신호만 본다').toBe(true)
   } finally {

@@ -53,9 +53,11 @@ type Reply<T> = { result: T } | { error: { code: string; message: string } }
 const POLL_MS = 3_000
 const POLL_LIMIT_MS = 180_000
 /**
- * 한 tick 이 매달릴 수 있는 시간. 상태 조회 IPC 가 영영 안 끝나도 감시 전체를 잠그지 않는다 —
- * 이 상한이 지나면 그 요청의 잠금을 **만료**시켜 다음 간격에 새로 묻는다. 이미 나간 요청은
- * 취소할 수 없으므로 그때부터는 잠시 겹칠 수 있다. 겹침보다 "영영 안 묻는 것"이 훨씬 나쁘다.
+ * 한 tick 이 매달릴 수 있는 시간 = **겹침을 허용하기 시작하는 시점**.
+ *
+ * 이 상한이 지나면 그 요청을 **버렸다**고 보고 잠금을 만료시켜 다음 간격에 새로 묻는다.
+ * 이미 나간 요청은 취소할 수 없으므로, 그때부터는 같은 공급자의 조회가 잠시 겹칠 수 있다.
+ * 이 절충은 책임자 결정(2026-11-11)이다 — 아래 '조건부 불변' 주석 참조.
  */
 const POLL_TICK_LIMIT_MS = 15_000
 
@@ -73,12 +75,17 @@ type PollTimer = {
  * 교체된 감시의 진행 중 요청과 새 감시의 tick 이 **겹쳐** 같은 공급자의 상태 조회가 동시에
  * 두 번 나간다(CI `update-poll.spec.ts:62`, `overlap` 2).
  *
- * 지금은 두 불변을 함께 지킨다:
- *  - 표는 세대 공용이다 → 교체해도 진행 중 요청과 겹치지 않는다(겹침 0).
- *  - 표의 항목에는 상한(`POLL_TICK_LIMIT_MS`)이 있다 → 매달린 요청이 영영 잠그지 않는다.
- * 늦게 끝난 옛 tick 이 이미 만료된 항목을 지우거나 새 항목의 잠금을 풀지 않도록 번호를 본다.
+ * **조건부 불변(책임자 결정, 2026-11-11)** — 두 요구가 무조건 함께 성립할 수는 없다:
+ *  - (가) 같은 공급자의 조회는 **잠금 15초 안에서는** 겹치지 않는다.
+ *  - (나) 15초가 지나도 정착하지 않은 요청은 **버린 것**으로 보고 새 조회를 허용한다.
+ * 요청을 취소할 수 없으므로 (나)를 지키면 (가)를 예외 없이 지킬 수 없다 — 그 절충을 명시적으로
+ * 채택했다. 감시 자체의 180초 마감이 **버린 요청 수의 상한**이다. 버려진 요청의 늦은 응답이
+ * 화면 상태를 덮는 경합은 이 계층의 일이 아니고 '알려진 한계'(RT2-01 늦은 상태 응답)에 속한다.
+ *
+ * 잠금 소유권은 **객체 동일성**으로 본다(번호 비교가 아니다). 만료된 옛 항목이 늦게 끝나도
+ * 지금 항목이 아니면 아무것도 건드리지 않고, **그 tick 의 결과(완료 여부)도 감시가 쓰지 않는다**.
  */
-type InflightRead = { seq: number; timer: ReturnType<typeof setTimeout> }
+type InflightRead = { timer: ReturnType<typeof setTimeout> }
 const pendingReads = new WeakMap<Map<Provider, PollTimer>, Map<Provider, InflightRead>>()
 
 function inflightOf(map: Map<Provider, PollTimer>): Map<Provider, InflightRead> {
@@ -108,10 +115,10 @@ function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
  * 감시 하나를 건다. `onExpire` 는 감시가 끝까지(3분) 확인하지 못했을 때 **표시를 내리는**
  * 몫이다 — 예전에는 타이머만 지워서 화면이 "로그인 중"에 영원히 머물렀다(검토 RT2-01).
  *
- * 진행 중 조회 잠금은 **감시 세대 공용**(`pendingReads`)이고 항목마다 상한이 있다:
- *  - 교체·취소해도 진행 중 요청과 겹치지 않는다(`update-poll` 겹침 0 불변).
- *  - 15초 상한이 지나면 그 항목을 만료시켜 다음 tick 이 다시 묻는다(RT2-01 멈춘 tick 회복).
- * 늦게 끝난 옛 요청은 자기 번호가 아니면 아무것도 건드리지 않는다.
+ * 진행 중 조회 잠금은 **감시 세대 공용**(`pendingReads`)이다. 조건부 불변은 위 표 주석 참조:
+ * 교체·취소해도 **15초 안에서는** 진행 중 요청과 겹치지 않고, 15초가 지나면 그 요청을 버린 것으로
+ * 보고 다음 tick 이 다시 묻는다(영영 잠기지 않음). 만료된 옛 tick 은 잠금도, 완료 판정도,
+ * 감시 종료도 건드리지 않는다 — 그래야 '버렸다'는 말이 시험으로 잠긴다.
  */
 function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void {
   clearPoll(map, provider)
@@ -126,14 +133,15 @@ function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Pro
     if (map.get(provider) !== timer) return
     // 진행 중 조회가 있으면 이번 간격은 건너뛴다(교체된 감시의 요청 포함).
     if (pending.has(provider)) return
-    const mine = (pending.get(provider)?.seq ?? 0) + 1
-    const entry: InflightRead = { seq: mine, timer: setTimeout(() => {
+    const entry: InflightRead = { timer: setTimeout(() => {
       // 상한: 매달린 요청은 잠금만 만료시킨다(그 요청 자체는 취소할 수 없다).
       if (pending.get(provider) === entry) pending.delete(provider)
     }, POLL_TICK_LIMIT_MS) }
     pending.set(provider, entry)
     void tick()
-      .then(done => { if (done) stop(false) })
+      // 만료된(버린) 요청의 결과는 **쓰지 않는다** — 완료라고 감시를 끝내면 그 tick 이 늦게
+      // 돌아온 것만으로 감시가 사라져, 새 tick 이 물은 결과가 다시 낡은 값이 된다.
+      .then(done => { if (done && pending.get(provider) === entry) stop(false) })
       .catch(() => { /* tick 실패는 상태(`failed`·`unknown`)로만 드러난다 — 감시는 계속한다 */ })
       .finally(() => {
         if (pending.get(provider) !== entry) return
