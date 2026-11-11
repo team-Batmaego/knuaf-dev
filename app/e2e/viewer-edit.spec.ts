@@ -442,3 +442,52 @@ test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (
     await electronApp.close()
   }
 })
+
+test('체크를 뺀 자리는 확정 뒤에도 원고 그대로다 (Roh 03)', async () => {
+  const { addSectionBody } = await import('./helpers')
+  const root = synthProject()
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    // 같은 낱말이 다른 장에도 있게 해서 목록에 자리가 둘 이상 뜨게 한다.
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 2 })
+    await expect(page.locator('.paperpane .sheet')).toContainText('재배 기록은 따로', { timeout: 30_000 })
+
+    await selectText(page, '재배 면적은 600평이다', '재배 면적')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await expect(input).toBeVisible({ timeout: 15_000 })
+    await input.fill('경작 면적')
+    await input.press('Enter')
+
+    const line = page.locator('.sameword')
+    await expect(line).toBeVisible({ timeout: 30_000 })
+    await line.getByRole('button', { name: '같이 고치기' }).click()
+    const list = page.locator('.sameword-list')
+    // b067ecd 에서는 이 목록이 열리지 않는다(첫 클릭에 바로 저장) — 거기서 실패한다.
+    await expect(list).toBeVisible({ timeout: 15_000 })
+
+    const places = list.locator('.sameword-place')
+    await expect(places.first()).toBeVisible()
+    expect(await places.count()).toBeGreaterThanOrEqual(2)
+
+    // Ⅲ. 결론 자리만 체크를 뺀다 — 그 문장은 손대지 않아야 한다.
+    const target = places.filter({ hasText: '재배 기록은' })
+    await expect(target).toHaveCount(1)
+    await target.locator('input[type="checkbox"]').uncheck()
+
+    // 확정 — 남은 자리 수는 지금 본문이 정한다(숫자를 시험이 짐작하지 않는다).
+    const label = await list.getByRole('button', { name: /군데 고치기/ }).textContent()
+    const n = Number((label ?? '').replace(/[^0-9]/g, ''))
+    expect(n).toBeGreaterThanOrEqual(1)
+    await list.getByRole('button', { name: `${n}군데 고치기` }).click()
+
+    // 체크한 자리는 바뀌고, 뺀 자리는 원고 그대로다.
+    await expect(page.locator('.paperpane .sheet')).toContainText('경작 관리도 함께 적는다.', { timeout: 30_000 })
+    await expect(page.locator('.paperpane .sheet')).toContainText('재배 기록은 따로 남긴다.')
+  } finally {
+    await electronApp.close()
+  }
+})
