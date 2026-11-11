@@ -18,13 +18,13 @@ const TAIL = '여기가 답변의 맨 끝입니다'
 /** 앞머리는 배너·인용, 본문은 2,000자 한도를 훌쩍 넘긴다. */
 const LONG = `${BANNER}\n> prod. 시험용\n\n강의자료 발췌본을 그대로 옮깁니다.\n${'슬라이드 내용 '.repeat(500)}\n${TAIL}`
 
-function seedChat(root: string): void {
+function seedChat(root: string, text = LONG): void {
   mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
   writeFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), JSON.stringify({
     root, provider: 'codex', state: 'idle',
     messages: [
       { id: 'u1', role: 'user', text: '자료를 읽어 주세요', at: new Date().toISOString(), delivery: 'sent' },
-      { id: 'a1', role: 'assistant', text: LONG, at: new Date().toISOString() }
+      { id: 'a1', role: 'assistant', text, at: new Date().toISOString() }
     ]
   }), 'utf-8')
 }
@@ -49,6 +49,36 @@ test('긴 답변은 접히고, 펼치면 전문이 그대로 있다 (발견 10)'
 
     await bubble.getByRole('button', { name: CHAT.showLess }).click()
     await expect(bubble).not.toContainText(TAIL)
+  } finally {
+    await electronApp.close()
+  }
+})
+
+/**
+ * 검토 Roh v0.6.2 권고2 — 2,000자 한도가 코드 블록 한가운데에 걸려도 자른 조각이 완성된 명령처럼
+ * 보이면 안 된다. 접힌 화면은 코드 줄 경계에서 끊기고 닫는 펜스 + "… 코드가 더 있어요" 를 달며,
+ * 펼치면 원문 명령이 전부 돌아온다.
+ */
+test('한도가 코드 블록을 가르면 반쪽 명령 대신 닫는 펜스와 잘림 표시를 보여 준다', async () => {
+  const root = synthProject()
+  const code = ['원문을 그대로 옮깁니다.', '', '```bash', ...Array.from({ length: 400 }, (_, i) => `python build.py --step ${i}`), '```', TAIL].join('\n')
+  seedChat(root, code)
+  const { electronApp, page } = await launch()
+  try {
+    await openProject(page, root, splitReady)
+    const bubble = page.locator('.chat-msg.assistant').first()
+    await expect(bubble).toBeVisible({ timeout: 30_000 })
+    const pre = bubble.locator('pre').first()
+    await expect(pre).toBeVisible()
+    // 잘렸음을 밝힌다 — 표시는 닫는 펜스 **뒤**의 글로 남는다(코드로 읽히지 않는다).
+    await expect(bubble).toContainText('… 코드가 더 있어요')
+    // 반쪽 명령이 남지 않는다 — 코드 블록 안의 줄은 전부 온전한 명령이다.
+    const codeLines = (await pre.locator('code').innerText()).split('\n').filter((l) => l.trim())
+    expect(codeLines.length, '코드가 통째로 사라졌다').toBeGreaterThan(0)
+    expect(codeLines.filter((l) => !/^python build\.py --step \d+$/.test(l)), '잘린 코드 줄이 남았다').toEqual([])
+    // 원문은 버리지 않는다 — 펼치면 끝까지 온다.
+    await bubble.getByRole('button', { name: /더 보기$/ }).click()
+    await expect(bubble, '펼쳤는데 전문이 없다').toContainText(TAIL)
   } finally {
     await electronApp.close()
   }
