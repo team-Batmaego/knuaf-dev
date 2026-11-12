@@ -84,6 +84,12 @@ export function SettingsScreen() {
   // Permission mode is global. Ask removes per-folder exceptions; trust leaves the inactive list intact.
   const permission: 'trust' | 'ask' = settings?.permission_mode === 'ask' ? 'ask' : 'trust'
   const pickPermission = async (m: 'trust' | 'ask') => { await window.knuaf.setSettings({ permission_mode: m, ...(m === 'ask' ? { trusted_roots: [] } : {}) }); await loadSettings() }
+  /**
+   * 오류 보고 동의 — `permission_mode` 와 같은 모양(누르면 저장 → 다시 읽기). `'unset'` 이면
+   * **둘 다 미체크**가 정상이다("아직 안 정함"을 화면이 말하지 않으면 그 상태를 표현할 수 없다).
+   */
+  const consent: 'unset' | 'on' | 'off' = settings?.report_consent ?? 'unset'
+  const pickConsent = async (m: 'on' | 'off') => { await window.knuaf.setSettings({ report_consent: m }); await loadSettings() }
   const pickFolder = async () => { const d = await window.knuaf.pickFolder(); if (d) void tryOpen(d) }
   const base = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
   return (
@@ -199,6 +205,17 @@ export function SettingsScreen() {
           <button onClick={() => void window.knuaf.folderOpen('logs')}>로그 폴더 열기</button>
           {buildCopy === 'failed' && <span role="alert" className="caption">{SETTINGS.buildInfoCopyFailed}</span>}
         </div>}
+        {/* 오류 보고 동의 — 기본은 미체크('unset')이고, 그 상태에서는 아무것도 보내지 않는다. */}
+        <div className="caption" style={{ marginTop: 'var(--sp-4)', marginBottom: 'var(--sp-1)' }}>{SETTINGS.reportConsentWhich}</div>
+        <label className="opt-row">
+          <input type="radio" name="report-consent" checked={consent === 'on'} onChange={() => void pickConsent('on')} />
+          <span>{SETTINGS.reportConsentOn}</span>
+        </label>
+        <label className="opt-row">
+          <input type="radio" name="report-consent" checked={consent === 'off'} onChange={() => void pickConsent('off')} />
+          <span>{SETTINGS.reportConsentOff}</span>
+        </label>
+        <p className="caption">{SETTINGS.reportConsentTradeoff}</p>
         <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>{PRIVACY_NOTE}</p>
       </section>
       </div>

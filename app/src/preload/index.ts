@@ -181,6 +181,16 @@ const api = {
     return () => ipcRenderer.removeListener('chat:snapshot', listener)
   },
   openGuide: (): Promise<boolean> => ipcRenderer.invoke('guide:open'),
+  /**
+   * 오류 자동 보고 — `status()` 는 "지금 물어볼까"를 main 이 디스크 상태에서 계산해 준다
+   * (`report_consent==='unset' && queue.length>0`). `answer(allow)` 는 답을 저장하고 그 상태
+   * 전이(큐 전송/삭제)까지 main 이 한다. 훅이 안 달린 실행에서도 핸들러가 있으므로
+   * `{ask:false}` 만 온다 — 렌더러는 분기 없이 같은 모양을 받는다.
+   */
+  crash: {
+    status: (): Promise<{ ask: boolean }> => ipcRenderer.invoke('crash:status'),
+    answer: (allow: boolean): Promise<void> => ipcRenderer.invoke('crash:answer', allow)
+  },
   appInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
   onSidecarLog: (fn: (entry: { stream: string; line: string }) => void) => {
     const listener = (_e: unknown, entry: { stream: string; line: string }) => fn(entry)

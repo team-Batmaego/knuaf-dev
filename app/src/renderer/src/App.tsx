@@ -10,6 +10,7 @@ import { Workspace } from './components/Workspace'
 import { PaperPane } from './components/PaperPane'
 import { Sheet } from './components/Sheet'
 import { FirstProjectGate } from './components/FirstProjectGate'
+import { CrashConsentAsk } from './components/CrashConsentAsk'
 import { SheetOver } from './components/SheetOver'
 import { RightPane } from './components/RightPane'
 import { SettingsModal } from './components/SettingsModal'
@@ -154,6 +155,7 @@ export function App() {
             <SettingsModal open={sheet === 'settings'} onClose={closeSheet} />
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}
             <FirstProjectGate />
+            <CrashConsentAsk />
           </>}
         >
           <Workspace chat={<Chat />} paper={<RightPane paper={<PaperPane overlay={checkup} />} />} />

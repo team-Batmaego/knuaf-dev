@@ -770,8 +770,11 @@ export const COMPLETION: Record<string, string> = {
 // Screen intros, onboarding
 // ---------------------------------------------------------------------------
 
-/** Data boundary: the agent providers see the project; the app itself phones nowhere. */
-export const PRIVACY_NOTE = 'AI 도우미를 연결하면 답변과 작업 폴더의 내용이 선택한 제공업체(OpenAI 또는 Anthropic)로 전송돼요. 앱 자체는 그 외 어디에도 자료를 보내지 않아요.'
+/**
+ * Data boundary: the agent providers see the project; the app itself phones nowhere
+ * except crash reports the student consented to (DESIGN §2-8).
+ */
+export const PRIVACY_NOTE = 'AI 도우미를 연결하면 답변과 작업 폴더의 내용이 선택한 제공업체(OpenAI 또는 Anthropic)로 전송돼요. 앱 자체는 논문 자료를 그 밖으로 보내지 않아요. 허락한 경우에는 앞으로 오류가 날 때마다 자동으로 오류 종류·앱 안 위치·앱 판·운영체제·발생 시각을 개발자에게 보내고(하루 3건까지), 논문 내용·내 파일 이름·내 컴퓨터 경로는 보내지 않아요. 설정에서 언제든 끌 수 있어요.'
 
 // ---------------------------------------------------------------------------
 // 첫 실행 (AI 연결 → 논문 폴더) · 폴더 고르기
@@ -1514,6 +1517,21 @@ export const REPORT = {
 } as const
 
 /**
+ * 오류 자동 보고 동의 시트(DESIGN §2-8). **본문은 두 줄이 상한이다** — 셋째 줄을 넣지 않고,
+ * 더 알릴 것은 `자세히` 안으로만 넣는다. `askScope` 는 "이번 1건"이 아니라 "앞으로 전부"에 대한
+ * 허락이라는 사실을 답하기 전에 알린다(I-01).
+ */
+export const CRASH_REPORT = {
+  askTitle: '앱에서 오류가 났어요',
+  askBody: '오류 종류·앱 안 위치·앱 판·운영체제·발생 시각만 보내요. 논문 내용·내 파일 이름·내 컴퓨터 경로는 보내지 않아요.',
+  askScope: '앞으로 오류가 나면 자동으로 보내요 · 설정에서 끌 수 있어요',
+  askDetailLabel: '자세히',
+  askDetail: '받는 곳: 개발자만 보는 비공개 채널로 전달돼요(Cloudflare Workers 를 거쳐요). 설정에서 언제든 끌 수 있고, "알리지 않기"를 고르면 앱의 대기 항목이 즉시 지워져요. 이미 보낸 것은 개발자에게 말하면 지워요.',
+  askAllow: '보내기',
+  askDeny: '안 보내기'
+} as const
+
+/**
  * 목적격 조사 `을/를`. 마지막 글자가 한글 음절이면 받침을 보고 고르고, 그 밖(숫자·영문·
  * 기호)은 `를`로 둔다. 절 제목에 조사를 붙여 문장을 만들 때만 쓴다.
  */
@@ -1584,7 +1602,11 @@ export const SETTINGS = {
   buildInfo: (date: string, commit: string) => `빌드 ${date} · 커밋 ${commit}`,
   copyBuildInfo: '빌드 정보 복사',
   buildInfoCopied: '복사했어요',
-  buildInfoCopyFailed: '복사하지 못했어요'
+  buildInfoCopyFailed: '복사하지 못했어요',
+  reportConsentWhich: '오류가 났을 때 개발자에게 알릴까요?',
+  reportConsentOn: '알리기 — 오류 종류와 위치만',
+  reportConsentOff: '알리지 않기',
+  reportConsentTradeoff: '논문 내용·내 파일 이름·내 컴퓨터 경로는 보내지 않아요. 아직 정하지 않았으면 아무것도 보내지 않아요.'
 }
 
 /**
