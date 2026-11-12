@@ -57,21 +57,27 @@ export function LanePlanCard({ card, invalidReason = null, onDecide, onStatus }:
   const quoteLong = quoteText.length > 0 && quoteClipped !== quoteText
 
   if (settled) {
+    /*
+     * 접힌 카드는 **기록 한 줄**이다(설계 §3-5, 시안 `v07.r3.html:142`) — 테두리·바탕이 있는 카드가 아니다.
+     * 시안의 가운뎃점 글리프(`I.dot`, 14px·`r=4`·`stroke-width=2`)는 `Icon` 표에 없는 모양이라
+     * 계약 밖 `IconName` 을 늘리지 않고 여기서 그대로 그린다.
+     * [카드 보기]가 이 줄로 스크롤·초점하므로 `id` 는 껍데기에 남긴다(`Chat.tsx:555`).
+     */
     return (
-      <div className="lane-card folded" id={`lane-card-${card.cardId}`} tabIndex={-1}>
-        <div className="lane-folded">
-          <span className="dot" aria-hidden="true"><Icon name="check" size={14} /></span>
-          <span>{foldedText(card, first, state, invalidReason)}</span>
-          <button type="button" className="lk" ref={folded} aria-expanded={open} onClick={() => setOpen(!open)}>
-            {open ? LANE_CARD.folded.detailsClose : LANE_CARD.folded.details}
-          </button>
-        </div>
+      <div className="lane-folded" id={`lane-card-${card.cardId}`} tabIndex={-1}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+        </svg>
+        <span>{foldedText(card, first, state, invalidReason)}</span>
+        <button type="button" className="lk" ref={folded} aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? LANE_CARD.folded.detailsClose : LANE_CARD.folded.details}
+        </button>
         {open && (
-          <>
+          <div className="lane-folded-body">
             <CardBody card={card} detail setDetail={() => undefined} readOnly />
             {/* 접힌 카드의 [자세히]는 읽기 전용이라 단추가 없다 — 범위 줄은 표 아래 한 줄로 남긴다. */}
             <p className="scope">{scope}</p>
-          </>
+          </div>
         )}
       </div>
     )
@@ -172,7 +178,7 @@ function CardBody({ card, detail, setDetail, readOnly = false }: {
         <p className="data">
           {LANE_CARD.readScope}{' '}
           <button type="button" className="lk" aria-expanded={detail} onClick={() => setDetail(!detail)}>
-            {detail ? LANE_CARD.quoteLess : LANE_CARD.quoteMore}
+            {CHAT.details}
           </button>
         </p>
       )}

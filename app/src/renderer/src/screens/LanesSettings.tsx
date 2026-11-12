@@ -3,6 +3,7 @@ import { WORK_LANES, LANE_TABLE, type LaneEntry } from '../../../shared/lanes'
 import type { ConsentRow, LanesSettingsView, ReviewModelGroup, SettingsRow } from '../../../shared/lanes-ipc'
 import { useLanes, laneActions } from '../store/lanes'
 import { LANE_CARD, LANE_NAME, LANES_SETTINGS, depthName, modelLabel, modelName, providerName, dayKo } from '../copy-lanes'
+import { isDirect } from '../laneLines'
 import { Icon } from '../components/Icon'
 import { Confirm } from '../components/Confirm'
 import { Popover, PopHead, PopRow } from '../components/Popover'
@@ -123,6 +124,13 @@ function Placement({ view, root, onDisable, pick, onOpenPick, onClosePick }: {
       <p className="caption" style={{ margin: '0 0 6px' }}>{LANES_SETTINGS.caption}</p>
       {view.mode === 'undecided' && <p className="caption" style={{ margin: '0 0 6px', color: 'var(--ink-2)' }}>{LANES_SETTINGS.pendingHead}</p>}
       <table className="lane-table">
+        {/* 열 폭 고정(검토 C2-V01) — 역할·깊이·어디서는 짧은 값이라 줄바꿈을 막고, 둘째 칸이 남는 폭을 쓴다. */}
+        <colgroup>
+          <col style={{ width: '19%' }} />
+          <col />
+          <col style={{ width: '12%' }} />
+          <col style={{ width: '16%' }} />
+        </colgroup>
         <thead>
           <tr>
             <th scope="col">{LANES_SETTINGS.colLane}</th>
@@ -170,16 +178,17 @@ function Placement({ view, root, onDisable, pick, onOpenPick, onClosePick }: {
 function Row({ lane, row }: { lane: SettingsRow['lane']; row: SettingsRow | null }) {
   const entry = row?.entry ?? null
   const note = row?.note ?? null
+  const direct = entry !== null && isDirect(entry)
   return (
     <tr>
-      <td>{LANE_NAME[lane]}</td>
+      <td className="nw">{LANE_NAME[lane]}</td>
       <td>
         {note === null
-          ? (entry ? `${providerName(entry.company)} · ${modelName(entry.model) || '기본'}` : '—')
+          ? (entry ? (direct ? LANE_CARD.direct : `${providerName(entry.company)} · ${modelName(entry.model) || '기본'}`) : '—')
           : <span className="exc"><Icon name="info" size={14} className="ic" />{' '}{noteText(row!)}</span>}
       </td>
-      <td>{note !== null ? '—' : depthName(entry?.effort)}</td>
-      <td>{entry ? (entry.how === 'main' ? LANES_SETTINGS.whereMain : LANES_SETTINGS.whereNew) : '—'}</td>
+      <td className="nw">{note !== null ? '—' : depthName(entry?.effort)}</td>
+      <td className="nw">{entry ? (direct ? LANES_SETTINGS.whereMain : LANES_SETTINGS.whereNew) : '—'}</td>
     </tr>
   )
 }
@@ -247,6 +256,6 @@ function sourceText(source: LanesSettingsView['source']): string {
 
 /** "ChatGPT Astra" — 이번 차례만 문구. 도우미가 직접 맡으면 회사 이름이 없다. */
 function entryWords(entry: LaneEntry): string {
-  if (!entry.model) return LANES_SETTINGS.whereMain
-  return `${providerName(entry.company)} ${modelName(entry.model)}`
+  if (isDirect(entry)) return LANE_CARD.direct
+  return `${providerName(entry.company)} ${modelName(entry.model) || '기본'}`
 }

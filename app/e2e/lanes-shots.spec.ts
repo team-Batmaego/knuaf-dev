@@ -9,64 +9,12 @@
  * 같은 화면을 얻는 데 몇 배가 걸린다 — 주입 통로가 장면 사이 전환을 이미 할 수 있다.
  */
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
-import { launch, openProject, setWindowWidth } from './helpers'
+import { expectWindowInner, launch, openProject, setWindowBounds } from './helpers'
 import { fakeCodexEnv, questionProject, scratch, seedChat, userDataWith } from './fixtures/fake-codex'
-
-const OUT = process.env.KNUAF_LANES_SHOTS_DIR
-
-const at = (minAgo: number): string => new Date(Date.now() - minAgo * 60_000).toISOString()
-
-const MESSAGES = [
-  { id: 'u1', role: 'user', text: '3장 시장 현황에 감초 가격 자료 좀 찾아 줘', at: at(9), delivery: 'sent' },
-  { id: 'a1', role: 'assistant', text: '네, 자료 찾기 담당에게 도매·소매 가격 조사를 맡길게요. 끝나면 원문을 다시 확인해서 3장에 넣을게요.', at: at(8) }
-]
-
-/** 공통 묶음 뼈대 — 각 장면이 필요한 칸만 덮어쓴다. */
-function snapshot(root: string, seq: number, patch: Record<string, unknown>): Record<string, unknown> {
-  return {
-    root,
-    seq,
-    lines: [],
-    cards: [],
-    events: [],
-    settings: {
-      mode: 'on',
-      source: { kind: 'recommended', rowId: 'claude-high-codex-low' },
-      rows: [],
-      differsFromRecommendation: false,
-      temporary: [],
-      recommendedDesign: { company: 'claude', model: 'opus', effort: 'high' },
-      nextDesignCompany: null,
-      consents: []
-    },
-    archives: [],
-    announcement: null,
-    stopButton: 'chat',
-    ...patch
-  }
-}
-
-const detail = (jobId: string, task: string) => ({ jobId, status: 'running', reason: null, error: null, task })
-const progressLine = (id: string, jobId: string, lane: string, task: string, minutes: number, waiting: number, assignee: Record<string, unknown>) => ({
-  kind: 'progress', tier: 3, id, at: at(minutes), dismissible: false,
-  jobId, lane, detail: detail(jobId, task), assignee,
-  phase: 'running', startedAt: at(minutes), waiting
-})
-
-async function inject(page: Page, snapshotValue: Record<string, unknown>): Promise<void> {
-  await page.evaluate((value) => {
-    window.dispatchEvent(new CustomEvent('knuaf:lanes-test', { detail: value }))
-  }, snapshotValue)
-}
-
-async function shoot(page: Page, name: string): Promise<void> {
-  if (!OUT) return
-  mkdirSync(OUT, { recursive: true })
-  await page.waitForTimeout(600)
-  await page.screenshot({ path: join(OUT, `${name}.png`) })
-}
+import {
+  at, changeCard, firstCard, inject, installLanesSeam, laneCalls, MESSAGES, progressLine,
+  releaseCardDecision, settingsCard, shoot, snapshot
+} from './fixtures/lanes'
 
 async function open(settings: Record<string, unknown>, after: (page: Page, root: string, app: ElectronApplication) => Promise<void>): Promise<void> {
   const dir = scratch()
@@ -78,7 +26,13 @@ async function open(settings: Record<string, unknown>, after: (page: Page, root:
     userData: userDataWith(dir, { permission_mode: 'trust', ...settings })
   })
   try {
-    await page.setViewportSize({ width: 1180, height: 800 })
+    /**
+     * 검토 C07-⑤: 예전에는 `page.setViewportSize(1180×800)` 로 렌더러 뷰포트를 **고정**했다.
+     * 그건 창 크기와 무관한 CDP 에뮬레이션이라, 나중에 창을 900×600 으로 줄여도 화면은 1180×800
+     * 그대로였다 — 900×600 조건의 증거가 아니었다. 그래서 실제 창 크기로 맞춘다.
+     */
+    await setWindowBounds(electronApp, 1180, 800)
+    await page.waitForTimeout(300)
     // 문서용 캡처는 불투명 사이드바로 남긴다(웹 레이어가 vibrancy 를 담지 못한다).
     await page.evaluate(() => { document.documentElement.dataset.vibrancy = 'off' })
     await openProject(page, root)
@@ -86,22 +40,6 @@ async function open(settings: Record<string, unknown>, after: (page: Page, root:
     await after(page, root, electronApp)
   } finally {
     await electronApp.close()
-  }
-}
-
-const CARD_ROWS = [
-  { lane: 'research', before: null, after: { company: 'codex', model: 'astra', effort: null, how: 'relay' }, rejected: null, designSwitchTo: null, requested: null },
-  { lane: 'writing', before: null, after: { company: 'codex', model: 'sol', effort: null, how: 'relay' }, rejected: null, designSwitchTo: null, requested: null },
-  { lane: 'repeat', before: null, after: { company: 'codex', model: 'terra', effort: null, how: 'relay' }, rejected: null, designSwitchTo: null, requested: null },
-  { lane: 'review', before: null, after: { company: 'codex', model: 'astra', effort: 'high', how: 'relay' }, rejected: null, designSwitchTo: null, requested: null }
-]
-
-function firstCard(cardId: string, state: Record<string, unknown>, createdAt: string): Record<string, unknown> {
-  return {
-    cardId, root: '', variant: 'first', baseVersion: 1, createdAt, reviewDue: false, quote: null,
-    rows: CARD_ROWS,
-    fees: [{ company: 'codex', accountLabel: 'a…@gmail.com', consented: false }],
-    fastDrain: false, recommendedDesign: { company: 'claude', model: 'opus', effort: 'high' }, state
   }
 }
 
@@ -158,7 +96,8 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
     await expect(card.locator('h3')).toHaveText('작업을 나눠 맡길까요?')
     await expect(card).toContainText('도우미 혼자 하던 일을 역할별로 나눠요. 검토는 늘 새 대화에서 해요.')
     await expect(card.locator('.lane-dl dt')).toHaveText(['자료 찾기', '글쓰기', '반복 작업', '검토'])
-    await expect(card.locator('.lane-dl dd').first()).toHaveText('ChatGPT · Astra · 기본')
+    // V03: `relay`(새 대화에 맡김)도 "새 대화"를 적는다 — 예전 값('ChatGPT · Astra · 기본')은 그 말이 빠져 있었다.
+    await expect(card.locator('.lane-dl dd').first()).toHaveText('ChatGPT · Astra · 기본 · 새 대화')
     await expect(card.locator('.chipref')).toContainText('아래 칩에서 골라요 — 추천 Claude Opus')
     // 읽기 범위는 "막는다"고 들리는 말을 쓰지 않는다(설계 §3 금지 문구).
     await expect(card).toContainText('담당은 파일을 읽을 수 있지만 논문 파일을 고치지는 못해요')
@@ -181,10 +120,28 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
       announcement: null,
       stopButton: 'chat'
     }))
-    await expect(page.locator('.lane-card.folded')).toBeVisible({ timeout: 15_000 })
-    // §3-5 접힘 — 적용한 줄과 범위가 한 줄에 남는다.
-    await expect(page.locator('.lane-card.folded')).toContainText('작업 분담을 정했어요 — 자료 찾기 ChatGPT Astra · 글쓰기 ChatGPT Sol · 반복 작업 ChatGPT Terra · 검토 ChatGPT Astra (계속)')
-    await expect(page.locator('.lane-card.folded').getByRole('button', { name: '자세히' })).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('.lane-folded')).toBeVisible({ timeout: 15_000 })
+    // §3-5 접힘 — 적용한 줄과 범위가 한 줄에 남는다. 테두리 있는 카드가 아니라 기록 한 줄이다(검토 C2-V03).
+    await expect(page.locator('.lane-folded')).toContainText('작업 분담을 정했어요 — 자료 찾기 ChatGPT Astra · 글쓰기 ChatGPT Sol · 반복 작업 ChatGPT Terra · 검토 ChatGPT Astra (계속)')
+    await expect(page.locator('.lane-folded').getByRole('button', { name: '자세히' })).toHaveAttribute('aria-expanded', 'false')
+    // V03 측정 단언 — 껍데기가 카드가 아니라 줄이다: 테두리·둥근 모서리·바탕 없음, 글리프는 14px 가운뎃점.
+    const foldedBox = await page.locator('.lane-folded').evaluate((el) => {
+      const s = getComputedStyle(el)
+      return { border: s.borderTopWidth, radius: s.borderTopLeftRadius, background: s.backgroundColor, display: s.display }
+    })
+    expect(foldedBox, '접힌 줄이 카드 상자를 유지한다').toMatchObject({ border: '0px', radius: '0px' })
+    expect(foldedBox.background).toBe('rgba(0, 0, 0, 0)')
+    expect(foldedBox.display).toBe('flex')
+    const glyph = page.locator('.lane-folded > svg')
+    await expect(glyph).toHaveAttribute('width', '14')
+    await expect(glyph.locator('circle')).toHaveAttribute('r', '4')
+    await expect(glyph.locator('path')).toHaveCount(0)
+    // [자세히]를 열면 읽기 전용 표가 줄 아래로 내려온다 — 줄 자체는 그대로 남는다.
+    await page.locator('.lane-folded').getByRole('button', { name: '자세히' }).click()
+    await expect(page.locator('.lane-folded .lane-folded-body .lane-dl dt')).toHaveText(['자료 찾기', '글쓰기', '반복 작업', '검토'])
+    await expect(page.locator('.lane-folded-body')).toHaveCSS('margin-left', '22px')
+    await page.locator('.lane-folded').getByRole('button', { name: '접기' }).click()
+    await expect(page.locator('.lane-folded-body')).toHaveCount(0)
     await places()
     await shoot(page, 'lane-card-folded')
 
@@ -209,6 +166,22 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
     await expect(events.nth(1)).toHaveClass(/warn/)
     await expect(events.nth(1)).toContainText('독립 검토를 하지 않았어요 — 나눠 맡기기를 안 씀')
     await expect(events.nth(2)).toContainText('ChatGPT가 스스로 하위 담당을 띄웠어요')
+    /*
+     * V02 측정 단언 — 시안 `v07.r3.html:103` 은 경고 삼각형만 주황이고 **본문은 회청색 그대로**다.
+     * 글자색을 직접 비교한다(사진으로는 구분되지 않는다). 글리프도 삼각형(`path`)이고 원이 아니다.
+     */
+    const [warnColor, plainColor] = await Promise.all([
+      events.nth(1).evaluate((el) => getComputedStyle(el).color),
+      events.nth(0).evaluate((el) => getComputedStyle(el).color)
+    ])
+    expect(warnColor, '경고 줄 본문까지 주황색이다').toBe(plainColor)
+    const warnIcon = events.nth(1).locator('svg')
+    expect(await warnIcon.locator('path').count(), '경고 줄 글리프에 삼각형이 없다').toBeGreaterThan(0)
+    expect(await warnIcon.locator('circle').count(), '경고 줄 글리프가 원형이다').toBe(0)
+    const warnIconColor = await warnIcon.evaluate((el) => getComputedStyle(el).color)
+    expect(warnIconColor, '경고 글리프가 경고색이 아니다').not.toBe(warnColor)
+    const plainIcon = events.nth(0).locator('svg')
+    await expect(plainIcon.locator('circle')).toHaveAttribute('cx', '12')
     // 넘김 확인 불가 줄은 종류 2 attn — 다시 넘기지 않으므로 단추는 [자세히]뿐이다.
     const uncertain = page.locator('#line-uncertain')
     await expect(uncertain).toContainText('글쓰기 결과를 도우미에게 넘겼는지 확인하지 못했어요')
@@ -329,12 +302,52 @@ test('설정 › 작업 분담', async () => {
     await expect(page.locator('.set-row2')).toHaveCount(2)
     await expect(page.locator('.set-row2').nth(0)).toContainText('동의함')
     await expect(page.locator('.set-row2').nth(1)).toContainText('아직 안 함 — 처음 맡길 때 물어봐요')
+    /*
+     * V01 측정 단언 — 시안 `settings-light.png` 는 "기본"·"높게"·"새 대화"가 **한 줄**이다.
+     * `auto` 표에서는 긴 예외 설명이 남는 폭을 다 먹어 이 칸들이 "기/본" 으로 꺾였다.
+     * 사진으로는 회귀를 못 잡으므로 글자의 **줄 상자 개수**를 센다. 칸 높이(padding 포함)로 재면
+     * 한 줄짜리도 8px 패딩 두 번 때문에 줄 높이를 넘겨 늘 실패한다 — 범위 사각형으로 잰다.
+     */
+    const cellHeights = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('.lane-table td.nw')).map((el) => {
+        const td = el as HTMLElement
+        const range = document.createRange()
+        range.selectNodeContents(td)
+        const tops = new Set<number>()
+        for (const rect of Array.from(range.getClientRects())) tops.add(Math.round(rect.top))
+        return {
+          text: td.textContent ?? '',
+          lines: tops.size,
+          line: parseFloat(getComputedStyle(td).lineHeight) || 0,
+          whiteSpace: getComputedStyle(td).whiteSpace
+        }
+      })
+    })
+    expect(cellHeights.length, '고정 폭 칸이 하나도 없다').toBeGreaterThan(0)
+    for (const cell of cellHeights) {
+      expect(cell.whiteSpace, `"${cell.text}" 칸이 줄바꿈을 허용한다`).toBe('nowrap')
+      expect(cell.lines, `"${cell.text}" 칸이 ${cell.lines}줄(${cell.line}px)로 꺾였다`).toBe(1)
+    }
+    // 둘째 칸(회사 · 모델)이 남는 폭을 쓴다 — 고정 폭 합(19+12+16) 뒤 나머지.
+    const columnWidths = await page.evaluate(() => {
+      const ths = Array.from(document.querySelectorAll('.lane-table thead th'))
+      return ths.map((th) => th.getBoundingClientRect().width)
+    })
+    expect(columnWidths[1], '회사 · 모델 칸이 가장 넓지 않다').toBeGreaterThan(columnWidths[0])
+    expect(columnWidths[1], '회사 · 모델 칸이 가장 넓지 않다').toBeGreaterThan(columnWidths[2])
+    expect(columnWidths[1], '회사 · 모델 칸이 가장 넓지 않다').toBeGreaterThan(columnWidths[3])
     await shoot(page, 'lane-settings')
 
-    // 좁은 창 — 앱 최소 폭(900)에서 표가 내용 칸을 넘지 않는가. §5 [r3 U6-07]의 "내용 칸 480px 미만"
-    // 갈래는 창 폭으로는 닿지 않는다(설정 창 780 고정, 창 최소 900) → 확대로 그 폭을 만든다.
-    await setWindowWidth(app, 900)
-    await page.waitForTimeout(400)
+    /*
+     * 좁은 창 — 앱 최소 크기 900×600 에서 표가 내용 칸을 넘지 않는가. §5 [r3 U6-07]의 "내용 칸
+     * 480px 미만" 갈래는 창 폭으로는 닿지 않는다(설정 창 780 고정, 창 최소 900) → 확대로 만든다.
+     *
+     * 검토 C07-⑤: 예전에는 폭만 900 으로 바꾸고 **높이는 그대로**였다. 이제 창 자체를 900×600 으로
+     * 줄이고, 렌더러가 정말 그 크기를 받았는지 먼저 확인한다 — 확인 없이 재면 "600 높이에서도
+     * 들어간다"는 증거가 아니라 옛 800 높이의 증거다.
+     */
+    await setWindowBounds(app, 900, 600)
+    await expectWindowInner(page, 900, 600)
     const wider = await page.evaluate(() => {
       const wrap = document.querySelector('.settings-wrap') as HTMLElement
       const body = wrap?.children[1] as HTMLElement
@@ -348,6 +361,7 @@ test('설정 › 작업 분담', async () => {
     // 표는 내용 칸 안에 들어가고 가로로 넘치지 않는다(좁은 창에서 잘리면 값이 안 보인다).
     expect(wider.table, `표 ${wider.table}px > 내용 칸 ${wider.body}px`).toBeLessThanOrEqual(wider.body + 1)
     expect(wider.overflow, `내용 칸이 가로로 ${wider.overflow}px 넘쳤다`).toBeLessThanOrEqual(0)
+    await shoot(page, 'lane-settings-900x600')
 
     // 확대 → 내용 칸 실폭이 480 미만. 표가 줄마다 두 줄 카드로 바뀌고 머리는 숨는다.
     // CSS `zoom` 은 컨테이너 질의 폭에 반영되지 않는다 — Electron 줌으로 CSS 픽셀 자체를 줄인다.

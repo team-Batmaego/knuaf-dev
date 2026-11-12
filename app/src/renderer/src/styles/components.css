@@ -711,10 +711,16 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .lane-risk ul { margin: 4px 0 0; padding-left: 18px; }
 .lane-risk .i { color: var(--accent); margin-right: 4px; }
 .lane-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.lane-card .scope, .lane-card .data { margin: 6px 0 10px; font-size: 12.5px; color: var(--muted); }
-.lane-card .data .lk { font-size: 12.5px; }
-.lane-folded { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.lane-card .scope, .lane-card .data, .lane-folded .scope, .lane-folded .data { margin: 6px 0 10px; font-size: 12.5px; color: var(--muted); }
+.lane-card .data .lk, .lane-folded .data .lk { font-size: 12.5px; }
+/* 접힌 카드는 테두리 없는 기록 한 줄이다(설계 §3-5, 시안 `v07.r3.html:142`).
+   [자세히]를 열면 표·범위 줄이 줄 아래로 내려온다 — 줄은 그대로 한 줄로 남는다. */
+.lane-folded { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.lane-folded > svg { flex: none; }
 .lane-folded .lk { font-size: 12.5px; white-space: nowrap; flex: none; }
+.lane-folded-body { flex-basis: 100%; min-width: 0; margin: 4px 0 0 22px; color: var(--ink); font-size: 14px; }
+.lane-folded-body .lane-dl { margin: 0 0 6px; }
+.lane-folded-body .lane-risk { margin: 0 0 6px; }
 
 /* ---- §2-1 알림 줄 안의 단추·작은 글 — 줄 높이를 키우지 않는 크기 ---- */
 .zline .grow small .lk { font-size: 12px; }
@@ -722,8 +728,8 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .zline button.quiet { padding: 4px 10px; font-size: 13px; white-space: nowrap; flex: none; }
 .zline .more { font-size: 12px; white-space: nowrap; flex: none; }
 .zline-more { margin-top: 4px; }
-/* §2-2 기록 줄 — 경고(한도·넘김)만 아이콘 색을 경고색으로. 바탕은 `.chat-event` 그대로. */
-.chat-event.warn { color: var(--attn); }
+/* §2-2 기록 줄 — 경고(한도·넘김)만 아이콘 색을 경고색으로. 바탕은 `.chat-event` 그대로.
+   부모 색을 바꾸면 본문 글자까지 주황이 되므로(검토 C2-V02) 아이콘 색만 바꾼다. */
 .chat-event.warn svg { color: var(--attn); }
 
 /* ---- §4-2 한도로 멈춘 대화(읽기 전용) ---- */
@@ -741,10 +747,14 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .set-row2 .nm { width: 80px; font-weight: 500; flex: none; }
 .set-row2 .grow { flex: 1; color: var(--ink-2); }
 
-/* ---- §5 설정 "작업 분담" 표 ---- */
-.lane-table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 8px 0 6px; }
-.lane-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12.5px; padding: 6px 8px; border-bottom: var(--hairline) solid var(--line); }
-.lane-table td { padding: 8px; border-bottom: var(--hairline) solid var(--line); vertical-align: top; }
+/* ---- §5 설정 "작업 분담" 표 ----
+   `auto` 표는 긴 예외 설명이 남는 폭을 다 먹어 짧은 값 열을 1글자로 압축한다(검토 C2-V01 —
+   "기/본", "높/게", "새/대화"). 열 폭을 `colgroup` 으로 고정하고(`table-layout: fixed`),
+   짧은 값 칸은 `.nw` 로 줄바꿈을 막는다. 예외 설명이 든 둘째 칸만 남는 폭에서 접힌다. ---- */
+.lane-table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 8px 0 6px; table-layout: fixed; }
+.lane-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12.5px; padding: 6px 8px; border-bottom: var(--hairline) solid var(--line); white-space: nowrap; }
+.lane-table td { padding: 8px; border-bottom: var(--hairline) solid var(--line); vertical-align: top; word-break: keep-all; }
+.lane-table .nw { white-space: nowrap; }
 .lane-table tr:last-child td { border-bottom: 0; }
 .lane-table .muted { color: var(--muted); }
 .lane-table .exc { color: var(--ink-2); font-size: 13px; }
@@ -758,6 +768,8 @@ button.lk:hover { border-bottom-color: var(--ink); }
   .lane-table tr { padding: 8px 0; border-bottom: var(--hairline) solid var(--line); }
   .lane-table tr:last-child { border-bottom: 0; }
   .lane-table td { display: inline; padding: 0; border: 0; }
+  /* 두 줄 갈래에서는 값이 한 줄에 이어 붙으므로 `.nw` 를 풀어야 좁은 폭에서 넘치지 않는다. */
+  .lane-table .nw { white-space: normal; }
   .lane-table td:first-child { display: block; font-weight: 600; margin-bottom: 2px; }
   .lane-table td + td:not(:last-child)::after { content: " · "; color: var(--faint); }
   .set-row2 { flex-wrap: wrap; gap: 4px 12px; }
