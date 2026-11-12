@@ -12,10 +12,10 @@
  * 대역을 `ChatService` 의 시험 이음매(`fs`)로 넣는다.
  */
 import { expect, test } from '@playwright/test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { ChatService } from '../src/main/chat/service'
+import { ChatService, QUIT_FLUSH_DELAYS_MS } from '../src/main/chat/service'
 import { skillSource } from '../src/main/agent'
 import { readRecoverable, renameWithRetry, writeFileAtomic, type SafeWriteFs, type WriteResult } from '../src/main/safeWrite'
 import type { ChatSnapshot } from '../src/shared/chat'
@@ -351,6 +351,119 @@ test('빈 초안의 삭제가 막혀도 보낸 글이 되살아나지 않는다 
   svc.flushDrafts()                                       // 대기가 남아 있어 다시 지운다
   expect(existsSync(draft), '잠금이 풀린 뒤에도 지우지 않았다').toBe(false)
   expect(svc.draft(root)).toBe('')
+})
+
+test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 — 재시도 예산이 줄어 있다 (RT3)', () => {
+  // 멈춤 후보 1a: `flushDrafts()` 는 **동기**다. 재시도 대기(Atomics.wait)를 안고 돌면 그 시간만큼
+  // main 스레드가 서고, 그동안 종료 마감 타이머도 서 있다. 그래서 종료 경로는 `QUIT_FLUSH_DELAYS_MS`
+  // 로 부르고, 기본 예산(300ms)은 타이머 flush 에만 쓴다.
+  // 20+30=50ms 는 **파일 하나**의 상한이다(검토 RT3 정정) — 초안이 N개면 50×N ms 까지 늘어난다.
+  // 이 시험은 파일 하나만 두므로 그 합이 그대로 상한이 된다.
+  // ⓐ 예산값 자체를 잠근다. 시도 횟수만으로는 지연이 [200,200] 으로 늘어도 3회라 통과한다(검토 I-01).
+  expect(QUIT_FLUSH_DELAYS_MS, '종료 예산이 [20,30] 에서 벗어났다').toEqual([20, 30])
+  expect(QUIT_FLUSH_DELAYS_MS.reduce((a, b) => a + b, 0), '파일 하나 상한 50ms 를 넘었다').toBeLessThanOrEqual(50)
+  const { root, draft } = project()
+  let blocked = true
+  // 판별값은 **시도 횟수**다(러너 속도와 무관). 종료 예산 [20,30] 이면 초기 1 + 재시도 2 = 3회,
+  // 기본 예산 [20,40,80,160] 이면 5회 — 이 시험이 가르려는 것이 정확히 그 차이다.
+  // 시도 사이 간격도 함께 잰다(hrtime — 단조 증가라 벽시계 조정에 안 흔들린다). 하한이므로
+  // 예산을 키운 쪽은 못 잡고(그건 ⓐ 가 값으로 잡는다) **대기를 건너뛴 쪽**을 잡는다 — [0,0] 처럼
+  // 횟수만 3회로 맞춘 경우가 여기서 걸린다(ⓑ).
+  let attempts = 0
+  let writes = 0
+  const attemptAt: bigint[] = []
+  const svc = service(() => {}, faultyFs({ write: (p) => {
+    if (!p.startsWith(draft)) return null
+    writes++
+    if (!blocked) return null
+    attempts++
+    attemptAt.push(process.hrtime.bigint())
+    return eacces()
+  } }))
+  svc.setDraft(root, '쓰다 만 글')
+  const started = Date.now()
+  // ⓒ 실제로 넘어간 지연값 — `sleepSync` 는 `Atomics.wait(…, ms)` 로 자므로, flush 가 도는 동안만
+  // 그 함수를 감싸 `ms` 를 모은다. 값 잠금(ⓐ)·하한(ⓑ)만으로는 "예산을 **키운** 회귀"가 남는다:
+  // 지연이 [200,300] 으로 늘어도 상수는 [20,30] 이고 간격은 하한을 넘으므로 둘 다 통과한다(검토 FIX1).
+  // 제품 코드가 아니라 **시험이 부르는 전역**을 잠깐 바꾸는 것이라 finally 로 반드시 되돌린다 —
+  // 새면 뒤따르는 시험의 대기까지 가로챈다.
+  const waits: number[] = []
+  const atomics = Atomics as unknown as { wait: typeof Atomics.wait }
+  const realWait = atomics.wait
+  try {
+    atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
+      waits.push(Number(args[3]))
+      return realWait(...args)
+    }) as typeof Atomics.wait
+    expect(() => svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })).not.toThrow()
+  } finally {
+    atomics.wait = realWait
+  }
+  const elapsed = Date.now() - started
+  // 넘어간 지연값이 예산 그대로여야 한다 — 위 두 단언이 못 잡는 "값을 키운" 회귀가 여기서 걸린다.
+  expect(waits, '재시도 대기에 넘어간 지연값이 종료 예산 [20,30] 과 다르다').toEqual([20, 30])
+  // 시도 횟수가 먼저다 — 벽시계보다 흔들리지 않는 판별값이라, 예산이 새면 이 줄이 먼저 짚는다.
+  expect(attempts, '종료 예산인데 재시도가 기본 예산(5회)만큼 돌았다').toBe(3)
+  // ⓑ 하한 — 재시도 i 는 `delays[i-1]` 만큼 동기로 기다린 뒤에야 다음 시도를 한다.
+  // 상한이 아니라 하한이라 러너가 느린 것은 걸리지 않는다(1ms 는 시계 눈금 여유).
+  for (let i = 1; i < attemptAt.length; i++) {
+    const wait = QUIT_FLUSH_DELAYS_MS[i - 1]
+    const gap = Number(attemptAt[i] - attemptAt[i - 1]) / 1e6
+    expect(gap, `${i}번째 재시도가 예산 ${wait}ms 를 기다리지 않았다`).toBeGreaterThanOrEqual(wait - 1)
+  }
+  // 벽시계는 **멈춤 방지** 상한일 뿐이다(판별은 위 시도 횟수). 50ms 예산에 러너 스케줄링 지연이 얹혀
+  // 맥 CI 에서 290ms 까지 나왔다 — 그 사례에 경계가 붙지 않도록 넉넉히 둔다. 1초를 넘으면 그건
+  // 지연이 아니라 동기 대기(Atomics.wait)가 예산 밖에서 돌았다는 뜻이다.
+  expect(elapsed, '종료 경로가 1초 넘게 main 스레드를 세웠다 — 재시도 대기가 예산 밖에서 돌았다').toBeLessThan(1000)
+  expect(svc.draft(root), '저장에 실패했는데 메모리 값까지 잃었다').toBe('쓰다 만 글')
+  expect(existsSync(draft)).toBe(false)
+  // 잠금이 풀리면 다음 flush 가 남긴다 — 예산을 줄인 것이 "덜 남긴다"는 뜻은 아니다.
+  blocked = false
+  svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })
+  expect(readFileSync(draft, 'utf8')).toBe('쓰다 만 글')
+  const again = Date.now()
+  const writesBefore = writes
+  svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })      // 남은 대기 없음 — 쓰기 시도 자체가 없다
+  expect(writes - writesBefore, '남은 대기가 없는데 쓰기를 또 시도했다').toBe(0)
+  expect(Date.now() - again).toBeLessThan(1000)            // 같은 이유 — 판별은 위 쓰기 시도 0회
+})
+
+test('저장 실패 진단에는 절대 경로·오류 본문이 아니라 이름과 코드만 남는다 (RT3 중요)', () => {
+  // 검토 RT3 중요: 진단 파일은 Playwright 산출물로 CI 에 올라간다. `SafeWriteFs` 오류의
+  // `message` 에는 논문 폴더 절대 경로와 토큰이 실릴 수 있었고, 예전 `fail()` 은 그 문자열과
+  // `${file}`(절대 경로)을 그대로 남겼다 — 실제로 마커가 파일에 닿는 것을 검토가 관측했다.
+  const dir = mkdtempSync(join(tmpdir(), 'kd-safe-diag-'))
+  const log = join(dir, 'app-log.txt')
+  const before = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = log
+  try {
+    const marker = 'MARKER-papers-9c1f'
+    const file = `/Users/${marker}/논문/chat.json`
+    const fs: SafeWriteFs = {
+      writeFileSync: (() => { throw Object.assign(new Error(`EACCES: denied /Users/${marker} token=sk-MARKERTOKEN000000000000000000000000`), { code: 'EACCES' }) }) as unknown as SafeWriteFs['writeFileSync'],
+      renameSync: (() => {}) as unknown as SafeWriteFs['renameSync'],
+      unlinkSync: (() => {}) as unknown as SafeWriteFs['unlinkSync'],
+      readFileSync: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
+    }
+    const shown: string[] = []
+    const r = writeFileAtomic(file, 'BODY', { fs, delaysMs: NO_WAIT, log: (m) => shown.push(m) })
+    expect(r.ok).toBe(false)
+    const text = readFileSync(log, 'utf8')
+    expect(text, '진단이 아예 기록되지 않았다').toContain('safeWrite:')
+    expect(text, '절대 경로가 진단 파일에 닿았다').not.toContain(marker)
+    expect(text, '오류 본문의 토큰이 진단 파일에 닿았다').not.toContain('MARKERTOKEN')
+    // 남아야 하는 것: 파일 이름과 오류 코드(그게 진단의 목적이다).
+    expect(text).toContain('chat.json')
+    expect(text).toContain('code=EACCES')
+    // 화면 로그(stderr)도 같은 규칙이다 — 여기는 `scrub` 이 아니라 **경로를 넣지 않는 것**으로 막는다.
+    expect(shown.join('\n'), '화면 로그가 절대 경로를 그대로 읽었다').not.toContain(marker)
+    expect(shown.join('\n'), '화면 로그가 오류 본문을 그대로 읽었다').not.toContain('MARKERTOKEN')
+    expect(shown.join('\n')).toContain('chat.json')
+  } finally {
+    if (before === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = before
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('초안 rename 이 막히면 .tmp 에 남고, 다음 실행이 되살려 제자리로 옮긴다', () => {

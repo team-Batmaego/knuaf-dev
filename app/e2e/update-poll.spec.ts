@@ -30,6 +30,7 @@ test('suspended probes obey stop, restart and the three-minute deadline', async 
     now = end
   }
   const tick = async () => { await useConnect.getState().refresh('codex'); return false }
+  let stuckRelease: (done: boolean) => void = () => {}
   try {
     useConnect.setState({ loggingIn: { codex: true, claude: false } })
     startPoll('codex', tick)
@@ -65,10 +66,176 @@ test('suspended probes obey stop, restart and the three-minute deadline', async 
     await advance(3000)
     expect(overlap).toBe(1)
     // A stuck in-flight tick must not prevent the independent deadline from clearing timers.
-    startPoll('codex', () => new Promise<boolean>(() => {}))
+    startPoll('codex', () => new Promise<boolean>((resolve) => { stuckRelease = resolve }))
     await advance(180000)
     expect(timers.size).toBe(0)
   } finally {
+    // 남긴 tick 을 정착시켜 **모듈 공용 잠금 표**를 비운다. 이 시험들은 가짜 시계를 갈아 끼우므로,
+    // 매달린 채 끝내면 그 잠금의 만료 타이머가 사라져 다음 시험이 영영 잠긴 것처럼 보인다(실측).
+    stuckRelease(false)
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    stopPoll()
+    useConnect.setState(originalState)
+    globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval
+    globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout
+    ;(globalThis as { window?: unknown }).window = original.window
+  }
+})
+
+test('조건부 불변: 잠금 15초 안에서는 겹치지 않고, 지나면 버린 요청 위에 새로 묻는다', async () => {
+  // 책임자 결정(2026-11-11): 요청을 취소할 수 없으므로 '겹침 0'과 '영영 잠기지 않음'은 무조건
+  // 함께 성립하지 않는다. 계약:
+  //   ① 잠금 안(첫 tick + 15초)에서는 새 조회가 시작되지 않는다.
+  //   ② 15초가 지나면 그 요청을 **버렸다**고 보고 다음 간격에 새 조회를 1회 허용한다.
+  //   ③ 버린 요청의 **늦은 결과는 감시가 쓰지 않는다**(완료라고 감시를 끝내지 않는다).
+  //   ④ 감시의 180초 마감이 버린 요청 수의 상한이다 — 마감 뒤 타이머 0.
+  const original = { setInterval, clearInterval, setTimeout, clearTimeout, window: (globalThis as { window?: unknown }).window }
+  const originalState = useConnect.getState()
+  let now = 0, next = 0
+  const timers = new Map<number, { at: number; delay: number; repeat: boolean; fn: () => void }>()
+  const schedule = (fn: () => void, delay: number, repeat: boolean) => {
+    const id = ++next; timers.set(id, { at: now + delay, delay, repeat, fn }); return id
+  }
+  globalThis.setInterval = ((fn: () => void, delay: number) => schedule(fn, delay, true)) as unknown as typeof setInterval
+  globalThis.setTimeout = ((fn: () => void, delay: number) => schedule(fn, delay, false)) as unknown as typeof setTimeout
+  globalThis.clearInterval = ((id: number) => { timers.delete(id) }) as unknown as typeof clearInterval
+  globalThis.clearTimeout = ((id: number) => { timers.delete(id) }) as unknown as typeof clearTimeout
+  ;(globalThis as { window?: unknown }).window = { knuaf: { connect: { status: async () => ({ result: { installed: true, connected: false, version: null, detail: '', probe: 'ok' } }) } } }
+  const advance = async (ms: number) => {
+    const end = now + ms
+    while (true) {
+      const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
+      if (!due) break
+      const [id, timer] = due; now = timer.at
+      if (timer.repeat) timer.at += timer.delay; else timers.delete(id)
+      timer.fn()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+    }
+    now = end
+  }
+  // tick 호출 시각과 resolver — 시험이 "늦은 완료"를 직접 만들 수 있다.
+  const started: number[] = []
+  const resolvers: ((done: boolean) => void)[] = []
+  const tick = (): Promise<boolean> => new Promise<boolean>((resolve) => { started.push(now); resolvers.push(resolve) })
+  try {
+    // ① 첫 tick(3초)이 매달린 동안, 3초 간격이 계속 지나도 새 조회가 없다.
+    startPoll('codex', tick)
+    await advance(12_000)
+    expect(started, '15초 안에 겹쳐 시작했다').toEqual([3_000])
+    // ② 15초 시점에도 아직 잠김(만료는 18초), 만료 뒤 첫 간격(21초)에 한 번 시작한다.
+    await advance(3_000)                        // → 15초
+    expect(started.length, '만료 전에 시작했다').toBe(1)
+    await advance(6_000)                        // → 21초
+    expect(started.length, '만료 뒤에도 새 조회가 없다(영영 잠김)').toBe(2)
+
+    // ③ 버린 요청(3초 tick)의 늦은 완료(true)는 감시를 쓰지 않는다 — 끝나면 새 tick 이 영영 없다.
+    resolvers[0](true)
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    expect(timers.size, '버린 요청의 완료가 감시를 끝냈다').toBeGreaterThan(0)
+
+    // ④ 그 증거: 21초 tick 도 15초(36초)에 만료되고 다음 간격(39초)에 새 tick 이 시작된다.
+    await advance(18_000)                       // → 39초
+    expect(started.length, '버린 요청의 완료가 감시를 끝내 새 조회가 멈췄다').toBe(3)
+
+    // ⑤ 마감 경계의 정확한 계약은 아래 별도 시험이 잰다(여기서는 239초를 재지 않는다 —
+    //    검토 CI1-FIXCHECK 차단 잔여: 180초에 무엇이 0 인지/아닌지를 갈라야 한다).
+    for (const resolve of resolvers) resolve(false)
+
+    // ⑥ **교체된 감시**도 잠금 안에서는 겹치지 않고, 만료 뒤에만 한 번 새로 묻는다
+    //    (잠금 표가 감시 세대 밖에 있는 이유가 이 문장이다). 앞 단계의 진행 중 조회를 먼저
+    //    정착시켜 **깨끗한 잠금 표**에서 시작한다 — ⑤ 의 대기(200초)에 기대지 않는다.
+    for (const resolve of resolvers) resolve(false)
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    startPoll('codex', tick)
+    await advance(3_000)                        // 이 감시의 첫 tick 이 매달린다(잠금 유지)
+    const held = started.length
+    startPoll('codex', tick)                    // 잠금이 살아 있는 채로 교체
+    await advance(12_000)                       // → 첫 tick + 12초: 아직 잠금 안
+    expect(started.length, '교체된 감시가 잠금 안에서 겹쳐 조회했다').toBe(held)
+    await advance(6_000)                        // → 첫 tick + 18초: 만료 뒤 첫 간격
+    expect(started.length, '교체된 감시가 만료 뒤에도 새로 묻지 않는다(영영 잠김)').toBe(held + 1)
+  } finally {
+    // 남긴 tick 을 정착시켜 **모듈 공용 잠금 표**를 비운다. 이 시험들은 가짜 시계를 갈아 끼우므로,
+    // 매달린 채 끝내면 그 잠금의 만료 타이머가 사라져 다음 시험이 영영 잠긴 것처럼 보인다(실측).
+    for (const resolve of resolvers) resolve(false)
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+    stopPoll()
+    useConnect.setState(originalState)
+    globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval
+    globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout
+    ;(globalThis as { window?: unknown }).window = original.window
+  }
+})
+
+/**
+ * 180초 마감 경계 계약(검토 RT3-CI1-FIXCHECK 차단 잔여) — 마감에 **무엇이** 0 인지 가른다.
+ *  - 마감 직전: 감시는 살아 있어 tick 이 계속 시작된다.
+ *  - 마감 직후(180초 + 1ms): 감시 interval·deadline 타이머 0, 새 tick 0.
+ *    단 진행 중 조회의 **잠금 만료 타이머 1개는 남는다**(최대 15초) — 마감에서 그걸 지우면
+ *    '15초 안 겹침 0'이 깨지므로 지우지 않는다.
+ *  - 195초(= 180 + 15): 타이머 전부 0.
+ */
+test('180초 마감은 감시만 끝낸다 — 잠금 만료 타이머는 최대 15초 더 남고 195초에 전부 0', async () => {
+  const original = { setInterval, clearInterval, setTimeout, clearTimeout, window: (globalThis as { window?: unknown }).window }
+  const originalState = useConnect.getState()
+  let now = 0, next = 0
+  const timers = new Map<number, { at: number; delay: number; repeat: boolean; fn: () => void }>()
+  const schedule = (fn: () => void, delay: number, repeat: boolean) => {
+    const id = ++next; timers.set(id, { at: now + delay, delay, repeat, fn }); return id
+  }
+  globalThis.setInterval = ((fn: () => void, delay: number) => schedule(fn, delay, true)) as unknown as typeof setInterval
+  globalThis.setTimeout = ((fn: () => void, delay: number) => schedule(fn, delay, false)) as unknown as typeof setTimeout
+  globalThis.clearInterval = ((id: number) => { timers.delete(id) }) as unknown as typeof clearInterval
+  globalThis.clearTimeout = ((id: number) => { timers.delete(id) }) as unknown as typeof clearTimeout
+  ;(globalThis as { window?: unknown }).window = { knuaf: { connect: { status: async () => ({ result: { installed: true, connected: false, version: null, detail: '', probe: 'ok' } }) } } }
+  const advance = async (ms: number) => {
+    const end = now + ms
+    while (true) {
+      const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
+      if (!due) break
+      const [id, timer] = due; now = timer.at
+      if (timer.repeat) timer.at += timer.delay; else timers.delete(id)
+      timer.fn()
+      for (let i = 0; i < 12; i++) await Promise.resolve()
+    }
+    now = end
+  }
+  /** 감시 타이머 = 3초 반복 interval + 180초 deadline. 잠금 만료 타이머(15초)와 갈라 센다. */
+  const watchTimers = () => [...timers.values()].filter((t) => t.repeat || t.delay === 180_000)
+  const lockTimers = () => [...timers.values()].filter((t) => !t.repeat && t.delay === 15_000)
+  // 마감 직전에 매달리는 tick 을 하나 만든다: 177초 tick 만 정착하지 않는다(그 잠금 만료는 192초).
+  const started: number[] = []
+  const resolvers: ((done: boolean) => void)[] = []
+  const tick = (): Promise<boolean> => {
+    started.push(now)
+    if (now !== 177_000) return Promise.resolve(false)
+    return new Promise<boolean>((resolve) => { resolvers.push(resolve) })
+  }
+  let expired = 0
+  try {
+    startPoll('codex', tick, () => { expired++ })
+    // 마감 직전(179초 999ms): 감시 타이머 2개 살아 있고, tick 은 계속 시작됐다.
+    await advance(179_999)
+    expect(watchTimers().length, '마감 직전에 감시 타이머가 2개가 아니다').toBe(2)
+    expect(started.filter((at) => at > 170_000), '마감 직전에 tick 이 돌지 않았다').toEqual([171_000, 174_000, 177_000])
+    const beforeDeadline = started.length
+    // 마감 직후(180초 + 1ms): 감시 타이머 0, 새 tick 0. 잠금 만료 타이머는 1개 남는다.
+    await advance(2)
+    expect(watchTimers().length, '마감 직후에도 감시 타이머가 남았다').toBe(0)
+    expect(started.length, '마감 뒤에 새 tick 이 시작됐다').toBe(beforeDeadline)
+    expect(lockTimers().length, '마감이 진행 중 조회의 잠금 만료 타이머까지 지웠다 — 15초 안 겹침 0 이 깨진다').toBe(1)
+    // 마감은 표시를 내리는 콜백을 **한 번** 부른다(화면이 '로그인 중'에 머물지 않게).
+    expect(expired, '마감인데 만료 콜백이 불리지 않았다').toBe(1)
+    // 잠금 만료 타이머는 192초(177 + 15)에 스스로 사라진다 → 195초에는 전부 0.
+    await advance(15_000)   // → 195초
+    expect(timers.size, '195초에도 타이머가 남았다').toBe(0)
+    expect(started.length, '마감 뒤에 새 tick 이 시작됐다').toBe(beforeDeadline)
+    expect(expired, '마감 뒤 195초 사이에 만료 콜백이 또 불렸다').toBe(1)
+  } finally {
+    // 남긴 tick 을 정착시켜 **모듈 공용 잠금 표**를 비운다. 이 시험들은 가짜 시계를 갈아 끼우므로,
+    // 매달린 채 끝내면 그 잠금의 만료 타이머가 사라져 다음 시험이 영영 잠긴 것처럼 보인다(실측).
+    for (const resolve of resolvers) resolve(false)
+    for (let i = 0; i < 12; i++) await Promise.resolve()
     stopPoll()
     useConnect.setState(originalState)
     globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval
