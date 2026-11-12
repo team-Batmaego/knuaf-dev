@@ -9,6 +9,16 @@ import { sha256 } from './isolation'
 import type { ConversationOwner, ExecutionAccount, UsageState } from './types'
 import type { OwnerTransition } from './transition'
 
+/**
+ * §1-4 ② — 대상 대화를 열어 **첫 턴이 끝난** 결과. `firstTurn` 이 `ok` 일 때만 소유를 넘긴다:
+ * `limit` 은 대상도 한도(화면은 "…도 지금 한도에 걸렸어요" + [나중에]), `failed` 는 그 밖의 실패다.
+ */
+export type HandoffOpenResult = ConversationOwner & { firstTurn: 'ok' | 'limit' | 'failed' }
+
+/** 사유 판정 — `firstTurn` 을 제안의 `failedReason` 으로 옮긴다(계약 `handoff-failed.reason`). */
+const failedReasonOf = (firstTurn: HandoffOpenResult['firstTurn']): 'target-limit' | null =>
+  firstTurn === 'limit' ? 'target-limit' : null
+
 export interface HandoffSource {
   rootConversationId: string
   owner: ConversationOwner
@@ -71,14 +81,30 @@ export interface ConversationProposal {
   state: 'open' | 'running' | 'consumed' | 'failed' | 'discarded'
   shownAt: string
   clickedAt?: string
+  /**
+   * §1-4 — 마지막 시도가 **왜** 넘기지 못했는가. `target-limit` 은 대상(이어 받는 회사)의 첫
+   * 턴이 §1-2 의 `limit` 으로 끝난 경우다(화면은 [나중에]만 그린다). 그 밖의 실패는 `null`.
+   * 넘긴 제안(`consumed`)·시도 전(`open`)에는 없다.
+   */
+  failedReason?: 'target-limit' | null
 }
 interface HandoffState { version: 1; proposals: ConversationProposal[]; attempts: Record<string, string[]> }
 export interface ConversationHandoffOptions {
   stateDir: string
   maxBytes: number
   account: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
-  /** Abort must stop in-flight creation; close also cleans a session returned after cancellation. */
-  open: (request: { id: string; root: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal }) => Promise<ConversationOwner>
+  /**
+   * §1-4 ② — 누르기 전 단추 조건에 쓰는 연결 쪽 선언(㉠). `true` 인 연결만 `usage:'unknown'`
+   * 이어도 첫 턴 안 확인으로 넘긴다. 넘기지 않으면 `false`(안전 기본값 = 단추 없음).
+   */
+  gateInTurn?: (company: 'claude' | 'codex') => boolean
+  /**
+   * Abort must stop in-flight creation; close also cleans a session returned after cancellation.
+   *
+   * §1-4 ②: **대상 첫 턴이 끝날 때까지** 기다린다 — 돌려주는 `firstTurn` 이 그 결과다.
+   * `ok` 일 때만 소유를 넘기고, `limit`/`failed` 면 부르는 쪽이 접는다.
+   */
+  open: (request: { id: string; root: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal }) => Promise<HandoffOpenResult>
   close: (owner: ConversationOwner) => Promise<void>
   /** Async preparation has no visible side effects; returned commit is synchronous. */
   prepareActivation: (oldOwner: ConversationOwner, newOwner: ConversationOwner, entry: LaneEntry, signal: AbortSignal) => Promise<() => void>
@@ -104,6 +130,13 @@ export function buildHandoffBundle(source: HandoffSource, archive: string, maxBy
     jobs: structuredClone(source.jobs), skillVersion: source.skillVersion, truncated: [], archive, sourceLocation: source.sourceLocation
   }
   const size = () => Buffer.byteLength(JSON.stringify(bundle))
+  // §1-3 ⑤ — **기준값이 없으면** 무엇이 바뀌었는지 알 수 없다. `afterHashes` 전부를 `before:null`
+  // 로 실으면 "새로 생긴 파일"처럼 읽혀 거짓말이 된다. 비우고 `truncated` 로 알린다.
+  if (!Object.keys(source.beforeHashes).length) {
+    if (bundle.changedFiles.length) bundle.truncated.push('changedFiles')
+    bundle.changedFiles = []
+    bundle.changedFileCount = 0
+  }
   // Priority 1: oldest student messages first, preserving every omitted byte in archive.
   // **마지막 학생 글은 남긴다** — 0건이면 인계가 아니다(REVIEW-C0 중요 4). 그 한 건조차 안
   // 들어가면 묶음을 만들지 않고 `null`(계약 `tooLong` → [새 대화로 시작]).
@@ -177,7 +210,12 @@ export class ConversationHandoff {
     if (existing) return structuredClone(existing)
     if (this.reservations.has(rootId)) return null
     const other = await this.options.account(source.entry.company === 'claude' ? 'codex' : 'claude')
-    if ((this.generations.get(rootId) ?? 0) !== generation || !other?.connected || other.usage !== 'allowed') return null
+    // §1-4 ① — `allowed` 면 띄운다. `unknown`(사용량을 모름)이면 **대상이 Claude** 이고 그 연결이
+    // 첫 턴 안 확인을 선언했을 때만 띄운다 — 넘긴 뒤 첫 턴에서 한도가 드러나면 되돌린다(§1-4 ②).
+    // `limit`·`auth`·`null` 은 단추 없음.
+    const gateAllowed = other?.usage === 'allowed' ||
+      (other?.usage === 'unknown' && other.account.company === 'claude' && this.options.gateInTurn?.('claude') === true)
+    if ((this.generations.get(rootId) ?? 0) !== generation || !other?.connected || !gateAllowed) return null
     const entry = continueAfterLimit('design', source.entry, other.account,
       { consented: other.consented, basicUsageAllowed: true }, { [other.account.company]: other.account.models })
     const attempts = this.state.attempts[rootId] ??= [`${source.entry.company}:${source.entry.model}`]
@@ -221,11 +259,12 @@ export class ConversationHandoff {
     if (!p.bundlePath || !p.bundleHash) return null
     const controller = new AbortController()
     this.reservations.set(p.rootConversationId, controller)
-    p.state = 'running'; p.clickedAt = new Date().toISOString(); this.persist()
+    // 새 시도 — 지난 시도의 실패 사유는 이 시도의 결과로 덮인다.
+    p.state = 'running'; p.clickedAt = new Date().toISOString(); delete p.failedReason; this.persist()
     const generation = this.generations.get(p.rootConversationId) ?? 0
     const valid = () => !controller.signal.aborted && this.reservations.get(p.rootConversationId) === controller
       && (this.generations.get(p.rootConversationId) ?? 0) === generation
-    let owner: ConversationOwner | undefined, transition: OwnerTransition | undefined, committed = false
+    let owner: HandoffOpenResult | undefined, transition: OwnerTransition | undefined, committed = false
     let refresh: HandoffSource | undefined
     try {
       const account = await this.options.account(p.entry.company)
@@ -247,11 +286,15 @@ export class ConversationHandoff {
         signal: controller.signal,
         firstMessage: `/knuaf-dev 재개: 논문 폴더가 정본이며 아래 묶음은 대화 맥락 보조입니다. 끊긴 차례를 자동 재전송하거나 이미 한 작업을 반복하지 말고 폴더 상태를 확인하세요. 첫 답에서 “앞 대화를 이어 받았어요 — {마지막으로 하던 일}”이라고 알리세요.\n${text}` })
       if (!valid()) return null
+      // §1-4 ② — **첫 턴이 성공으로 끝난 뒤에만** 소유를 넘긴다. 새 세션은 이 순간 이미 열려
+      // 있지만(학생이 산 요청 1번), `finally` 가 그 연결을 닫고 보관을 만들지 않는다.
+      if (owner.firstTurn !== 'ok') { p.failedReason = failedReasonOf(owner.firstTurn); return null }
       if (owner.id !== p.newConversationId || owner.company !== p.entry.company || !owner.sessionId || owner.sessionId === p.oldOwner.sessionId) throw new Error('이어 받기는 다른 새 세션이어야 해요.')
       const activate = await this.options.prepareActivation(p.oldOwner, owner, structuredClone(p.entry), controller.signal)
       if (!valid()) return null
       committed = transition.commit(owner, activate)
       if (!committed) return null
+      delete p.failedReason
       p.state = 'consumed'; this.persist()
       this.options.audit({ type: 'conversation-continue-after-limit', rootConversationId: p.rootConversationId,
         oldConversationId: p.oldOwner.id, newConversationId: owner.id, reason: 'limit', clickedAt: p.clickedAt,

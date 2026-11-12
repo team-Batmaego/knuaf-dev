@@ -599,6 +599,10 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     // 앱이 만드는 묶음의 상한 — 넘치면 정해진 순서로 줄이고 `trimmed` 로 알린다.
     maxBytes: 24_000,
     account: company => probeAccount(company),
+    // §1-4 ① — `usage:'unknown'` 이어도 넘겨 볼 대상. 앱의 담당 연결 중 첫 턴 안 확인을
+    // 실제로 하는 것은 Claude 쪽뿐이다(`claude.ts` `ClaudeRelayConnection.gateInTurn`) —
+    // Codex 는 그 선언이 없어 `unknown` 이면 단추를 띄우지 않는다(안전 기본값).
+    gateInTurn: company => company === 'claude',
     open: request => chat.openHandoff(request),
     close: owner => chat.closeHandoff(owner),
     prepareActivation: async (_old, _owner) => () => {},

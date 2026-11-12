@@ -733,6 +733,7 @@ export class ChatService {
   }
   private async execute(s: ChatSnapshot, connection: AgentConnection, text: string, requestId: string) {
     const key = this.key(s.root, s.provider)
+    this.limitTurns.delete(key)
     // 서버 재생(과거 턴)은 스냅샷에 assistant 기록이 하나도 없을 때만 — 이미 있으면
     // item-N/msg_* id가 달라 중복으로 들어온다.
     const replayHistory = !s.messages.some(m => m.role === 'assistant')
@@ -1443,13 +1444,27 @@ export class ChatService {
    */
   async openHandoff(request: {
     id: string; root: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal
-  }): Promise<ConversationOwner> {
+  }): Promise<HandoffOpenResult> {
     // [C1-10] 취소는 **연결하고 기다리는 동안** 둘 다 지킨다. 이미 취소된 요청은 아무것도
     // 열지 않고, 대기 중 취소되면 연 세션을 접는다.
     if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
     // [C1-01] 제안의 회사는 실행 파일 선택까지 가므로 여기서도 닫는다.
     const provider = providerOf(request.entry.company)
     const key = this.key(request.root, provider)
+    // §1-4 ② — 이 턴의 한도는 **대상이 한도**라는 뜻이다. 그 사이 `proposeHandoff` 가 세 번째
+    // 제안을 열지 않게 표시하고, 끝나면 지운다.
+    this.handoffOpening.add(key)
+    try {
+      return await this.openHandoffTurn(request, provider, key)
+    } finally {
+      this.handoffOpening.delete(key)
+      this.limitTurns.delete(key)
+    }
+  }
+  /** `openHandoff` 의 본체 — 대화를 비우고 첫 턴을 **끝까지** 기다린 뒤 결과를 붙인다. */
+  private async openHandoffTurn(request: {
+    id: string; root: string; entry: LaneEntry; firstMessage: string; bundlePath: string; signal: AbortSignal
+  }, provider: Provider, key: string): Promise<HandoffOpenResult> {
     // [C1-09] 이전 대화는 **메모리에만** 있지 않다. 앱을 다시 켰거나 다른 경로가 스냅샷을 비웠으면
     // 지도가 비어 있고, 그 상태로 빈 대화를 `publish` 하면 디스크의 기존 기록을 **덮어쓴다**
     // (넘기기를 실패했을 때 되돌릴 것도 사라진다). 그래서 디스크에서 먼저 찾는다.
@@ -1488,12 +1503,31 @@ export class ChatService {
       if (!sessionId) throw new Error('이어 받은 대화의 세션을 열지 못했어요.')
       if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
       owner = { id: request.id, sessionId, company: provider }
-      return owner
+      // §1-4 ② — **첫 턴이 성공으로 끝난 뒤에만** 소유를 넘긴다. 세션 id 만으로 넘기면 한도에
+      // 걸린 대상도 "이어 받음"이 되고, 그 실패가 학생 눈에 보이지 않는다.
+      const firstTurn = await this.awaitFirstTurn(key, request.signal)
+      if (request.signal.aborted) throw new LaneFailure('unavailable', '이어 받기를 취소했어요.')
+      return { ...owner, firstTurn }
     } catch (error) {
       // 열다 만 대화는 여기서 접는다 — 넘기지 못했으므로 이전 기록으로 되돌린다([C1-09]).
       await this.closeHandoff({ id: request.id, sessionId: '', company: provider })
       throw error
     }
+  }
+  /**
+   * §1-4 ② — 인계로 연 대화의 **첫 턴** 결과. 성공 판정은 스냅샷이다: `state:'idle'` 이고 오류가
+   * 없으면 `ok`. 한도는 `execute` 가 남긴 구조 신호(`limitTurns`)만 본다 — 문구로 짐작하지 않는다.
+   * 중단·실패·세션 없이 끝난 턴은 `failed`(소유를 넘기지 않는다).
+   */
+  private async awaitFirstTurn(key: string, signal: AbortSignal): Promise<HandoffOpenResult['firstTurn']> {
+    const run = this.runs.get(key)
+    if (run) {
+      const aborted = new Promise<void>((resolve) => { signal.addEventListener('abort', () => resolve(), { once: true }) })
+      await Promise.race([run.catch(() => undefined), aborted])
+    }
+    const s = this.snapshots.get(key)
+    if (s?.state === 'idle' && s.error === undefined) return 'ok'
+    return this.limitTurns.has(key) ? 'limit' : 'failed'
   }
   /**
    * 디스크의 대화 기록. **파일이 없을 때만** `null` 이다([C1-09] fail-closed).

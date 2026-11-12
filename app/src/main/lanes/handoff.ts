@@ -43,9 +43,12 @@ export function handoffLines(root: string, proposals: ConversationProposal[]): L
       continue
     }
     if (proposal.state === 'failed') {
+      // §1-4 ④ — 사유는 생산자가 정한다(문구로 짐작하지 않는다). `target-limit` 이면 화면은
+      // "{회사}도 지금 한도에 걸렸어요" + [나중에]만, `null` 이면 지금 문구 + [다시 하기].
       lines.push({
         id, kind: 'handoff-failed', tier: 2, at: proposal.clickedAt ?? proposal.shownAt,
-        dismissible: false, proposalId: proposal.proposalId, to
+        dismissible: false, proposalId: proposal.proposalId, to,
+        reason: proposal.failedReason ?? null
       })
     }
   }

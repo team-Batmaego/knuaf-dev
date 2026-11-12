@@ -5,24 +5,25 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
-import { ConversationHandoff, type HandoffSource } from '../src/main/chat/jobs/conversation'
+import { ConversationHandoff, type ConversationProposal, type HandoffSource } from '../src/main/chat/jobs/conversation'
 import { JobStore } from '../src/main/chat/jobs/store'
 import { canonical } from '../src/main/chat/jobs/isolation'
 import { handoffLines } from '../src/main/lanes/handoff'
+import { skillSource, skillVersion } from '../src/main/agent'
 import type { AgentConnection } from '../src/main/chat/contracts'
-import type { ConversationOwner, ExecutionAccount, JobRecord } from '../src/main/chat/jobs/types'
+import type { ExecutionAccount } from '../src/main/chat/jobs/types'
 import type { LanePlan } from '../src/shared/lanes'
 import { planFromRow } from '../src/shared/lanes'
 
-function proposal(patch: Record<string, unknown> = {}) {
+function proposal(patch: Partial<ConversationProposal> = {}): ConversationProposal {
   return {
     proposalId: 'p1',
     rootConversationId: 'claude\0/thesis',
     root: '/thesis',
-    oldOwner: { id: 'claude\0/thesis', sessionId: 'old', company: 'claude' as const },
+    oldOwner: { id: 'claude\0/thesis', sessionId: 'old', company: 'claude' },
     newConversationId: 'codex\0/thesis',
-    entry: { company: 'codex' as const, model: 'sol', effort: 'high', how: 'relay' as const },
-    from: { company: 'claude' as const, model: 'opus', effort: null },
+    entry: { company: 'codex', model: 'sol', effort: 'high', how: 'relay' },
+    from: { company: 'claude', model: 'opus', effort: null },
     accountId: 'codex-account',
     accountFingerprint: 'f',
     bundleHash: 'h',
@@ -30,7 +31,7 @@ function proposal(patch: Record<string, unknown> = {}) {
     archivePath: '/private/archive.json',
     tooLong: false,
     trimmed: false,
-    state: 'open' as const,
+    state: 'open',
     shownAt: '2026-11-10T00:00:00.000Z',
     ...patch
   }
@@ -112,7 +113,7 @@ function handoffFixture() {
   const options = {
     stateDir, maxBytes: 10_000,
     account: async () => structuredClone(account),
-    open: async (request: { id: string }) => ({ id: request.id, sessionId: `s-${request.id}`, company: 'codex' }),
+    open: async (request: { id: string }) => ({ id: request.id, sessionId: `s-${request.id}`, company: 'codex' as const, firstTurn: 'ok' as const }),
     close: async () => {},
     prepareActivation: async () => () => {},
     beginTransition: () => ({ ready: async () => {}, commit: () => true, cancel: () => {}, flush: async () => {} }),
@@ -176,7 +177,11 @@ test('later closes a proposal and folder invalidation aborts an in-flight handof
 })
 
 // ⑤ §4-1 IPC 경로 — 넘긴 뒤에만 `handoff-done` 이 남고, 새 대화가 그 폴더의 대화가 된다.
-function serviceFixture(options: { proposals?: unknown[] } = {}) {
+function serviceFixture(options: {
+  proposals?: unknown[]
+  main?: Partial<AgentConnection>
+  proposeResult?: (source: HandoffSource) => ConversationProposal | null
+} = {}) {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-handoff-svc-')))
   const root = join(base, 'thesis')
   mkdirSync(root, { recursive: true })
@@ -188,7 +193,7 @@ function serviceFixture(options: { proposals?: unknown[] } = {}) {
   const proposals = (options.proposals ?? [proposal({
     root, rootConversationId: `claude\0${root}`, oldOwner: { id: `claude\0${root}`, sessionId: 'old', company: 'claude' },
     newConversationId: `codex\0${root}`
-  })]) as ReturnType<typeof proposal>[]
+  })]) as ConversationProposal[]
 
   const main: AgentConnection = {
     status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
@@ -204,13 +209,21 @@ function serviceFixture(options: { proposals?: unknown[] } = {}) {
       mainRuns.push({ root, text })
       events.session(`session-${mainRuns.length}`)
     },
-    stop: async () => {}
+    stop: async () => {},
+    ...options.main
   }
   // 넘기기는 실제 경로 그대로 — 인계 이음매의 `open` 이 서비스의 새 대화 열기를 부른다.
   let svc: ChatService
+  /** 서비스가 이음매에 건넨 실패 당시 사실 — 제안이 실제로 무엇으로 판정됐는지 본다. */
+  const sources: HandoffSource[] = []
   const seam = {
     visible: () => structuredClone(proposals as never),
-    propose: async () => null,
+    propose: async (source: HandoffSource) => {
+      sources.push(source)
+      const made = options.proposeResult?.(source) as ReturnType<typeof proposal> | undefined
+      if (made) proposals.push(made)
+      return made ?? null
+    },
     continue: async (proposalId: string) => {
       const found = proposals.find(entry => entry.proposalId === proposalId)
       if (!found) return null
@@ -234,7 +247,7 @@ function serviceFixture(options: { proposals?: unknown[] } = {}) {
     invalidateHandoff: () => {},
     handoff: seam
   })
-  return { svc, root, userData, mainRuns, proposals, seam, plan, emitted }
+  return { svc, root, userData, mainRuns, proposals, seam, plan, emitted, sources }
 }
 
 function fakeSkill(): string {
@@ -286,7 +299,8 @@ test('opening a handoff mints the new conversation and closing it restores the o
     firstMessage: '앞 대화를 이어 받았어요',
     bundlePath: '/private/bundle.json', signal: controller.signal
   })
-  expect(owner).toEqual({ id: 'claude\0' + f.root, sessionId: 'session-2', company: 'claude' })
+  // §1-4 ② — 돌려주는 값에 첫 턴 결과가 붙는다(`ok` 일 때만 소유를 넘긴다).
+  expect(owner).toEqual({ id: 'claude\0' + f.root, sessionId: 'session-2', company: 'claude', firstTurn: 'ok' })
   const opened = f.svc.snapshot(f.root, 'claude')
   expect(opened.messages.map(message => message.text)).toEqual(['앞 대화를 이어 받았어요'])
 

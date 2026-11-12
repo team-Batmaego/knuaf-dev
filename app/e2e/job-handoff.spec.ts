@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildHandoffBundle, ConversationHandoff, type HandoffSource } from '../src/main/chat/jobs/conversation'
+import { buildHandoffBundle, ConversationHandoff, type HandoffOpenResult, type HandoffSource } from '../src/main/chat/jobs/conversation'
 import { planFromRow } from '../src/shared/lanes'
 import type { ConversationOwner, ExecutionAccount } from '../src/main/chat/jobs/types'
 
@@ -20,11 +20,18 @@ function fixture() {
     skillVersion: 'skill-v1', sourceLocation: '/private/old-chat.json'
   }
   const opened: { id: string; firstMessage: string }[] = [], activated: object[] = [], transfers: object[] = [], audits: object[] = []
+  const closed: ConversationOwner[] = []
   let readAccount = async () => structuredClone(account)
   const options = {
     stateDir, maxBytes: 10_000, account: async () => readAccount(),
-    open: async (request: { id: string; firstMessage: string }) => { opened.push(request); return { id: request.id, sessionId: 'new-session', company: 'codex' } as ConversationOwner },
-    close: async (_owner: ConversationOwner) => {},
+    // §1-4 ② — 인계는 **첫 턴이 성공으로 끝난 뒤에만** 성립한다. 대역도 그 계약을 지킨다.
+    open: async (request: { id: string; firstMessage: string }): Promise<HandoffOpenResult> => {
+      opened.push(request)
+      return { id: request.id, sessionId: 'new-session', company: 'codex', firstTurn: 'ok' }
+    },
+    close: async (owner: ConversationOwner) => { closed.push(owner) },
+    // §1-4 ① — 연결이 "첫 턴 안 확인"을 선언했는지. 시험마다 켠다.
+    gateInTurn: undefined as ((company: 'claude' | 'codex') => boolean) | undefined,
     prepareActivation: async (oldOwner: ConversationOwner, newOwner: ConversationOwner) => () => { activated.push({ oldOwner, newOwner }) },
     beginTransition: (root: string) => ({
       ready: async () => {},
@@ -32,8 +39,8 @@ function fixture() {
       cancel: () => {}, flush: async () => {}
     }), audit: (record: object) => { audits.push(record) }
   }
-  return { source, account, options, opened, activated, transfers, audits, handoff: new ConversationHandoff(options),
-    readAccount: (fn: typeof readAccount) => { readAccount = fn } }
+  return { source, account, options, opened, activated, transfers, audits, closed,
+    handoff: new ConversationHandoff(options), readAccount: (fn: typeof readAccount) => { readAccount = fn } }
 }
 
 test('main confirmed limit proposes design model without relay consent, opens one fresh packet and transfers jobs', async () => {
@@ -119,4 +126,92 @@ test('unsupported depth resets explicitly to default and auth or API path cannot
   expect((await f.handoff.propose(f.source))!.entry.effort).toBeNull()
   const g = fixture(); g.account.account = { company: 'codex', accountType: 'apiKey', models: g.account.account.models }
   expect(await g.handoff.propose(g.source)).toBeNull()
+})
+
+// §0-5 2 — 인계는 **대상 첫 턴이 성공으로 끝난 뒤에만** 성립한다. 대역이 `limit` 을 돌려주면
+// 소유를 넘기지 않고(전환 commit 0) 시도한 새 세션을 접으며, 사유는 `target-limit` 이다.
+test('handoff: 대상 allowed 뒤 결과 limit이면 commit 0', async () => {
+  const f = fixture()
+  f.options.open = async (request: { id: string }): Promise<HandoffOpenResult> =>
+    ({ id: request.id, sessionId: 'new-session', company: 'codex', firstTurn: 'limit' })
+  const p = (await f.handoff.propose(f.source))!
+  expect(await f.handoff.continue(p.proposalId)).toBeNull()
+  expect(f.opened).toHaveLength(0); expect(f.activated).toEqual([])
+  expect(f.transfers).toEqual([]); expect(f.audits).toEqual([])
+  expect(f.handoff.proposals()).toEqual([])
+  expect(f.handoff.visible()).toMatchObject([{ state: 'failed', failedReason: 'target-limit' }])
+  // 넘기지 못한 새 대화는 접는다 — 0 이면 세션이 그 폴더의 대화인 척 남는다.
+  expect(f.closed).toHaveLength(1)
+})
+
+// §0-5 2 — 첫 사건이 거절이면 같은 결과이고, 그 대상 모델로는 **다시 제안하지 않는다**(`attempts`).
+test('handoff: 대상 첫 사건 rejected', async () => {
+  const f = fixture()
+  f.options.open = async (request: { id: string }): Promise<HandoffOpenResult> =>
+    ({ id: request.id, sessionId: 'new-session', company: 'codex', firstTurn: 'limit' })
+  const p = (await f.handoff.propose(f.source))!
+  expect(await f.handoff.continue(p.proposalId)).toBeNull()
+  expect(f.transfers).toEqual([]); expect(f.closed).toHaveLength(1)
+  expect(f.handoff.visible()).toMatchObject([{ state: 'failed', failedReason: 'target-limit' }])
+  // 이미 시도한 `codex:gpt-6.1-sol` 은 새 제안이 되지 않는다.
+  expect(await f.handoff.propose(f.source)).toBeNull()
+  expect(f.handoff.proposals()).toEqual([])
+  expect(f.handoff.visible()).toHaveLength(1)
+})
+
+// §0-5 2 — 넘기는 도중 무효화되면 늦게 도착한 세션은 버린다(늦은 콜백이 소유를 뒤집지 않는다).
+test('handoff: 늦은 콜백 무시', async () => {
+  const f = fixture(), p = (await f.handoff.propose(f.source))!
+  const { promise, resolve } = Promise.withResolvers<HandoffOpenResult>()
+  f.options.open = () => promise
+  const click = f.handoff.continue(p.proposalId)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  f.handoff.invalidate('root')
+  resolve({ id: p.newConversationId, sessionId: 'late-session', company: 'codex', firstTurn: 'ok' })
+  expect(await click).toBeNull()
+  expect(f.transfers).toEqual([]); expect(f.activated).toEqual([]); expect(f.audits).toEqual([])
+  expect(f.handoff.visible()).toEqual([])
+})
+
+// §0-5 2 — 첫 턴이 성공하면 한 번만 넘긴다.
+test('handoff: 대상 성공 → commit 1', async () => {
+  const f = fixture(), p = (await f.handoff.propose(f.source))!
+  const owner = await f.handoff.continue(p.proposalId)
+  expect(owner).toMatchObject({ id: p.newConversationId, sessionId: 'new-session', company: 'codex' })
+  expect(f.opened).toHaveLength(1); expect(f.activated).toHaveLength(1)
+  expect(f.transfers).toHaveLength(1); expect(f.audits).toHaveLength(1)
+  expect(f.handoff.visible()).toEqual([]); expect(f.closed).toEqual([])
+})
+
+// §0-5 2 — 누른 뒤 계정이 바뀌면 지문이 어긋나므로 아무것도 넘기지 않는다.
+test('handoff: 클릭 때 지문 다르면 0', async () => {
+  const f = fixture(), p = (await f.handoff.propose(f.source))!
+  f.account.accountId = 'replacement'
+  expect(await f.handoff.continue(p.proposalId)).toBeNull()
+  expect(f.opened).toEqual([]); expect(f.transfers).toEqual([]); expect(f.closed).toEqual([])
+  // 제안은 접히고 같은 폴더의 새 제안이 선다(계정이 바뀌었으니 새로 고른다).
+  expect(f.handoff.proposals()).toMatchObject([{ accountId: 'replacement' }])
+})
+
+// §0-5 2 — `usage:'unknown'` 은 연결이 첫 턴 안 확인을 선언했을 때만 Claude 대상 단추를 연다.
+test('handoff: gateInTurn 없으면 Claude 대상 단추 0', async () => {
+  const f = fixture()
+  f.source.entry = { company: 'codex', model: 'gpt-6.1-sol', effort: 'high', how: 'main' }
+  f.account.accountId = 'claude-subscription'
+  f.account.usage = 'unknown'
+  f.account.account = { company: 'claude', subscriptionType: 'max', apiKeySource: 'none',
+    models: [{ model: 'opus', name: 'Opus', efforts: ['high'] }] }
+  expect(await f.handoff.propose(f.source)).toBeNull()
+  f.options.gateInTurn = company => company === 'claude'
+  expect(await f.handoff.propose(f.source)).toMatchObject({
+    entry: { company: 'claude', model: 'opus', effort: 'high', how: 'main' }
+  })
+})
+
+// §0-5 2 — 기준값(beforeHashes)이 없으면 무엇이 바뀌었는지 알 수 없다 — 비우고 `truncated` 로 알린다.
+test('handoff: beforeHashes 없으면 changedFiles 비움', () => {
+  const f = fixture(); f.source.beforeHashes = {}
+  const bundle = buildHandoffBundle(f.source, '/private/archive.json', 10_000)!
+  expect(bundle.changedFiles).toEqual([]); expect(bundle.changedFileCount).toBe(0)
+  expect(bundle.truncated).toEqual(['changedFiles'])
 })

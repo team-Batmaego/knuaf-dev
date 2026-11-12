@@ -43,7 +43,7 @@ function fixture() {
         students: [{ text: '앞 대화의 마지막 학생 차례', attachments: [] }], lastAssistant: null,
         beforeHashes: {}, afterHashes: {}, approvedPlan: plan, jobs: [], skillVersion: 'v1', sourceLocation: '/private/chat' }
       const options: ConversationHandoffOptions = { stateDir: join(base, 'handoff'), maxBytes: 10000,
-        account: company => account(company), open: async request => { const target: ConversationOwner = { id: request.id, sessionId: `s-${request.id}`, company: request.entry.company }; opened.push(target); return target },
+        account: company => account(company), open: async request => { const target = { id: request.id, sessionId: `s-${request.id}`, company: request.entry.company, firstTurn: 'ok' as const }; opened.push(target); return target },
         close: async target => { closed.push(target) }, prepareActivation: async (_old, target) => () => { activated.push(target) },
         beginTransition: folder => runner.beginOwnerTransition(folder), audit: () => {}, ...patch }
       return { h: new ConversationHandoff(options), source, options, opened, closed, activated }
