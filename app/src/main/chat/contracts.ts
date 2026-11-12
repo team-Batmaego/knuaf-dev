@@ -99,6 +99,13 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   // (새 `PATH` 키를 만들면 시스템 PATH 를 잃는다 — 위 `pathKeyOf` 주석).
   const pathKey = pathKeyOf(env)
   env[pathKey] = [...extraPathDirs, ...AGENT_PATH_DIRS, env[pathKey]].filter(Boolean).join(delimiter)
+  // 도우미가 자기 셸 도구로 규칙집 Python 스크립트(gg_*)를 파이프로 돌리면 윈도우 기본
+  // 인코딩(cp949)으로 나가 받는 쪽(UTF-8)에서 한글이 깨진다 — 사용자가 넣은 값도 덮는다
+  // (학생 PC 설정이 앱 동작을 바꾸지 않게). 사이드카와 같은 두 값이다.
+  // 대가: PYTHONUTF8 은 stdout 뿐 아니라 Python 의 기본 파일 인코딩도 UTF-8 로 바꾼다 —
+  // 인코딩을 명시하지 않고 cp949 파일을 읽는 다른 도구에는 영향이 갈 수 있다(규칙집은 UTF-8 전제).
+  env.PYTHONUTF8 = '1'
+  env.PYTHONIOENCODING = 'utf-8'
   return env
 }
 
