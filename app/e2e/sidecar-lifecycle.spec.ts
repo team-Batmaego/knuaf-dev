@@ -77,6 +77,10 @@ function harness(platform = 'darwin') {
     require: (name: string) => {
       if (name === './update/switch') return { skillSwitch }
       if (name === './update/activity') return { agentActivity }
+      // 진단은 `KNUAF_APP_LOG` 가 없으면 완전 무동작이다(`diagLog.ts`) — 대역도 같은 뜻으로 둔다.
+      // 여기서 진짜 `./diagLog` 를 부르면 안 된다: 이 소스는 `src/main/sidecar.ts` 라 상대 경로가
+      // 이 스펙 기준으로 풀리고, 그 오류가 16개 시험을 한꺼번에 죽였다(맥 CI, e102bb4).
+      if (name === './diagLog') return { diag: () => {} }
       if (name === './python') return {
         choosePython: (_root: string | null, override: string | null) => ({ python: override ?? 'base', kind: 'env' }),
         scriptsDir: () => scripts, sidecarDir: () => '/sidecar'

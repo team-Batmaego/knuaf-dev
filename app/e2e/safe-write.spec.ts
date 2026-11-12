@@ -361,12 +361,27 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   // 이 시험은 파일 하나만 두므로 그 합이 그대로 상한이 된다.
   const { root, draft } = project()
   let blocked = true
-  const svc = service(() => {}, faultyFs({ write: (p) => (blocked && p.startsWith(draft) ? eacces() : null) }))
+  // 판별값은 **시도 횟수**다(러너 속도와 무관). 종료 예산 [20,30] 이면 초기 1 + 재시도 2 = 3회,
+  // 기본 예산 [20,40,80,160] 이면 5회 — 이 시험이 가르려는 것이 정확히 그 차이다.
+  let attempts = 0
+  let writes = 0
+  const svc = service(() => {}, faultyFs({ write: (p) => {
+    if (!p.startsWith(draft)) return null
+    writes++
+    if (!blocked) return null
+    attempts++
+    return eacces()
+  } }))
   svc.setDraft(root, '쓰다 만 글')
   const started = Date.now()
   expect(() => svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })).not.toThrow()
   const elapsed = Date.now() - started
-  expect(elapsed, '종료 경로가 기본 예산(300ms)만큼 main 스레드를 세웠다').toBeLessThan(200)
+  // 시도 횟수가 먼저다 — 벽시계보다 흔들리지 않는 판별값이라, 예산이 새면 이 줄이 먼저 짚는다.
+  expect(attempts, '종료 예산인데 재시도가 기본 예산(5회)만큼 돌았다').toBe(3)
+  // 벽시계는 **멈춤 방지** 상한일 뿐이다(판별은 위 시도 횟수). 50ms 예산에 러너 스케줄링 지연이 얹혀
+  // 맥 CI 에서 290ms 까지 나왔다 — 그 사례에 경계가 붙지 않도록 넉넉히 둔다. 1초를 넘으면 그건
+  // 지연이 아니라 동기 대기(Atomics.wait)가 예산 밖에서 돌았다는 뜻이다.
+  expect(elapsed, '종료 경로가 1초 넘게 main 스레드를 세웠다 — 재시도 대기가 예산 밖에서 돌았다').toBeLessThan(1000)
   expect(svc.draft(root), '저장에 실패했는데 메모리 값까지 잃었다').toBe('쓰다 만 글')
   expect(existsSync(draft)).toBe(false)
   // 잠금이 풀리면 다음 flush 가 남긴다 — 예산을 줄인 것이 "덜 남긴다"는 뜻은 아니다.
@@ -374,8 +389,10 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })
   expect(readFileSync(draft, 'utf8')).toBe('쓰다 만 글')
   const again = Date.now()
-  svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })      // 남은 대기 없음 — 즉시 돌아온다
-  expect(Date.now() - again).toBeLessThan(200)
+  const writesBefore = writes
+  svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })      // 남은 대기 없음 — 쓰기 시도 자체가 없다
+  expect(writes - writesBefore, '남은 대기가 없는데 쓰기를 또 시도했다').toBe(0)
+  expect(Date.now() - again).toBeLessThan(1000)            // 같은 이유 — 판별은 위 쓰기 시도 0회
 })
 
 test('저장 실패 진단에는 절대 경로·오류 본문이 아니라 이름과 코드만 남는다 (RT3 중요)', () => {
