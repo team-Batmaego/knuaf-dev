@@ -21,7 +21,7 @@ jobs:
       pull-requests: read
     outputs:
       changed: ${{ steps.plan.outputs.changed }}
-      version: ${{ steps.plan.outputs.version }}
+      version: ${{ steps.reserve.outputs.version }}
       source-tag: ${{ steps.plan.outputs.source-tag }}
       source-commit: ${{ steps.plan.outputs.source-commit }}
       overlay: ${{ steps.plan.outputs.overlay }}
@@ -36,22 +36,14 @@ jobs:
           node-version: 22
       - name: Enforce immutable action references
         run: node app/scripts/tests/check-skill-workflow.mjs
-      - name: Refuse concurrent channel proposals
-        id: channel-state
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node app/scripts/check-channel-update-state.mjs
+      # The plan runs first so the guard knows whether this run has a new release to publish.
+      # Without that fact a blocked run would look like an idle schedule and report success.
       - name: Resolve public release and compare source commit plus overlay hash
         id: plan
-        if: steps.channel-state.outputs.skip != 'true'
-
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'node:fs'
-          import { execFileSync } from 'node:child_process'
-          import { overlayHash, sha256, jsonBytes, VERSION } from './app/scripts/compose-skill.mjs'
+          import { readFileSync, appendFileSync } from 'node:fs'
+          import { overlayHash, sha256, VERSION } from './app/scripts/compose-skill.mjs'
           import { RELEASE_PREFIX } from './app/scripts/sign-skill.mjs'
           const get = async url => {
             // Public knuaf-doc reads deliberately carry no authorization header.
@@ -80,10 +72,43 @@ jobs:
             console.log('No source/overlay change')
             process.exit(0)
           }
+          if (current && !VERSION.test(current.version)) throw new Error('Invalid current skill version')
+          appendFileSync(process.env.GITHUB_OUTPUT, `changed=true\nsource-tag=${source.tag}\nsource-commit=${source.commit}\noverlay=${overlay}\n`)
+          appendFileSync(process.env.GITHUB_OUTPUT, `current-version=${current?.version ?? ''}\n`)
+          NODE
+      # A pending release plus any open/abandoned channel branch fails the run. An idle schedule
+      # (nothing new to publish) stays green and only warns, so the daily cron keeps its signal.
+      - name: Refuse concurrent channel proposals
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Raw output on purpose: comparing with 'true' here would turn a missing output into a
+          # silent false. The guard itself rejects anything that is not exactly true or false.
+          CHANNEL_PENDING_NEW_RELEASE: ${{ steps.plan.outputs.changed }}
+        run: node app/scripts/check-channel-update-state.mjs
+      # Version reservation and the upstream clone only happen once the channel is clear,
+      # so a blocked run does no work it would have to throw away.
+      - name: Reserve version and fetch pinned upstream
+        id: reserve
+        if: steps.plan.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.plan.outputs.source-tag }}
+          SOURCE_COMMIT: ${{ steps.plan.outputs.source-commit }}
+          CURRENT_VERSION: ${{ steps.plan.outputs.current-version }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+          import { jsonBytes, VERSION } from './app/scripts/compose-skill.mjs'
+          const source = { repo: 'starceas/knuaf-doc', tag: process.env.SOURCE_TAG, commit: process.env.SOURCE_COMMIT }
+          if (!/^v\d+\.\d+\.\d+$/.test(source.tag) || !/^[a-f0-9]{40}$/.test(source.commit)) throw new Error('Invalid trusted source inputs')
           // Include published AND draft skill releases so a rejected/failed PR never reuses a version.
           const releases = JSON.parse(execFileSync('gh', ['api', '--paginate', '--slurp', 'repos/{owner}/{repo}/releases?per_page=100'], {encoding:'utf8'})).flat()
           const versions = releases.map(r => r.tag_name.replace(/^skill-v/, '')).filter(v => VERSION.test(v))
-          if (current) versions.push(current.version)
+          if (process.env.CURRENT_VERSION) {
+            if (!VERSION.test(process.env.CURRENT_VERSION)) throw new Error('Invalid current skill version')
+            versions.push(process.env.CURRENT_VERSION)
+          }
           versions.sort((a,b) => {
             const aa = a.split('.').map(BigInt), bb = b.split('.').map(BigInt)
             for (let i=0;i<3;i++) if (aa[i] !== bb[i]) return aa[i] > bb[i] ? 1 : -1
@@ -102,14 +127,13 @@ jobs:
           mkdirSync('app/resources/skill-release', {recursive:true})
           writeFileSync('app/resources/skill-release/source.json', jsonBytes(source))
           execFileSync('git', ['clone', '--quiet', '--depth', '1', '--branch', source.tag, 'https://github.com/starceas/knuaf-doc.git', 'app/resources/skill-upstream'], {stdio:'inherit'})
-          appendFileSync(process.env.GITHUB_OUTPUT, `changed=true\nversion=${version}\n`)
-          appendFileSync(process.env.GITHUB_OUTPUT, `source-tag=${source.tag}\nsource-commit=${source.commit}\noverlay=${overlay}\n`)
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`)
           NODE
       - name: Compose deterministic bundle and ZIP
         id: bundle
         if: steps.plan.outputs.changed == 'true'
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION: ${{ steps.reserve.outputs.version }}
         run: |
           node app/scripts/compose-skill.mjs --upstream app/resources/skill-upstream --source app/resources/skill-release/source.json --output app/resources/skill-release/bundle --zip "app/resources/skill-release/knuaf-dev-skill-$VERSION.zip" --version "$VERSION"
           node --input-type=module <<'NODE'
@@ -129,6 +153,21 @@ jobs:
           path: app/resources/skill-release
           if-no-files-found: error
           retention-days: 7
+      # The publish job pauses on the skill-release environment before any of its steps run,
+      # so the waiting state has to be explained from the job that finishes first.
+      - name: Note pending publish approval
+        if: steps.plan.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.reserve.outputs.version }}
+        run: |
+          {
+            echo "## 규칙집 $VERSION 게시 대기"
+            echo
+            echo "이 실행은 \`publish\` 잡에서 \`skill-release\` 환경 승인을 기다립니다(승인 전에는 아무 것도 게시되지 않습니다)."
+            echo "승인 화면: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "승인하지 않으면 채널 가지와 릴리스는 만들어지지 않습니다. 이 실행을 방치하면 다음 정기 실행도 같은 지점에서 대기합니다."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   compatibility:
     needs: compose
@@ -243,8 +282,21 @@ jobs:
         run: |
           cp app/resources/skill-release/signed/channel.json updates/channel.json
           cp app/resources/trusted-source.json app/skill-source.json
+      # Remember what the branch pointed at before this run proposes anything. The report below
+      # can then tell "this run pushed its proposal" from "an older proposal is still sitting
+      # there", which are two different manual follow-ups.
+      - name: Record channel branch head before proposing
+        id: branch_head
+        run: |
+          head=$(git ls-remote --heads origin refs/heads/skill-channel-update | cut -f1)
+          if [ -n "$head" ] && ! printf '%s' "$head" | grep -Eq '^[a-f0-9]{40}$'; then
+            echo "::error::Unexpected channel branch reference; stop for review."
+            exit 1
+          fi
+          echo "before=${head:-none}" >> "$GITHUB_OUTPUT"
       - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
         id: channel_pr
+        continue-on-error: true
         with:
           branch: skill-channel-update
           base: main
@@ -258,6 +310,77 @@ jobs:
             - [ ] updates/channel.json에서 skill 항목 외에는 main과 같다.
             - [ ] app 항목은 main과 같다.
             - [ ] 채널 PR은 merge commit으로 머지합니다(squash/rebase 금지). 갈래 커밋이 main에 포함되어야 다음 채널 실행이 가능합니다.
+            - [ ] 머지 또는 닫은 뒤 원격 갈래를 보관·삭제합니다. 갈래 머리의 **전체 SHA**(`<FULL>`, 원격에서 조회한 값)를 태그 대상으로 고정합니다. 로컬 `origin/skill-channel-update` 추적 참조는 옛 제안을 가리킬 수 있으므로 쓰지 않습니다. 태그 이름은 짧은 SHA(`<sha7>`)로 유일해지고, **가벼운 태그**여야 하며(annotated 금지), 원격 태그가 같은 전체 SHA를 가리키는 것을 확인한 뒤에만 갈래를 지웁니다: `git fetch origin <FULL> && test "$(git rev-parse FETCH_HEAD)" = <FULL> && git tag archive/skill-channel-update-<sha7> <FULL> && git push origin refs/tags/archive/skill-channel-update-<sha7> && test "$(git ls-remote origin refs/tags/archive/skill-channel-update-<sha7> | cut -f1)" = <FULL> && git push origin --delete skill-channel-update`. `--force`·`--force-with-lease`는 쓰지 않습니다. 같은 이름 태그가 이미 다른 커밋을 가리키면 push가 거부되므로 멈추고 사람이 확인합니다.
+      # The repository blocks Actions from opening pull requests. A branch with the same name is
+      # reused by every release, so the branch existing does not mean THIS run pushed. Compare the
+      # two proposal files this run wrote with the blobs stored on the branch, and only claim
+      # "PR만 남았다" when they match. A failed lookup is reported as unknown, never as absent.
+      - name: Report manual pull request step
+        if: steps.channel_pr.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.compose.outputs.version }}
+        run: |
+          branch=skill-channel-update
+          note() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
+          finish() {
+            note "" "릴리스 \`skill-v$VERSION\`는 이 실행에서 공개됐습니다. 자산은 \`gh release view skill-v$VERSION --repo $GITHUB_REPOSITORY\`로 확인합니다."
+            echo "::error::채널 PR 자동 생성 실패 — 실행 요약의 안내에 따라 사람이 마무리해야 합니다."
+            exit 1
+          }
+          unknown() {
+            note "$1" "" "$2" "이 실행이 갈래를 push했다고 단정하지 마세요."
+            finish
+          }
+          note "## 채널 PR 자동 생성 실패 — 사람이 확인해야 합니다" ""
+
+          if ! refs=$(git ls-remote --heads origin "refs/heads/$branch"); then
+            unknown "원격 갈래 조회가 실패해 \`$branch\`의 존재·부재와 이번 판 반영 여부를 단정할 수 없습니다." \
+              "저장소의 갈래 목록을 직접 확인하세요. 갈래가 있고 이번 판이 반영됐다면 PR만 만들면 되고, 이번 판이 아니거나 갈래가 없다면 아래 안내를 따릅니다."
+          fi
+          head=$(printf '%s' "$refs" | cut -f1)
+          if [ -z "$head" ]; then
+            note "원격에 \`$branch\` 갈래가 없습니다(조회 성공, 부재 확인). 이 실행은 갈래를 push하지 못했고 릴리스만 공개된 상태입니다." \
+              "릴리스 자산이 온전한지 확인한 뒤 새 실행으로 다시 시도하세요(같은 판 재사용 금지)."
+            finish
+          fi
+          if ! printf '%s' "$head" | grep -Eq '^[a-f0-9]{40}$'; then
+            unknown "원격 갈래 참조가 예상 밖입니다(\`$refs\`)." "사람이 저장소 상태를 직접 확인해야 합니다."
+          fi
+
+          reflected=true
+          for path in updates/channel.json app/skill-source.json; do
+            if ! remote=$(gh api "repos/$GITHUB_REPOSITORY/contents/$path?ref=$branch" --jq .sha 2>&1); then
+              case "$remote" in
+                *"HTTP 404"*) reflected=false; continue ;;
+              esac
+              unknown "원격 \`$path\` 조회가 실패했습니다: \`$remote\`" "이번 판 반영 여부와 갈래 상태를 단정할 수 없습니다. GitHub 상태를 확인한 뒤 직접 판단하세요."
+            fi
+            if ! printf '%s' "$remote" | grep -Eq '^[a-f0-9]{40}$'; then
+              unknown "원격 \`$path\` 응답이 예상 밖입니다(\`$remote\`)." "이번 판 반영 여부를 단정할 수 없습니다."
+            fi
+            if ! local_sha=$(git hash-object "$path"); then
+              unknown "\`$path\`의 로컬 blob을 계산하지 못했습니다." "이번 판 반영 여부를 단정할 수 없습니다."
+            fi
+            if [ "$remote" != "$local_sha" ]; then reflected=false; fi
+          done
+          head7=$(printf '%s' "$head" | cut -c1-7)
+
+          if [ "$reflected" = true ]; then
+            note "원격 갈래 \`$branch\`($head7)의 \`updates/channel.json\`·\`app/skill-source.json\`이 이번 제안과 같습니다. 릴리스 공개와 갈래 push는 끝났고 PR만 만들어지지 않았습니다." \
+              "" "다음 명령을 책임자 또는 오모냥이 실행하세요:" "" '```' \
+              "gh pr create --repo $GITHUB_REPOSITORY --head $branch --base main --title '규칙집 $VERSION 채널 반영' --body '서명·호환 시험 완료. 채널 PR 템플릿 항목을 확인한 뒤 merge commit으로 머지합니다. 머지 뒤에는 갈래를 archive 태그로 보관하고 원격에서 삭제합니다.'" \
+              '```' "" "열린 채널 PR이 남아 있는 동안 다음 실행은 대기·실패합니다."
+          else
+            note "원격 갈래 \`$branch\`($head7)에 이번 판 제안이 없습니다. 이전 제안이 남아 있을 수 있으므로 이 실행이 push를 마쳤다고 보지 마세요." \
+              "" "1. 갈래에 이번 판이 실제로 반영됐는지 먼저 확인합니다(위 blob SHA와 이번 제안 비교, 또는 \`gh pr list --head $branch\`·갈래 커밋 이력). 반영이 확인되면 \`gh pr create --repo $GITHUB_REPOSITORY --head $branch --base main\`만 실행합니다." \
+              "2. 이전 제안이라면 그 갈래 머리($head7)를 보관한 뒤 삭제하고, 릴리스 자산을 확인한 뒤 새 실행으로 다시 시도합니다." \
+              '```' \
+              "git fetch origin $head && test \"\$(git rev-parse FETCH_HEAD)\" = $head && git tag archive/$branch-$head7 $head && git push origin refs/tags/archive/$branch-$head7 && test \"\$(git ls-remote origin refs/tags/archive/$branch-$head7 | cut -f1)\" = $head && git push origin --delete $branch" \
+              '```' \
+              "같은 이름 태그가 이미 다른 커밋을 가리키면 push가 거부되므로 멈추고 사람이 확인합니다(강제 덮어쓰기 금지)."
+          fi
+          finish
       # First real run: required branch-protection check names must match dispatch job names,
       # and all results must attach to this PR's HEAD commit. Do not infer this from dispatch acceptance.
       # If either does not match, 오모냥 reopens the PR to trigger pull_request CI instead.
