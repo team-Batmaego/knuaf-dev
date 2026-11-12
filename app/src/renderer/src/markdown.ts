@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it'
 import type { RuleBlock } from 'markdown-it/lib/parser_block.mjs'
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs'
+import { encodeImageSrc, localImagePath } from '../../shared/paper-image'
 
 /**
  * 종이 칸 마크다운 렌더 (IMPL-PLAN §4-2, DESIGN §1-1).
@@ -9,8 +10,12 @@ import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs'
  * - `html: false` — 도우미가 쓴 문자열이 그대로 마크업이 되지 않는다(원문 `<script>` 등은 글자로 남는다).
  * - `linkify: false` — 맨 주소를 링크로 만들지 않는다.
  * - 링크는 **열지 않는다**(GUI-12). `[글](주소)` 는 `글` 만 남기고 앵커를 만들지 않는다.
- * - 이미지도 그리지 않는다 — 종이 칸이 원격 주소를 부르면 "앱은 그 밖 어디에도 보내지
- *   않아요"라는 안내(PRIVACY_NOTE)가 사실이 아니게 된다. alt 글자만 남긴다.
+ * - 그림은 **논문 폴더 안 상대 경로만** 그린다. 원격·`file:`·`data:`·`//host`·절대 경로는 지금처럼
+ *   alt 글자만 남긴다 — 종이 칸이 인터넷 주소를 부르면 "앱은 그 밖 어디에도 보내지 않아요"
+ *   (PRIVACY_NOTE)가 사실이 아니게 된다.
+ *
+ * 그림 주소는 여기서 **만들기만** 한다(`knuaf-img://paper/<상대 경로>`). 실제 파일 읽기·폴더 안 판정은
+ * main이 한다(`main/paper-images/`) — 렌더러는 경로를 열 수 없고, 동기 렌더 계약도 그대로다.
  *
  * 어디로도 이동하지 않는 정적 글이라 이 셋을 끄는 것이 기능 손실이 아니다.
  */
@@ -19,8 +24,12 @@ const md = new MarkdownIt({ html: false, linkify: false, breaks: false, typograp
 md.renderer.rules.link_open = () => ''
 md.renderer.rules.link_close = () => ''
 md.renderer.rules.image = (tokens, idx) => {
-  const alt = tokens[idx].content
-  return alt ? `${md.utils.escapeHtml(alt)} ` : ''
+  const token = tokens[idx]
+  const alt = token.content
+  const rel = localImagePath(token.attrGet('src'))
+  // 폴더 안 상대 경로가 아니면(원격·다른 스킴·`..`·절대 경로) alt 글자만 — 지금까지의 동작 그대로.
+  if (!rel) return alt ? `${md.utils.escapeHtml(alt)} ` : ''
+  return `<img src="${md.utils.escapeHtml(encodeImageSrc(rel))}" alt="${md.utils.escapeHtml(alt)}">`
 }
 
 /**
