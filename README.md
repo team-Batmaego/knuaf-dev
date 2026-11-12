@@ -110,6 +110,14 @@ pytest 옵션은 `--` 뒤에 전달합니다: `node app/scripts/test-with-skill.
 
 앱은 [app/README.md](app/README.md) 를 보세요. CI는 ubuntu/macos/windows × Python 3.10/3.13 에서 같은 테스트를 돌립니다.
 
+위 화면 사진(`docs/images/*.png`)은 시험을 그냥 돌려도 바뀌지 않습니다 — `screenshots.spec.ts`의 기본 출력이 `app/test-results/ui-shots`(git 제외)이기 때문입니다. 안내서 사진을 실제로 갱신할 때만 자리를 명시합니다:
+
+```bash
+pnpm -C app build && KNUAF_SHOT_DIR=../docs/images pnpm -C app exec playwright test e2e/screenshots.spec.ts
+```
+
+`window-shots.spec.ts`는 별개로 `docs/images/window/`에 직접 쓰며 `KNUAF_WINDOW_SHOTS=1`일 때만 돕니다(맥 전용).
+
 ## 학교 공식 지침 원문
 
 저작권이 불확실한 학교 공식 PDF·발췌본은 이 저장소에 **들어 있지 않습니다.** 사용자가 자신의 학교 공식 원문을 직접 준비해서 등록해야 합니다.

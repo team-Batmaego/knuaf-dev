@@ -1,0 +1,276 @@
+{
+  "schema": "knuaf.notices/1",
+  "written_at": "2026-11-10T20:16:52.242139+00:00",
+  "project_id": "d29edc18f40887ca323113e98b70f9af3d23b4e7ade89cdf4115ada427f51942",
+  "notices": [
+    {
+      "check_id": "finance_workbook_notice",
+      "target": "xlsx",
+      "status": "check_needed",
+      "severity": "info",
+      "reason": "학교 재무 양식의 수식 오류 18곳을 바로잡았어요 / 67곳은 계산 방식을 다르게 했어요",
+      "evidence": [],
+      "owner": "skill",
+      "required_for": [],
+      "input_revision": 1,
+      "checker_version": "1.0",
+      "title": "학교 재무 양식의 수식 오류 18곳을 바로잡았어요 / 67곳은 계산 방식을 다르게 했어요",
+      "items": [
+        {
+          "key": "invest_subtotal_2027",
+          "kind": "typo",
+          "what": "2027년 투자 소계가 한 행을 빼고 더하고 있어서, 다섯 행 모두 더하도록 바로잡았어요",
+          "cells": [
+            "4.투자계획!E24",
+            "4.투자계획!F24",
+            "4.투자계획!G24",
+            "4.투자계획!H24"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "invest_subtotal_2028_2031",
+          "kind": "typo",
+          "what": "2028~2031년 투자 소계가 한 줄만 더하고 있어서, 네 해 모두 더하도록 바로잡았어요",
+          "cells": [
+            "4.투자계획!E29",
+            "4.투자계획!F29",
+            "4.투자계획!G29",
+            "4.투자계획!H29"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "invest_total_missing",
+          "kind": "typo",
+          "what": "2028년 투자 합계 칸에 수식이 없어 합계 수식을 넣었어요",
+          "cells": [
+            "4.투자계획!E25"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "invest_item_cells_cleared",
+          "kind": "typo",
+          "what": "투자 항목·규격 칸에 합계 수식이 잘못 들어가 있어 지웠어요",
+          "cells": [
+            "4.투자계획!C26",
+            "4.투자계획!D26",
+            "4.투자계획!C27",
+            "4.투자계획!D27",
+            "4.투자계획!C28",
+            "4.투자계획!D28"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "sales_commercialization_rate",
+          "kind": "method",
+          "what": "해마다 다른 상품화율을 보도록 고쳤어요(첫해 값을 그대로 쓰고 있었어요)",
+          "cells": [
+            " 7. 판매계획!O35",
+            " 7. 판매계획!O44",
+            " 7. 판매계획!O53",
+            " 7. 판매계획!O62"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "production_area",
+          "kind": "method",
+          "what": "생산량 계산에 박혀 있던 1,340리터 대신 확인된 재배면적을 쓰도록 고쳤어요",
+          "cells": [
+            "8. 생산계획!C11",
+            "8. 생산계획!G11",
+            "8. 생산계획!K11",
+            "8. 생산계획!O11",
+            "8. 생산계획!S11"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "production_avg_price",
+          "kind": "method",
+          "what": "해마다 그 해 평균가격을 보도록 고쳤어요(첫해 가격에 묶여 있었어요)",
+          "cells": [
+            "8. 생산계획!C14",
+            "8. 생산계획!G14",
+            "8. 생산계획!K14",
+            "8. 생산계획!O14",
+            "8. 생산계획!S14"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "material_textbook_growth_removed",
+          "kind": "method",
+          "what": "교재 예시 상승률(1.05)을 빼고, 학생이 적은 단가나 근거 있는 상승률을 쓰도록 고쳤어요",
+          "cells": [
+            "9. 영농자재구매계획!F20",
+            "9. 영농자재구매계획!F21",
+            "9. 영농자재구매계획!F22",
+            "9. 영농자재구매계획!F23",
+            "9. 영농자재구매계획!F24",
+            "9. 영농자재구매계획!F25",
+            "9. 영농자재구매계획!F31",
+            "9. 영농자재구매계획!F32",
+            "9. 영농자재구매계획!F33",
+            "9. 영농자재구매계획!F34",
+            "9. 영농자재구매계획!F35",
+            "9. 영농자재구매계획!F36",
+            "9. 영농자재구매계획!F42",
+            "9. 영농자재구매계획!F43",
+            "9. 영농자재구매계획!F44",
+            "9. 영농자재구매계획!F45",
+            "9. 영농자재구매계획!F46",
+            "9. 영농자재구매계획!F47",
+            "9. 영농자재구매계획!F53",
+            "9. 영농자재구매계획!F54",
+            "9. 영농자재구매계획!F55",
+            "9. 영농자재구매계획!F56",
+            "9. 영농자재구매계획!F57",
+            "9. 영농자재구매계획!F58"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "depreciation_grant_net",
+          "kind": "method",
+          "what": "시설·농기계 장부가를 보조금을 뺀 값으로 계산하도록 고쳤어요",
+          "cells": [
+            "13. 감가상각비계획 !D8",
+            "13. 감가상각비계획 !F8",
+            "13. 감가상각비계획 !G8",
+            "13. 감가상각비계획 !D19",
+            "13. 감가상각비계획 !F19",
+            "13. 감가상각비계획 !G19",
+            "13. 감가상각비계획 !D30",
+            "13. 감가상각비계획 !F30",
+            "13. 감가상각비계획 !G30",
+            "13. 감가상각비계획 !D41",
+            "13. 감가상각비계획 !F41",
+            "13. 감가상각비계획 !G41",
+            "13. 감가상각비계획 !D52",
+            "13. 감가상각비계획 !F52",
+            "13. 감가상각비계획 !G52"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "balance_last_year_profit",
+          "kind": "typo",
+          "what": "2031년 순이익이 다른 해와 다른 줄을 보고 있어서 세후 순익을 보도록 바로잡았어요",
+          "cells": [
+            "17. 추정대차대조표!H42"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "balance_opening_capital",
+          "kind": "typo",
+          "what": "기초 자본이 자산 총계 그대로여서 부채를 빼도록 바로잡았어요",
+          "cells": [
+            "17. 추정대차대조표!C44"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "balance_last_year_land",
+          "kind": "typo",
+          "what": "2031년 논밭 자산이 그 해 투자가 아니라 전년도 자기자금을 더하고 있어서 바로잡았어요",
+          "cells": [
+            "17. 추정대차대조표!H27"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "balance_loan_by_year",
+          "kind": "method",
+          "what": "융자금이 투자계획 금액을 보거나 1차년도 값을 이어받고 있어, 연도별 상환계획 값을 보도록 바로잡았어요",
+          "cells": [
+            "17. 추정대차대조표!D36",
+            "17. 추정대차대조표!E36",
+            "17. 추정대차대조표!F36",
+            "17. 추정대차대조표!G36",
+            "17. 추정대차대조표!H36"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "balance_equity_paid_in",
+          "kind": "method",
+          "what": "자본 총계에 그 해 추가로 납입한 자본을 더하도록 고쳤어요",
+          "cells": [
+            "17. 추정대차대조표!D44",
+            "17. 추정대차대조표!E44",
+            "17. 추정대차대조표!F44",
+            "17. 추정대차대조표!G44",
+            "17. 추정대차대조표!H44"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "cashflow_facility_equipment",
+          "kind": "method",
+          "what": "시설·농기계 투자 지출을 투자 분류별로 연결했어요",
+          "cells": [
+            "18. 현금흐름계획!D16",
+            "18. 현금흐름계획!H17"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        },
+        {
+          "key": "income_double_conversion",
+          "kind": "method",
+          "what": "출하량을 두 번 환산하던 것을 한 번만 하도록 고쳤어요",
+          "cells": [
+            "15. 손익계획!C41",
+            "15. 손익계획!C46"
+          ],
+          "source": "transform",
+          "in_school_form": true
+        }
+      ],
+      "notice_identity": "a69dd25772be8e49c05e95f472b4e417d6101e0f995d3689fcf63d8f78cd6f11",
+      "receipt_path": "out/receipt.json",
+      "record_refs": [
+        {
+          "collection": "outputs",
+          "id": "wb1"
+        }
+      ],
+      "typo_count": 18,
+      "method_count": 67,
+      "dismissible": true,
+      "redisplay_rule": "identity_changed",
+      "project_id": "d29edc18f40887ca323113e98b70f9af3d23b4e7ade89cdf4115ada427f51942",
+      "choices": [
+        {
+          "value": "direct_tell",
+          "label": "교수님께 직접 말씀드릴게요"
+        },
+        {
+          "value": "footnote",
+          "label": "논문에 각주로 적을게요"
+        }
+      ],
+      "choice": "footnote",
+      "choice_hint": "교수님께 이렇게 말씀하시면 됩니다: 학교 재무 엑셀 양식과 계산 방식이 다른 부분이 있어서, 계산 방식을 바로잡아 작성했다고 말씀드리세요. 왜 그렇게 했는지는 논문 각주에도 적어 두면 좋습니다."
+    }
+  ]
+}

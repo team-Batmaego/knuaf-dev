@@ -230,9 +230,10 @@ test('만드는 중에도 시도 시점 고지가 두 자리에 보인다 (반�
   try {
     await openProject(page, root)
     await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
-    // "지금"이 3단계(검토본)여야 종이 머리에 권하는 단추가 선다 — 장을 다 쓴 상태로 올린다.
+    // 내부 판정이 3단계(검토본)이면 종이 머리에 권하는 단추가 선다 — 장을 다 쓴 상태로 올린다.
+    // 제목줄 진행은 대화가 없어 "시작 전"이라 이 자리에서 단언하지 않는다(T1).
     markSectionReady(root)
-    await expect(page.locator('.titlebar .tbtn.now')).toContainText('검토본', { timeout: 20_000 })
+    await expect(page.locator('.paper-head').getByRole('button', { name: '검토본 만들기' }), { timeout: 20_000 }).toBeVisible()
     await projectPrepared(page) // 정본 개정 뒤 문제 해결의 자동 재진단도 끝나야 한다.
 
     // export 응답을 보류한다 — 그 동안이 "시도 중"이다.

@@ -4,7 +4,8 @@ import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/
 import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
-import { cutAtLine, formFold as formFoldOf, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { cutAtLine, formFold as formFoldOf, hiddenChars, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { mergeFoldSpans, progressHide } from '../../../shared/progress-list'
 import { ChatMarkdown } from '../components/ChatMarkdown'
 import { ProgressFold } from '../components/ProgressFold'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
@@ -15,6 +16,7 @@ import { ComposerModelChip } from '../components/ComposerModelChip'
 import { PermissionCard } from '../components/PermissionCard'
 import { QuestionCard } from '../components/QuestionCard'
 import { QuestionForm } from '../components/QuestionForm'
+import { NoticeStack } from '../components/NoticeStack'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
@@ -28,7 +30,8 @@ import { projectFolderName } from '../../../shared/project-folder'
 import { useShallow } from 'zustand/react/shallow'
 import { create } from 'zustand'
 
-export type DraftIntent = { seq: number; root: string | null; title?: string }
+/** 알림의 [각주 넣어 줘] 처럼, 신고 문구 대신 **이 문장을 입력칸에 채우는** 길(`text`). */
+export type DraftIntent = { seq: number; root: string | null; title?: string; text?: string }
 export const useReportIntent = create<{ intent: DraftIntent | null }>(() => ({ intent: null }))
 let reportSeq = 0
 
@@ -36,6 +39,16 @@ let reportSeq = 0
 export function requestReport(title?: string): void {
   const project = useProject.getState()
   useReportIntent.setState({ intent: { seq: ++reportSeq, root: project.root, title } })
+  project.setPaneView('chat')
+}
+
+/**
+ * 알림의 [각주 넣어 줘] — 신고 접두사 없이 **그 문장만** 입력칸에 채운다. 보내지는 않는다(학생이 고쳐 보낸다).
+ * `Chat` 이 떠 있지 않아도(좁은 창) 의도가 남도록 `requestReport` 와 같은 자리를 쓴다.
+ */
+export function requestDraftText(text: string): void {
+  const project = useProject.getState()
+  useReportIntent.setState({ intent: { seq: ++reportSeq, root: project.root, text } })
   project.setPaneView('chat')
 }
 
@@ -51,6 +64,18 @@ export function applyReportIntent(intent: DraftIntent, projectRoot: string | nul
   useReportIntent.setState({ intent: null })
   if (intent.root !== projectRoot) return null
   if (!projectRoot) return 'no-folder'
+  // `text` 는 신고가 아니라 **입력칸 채우기**다 — AI 연결·차단 상태와 무관하게 채운다(보내지 않는다).
+  // 학생이 쓰던 글은 지우지 않는다: 비었으면 그 문장만, 있으면 줄을 바꿔 **덧붙인다**
+  // (`store/chat.ts` 의 `insertPath` 와 같은 규칙 — 앱이 쓴 글과 학생 글을 붙여 쓴다).
+  if (typeof intent.text === 'string') {
+    const draft = useChat.getState().draft
+    const text = intent.text
+    // 연속 클릭은 덧붙이지 않는다 — 이미 그 문장으로 끝나면 그대로 둔다(같은 말 두 줄이 쌓이지 않게).
+    const last = draft.trimEnd().split('\n').at(-1) ?? ''
+    if (last.trim() === text.trim()) return 'ready'
+    useChat.getState().setDraft(draft.trim() ? (draft.endsWith('\n') ? draft + text : draft + '\n' + text) : text)
+    return 'ready'
+  }
   if (connState === 'failed' || connState === 'unknown') return 'status-failed'
   if (disconnected) return 'disconnected'
   useChat.getState().setDraft(reportDraft(useChat.getState().draft, intent.title))
@@ -88,19 +113,28 @@ function Delivery({ m, sending, onResend }: { m: ChatMessage; sending: boolean; 
   return null
 }
 
-function Message({ m, onResend, onFileLink, fold, sending = false }: { m: ChatMessage; onResend?: () => void; onFileLink?: (relative: string) => void; fold?: FoldOptions; sending?: boolean }) {
+function Message({ m, onResend, onFileLink, fold, hide, sending = false }: { m: ChatMessage; onResend?: () => void; onFileLink?: (relative: string) => void; fold?: FoldOptions; hide?: { start: number; end: number }[]; sending?: boolean }) {
   const [open, setOpen] = useState(false)
   const [unfolded, setUnfolded] = useState(false)
   const projectRoot = useProject((s) => s.root)
   if (m.role === 'system') return <div className="chat-msg system"><span className="caption">{m.text}</span></div>
   const folding = !!fold && !unfolded
-  const text = folding && fold ? stripLines(m.text, fold.spans) : m.text
+  // 진행 목록 덩어리는 안내 줄 없이 조용히 걷는다(IMPL-T1 §3-1). 카드 접기와 원문 줄 번호
+  // 기준으로 합쳐 `stripLines`를 한 번 부른다 — 겹침·맞닿음 줄은 한 번만 걷힌다.
+  // unfold("여기에 펼치기")는 카드 접기만 풀고, 진행 덩어리는 계속 숨겨 둔다 — 진행 표시는 제목줄 하나다.
+  const combined = (() => {
+    const cardSpans = folding && fold ? fold.spans : []
+    const hideSpans = hide ?? []
+    if (cardSpans.length === 0 && hideSpans.length === 0) return null
+    return mergeFoldSpans([...cardSpans, ...hideSpans])
+  })()
+  const text = combined ? stripLines(m.text, combined) : m.text
   const long = text.length > LONG_MESSAGE
   // 한도가 표·목록 한가운데를 가르지 않게 **줄 경계**에서 자른다. "더 보기"의 수는 자르기 전이
   // 아니라 **접힌 뒤 실제로 남은 글** 기준이다(예전에는 원문 길이를 써서 실제보다 크게 보였다).
   const shown = long && !open ? cutAtLine(text, LONG_MESSAGE) : text
   // 접은 줄은 "더 보기"로 되돌릴 글도 아니다 — 수는 지금 화면 기준으로 센다.
-  const hidden = text.length - shown.length
+  const hidden = hiddenChars(text, shown)
   // 재확인 메모를 **먼저** 떼어 낸다 — 인용 정규식보다 앞서야 한다(§6-1). 순서가 바뀌면
   // 인용 본문 끝에 메모 전문이 드러난다. 옛 말풍선(대화 기록에 남은 것)도 같은 접기를 탄다.
   const recheck = m.role === 'user' ? splitRecheck(shown) : { body: shown, memo: null, count: 0 }
@@ -465,6 +499,17 @@ export function Chat() {
   useEffect(() => { if (snapshot?.permission) toBottom() }, [snapshot?.permission?.id])
 
   const running = snapshot?.state === 'running' || snapshot?.state === 'permission'
+  /**
+   * 재무 알림 다시 읽기 신호(중요2) — 도우미가 말을 마치거나 묻기를 마치면 규칙집이 알림 파일을
+   * 새로 쓰거나 지운다. 턴이 끝나는 전이(작업 중 → 그 밖)에서만 값을 올린다: 렌더마다 올리면
+   * 읽기가 끝없이 돈다. 첫 렌더는 올리지 않는다(마운트 시 `NoticeStack` 이 이미 한 번 읽는다).
+   */
+  const [noticeReload, setNoticeReload] = useState(0)
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !running) setNoticeReload((count) => count + 1)
+    wasRunning.current = running
+  }, [running])
   const lastUncertain = snapshot?.messages.filter((m) => m.role === 'user' && m.delivery === 'uncertain').at(-1)
   const attach = async (): Promise<void> => { const p = await window.knuaf.pickFile({ title: CHAT.attach }); if (p) insertPath(p) }
 
@@ -563,7 +608,8 @@ export function Chat() {
     if (!result) return
     if (result !== 'ready') setReportNotice(result)
     else {
-      setReportNotice(offline ? 'offline' : 'normal')
+      // 입력칸 채우기는 신고가 아니다 — 신고 안내 줄을 세우지 않고 초점만 옮긴다.
+      if (typeof reportIntent.text !== 'string') setReportNotice(offline ? 'offline' : 'normal')
       if (zone.kind === 'question') setFreeRequest((prev) => ({ messageId: zone.messageId, seq: (prev?.seq ?? 0) + 1 }))
       else if (zone.kind === 'form') {
         setFreeFormId(zone.messageId)
@@ -655,7 +701,7 @@ export function Chat() {
         return found ? { spans: found.spans, count: found.count, kind: 'fields' as const } : null
       })()
     : null
-  const folds = progressGroups(snapshot?.messages ?? [])
+  const folds = progressGroups(snapshot?.messages ?? [], events.map((e) => Date.parse(e.at) || 0))
   const thread: { key: string; at: number; node: ReactNode }[] = []
   const messageNode = (m: ChatMessage): ReactNode => {
     const card = cardId === m.id
@@ -663,8 +709,11 @@ export function Chat() {
       ? zone.kind === 'question' ? { spans: [zone.card.span], count: zone.card.options.length, kind: 'options' as const }
         : formFold
       : null
+    // 도우미 답의 진행 목록 덩어리는 제목줄에만 보인다(IMPL-T1 §3-1) — 본문에서 조용히 걷는다.
+    // 무효 덩어리는 감추지 않는다(글이 사라지면 안 됨). `다음 작업`·`지금 확인할 것` 줄은 구간 밖이라 남는다.
+    const hide = m.role === 'assistant' ? progressHide(m.text) : []
     return <Message key={m.id} m={m} sending={lastPending && m.id === lastUser?.id} onFileLink={openFileLink} onResend={!running && m.delivery === 'uncertain' ? () => void send(m.text) : undefined}
-      fold={span ?? undefined} />
+      fold={span ?? undefined} hide={hide.length ? hide : undefined} />
   }
   // 한 묶음은 첫 말 자리에 한 번만 선다 — 두 번째 말에서 또 만들면 같은 묶음이 여러 번 그려진다.
   const placed = new Set<string>()
@@ -705,6 +754,10 @@ export function Chat() {
           </>) : <div>{CHAT.emptyBody}</div>}
         </div>
       )}
+
+      {/* 재무 알림 — 대화 창 맨 위 고정 줄(SKE-08). 대화가 굴러도 제자리다(스크롤 영역 밖). */}
+      <NoticeStack root={projectRoot} reloadKey={noticeReload} onFootnote={() => requestAnimationFrame(() => taRef.current?.focus())}
+        onWriteTalk={requestDraftText} />
 
       <div className="chat-thread" ref={threadRef} onScroll={onThreadScroll}>
         {switchNotice && <div className="chat-event" role="status">{PROVIDER_NAME[switchNotice]}는 {PROVIDER_NAME[switchNotice === 'claude' ? 'codex' : 'claude']}와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.</div>}
