@@ -650,6 +650,8 @@ export class ChatService {
    *
    * 마감을 넘긴 연결은 여기서 **던지지 않는다**(인계는 계속돼야 한다). 다만 그 연결은
    * `reclaimPending` 에 남겨 소유권을 유지하고 `'pending'` 으로 알린다 — 정리를 완료로 읽지 않게.
+   * **호출 전부터 남아 있던 미회수 연결**(학생 중단이 3초를 넘긴 것)도 같은 판정에 들어간다:
+   * 이번 호출이 그 `stop()` 을 다시 부르지 않더라도, 아직 살아 있는 자식은 완료가 아니다.
    */
   async closeForUpdate(confirmStopped: () => Promise<void>): Promise<'settled' | 'pending'> {
     for (const connection of [...this.connections.values(), ...this.globals.values()]) this.closingConnections.add(connection)
@@ -660,7 +662,12 @@ export class ChatService {
     // 진단이 꺼져 있으면 시계도 문자열도 만들지 않는다(검토 RT3 권고).
     const traced = diagEnabled()
     const startedAt = traced ? Date.now() : 0
-    if (traced) diag(`closeForUpdate:stop:start n=${this.closingConnections.size}`)
+    /**
+     * 인계 전에 이미 마감을 넘겨 남아 있던 연결(`stop()` 타임아웃분). 이번 `list` 에는 없으므로
+     * 따로 합쳐야 완료 판정이 "정말 다 정리됐는가"가 된다 — `close()` 와 같은 규칙이다.
+     */
+    const stranded = [...this.reclaimPending]
+    if (traced) diag(`closeForUpdate:stop:start n=${this.closingConnections.size} stranded=${stranded.length}`)
     // 이름(`stop:<i>`)을 같은 배열의 순번으로 되돌려야 한다 — 순회 대상은 한 번만 만든다.
     const list = [...this.closingConnections]
     const stopped = await shutdownWithin(
@@ -672,13 +679,21 @@ export class ChatService {
     if (stopped.pending.length) console.error(`[shutdown] 연결 정리: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
     const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
     for (const connection of pending) this.reclaimPending.add(connection)
+    // 이번 호출에서 실제로 정착한 연결은 회수 목록에서도 지운다 — 남겨 두면 완료 판정이 거짓 미완료가 된다.
+    for (const connection of list) if (!pending.includes(connection)) this.reclaimPending.delete(connection)
+    // 인계 판정도 이번 pending ∪ (아직 남아 있는) 호출 전 미회수 — 이전 `stop()` 타임아웃분이 있으면 완료가 아니다.
+    const unreclaimed = [...this.reclaimPending]
     await confirmStopped()
-    if (traced) diag(`closeForUpdate:confirm:end elapsed=${Date.now() - startedAt}ms`)
+    if (traced) diag(`closeForUpdate:confirm:end elapsed=${Date.now() - startedAt}ms unreclaimed=${unreclaimed.length}`)
     const failed = stopped.failed[0]
     if (failed) throw failed.reason
     // 확인까지 끝났고 마감을 넘긴 연결이 없을 때만 목록을 비운다.
     if (!pending.length) this.closingConnections.clear()
-    return pending.length ? 'pending' : 'settled'
+    if (unreclaimed.length) {
+      console.error(`[shutdown] 연결 정리: 회수하지 못한 연결 ${unreclaimed.length}건 — 이번 마감 초과 ${pending.length} · 이전 타임아웃 ${stranded.length}`)
+      return 'pending'
+    }
+    return 'settled'
   }
   /**
    * 종료 정리. 돌려주는 값은 **정리 결과의 분류**다:
@@ -689,12 +704,26 @@ export class ChatService {
    * 그 `chat.close` 를 완료로 읽어 `needsReclaim=false` → 회수 분기를 건너뛰었고, 그 연결의 pid 는
    * `ownedPids()` 에서도 사라졌다(검토 RT3 차단). 분류를 돌려주면 호출부가 실패로 승격할 수 있다.
    * 마감을 넘긴 연결은 **다시 쓰지 않지만**(맵을 비운다) 소유권은 `reclaimPending` 에 남는다.
+   * `done` 의 뜻은 "지금 정말로 회수할 것이 없다"다 — 이번 호출에서 마감을 넘긴 연결뿐 아니라
+   * **이전 `stop()` 이 남겨 둔 미회수 연결**까지 없어야 `done` 이다(검토 hangfix-fix2 차단).
    */
   async close(): Promise<{ outcome: 'done' } | { outcome: 'pending'; pids: number[] }> {
     // 진단이 꺼져 있으면 시계·문자열 조립을 하지 않는다(검토 RT3 권고) — 종료 경로다.
     const traced = diagEnabled()
     const startedAt = traced ? Date.now() : 0
-    if (traced) diag(`close:start runs=${this.runs.size} connections=${this.connections.size} globals=${this.globals.size} closing=${this.closingConnections.size}`)
+    /**
+     * **호출 전부터 남아 있던 미회수 연결.** `stop()`(학생 중단)이 3초 마감을 넘기면 그 연결을
+     * `reclaimPending` 에 넣고 활성 맵에서 지운다 — 재사용하면 안 되기 때문이다. 그런데 이 목록을
+     * 완료 판정에서 빼면 다음 `close()` 가 "이번에 찾은 pending 없음"만 보고 `done` 을 돌려준다:
+     * 검토 hangfix-fix2 실측이 정확히 그랬다(close 0ms · done=[sidecar.stop, chat.close] ·
+     * `needsReclaim=false` · 자식 생존). 그래서 **이번 pending 과 이 스냅숏의 합집합**으로 정한다.
+     *
+     * 이 연결들의 `stop()` 은 **다시 부르지 않는다**: 이미 한 번 마감을 넘긴 stop 을 또 3초
+     * 기다리면 종료만 늦어지고(검토자 실측 stop 호출 1회), 남은 자식은 `reclaimChildren` 이 pid 로
+     * 회수한다. "남아 있다"는 사실 자체가 미완료다.
+     */
+    const stranded = [...this.reclaimPending]
+    if (traced) diag(`close:start runs=${this.runs.size} connections=${this.connections.size} globals=${this.globals.size} closing=${this.closingConnections.size} stranded=${stranded.length}`)
     this.beginShutdown()
     const connections = new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])
     /**
@@ -714,6 +743,10 @@ export class ChatService {
     if (stopped.pending.length) console.error(`[shutdown] close: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
     const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
     for (const connection of pending) this.reclaimPending.add(connection)
+    // 이번 호출에서 실제로 정착한 연결은 회수 목록에서도 지운다 — 아니면 한 번 넘긴 것이 영원히 미완료로 남는다.
+    for (const connection of list) if (!pending.includes(connection)) this.reclaimPending.delete(connection)
+    // 완료 판정 대상 = 이번 pending ∪ 호출 전부터 남아 있던 미회수(위에서 둘을 합쳐 놓았다).
+    const unreclaimed = new Set(this.reclaimPending)
     /**
      * 진행 중인 턴을 기다리되 **상한**을 둔다. 예전에는 `await Promise.all(this.runs.values())`
      * 였는데, 턴 하나가 안 끝나면 앱 종료가 영원히 매달렸다(윈도우 e2e 종료 멈춤). 남은 턴은
@@ -753,9 +786,13 @@ export class ChatService {
     if (traced) diag(`close:end elapsed=${Date.now() - startedAt}ms pendingConnections=${pending.length}`)
     const failed = stopped.failed[0]
     if (failed) throw failed.reason
-    if (!pending.length) return { outcome: 'done' }
-    const pids = [...new Set(pending.flatMap((connection) => connection.ownedPids?.() ?? []))]
-    if (traced) diag(`close:pending pids=${pids.join(',') || '없음'}`)
+    /**
+     * **호출 전부터 남아 있던 연결도 미완료다.** `stop()` 타임아웃분은 이번 `list` 에 없지만 자식은
+     * 아직 살아 있다 — 여기서 `done` 을 돌려주면 `index.ts` 가 회수 분기를 건너뛴다(검토 hangfix-fix2 차단).
+     */
+    if (!unreclaimed.size) return { outcome: 'done' }
+    const pids = [...new Set([...unreclaimed].flatMap((connection) => connection.ownedPids?.() ?? []))]
+    if (traced) diag(`close:pending pids=${pids.join(',') || '없음'} reclaimed=${unreclaimed.size}`)
     return { outcome: 'pending', pids }
   }
 }

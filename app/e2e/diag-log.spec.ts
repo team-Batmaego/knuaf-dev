@@ -77,6 +77,48 @@ test('diag() 는 파일에 scrub 을 거친 것만 쓴다 — 가짜 토큰·경
   }
 })
 
+test('짧은 Bearer 토큰도 헤더 한 줄·시험 수집·진단 파일 셋 다에서 지운다 (hangfix-fix2 중요)', () => {
+  // 검토 hangfix-fix2 중요: `authorization: Bearer MARKERtoken0123456789` 가
+  // `authorization=<값> MARKERtoken0123456789` 로 나왔다. 헤더 규칙이 값 자리의 **첫 토큰**만 먹어
+  // 스킴(`Bearer`)만 지워졌고, 남은 21자 토큰은 Bearer 규칙의 8자 하한에 걸리지 않았으며
+  // 32자 덩어리 규칙도 통과했다 — witnessLines 와 진단 파일 양쪽이 그대로 샜다.
+  const SHORT = 'MARKERtoken0123456789'                 // 21자 — 32자 덩어리 규칙 미만
+  const BARE = 'MARKERtok'                              // 9자 — 헤더 없이 홀로 찍힌 경우
+  const line = `[transport] authorization: Bearer ${SHORT}`
+  const bare = `[transport] 재시도 Authorization=Bearer ${BARE}`
+
+  // (a) scrub — 값이 사라지고 이름은 남는다.
+  for (const input of [line, bare, `[transport] proxy-authorization: Basic ${SHORT}`]) {
+    const out = scrub(input)
+    expect(out, `짧은 Bearer 토큰이 그대로 남았다: ${out}`).not.toContain(SHORT)
+    expect(out, `짧은 Bearer 토큰이 그대로 남았다: ${out}`).not.toContain(BARE)
+    expect(out.toLowerCase(), '무엇을 지웠는지가 로그에서 사라졌다').toContain('authorization=<값>')
+  }
+
+  // (b) 시험 수집 — 앱 태그 줄을 옮기면서 같은 값을 지운다.
+  const collected = witnessLines('out', `${line}\n${bare}`, 1_700_000_000_000).join('\n')
+  expect(collected, '시험 수집 산출물에 짧은 Bearer 토큰이 남았다').not.toContain(SHORT)
+  expect(collected, '시험 수집 산출물에 짧은 Bearer 토큰이 남았다').not.toContain(BARE)
+
+  // (c) 진단 파일 — CI 산출물로 업로드되는 경로.
+  const dir = mkdtempSync(join(tmpdir(), 'kd-diag-'))
+  const file = join(dir, 'app-log.txt')
+  const before = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = file
+  try {
+    diag(line)
+    diag(bare)
+    const text = readFileSync(file, 'utf8')
+    expect(text, '진단 파일에 짧은 Bearer 토큰이 닿았다').not.toContain(SHORT)
+    expect(text, '진단 파일에 짧은 Bearer 토큰이 닿았다').not.toContain(BARE)
+    expect(text, '진단이 아예 기록되지 않았다').toContain('[transport] authorization=<값>')
+  } finally {
+    if (before === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = before
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('시험 수집은 앱 태그 줄만 옮기고, 옮긴 줄에서도 값을 지운다', () => {
   const chunk = [
     'DevTools listening on ws://127.0.0.1:1234/devtools/browser/abc',

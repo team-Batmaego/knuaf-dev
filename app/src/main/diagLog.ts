@@ -35,9 +35,19 @@ const MAX_LINE = 400
  * 순서가 중요하다: 헤더/토큰 → 경로 → 긴 덩어리.
  */
 const SCRUBS: readonly (readonly [RegExp, string])[] = [
-  // 인증 헤더·자격증명. `code=` 는 오류 코드라 건드리지 않는다.
-  [/\b(proxy-)?authorization\b\s*[:=]\s*[^\s,;]+/gi, 'authorization=<값>'],
-  [/\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer <값>'],
+  /**
+   * 인증 헤더·자격증명. `code=` 는 오류 코드라 건드리지 않는다.
+   *
+   * **스킴과 값을 한 규칙에서 함께 먹는다**(검토 hangfix-fix2 중요). 예전에는 이 규칙이
+   * `[^\s,;]+` 로 첫 토큰만 먹어 `authorization: Bearer MARKERtoken0123456789` 가
+   * `authorization=<값> MARKERtoken0123456789` 가 됐다 — 스킴(`Bearer`)만 지워지고 값이 남았고,
+   * 32자 미만이면 마지막 덩어리 규칙도 통과했다. 스킴 규칙과 Bearer 규칙을 따로 두는 한
+   * **순서**에 기대게 되므로, 스킴은 여기서 선택적으로 함께 삼킨다(스킴은 글자·하이픈만이고
+   * 뒤에 공백이 와야 하므로 `token=abc` 같은 값은 스킴으로 오인하지 않는다).
+   */
+  [/\b(proxy-)?authorization\b\s*[:=]\s*(?:[A-Za-z][A-Za-z-]*\s+)?[^\s,;]+/gi, 'authorization=<값>'],
+  // 헤더 없이 홀로 찍힌 `Bearer …`. 길이 하한을 두지 않는다 — 짧은 토큰도 자격증명이다.
+  [/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <값>'],
   [/\b(token|password|passwd|secret|api[-_]?key|access[-_]?token|refresh[-_]?token|session[-_]?id|cookie)\b\s*[:=]\s*[^\s,;]+/gi, '$1=<값>'],
   // 절대 경로: 사용자 이름·논문 폴더가 CI 산출물로 새지 않게. 윈도우(`C:\…`, `\\server\…`) 먼저.
   [/(?:[A-Za-z]:\\|\\\\)[^\s"',;]+/g, '<경로>'],

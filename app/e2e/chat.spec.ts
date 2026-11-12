@@ -552,6 +552,52 @@ test('close() 는 끝나지 않는 연결 정리를 숨기지 않는다 — 미�
   hung.resolve()
 })
 
+test('stop() 이 남긴 미회수 연결을 close() 가 완료로 보지 않는다 — 중단 뒤 앱 종료 순서 (hangfix-fix2 차단)', async () => {
+  // 검토 hangfix-fix2 차단: 학생 중단(`stop()`)이 3초 마감을 넘기면 그 연결은 `reclaimPending` 에 들어가고
+  // 활성 맵에서 빠진다. 예전 `close()` 는 **이번 호출의** pending 만으로 완료를 판정해서 `done` 을 돌려줬고
+  // (검토자 실측: stop 완료 뒤 close 0ms · done=[sidecar.stop,chat.close] · needsReclaim=false), 자식은 살아 있었다.
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const hung = Promise.withResolvers<void>()
+  let stops = 0
+  const svc = service(fake({ stop: () => { stops += 1; return hung.promise }, ownedPids: () => [4242] }))
+  await svc.status(root, 'codex')                                  // 연결 확보
+  const stopStarted = Date.now()
+  await within(svc.stop(root, 'codex'), 20_000)
+  expect(Date.now() - stopStarted, 'stop() 이 연결 마감을 넘겨 매달렸다').toBeLessThan(6_000)
+  // 이제 close() — 남은 연결이 없으니 예전에는 즉시 done 이었다.
+  const closeStarted = Date.now()
+  const result = await within(svc.close(), 20_000)
+  expect(result, 'close() 가 끝나지 않는 연결 앞에서 매달렸다').not.toBe('timeout')
+  expect(Date.now() - closeStarted, 'close() 가 이미 넘긴 연결을 다시 기다린다 — 중단 뒤 종료가 3초 더 걸린다').toBeLessThan(1_000)
+  const outcome = result as Exclude<typeof result, 'timeout'>
+  // (a) 이미 남아 있던 미회수 연결이 완료 판정에 들어간다.
+  expect(outcome.outcome, 'stop() 타임아웃분을 close() 가 완료로 보고했다').toBe('pending')
+  // (b) 그 분류가 회수 분기를 켠다.
+  expect(needsReclaim({ pending: [], failed: [{ name: 'chat.close', reason: outcome }] }),
+    '남아 있던 미회수 연결이 회수 분기를 켜지 않는다').toBe(true)
+  // (c) 자식 소유권이 유지된다.
+  expect(svc.ownedPids(), '미회수 연결의 pid 가 회수 집합에 없다').toContain(4242)
+  // (d) 넘긴 stop 을 다시 부르지 않는다 — 두 번째 3초를 쓰지 않고도 미완료로 판정한다.
+  expect(stops, 'stop() 을 다시 불렀다 — 종료 경로가 마감을 두 번 기다린다').toBe(1)
+  hung.resolve()
+})
+
+test('closeForUpdate() 도 stop() 이 남긴 미회수 연결을 정리 완료로 보지 않는다 (hangfix-fix2 차단)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
+  const hung = Promise.withResolvers<void>()
+  let stops = 0
+  const svc = service(fake({ stop: () => { stops += 1; return hung.promise }, ownedPids: () => [4343] }))
+  await svc.status(root, 'codex')
+  await within(svc.stop(root, 'codex'), 20_000)
+  const started = Date.now()
+  // 인계 계약: 마감을 넘긴 연결은 **던지지 않고** `'pending'` 으로 분류한다.
+  expect(await within(svc.closeForUpdate(async () => {}), 20_000), 'closeForUpdate() 가 매달렸다').toBe('pending')
+  expect(Date.now() - started, 'closeForUpdate() 가 이미 넘긴 연결을 다시 기다린다').toBeLessThan(1_000)
+  expect(svc.ownedPids(), '인계에서도 미회수 연결의 pid 는 남아야 한다').toContain(4343)
+  expect(stops, 'stop() 을 다시 불렀다').toBe(1)
+  hung.resolve()
+})
+
 test('closeForUpdate() 도 끝나지 않는 연결 정리 앞에서 상한 안에 끝난다 (RT3)', async () => {
   // 인계(업데이트) 경로의 같은 결함. 여기서는 마감을 넘긴 연결을 **실패로 올리지 않는다** —
   // 정착한 거절만 던진다(`app-update.spec.ts` 의 `/old connection/` 계약). 다만 `'pending'` 으로
