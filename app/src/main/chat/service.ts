@@ -1116,6 +1116,10 @@ export class ChatService {
     // 주문 번호는 앱 전체에서 하나다(`JobRunner.enqueue`). 다른 폴더의 같은 번호는
     // 조용히 버리지 않고 이 폴더 대화에 한 번 알린다 — 학생이 번호를 바꿀 수 있게.
     const known = new Map(records.map(record => [record.spec.id, record.root]))
+    // §0-5 6번 — 이 폴더에 승인 배치가 없으면 `enqueue` 는 **언제나** 승인 불일치로 거절한다
+    // (`JobRunner.approved`). 그 사실을 한 차례에 한 번만 알린다: 주문 2건이 쌓여도 줄은 1개다.
+    const noPlan = this.store().effectivePlan(s.root) === null
+    let planRejected = false
     let queued = false
     for (const name of names.sort()) {
       if (!name.endsWith('.json')) continue
@@ -1149,6 +1153,9 @@ export class ChatService {
         if ('parent' in raw || 'cause' in raw) continue
         if (raw.schema !== declaration.schema || raw.contractVersion !== declaration.contractVersion) continue
         if (raw.id !== id) continue
+        // 여기까지 왔으면 주문서 모양은 맞다 — 승인 배치가 없으면 `enqueue` 는 승인 불일치로
+        // 거절할 수밖에 없다(`JobRunner.approved`). 거절 문구를 문자열로 되짚지 않고 사실을 남긴다.
+        if (noPlan) planRejected = true
         // 모양은 JobRunner.validate 가 깊이 검사한다 — 여기서는 타입 경계만 넘긴다.
         runner.enqueue(s.root, raw as unknown as JobSpec, owner, s.sessionId)
         known.set(id, root)
@@ -1156,6 +1163,18 @@ export class ChatService {
       } catch (error) {
         console.error('[knuaf] jobs', JSON.stringify({ type: 'collect-skip', id, error: error instanceof Error ? error.message : String(error) }))
       }
+    }
+    // §0-5 6번 — 승인 배치가 없어 맡기지 못한 주문이 있으면 **이 차례에 한 번** 알린다.
+    // 되풀이를 막는 Set 을 두지 않는다: 파일은 앱이 지우지 않으므로 다음 차례에도 같은 줄이
+    // 한 번 더 나가야 한다(설계 "차례마다 1회"). 본대화 모델에게 따로 보내지 않는다.
+    if (planRejected) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'collect-skip', reason: 'no-plan', root }))
+      s.messages.push({
+        id: randomUUID(), role: 'system',
+        text: '작업 분담이 켜져 있지 않아 맡기지 않았어요 — 설정 › 작업 분담에서 켤 수 있어요',
+        at: new Date().toISOString()
+      })
+      this.publish(s)
     }
     // 이번에 새로 넣은 주문이 없어도 이 폴더의 대기 주문이 남아 있을 수 있다(재시작 뒤,
     // 다른 폴더의 차례에서 미뤄진 주문). 그때도 이 폴더 차례에 실행한다.

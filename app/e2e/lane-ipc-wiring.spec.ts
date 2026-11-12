@@ -705,3 +705,44 @@ test('fix C1-11: a failed public manifest write leaves the owner untouched', asy
   expect(readFileSync(target, 'utf8')).toContain(`claude`)
   await transition.flush()
 })
+
+// §0-5 6번 — 승인 배치가 없어 `enqueue` 가 거절한 주문이 있으면 **그 차례에 한 번** 시스템 줄.
+// 파일은 앱이 지우지 않으므로 다음 차례에도 같은 줄이 한 번 더 나간다("차례마다 1회").
+test('no-plan: 차례마다 1회', async () => {
+  const w = wiring()
+  const systemLines = () =>
+    w.svc.snapshot(w.root, 'claude').messages.filter(message => message.role === 'system')
+  // 승인 배치를 만들지 않는다 — 주문 2건은 모양이 맞아도 승인 불일치로 거절된다.
+  await w.svc.send(w.root, 'claude', '첫 차례', 'req-1')
+  await until(() => systemLines().length === 1)
+  expect(systemLines().map(message => message.text)).toEqual([
+    '작업 분담이 켜져 있지 않아 맡기지 않았어요 — 설정 › 작업 분담에서 켤 수 있어요'
+  ])
+  expect(w.jobRuns).toEqual([])
+
+  // 두 번째 차례 — 주문 파일은 그대로 남아 있다(앱은 지우지 않는다). 줄이 또 1개 붙는다.
+  await w.svc.send(w.root, 'claude', '둘째 차례', 'req-2')
+  await until(() => systemLines().length === 2)
+  expect(systemLines().map(message => message.text)).toEqual([
+    '작업 분담이 켜져 있지 않아 맡기지 않았어요 — 설정 › 작업 분담에서 켤 수 있어요',
+    '작업 분담이 켜져 있지 않아 맡기지 않았어요 — 설정 › 작업 분담에서 켤 수 있어요'
+  ])
+  // 주문 파일은 고치지도 지우지도 않는다.
+  expect(JSON.parse(readFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), 'utf8')).id).toBe('job-a')
+  expect(w.jobRuns).toEqual([])
+  await w.svc.close()
+})
+
+test('no-plan: 승인 있으면 0', async () => {
+  const w = wiring()
+  w.svc.approvePlan(w.root, planFromRow('both-high'))
+  w.svc.setConsent('codex', 'codex-account', true)
+  w.gate.resolve()
+  await w.svc.send(w.root, 'claude', '부탁', 'req-1')
+  await until(() => w.jobRuns.includes('job-b'))
+  const systemLines = w.svc.snapshot(w.root, 'claude').messages.filter(message => message.role === 'system')
+  // 승인 배치가 있으면 안내 줄은 0개다(주문이 실제로 돌아 남는 "자료 담당…" 줄은 별개).
+  expect(systemLines.filter(message => message.text.includes('작업 분담이 켜져 있지 않아'))).toEqual([])
+  expect(w.jobRuns).toContain('job-a')
+  await w.svc.close()
+})
