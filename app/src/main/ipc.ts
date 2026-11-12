@@ -31,6 +31,8 @@ import { AppHandoff } from './update/handoff'
 import { WindowsUpdateRuntime } from './update/windows'
 import { checkDocxZip } from './docx-zip'
 import { ensureSectionBaseline } from './review-baseline'
+import { readDismissed, readNotices, writeDismissed } from './notices'
+import { CHOICE_VALUES } from '../shared/notice'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -144,6 +146,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   ipcMain.handle('rpc', async (_e, method: string, rawParams: Record<string, unknown>, clientId: string) => {
     if (method === 'artifact.preview') return { error: { code: 'invalid_method', message: '미리보기는 preview:read 경로만 사용할 수 있어요.' } }
+    // 선택은 `notices:choose` 만 — generic RPC 는 `params.root` 를 그대로 넘기므로(아래 `root`)
+    // 화면이 고른 폴더와 다른 폴더에 학생 선택을 적을 수 있다. 그 문을 닫는다.
+    if (method === 'notices.choose') return { error: { code: 'invalid_method', message: '알림 선택은 notices:choose 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -782,6 +787,67 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       throw new Error('같은 이름의 폴더가 너무 많아요.')
     } catch (error) {
       return { error: { code: 'create_folder_failed', message: String(error) } }
+    }
+  })
+
+  // 학교 재무 양식 알림 — 읽기·닫기 기억. 알림 파일은 규칙집이 쓰고 앱은 읽기만 한다.
+  // `root` 는 화면이 들고 있는 그 논문 폴더여야 한다(다른 폴더의 알림을 이 화면에 섞지 않는다).
+  ipcMain.handle('notices:read', (_e, root: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    try {
+      return { result: { notices: readNotices(root).notices, dismissed: readDismissed(app.getPath('userData')) } }
+    } catch (error) {
+      return { error: { code: 'notices_read', message: error instanceof Error ? error.message : String(error) } }
+    }
+  })
+  ipcMain.handle('notices:dismiss', (_e, root: unknown, key: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof key !== 'string' || !key) return { error: { code: 'invalid_params', message: '알림 열쇠가 올바르지 않습니다.' } }
+    // 열쇠는 `project_id:notice_identity` 다 — 이 폴더의 열쇠만 닫힌다. 접두를 안 보면 화면(또는
+    // 그 화면을 흉내 내는 쪽)이 다른 논문의 알림을 이 앱의 닫기 기억에 넣어 둘 수 있다.
+    const projectId = peekProject(root).project_id
+    if (!projectId || !key.startsWith(`${projectId}:`)) {
+      return { error: { code: 'project_mismatch', message: '다른 논문의 알림은 닫을 수 없어요.' } }
+    }
+    try {
+      return { result: writeDismissed(app.getPath('userData'), key) }
+    } catch (error) {
+      return { error: { code: 'notices_dismiss', message: error instanceof Error ? error.message : String(error) } }
+    }
+  })
+  /**
+   * 선택 기록 — 화면이 보낸 `(root, identity, value)` 를 **메인이 다시 검사**한 뒤 sidecar 에 넘긴다.
+   * ① 열린 폴더여야 하고 ② 그 `identity` 가 지금 알림 파일의 유효 알림이어야 하며 ③ 값은 계약의 둘뿐이다.
+   * 이 셋을 안 보면 화면이 임의의 identity·폴더로 정본을 고칠 수 있다(선택은 정본 쓰기다).
+   */
+  ipcMain.handle('notices:choose', async (_e, root: unknown, identity: unknown, value: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof identity !== 'string' || !identity.trim()) {
+      return { error: { code: 'invalid_params', message: '알림 식별자가 올바르지 않습니다.' } }
+    }
+    if (!CHOICE_VALUES.includes(value as (typeof CHOICE_VALUES)[number])) {
+      return { error: { code: 'invalid_params', message: '알림 선택 값이 올바르지 않습니다.' } }
+    }
+    // 알림 파일은 규칙집이 쓴다 — 그 파일이 말하는 알림만 선택할 수 있다.
+    let known = false
+    try {
+      known = readNotices(root).notices.some((notice) => notice.key.slice(notice.key.indexOf(':') + 1) === identity)
+    } catch (error) {
+      return { error: { code: 'notices_read', message: error instanceof Error ? error.message : String(error) } }
+    }
+    if (!known) return { error: { code: 'notice_unknown', message: '그 알림을 이 폴더에서 찾지 못했어요.' } }
+    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    try {
+      // 정본·알림 파일 다시 쓰기는 sidecar(규칙집) 몫이다. 앱은 결과 봉투만 그대로 돌려준다.
+      return { result: await sidecar.call('notices.choose', { root, identity, value }) }
+    } catch (error) {
+      return { error: ipcError(error) }
     }
   })
 

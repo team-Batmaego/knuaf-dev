@@ -24,7 +24,8 @@ export default defineConfig({
     'guard-instructions.spec.ts',
     'guard-rules.spec.ts',
     'guard-roh-stage1.spec.ts',
-    'guard-roh-stage2.spec.ts'
+    'guard-roh-stage2.spec.ts',
+    'notice-bubble.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

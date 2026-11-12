@@ -13,6 +13,7 @@ import { ComposerModelChip } from '../components/ComposerModelChip'
 import { PermissionCard } from '../components/PermissionCard'
 import { QuestionCard } from '../components/QuestionCard'
 import { QuestionForm } from '../components/QuestionForm'
+import { NoticeStack } from '../components/NoticeStack'
 import { Icon } from '../components/Icon'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
@@ -26,7 +27,8 @@ import { projectFolderName } from '../../../shared/project-folder'
 import { useShallow } from 'zustand/react/shallow'
 import { create } from 'zustand'
 
-export type DraftIntent = { seq: number; root: string | null; title?: string }
+/** 알림의 [각주 넣어 줘] 처럼, 신고 문구 대신 **이 문장을 입력칸에 채우는** 길(`text`). */
+export type DraftIntent = { seq: number; root: string | null; title?: string; text?: string }
 export const useReportIntent = create<{ intent: DraftIntent | null }>(() => ({ intent: null }))
 let reportSeq = 0
 
@@ -34,6 +36,16 @@ let reportSeq = 0
 export function requestReport(title?: string): void {
   const project = useProject.getState()
   useReportIntent.setState({ intent: { seq: ++reportSeq, root: project.root, title } })
+  project.setPaneView('chat')
+}
+
+/**
+ * 알림의 [각주 넣어 줘] — 신고 접두사 없이 **그 문장만** 입력칸에 채운다. 보내지는 않는다(학생이 고쳐 보낸다).
+ * `Chat` 이 떠 있지 않아도(좁은 창) 의도가 남도록 `requestReport` 와 같은 자리를 쓴다.
+ */
+export function requestDraftText(text: string): void {
+  const project = useProject.getState()
+  useReportIntent.setState({ intent: { seq: ++reportSeq, root: project.root, text } })
   project.setPaneView('chat')
 }
 
@@ -49,6 +61,18 @@ export function applyReportIntent(intent: DraftIntent, projectRoot: string | nul
   useReportIntent.setState({ intent: null })
   if (intent.root !== projectRoot) return null
   if (!projectRoot) return 'no-folder'
+  // `text` 는 신고가 아니라 **입력칸 채우기**다 — AI 연결·차단 상태와 무관하게 채운다(보내지 않는다).
+  // 학생이 쓰던 글은 지우지 않는다: 비었으면 그 문장만, 있으면 줄을 바꿔 **덧붙인다**
+  // (`store/chat.ts` 의 `insertPath` 와 같은 규칙 — 앱이 쓴 글과 학생 글을 붙여 쓴다).
+  if (typeof intent.text === 'string') {
+    const draft = useChat.getState().draft
+    const text = intent.text
+    // 연속 클릭은 덧붙이지 않는다 — 이미 그 문장으로 끝나면 그대로 둔다(같은 말 두 줄이 쌓이지 않게).
+    const last = draft.trimEnd().split('\n').at(-1) ?? ''
+    if (last.trim() === text.trim()) return 'ready'
+    useChat.getState().setDraft(draft.trim() ? (draft.endsWith('\n') ? draft + text : draft + '\n' + text) : text)
+    return 'ready'
+  }
   if (connState === 'failed' || connState === 'unknown') return 'status-failed'
   if (disconnected) return 'disconnected'
   useChat.getState().setDraft(reportDraft(useChat.getState().draft, intent.title))
@@ -466,6 +490,17 @@ export function Chat() {
   useEffect(() => { if (snapshot?.permission) toBottom() }, [snapshot?.permission?.id])
 
   const running = snapshot?.state === 'running' || snapshot?.state === 'permission'
+  /**
+   * 재무 알림 다시 읽기 신호(중요2) — 도우미가 말을 마치거나 묻기를 마치면 규칙집이 알림 파일을
+   * 새로 쓰거나 지운다. 턴이 끝나는 전이(작업 중 → 그 밖)에서만 값을 올린다: 렌더마다 올리면
+   * 읽기가 끝없이 돈다. 첫 렌더는 올리지 않는다(마운트 시 `NoticeStack` 이 이미 한 번 읽는다).
+   */
+  const [noticeReload, setNoticeReload] = useState(0)
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !running) setNoticeReload((count) => count + 1)
+    wasRunning.current = running
+  }, [running])
   const lastUncertain = snapshot?.messages.filter((m) => m.role === 'user' && m.delivery === 'uncertain').at(-1)
   const attach = async (): Promise<void> => { const p = await window.knuaf.pickFile({ title: CHAT.attach }); if (p) insertPath(p) }
 
@@ -562,7 +597,8 @@ export function Chat() {
     if (!result) return
     if (result !== 'ready') setReportNotice(result)
     else {
-      setReportNotice(offline ? 'offline' : 'normal')
+      // 입력칸 채우기는 신고가 아니다 — 신고 안내 줄을 세우지 않고 초점만 옮긴다.
+      if (typeof reportIntent.text !== 'string') setReportNotice(offline ? 'offline' : 'normal')
       if (zone.kind === 'question') setFreeRequest((prev) => ({ messageId: zone.messageId, seq: (prev?.seq ?? 0) + 1 }))
       else if (zone.kind === 'form') {
         setFreeFormId(zone.messageId)
@@ -707,6 +743,10 @@ export function Chat() {
           </>) : <div>{CHAT.emptyBody}</div>}
         </div>
       )}
+
+      {/* 재무 알림 — 대화 창 맨 위 고정 줄(SKE-08). 대화가 굴러도 제자리다(스크롤 영역 밖). */}
+      <NoticeStack root={projectRoot} reloadKey={noticeReload} onFootnote={() => requestAnimationFrame(() => taRef.current?.focus())}
+        onWriteTalk={requestDraftText} />
 
       <div className="chat-thread" ref={threadRef} onScroll={onThreadScroll}>
         {switchNotice && <div className="chat-event" role="status">{PROVIDER_NAME[switchNotice]}는 {PROVIDER_NAME[switchNotice === 'claude' ? 'codex' : 'claude']}와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.</div>}
