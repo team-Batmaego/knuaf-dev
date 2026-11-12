@@ -164,10 +164,15 @@ Electron 시험은 `await electronApp.close()` 대신 `await closeApp(electronAp
 Playwright의 `close()`는 앱 종료가 아니라 **런치 래퍼 프로세스의 `close` 이벤트**를 무타임아웃으로
 기다리므로(윈도우 래퍼는 `shell: true`의 `cmd.exe`), 래퍼가 안 죽으면 앱이 정상 종료해도 시험이 매달립니다.
 `closeApp`은 상한(기본 20초)을 두고 넘기면 프로세스 트리를 강제 정리하며, 그 사실을 `close:force`로
-`app-log.txt`에 남깁니다. `close:end`도 이 함수가 남기므로 `captureAppLog`의 5초 헬스비트가 워커 종료까지
-돌지 않습니다. 상한 갈래의 계약은 `e2e/close-app.spec.ts`가 고정합니다.
-브라우저를 실제로 띄우는 시험은 `stubExternal(electronApp)`을 함께 씁니다(기록을 남기지 않으므로
-`shellCalls(log)`를 정확 배열로 단언하는 시험과 충돌하지 않습니다).
+`app-log.txt`에 남깁니다. 강제 정리마저 실패하면 `close:force-failed <이유>`를 남기고 그 시험을
+**실패로 드러냅니다**(잔류 프로세스를 통과로 덮지 않음). `close()` 자체의 거절은 `close:rejected`로만
+남기고 시험을 깨뜨리지 않습니다. `close:end`도 이 함수가 어느 갈래에서나 남기므로 `captureAppLog`의
+5초 헬스비트가 워커 종료까지 돌지 않습니다.
+강제 종료는 `killPlan(pid)`이 만드는 **계획**과 `forceKill` 실행기가 나뉘어 있어, `e2e/close-app.spec.ts`는
+실제 `taskkill`·`kill` 없이 명령·pid·옵션(`/T /F`, timeout)과 실패 갈래를 단언합니다. 회귀 시험에서
+실제 프로세스를 건드리지 마세요 — 사설 pid 로 `taskkill`을 돌리면 러너의 무관한 프로세스가 죽습니다.
+브라우저를 실제로 띄우는 시험은 `stubExternal(electronApp)`을 `try` **안에서** 부릅니다(정리 누락 방지,
+기록을 남기지 않으므로 `shellCalls(log)`를 정확 배열로 단언하는 시험과 충돌하지 않습니다).
 
 `pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
 별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.

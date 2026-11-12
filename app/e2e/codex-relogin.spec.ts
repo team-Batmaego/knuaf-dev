@@ -13,10 +13,11 @@ for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'e
     const userData = userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' } })
     const { electronApp, page, appLog } = await launch({ env, userData })
     const log = captureAppLog(electronApp, appLog)
-    await stubExternal(electronApp)
     const root = synthProject()
     seedChat(root, [{ id: 'previous', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
     try {
+      // 앱 호출이 실패해도 반드시 정리로 가야 한다 — try 밖에 두면 finally 가 안 돈다(검토 I-02).
+      await stubExternal(electronApp)
       await openProject(page, root)
       const chip = page.getByTitle('이 논문의 도우미')
       await expect(chip).toContainText('연결됨')
@@ -72,8 +73,8 @@ test('연결된 두 회사에서 다시 로그인을 시작하고 취소할 수 
   writeFakeClaude(bin)
   const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
   const log = captureAppLog(electronApp, appLog)
-  await stubExternal(electronApp)
   try {
+    await stubExternal(electronApp)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')
     await chip.click()
@@ -100,8 +101,8 @@ test('로그인 응답 직후 도착한 완료 알림도 새 시도의 id에 맞
   writeFakeClaude(bin)
   const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
   const log = captureAppLog(electronApp, appLog)
-  await stubExternal(electronApp)
   try {
+    await stubExternal(electronApp)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')
     await chip.click()
@@ -118,10 +119,10 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
   writeFakeClaude(bin)
   const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
   const log = captureAppLog(electronApp, appLog)
-  await stubExternal(electronApp)
   const root = synthProject()
   seedChat(root, [{ id: 'previous', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
   try {
+    await stubExternal(electronApp)
     await openProject(page, root)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')

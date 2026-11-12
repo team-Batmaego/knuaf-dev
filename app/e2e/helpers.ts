@@ -238,6 +238,94 @@ export async function stubExternal(electronApp: ElectronApplication): Promise<vo
   await electronApp.evaluate(({ shell }) => { shell.openExternal = async () => {} })
 }
 
+/** 강제 종료 명령에 거는 제한. 상한(`ms`) 뒤에 붙는 최악의 추가 시간이다. */
+const KILL_TIMEOUT_MS = 5_000
+
+/** 강제 종료 한 번의 **계획** — 실행과 분리해 두어야 시험이 실제 명령 없이 명령·pid·옵션을 단언한다. */
+export type KillPlan =
+  | { kind: 'taskkill'; command: string; options: { shell: true; windowsHide: true; timeout: number } }
+  | { kind: 'signal'; signal: NodeJS.Signals }
+
+/**
+ * 이 pid 를 정리할 명령. **여기서 실행하지 않는다** — 시험이 실제 `taskkill` 없이 이 값을 단언한다.
+ *
+ * 윈도우에서 `proc.kill()` 은 래퍼(`cmd.exe`)만 죽이고 그 아래는 남는다 — 트리째 죽여야 한다.
+ * Playwright 자신도 강제 종료에 같은 모양(`taskkill /T /F`)을 쓴다(1.63.0 `killProcess`).
+ * 그 외 플랫폼은 `shell: false` 라 이 pid 가 곧 electron 이다.
+ */
+export function killPlan(pid: number, platform: NodeJS.Platform = process.platform): KillPlan {
+  if (platform === 'win32')
+    return {
+      kind: 'taskkill',
+      command: `taskkill /pid ${pid} /T /F`,
+      options: { shell: true, windowsHide: true, timeout: KILL_TIMEOUT_MS }
+    }
+  return { kind: 'signal', signal: 'SIGKILL' }
+}
+
+/** 강제 종료 대상 — Electron 이 준 자식 프로세스에서 쓰는 두 필드만. */
+export type KillTarget = { pid: number; kill(signal: NodeJS.Signals): boolean }
+
+/** 강제 종료 결과. `ok: false` 면 `closeApp` 이 실패로 드러낸다 — 조용히 넘기지 않는다. */
+export type KillOutcome = { ok: true } | { ok: false; detail: string }
+
+/** 강제 종료 실행기. 시험은 **이것을 갈아 끼워** 실제 프로세스를 건드리지 않는다. */
+export type ForceKiller = (target: KillTarget) => KillOutcome
+
+/** pid 가 아직 살아 있는가. `EPERM` 은 "있지만 남의 것"이라 살아 있는 것으로 본다. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** `spawnSync` 가 돌려주는 것 중 판정에 쓰는 부분만. */
+export type SpawnOutcome = { status: number | null; signal: NodeJS.Signals | null; error?: Error }
+
+/**
+ * `taskkill` 결과를 **판정**한다. 종료 코드를 추측하지 않는다.
+ *
+ * `spawnSync` 는 0 이 아닌 코드로 끝나도 예외를 던지지 않으므로 `status`·`signal`·`error` 를
+ * 직접 봐야 한다(검토 I-01). 다만 "이미 없다"는 실패가 아니다 — 윈도우 `taskkill` 은 없는 pid
+ * 에도 0 이 아닌 코드를 내므로, 코드가 아니라 **pid 생존**으로 결론낸다.
+ */
+export function judgeKill(result: SpawnOutcome, stillAlive: boolean): KillOutcome {
+  if (result.status === 0) return { ok: true }
+  if (!stillAlive) return { ok: true }
+  const why = result.error
+    ? ((result.error as NodeJS.ErrnoException).code ?? result.error.message)
+    : result.signal
+      ? `signal=${result.signal}`
+      : `status=${result.status}`
+  return { ok: false, detail: `taskkill ${why}` }
+}
+
+/** `forceKill` 의 바깥 의존 — 시험이 실제 명령·실제 pid 없이 각 갈래를 만든다. */
+export type KillDeps = {
+  alive?: (pid: number) => boolean
+  platform?: NodeJS.Platform
+  spawn?: (command: string, options: object) => SpawnOutcome
+}
+
+/**
+ * 기본 강제 종료 실행기 — 실제로 정리한다. 회귀 시험은 이 함수의 **기본 인자**를 쓰지 않는다.
+ */
+export function forceKill(target: KillTarget, deps: KillDeps = {}): KillOutcome {
+  const { pid } = target
+  const isAlive = deps.alive ?? alive
+  const plan = killPlan(pid, deps.platform ?? process.platform)
+  if (plan.kind === 'taskkill') {
+    const run = deps.spawn ?? ((command, options) => spawnSync(command, options as never) as SpawnOutcome)
+    return judgeKill(run(plan.command, plan.options), isAlive(pid))
+  }
+  if (target.kill(plan.signal)) return { ok: true }
+  // `kill()` 이 false 를 돌려줘도 이미 죽었으면 목적은 달성이다(검토 I-01).
+  return isAlive(pid) ? { ok: false, detail: `kill(${plan.signal}) false` } : { ok: true }
+}
+
 /**
  * 앱을 닫되 **상한을 둔다**.
  *
@@ -251,13 +339,18 @@ export async function stubExternal(electronApp: ElectronApplication): Promise<vo
  * 앱이 스스로 끝나면 이 상한은 아무 일도 하지 않는다. 넘겼을 때만 프로세스 **트리**를
  * 강제로 정리하고 그 사실을 `close:force` 로 남긴다 — 조용히 넘기면 다음 사람이 못 본다.
  *
- * `close:end` 는 여기서 **반드시** 남긴다. 안 남기면 `captureAppLog` 의 5초 헬스비트가
- * 워커 종료까지 계속 찍혀, 통과한 시험도 매달린 것처럼 보인다(오탐).
+ * 강제 정리마저 실패하면 `close:force-failed <이유>` 를 남기고 **던진다** — 정리 실패를
+ * 통과로 덮으면 다음 사람이 잔류 프로세스를 또 만난다. `close()` 자체의 거절은 `close:rejected`
+ * 로만 남기고 던지지 않는다(앱이 이미 끝난 정상적인 경우가 있다).
+ *
+ * `close:end` 는 어느 갈래에서도 **반드시** 남긴다(finally). 안 남기면 `captureAppLog` 의
+ * 5초 헬스비트가 워커 종료까지 계속 찍혀, 통과한 시험도 매달린 것처럼 보인다(오탐).
  */
 export async function closeApp(
   electronApp: ElectronApplication,
   log: { mark: (stage: string) => void },
-  ms = 20_000
+  ms = 20_000,
+  opts: { forceKill?: ForceKiller } = {}
 ): Promise<void> {
   log.mark('close:start')
   const proc = electronApp.process()
@@ -266,21 +359,21 @@ export async function closeApp(
   timer.unref?.()
   try {
     // 강제 종료 뒤 원래 약속이 늦게 거절해도 시험을 오염시키지 않는다.
-    const closed = electronApp.close().then(() => 'closed' as const, () => 'closed' as const)
+    const closed = electronApp.close().then(
+      () => 'closed' as const,
+      (e: unknown) => {
+        log.mark(`close:rejected ${(e as Error)?.message ?? String(e)}`)
+        return 'closed' as const
+      }
+    )
     if (await Promise.race([closed, expiry.promise]) === 'expired') {
       const pid = proc.pid
       log.mark(`close:force pid=${pid ?? '없음'} 상한=${ms}ms`)
       if (typeof pid === 'number') {
-        // 윈도우에서 `proc.kill()` 은 래퍼(`cmd.exe`)만 죽이고 그 아래는 남는다 — 트리째 죽여야 한다.
-        // Playwright 자신도 강제 종료에 같은 모양(taskkill /T /F)을 쓴다(1.63.0 `killProcess`).
-        // 그 외 플랫폼은 `shell: false` 라 이 pid 가 곧 electron 이고, 이 갈래에 닿는 일은 사실상 없다
-        // (앱이 정상 종료하면 상한이 발동하지 않는다). 여기서 자식 사이드카까지 거두지는 않는다.
-        try {
-          if (process.platform === 'win32') spawnSync(`taskkill /pid ${pid} /T /F`, { shell: true, windowsHide: true })
-          else proc.kill('SIGKILL')
-        } catch (e) {
-          // 이미 죽었다면(ESRCH) 실패로 만들지 않는다 — 할 일은 다 했다.
-          log.mark(`close:force-failed ${(e as NodeJS.ErrnoException).code ?? String(e)}`)
+        const outcome = (opts.forceKill ?? forceKill)(proc as unknown as KillTarget)
+        if (!outcome.ok) {
+          log.mark(`close:force-failed ${outcome.detail}`)
+          throw new Error(`close:force-failed ${outcome.detail}`)
         }
       }
     }
