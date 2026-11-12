@@ -11,6 +11,7 @@ import { autoAllow, describeTool, inspectAgentSettings, looksLikePath, lostToolC
 import { checkLabel } from '../src/renderer/src/copy'
 import { pathKeyOf, subscriptionEnv } from '../src/main/chat/contracts'
 import { winSpawn } from '../src/main/win'
+import { needsReclaim } from '../src/main/shutdown'
 import type { AgentConnection } from '../src/main/chat/contracts'
 
 const appRoot = resolve(__dirname, '..')
@@ -524,31 +525,45 @@ test('close() 는 끝나지 않는 턴 앞에서도 상한 안에 끝난다 (RT2
   hung.resolve()
 })
 
-test('close() 는 끝나지 않는 연결 정리 앞에서도 상한 안에 끝난다 (RT3)', async () => {
-  // 멈춤 후보 1b: `close()` 의 연결 정리는 `shutdownWithin` **밖**의 `Promise.allSettled` 였다.
-  // 바깥 10초 마감은 이 대기에는 걸리지 않으므로, 연결 하나의 `stop()` 이 안 끝나면 종료 전체가
-  // 매달렸다 — 윈도우 e2e 에서 `electronApp.close()` 가 안 돌아온 자리다.
+test('close() 는 끝나지 않는 연결 정리를 숨기지 않는다 — 미완료 보고·회수 분기·pid 유지 (RT3 차단)', async () => {
+  // 검토 RT3 차단: 예전 `close()` 는 3초를 넘긴 연결 정리를 `console.error` 로만 남기고 맵을 비운 뒤
+  // **성공 모양(`void`)** 을 돌려줬다. 그래서 `index.ts` 의 `chat.close` 정리가 `done` 으로 집계되고
+  // `needsReclaim=false` — 정지된 자식을 그대로 두고 앱이 나갔다(실측: 3005ms, done=[sidecar.stop,
+  // chat.close], ownedPids=[]). 지금은 그 연결을 `pending` 으로 분류하고 소유권을 유지한다.
   const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
   const hung = Promise.withResolvers<void>()
-  const svc = service(fake({ stop: () => hung.promise }))
+  const svc = service(fake({ stop: () => hung.promise, ownedPids: () => [4242] }))
   await svc.status(root, 'codex')                          // 연결을 만들어 둔다
   const started = Date.now()
-  expect(await within(svc.close().then(() => 'done' as const), 20_000), 'close() 가 끝나지 않는 연결 앞에서 매달렸다').toBe('done')
+  const result = await within(svc.close(), 20_000)
+  expect(result, 'close() 가 끝나지 않는 연결 앞에서 매달렸다').not.toBe('timeout')
   // 연결 마감은 3초(CLOSE_CONNECTION_DEADLINE_MS) — 넉넉히 잡아 6초로 잠근다.
   expect(Date.now() - started, 'close() 가 연결 마감을 넘겨 매달렸다').toBeLessThan(6_000)
+  const outcome = result as Exclude<typeof result, 'timeout'>
+  // (a) 마감을 넘긴 정리를 **완료로 보고하지 않는다**.
+  expect(outcome, '마감을 넘긴 연결 정리를 성공으로 보고했다').not.toEqual({ outcome: 'done' })
+  expect(outcome.outcome).toBe('pending')
+  // (b) 그 분류가 회수 분기를 켠다 — `index.ts` 는 `chat.close` 를 실패로 승격하고,
+  //     `shutdownWithin` 이 그것을 failed 로 집계하면 여기가 true 다.
+  expect(needsReclaim({ pending: [], failed: [{ name: 'chat.close', reason: outcome }] }),
+    '미완료 연결 정리가 회수 분기를 켜지 않는다').toBe(true)
+  // (c) 그 연결이 띄운 pid 는 회수 집합에 남는다.
+  expect(svc.ownedPids(), '마감을 넘긴 연결의 pid 가 회수 집합에서 사라졌다').toContain(4242)
   hung.resolve()
 })
 
 test('closeForUpdate() 도 끝나지 않는 연결 정리 앞에서 상한 안에 끝난다 (RT3)', async () => {
   // 인계(업데이트) 경로의 같은 결함. 여기서는 마감을 넘긴 연결을 **실패로 올리지 않는다** —
-  // 정착한 거절만 던진다(`app-update.spec.ts` 의 `/old connection/` 계약).
+  // 정착한 거절만 던진다(`app-update.spec.ts` 의 `/old connection/` 계약). 다만 `'pending'` 으로
+  // **분류해 돌려준다**(성공 모양 아님). 소유권은 `close()` 와 같이 유지한다.
   const root = mkdtempSync(join(tmpdir(), 'kd-chat-'))
   const hung = Promise.withResolvers<void>()
-  const svc = service(fake({ stop: () => hung.promise }))
+  const svc = service(fake({ stop: () => hung.promise, ownedPids: () => [4343] }))
   await svc.status(root, 'codex')
   const started = Date.now()
-  expect(await within(svc.closeForUpdate(async () => {}).then(() => 'done' as const), 20_000), 'closeForUpdate() 가 끝나지 않는 연결 앞에서 매달렸다').toBe('done')
+  expect(await within(svc.closeForUpdate(async () => {}), 20_000), 'closeForUpdate() 가 끝나지 않는 연결 앞에서 매달렸다').toBe('pending')
   expect(Date.now() - started, 'closeForUpdate() 가 연결 마감을 넘겨 매달렸다').toBeLessThan(6_000)
+  expect(svc.ownedPids(), '인계에서도 미완료 연결의 pid 는 남아야 한다').toContain(4343)
   hung.resolve()
 })
 

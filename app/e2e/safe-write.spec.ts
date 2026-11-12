@@ -12,7 +12,7 @@
  * 대역을 `ChatService` 의 시험 이음매(`fs`)로 넣는다.
  */
 import { expect, test } from '@playwright/test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { ChatService, QUIT_FLUSH_DELAYS_MS } from '../src/main/chat/service'
@@ -356,7 +356,9 @@ test('빈 초안의 삭제가 막혀도 보낸 글이 되살아나지 않는다 
 test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 — 재시도 예산이 줄어 있다 (RT3)', () => {
   // 멈춤 후보 1a: `flushDrafts()` 는 **동기**다. 재시도 대기(Atomics.wait)를 안고 돌면 그 시간만큼
   // main 스레드가 서고, 그동안 종료 마감 타이머도 서 있다. 그래서 종료 경로는 `QUIT_FLUSH_DELAYS_MS`
-  // (합계 50ms)로 부르고, 기본 예산(300ms)은 타이머 flush 에만 쓴다.
+  // 로 부르고, 기본 예산(300ms)은 타이머 flush 에만 쓴다.
+  // 20+30=50ms 는 **파일 하나**의 상한이다(검토 RT3 정정) — 초안이 N개면 50×N ms 까지 늘어난다.
+  // 이 시험은 파일 하나만 두므로 그 합이 그대로 상한이 된다.
   const { root, draft } = project()
   let blocked = true
   const svc = service(() => {}, faultyFs({ write: (p) => (blocked && p.startsWith(draft) ? eacces() : null) }))
@@ -374,6 +376,44 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   const again = Date.now()
   svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })      // 남은 대기 없음 — 즉시 돌아온다
   expect(Date.now() - again).toBeLessThan(200)
+})
+
+test('저장 실패 진단에는 절대 경로·오류 본문이 아니라 이름과 코드만 남는다 (RT3 중요)', () => {
+  // 검토 RT3 중요: 진단 파일은 Playwright 산출물로 CI 에 올라간다. `SafeWriteFs` 오류의
+  // `message` 에는 논문 폴더 절대 경로와 토큰이 실릴 수 있었고, 예전 `fail()` 은 그 문자열과
+  // `${file}`(절대 경로)을 그대로 남겼다 — 실제로 마커가 파일에 닿는 것을 검토가 관측했다.
+  const dir = mkdtempSync(join(tmpdir(), 'kd-safe-diag-'))
+  const log = join(dir, 'app-log.txt')
+  const before = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = log
+  try {
+    const marker = 'MARKER-papers-9c1f'
+    const file = `/Users/${marker}/논문/chat.json`
+    const fs: SafeWriteFs = {
+      writeFileSync: (() => { throw Object.assign(new Error(`EACCES: denied /Users/${marker} token=sk-MARKERTOKEN000000000000000000000000`), { code: 'EACCES' }) }) as unknown as SafeWriteFs['writeFileSync'],
+      renameSync: (() => {}) as unknown as SafeWriteFs['renameSync'],
+      unlinkSync: (() => {}) as unknown as SafeWriteFs['unlinkSync'],
+      readFileSync: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
+    }
+    const shown: string[] = []
+    const r = writeFileAtomic(file, 'BODY', { fs, delaysMs: NO_WAIT, log: (m) => shown.push(m) })
+    expect(r.ok).toBe(false)
+    const text = readFileSync(log, 'utf8')
+    expect(text, '진단이 아예 기록되지 않았다').toContain('safeWrite:')
+    expect(text, '절대 경로가 진단 파일에 닿았다').not.toContain(marker)
+    expect(text, '오류 본문의 토큰이 진단 파일에 닿았다').not.toContain('MARKERTOKEN')
+    // 남아야 하는 것: 파일 이름과 오류 코드(그게 진단의 목적이다).
+    expect(text).toContain('chat.json')
+    expect(text).toContain('code=EACCES')
+    // 화면 로그(stderr)도 같은 규칙이다 — 여기는 `scrub` 이 아니라 **경로를 넣지 않는 것**으로 막는다.
+    expect(shown.join('\n'), '화면 로그가 절대 경로를 그대로 읽었다').not.toContain(marker)
+    expect(shown.join('\n'), '화면 로그가 오류 본문을 그대로 읽었다').not.toContain('MARKERTOKEN')
+    expect(shown.join('\n')).toContain('chat.json')
+  } finally {
+    if (before === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = before
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('초안 rename 이 막히면 .tmp 에 남고, 다음 실행이 되살려 제자리로 옮긴다', () => {

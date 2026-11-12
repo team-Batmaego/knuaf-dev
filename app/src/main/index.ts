@@ -11,7 +11,7 @@ import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { defaultWindowSize } from '../shared/window'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
-import { diag, diagEnabled } from './diagLog'
+import { codeOf, diag, diagEnabled } from './diagLog'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
@@ -37,11 +37,16 @@ const SHUTDOWN_DEADLINE_MS = 10_000
 const diagStart = Date.now()
 let lastStage = 'boot'
 let quitPasses = 0
-const trace = (stage: string, detail = ''): void => {
+const trace = (stage: string, detail: string | (() => string) = ''): void => {
+  // 진단이 꺼져 있으면 **아무 일도 하지 않는다**(검토 RT3 권고). `lastStage` 는 heartbeat 만
+  // 읽는데 그 타이머도 아래 가드 안에서만 등록되므로, 꺼진 상태에서는 쓸 소비자가 없다.
+  // `detail` 을 함수로 넘기면 그 계산(예: 자식 pid 수집)도 꺼진 상태에서 아예 돌지 않는다.
+  if (!diagEnabled()) return
   lastStage = stage
-  diag(`stage=${stage}${detail ? ` ${detail}` : ''} elapsed=${Date.now() - diagStart}ms uptime=${process.uptime().toFixed(2)}s`)
+  const text = typeof detail === 'function' ? detail() : detail
+  diag(`stage=${stage}${text ? ` ${text}` : ''} elapsed=${Date.now() - diagStart}ms uptime=${process.uptime().toFixed(2)}s`)
 }
-if (diagEnabled) {
+if (diagEnabled()) {
   // 이벤트 루프가 살아 있는 한 5초마다 현재 단계를 남긴다. unref — 이 타이머가 종료를 붙잡지 않는다.
   const beat = setInterval(() => {
     diag(`heartbeat stage=${lastStage} elapsed=${Date.now() - diagStart}ms handles=${openHandles() || '(없음)'}`)
@@ -161,7 +166,16 @@ else {
       // 아직 안 쓴 학생 입력을 먼저 남긴다 — 동기다. **한 번만** 부른다: 예전에는 이 줄이 가드 밖에
       // 있어서 before-quit 이 다시 돌 때마다 같은 쓰기를 반복했고, 그 동기 쓰기가 종료 마감보다
       // 늦게 도는 바람에 `electronApp.close()` 가 안 돌아올 수 있었다(멈춤 후보 1a).
-      // 재시도 예산도 줄인다 — 정상 경로(300ms)는 여기서 main 스레드를 그만큼 세운다.
+      //
+      // **순서를 사실대로 적는다**(검토 RT3 정정): 이 flush 는 아래 `shutdownWithin` 의 10초 마감
+      // **타이머보다 앞서** 돈다 — 마감이 이 동기 쓰기를 감싸지 않는다. 그런데도 여기 두는 이유는,
+      // 마감 안으로 옮기면 마감을 태운 주체가 우리 정리가 아니라 이 동기 쓰기가 되기 때문이다:
+      // 재시도 대기는 **파일 하나당** `QUIT_FLUSH_DELAYS_MS` 합(20+30=50ms)이고, 초안이 N개면 최대
+      // 50×N ms + 동기 I/O 가 마감 앞에서 사라진다. 그러면 "정리 마감 10초"가 실제로는 "flush +
+      // 10초"가 되어 로그의 숫자가 의미를 잃는다. 지금 배치는 마감을 **정리 몫으로 남기고**, flush
+      // 지연은 flush 자신의 줄(`drafts:flush:*`)로 따로 보이게 한다.
+      // 한계도 적는다: 그래서 "앱이 10초 안에 닫힌다"고 이 코드만으로는 말할 수 없다 — 상한은
+      // flush 비용(초안 수 × 50ms + 동기 쓰기) + 10초 + 회수 1.5초의 합이다.
       trace(`before-quit#${quitPasses}:flush-start`)
       chat?.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })
       trace(`before-quit#${quitPasses}:flush-end`)
@@ -194,15 +208,29 @@ else {
       const stalled = process.env.KNUAF_E2E_QUIT_STALL === '1'
       const task = (name: string, start: () => Promise<unknown>): ShutdownTask => ({
         name,
-        start: () => { trace(`task:${name}:start`); const p = start(); void p.then(() => trace(`task:${name}:done`), (e: unknown) => trace(`task:${name}:reject`, `reason=${String(e)}`)); return p }
+        start: () => {
+          trace(`task:${name}:start`)
+          const p = start()
+          // 거절 이유는 **코드/이름만** 남긴다 — `String(e)` 는 경로·본문·토큰을 실어 온다(검토 RT3 중요).
+          void p.then(() => trace(`task:${name}:done`), (e: unknown) => trace(`task:${name}:reject`, `code=${codeOf(e)}`))
+          return p
+        }
       })
-      trace(`before-quit#${quitPasses}:shutdown-start`, `stalled=${stalled} pids=${knownPids().join(',') || '없음'}`)
+      trace(`before-quit#${quitPasses}:shutdown-start`, () => `stalled=${stalled} pids=${knownPids().join(',') || '없음'}`)
       void shutdownWithin([
         task('sidecar.stop', () => stalled ? Promise.withResolvers<void>().promise : sidecar.stopForExit()),
-        task('chat.close', () => chat?.close() ?? Promise.resolve())
+        /**
+         * 연결 정리가 마감을 넘겼으면 **실패로 승격한다**(검토 RT3 차단). 예전에는 `close()` 가
+         * 성공 모양(`void`)을 돌려줘 이 정리가 `done` 으로 집계됐고, 그래서 `needsReclaim=false` —
+         * 회수 분기를 건너뛰고 살아 있는 자식을 그냥 두고 나갔다.
+         */
+        task('chat.close', async () => {
+          const result = await (chat?.close() ?? Promise.resolve({ outcome: 'done' as const }))
+          if (result.outcome === 'pending') throw new Error(`연결 정리 미완료 pids=${result.pids.join(',') || '없음'}`)
+        })
       ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
         trace(`before-quit#${quitPasses}:shutdown-outcome`, `done=[${outcome.done.join(', ')}] pending=[${outcome.pending.join(', ')}] failed=[${outcome.failed.map((f) => f.name).join(', ')}] elapsedMs=${outcome.elapsedMs}`)
-        for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, failure.reason)
+        for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, codeOf(failure.reason))
         /**
          * **정착한 실패도 회수 대상이다**(검토 RT2-03). 예전에는 `pending` 이 비었는지만 보고
          * "정리 완료 → app.quit" 으로 갔으므로, sidecar stop 이 실패로 정착해도 회수 시도를
@@ -226,7 +254,7 @@ else {
          * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
          */
         if (app.listenerCount('before-quit') !== 1) {
-          trace(`branch:extra-listener`, `n=${app.listenerCount('before-quit')} listeners=${app.listeners('before-quit').map((f) => f.name || '(anonymous)').join('|')}`)
+          trace(`branch:extra-listener`, () => `n=${app.listenerCount('before-quit')} listeners=${app.listeners('before-quit').map((f) => f.name || '(anonymous)').join('|')}`)
           app.quit()
           return
         }
@@ -234,7 +262,7 @@ else {
         // 아는 자식을 한 번 더 트리째 끝내고, 살아 있는지 **관측**한다. OS 회수를 가정하지 않는다.
         trace(`branch:reclaim`, `pids=${pids.join(',') || '없음'}`)
         const reclaim = await reclaimChildren(pids)
-        trace(`branch:reclaim-done`, `alive=${reclaim.alive.join(',') || '없음'} unknown=${reclaim.unknown.join(',') || '없음'} handles=${openHandles() || '(없음)'}`)
+        trace(`branch:reclaim-done`, () => `alive=${reclaim.alive.join(',') || '없음'} unknown=${reclaim.unknown.join(',') || '없음'} handles=${openHandles() || '(없음)'}`)
         console.error(`[shutdown] 남은 핸들: ${openHandles() || '(없음)'}`)
         console.error(`[shutdown] 자식 회수 시도 pid=${reclaim.pids.join(',') || '없음'} 살아있음=${reclaim.alive.join(',') || '없음'} 확인못함=${reclaim.unknown.join(',') || '없음'} (앱이 아는 pid 만 — 손자는 관측 밖)`)
         trace('branch:exit')
