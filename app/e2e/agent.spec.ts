@@ -592,6 +592,10 @@ test.describe('buildLaunchScript', () => {
     expect(s).toContain(`cd '/tmp/논문 폴더' || exit 1`)
     expect(s).toContain(`export PATH='/tmp/논문 폴더/.venv/bin':'/App/Resources/python/bin':'/opt/homebrew/bin':'/usr/local/bin':"$HOME/.local/bin":"$PATH"`)
     expect(s).toContain('export KNUAF_DOC_APP=1')
+    // 도우미·학생이 이 창에서 돌리는 규칙집 스크립트도 UTF-8 로 말한다 — 윈도우 기본
+    // 코드페이지로 파이프하면 받는 쪽에서 한글이 깨진다(v0.6.4 발견, v0.5.0 규칙집 수정과 별개).
+    expect(s).toContain('export PYTHONUTF8=1')
+    expect(s).toContain('export PYTHONIOENCODING=utf-8')
     // ~/.claude/CLAUDE.md의 @import가 외부 경로를 가리키면 학생에게 영어 보안 프롬프트가 뜬다 —
     // 이 앱이 띄우는 도우미는 메모리 파일을 아예 읽지 않는다.
     expect(s).toContain('export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1')
@@ -638,6 +642,9 @@ test.describe('buildLaunchScript', () => {
     // PATH 는 `;` 이고 .venv 가 앞에 온다. 원래 PATH 를 덮지 않는다.
     expect(s).toContain('set "PATH=C:\\Users\\학생\\내 논문\\.venv\\Scripts;%PATH%"')
     expect(s).toContain('set "KNUAF_DOC_APP=1"')
+    // 맥 스크립트와 같은 이유 — cmd 기본 코드페이지(949)로 파이프한 한글이 받는 쪽에서 깨진다.
+    expect(s).toContain('set "PYTHONUTF8=1"')
+    expect(s).toContain('set "PYTHONIOENCODING=utf-8"')
     expect(s).toContain('set "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"')
     // 채팅과 같은 1층 — 설정 출처 0개, 도구 팝업은 끈다. 인용 부호는 배치 이스케이프 층수에
     // 따라 달라지므로(대상이 `.cmd` shim 이면 두 층) 토큰 자체로 확인하고, 실제 argv 는
@@ -811,6 +818,91 @@ test.describe('buildLaunchScript', () => {
     const cdFailure = await run(missingRoot)
     expect(cdFailure.code, cdFailure.stdout).toBe(1)
     expect(cdFailure.stdout).toContain('종료 코드: 1')
+  })
+
+  /**
+   * 검토 I-01(실행) — 생성한 `.command` 를 **실제로 돌려** 그 창의 자식이 두 값을 받는지 본다.
+   * 문자열 단언은 `export` 위치·순서가 틀려도 통과한다 — 자식의 환경을 직접 읽어야 잠긴다.
+   *
+   * 가짜 CLI 는 인자를 무시하고 받은 환경과 작업 폴더를 찍는다. **부모에는 반대 값**을 넣어
+   * 둔다(`0`/`ascii`) — 스크립트의 export 가 이기지 못하면 그대로 새어 나와 시험이 실패한다.
+   */
+  test('posix 런치 스크립트로 띄운 자식이 PYTHONUTF8·PYTHONIOENCODING 을 받는다 (I-01, 실행)', async () => {
+    // 윈도에는 `bash` 가 없고(있어도 Git Bash 의 `/c/...` 경로는 `realpathSync` 비교와 안 맞는다)
+    // 생성 경로도 `C:\...` 다 — 아래 `.cmd` 시험이 윈도 몫을 맡는다.
+    test.skip(process.platform === 'win32', 'POSIX 실행 시험은 윈도에서 제외 — 윈도는 아래 .cmd 시험이 맡음')
+    const base = mkdtempSync(join(tmpdir(), 'kd-utf8-'))
+    const root = join(base, '한글 논문 폴더')
+    mkdirSync(root, { recursive: true })
+    const agentPath = join(base, 'fake-claude')
+    writeFileSync(agentPath, '#!/bin/bash\nprintf \'UTF8=%s IO=%s PWD=%s\\n\' "$PYTHONUTF8" "$PYTHONIOENCODING" "$PWD"\n', 'utf-8')
+    chmodSync(agentPath, 0o755)
+    const scriptPath = join(base, 'launch.command')
+    writeFileSync(scriptPath, buildLaunchScript({
+      root, agent: 'claude', agentPath, venvBin: null, bundledBin: null, firstPrompt: '시작하기'
+    }, 'darwin'), { encoding: 'utf-8', mode: 0o755 })
+
+    const result = await new Promise<{ code: number | null, stdout: string }>((ok, fail) => {
+      const child = spawn('bash', [scriptPath], {
+        env: { ...process.env, PYTHONUTF8: '0', PYTHONIOENCODING: 'ascii' },
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      let stdout = ''
+      child.stdout.setEncoding('utf-8').on('data', (s: string) => { stdout += s })
+      child.stderr.setEncoding('utf-8').on('data', (s: string) => { stdout += s })
+      child.on('error', fail).on('close', (code) => ok({ code, stdout }))
+    })
+    expect(result.code, result.stdout).toBe(0)
+    const line = result.stdout.split('\n').find((l) => l.includes('UTF8='))
+    expect(line, `가짜 CLI 가 뜨지 않았다: ${result.stdout}`).toBeTruthy()
+    // 두 값이 자식까지 갔는지 — 부모의 `0`/`ascii` 가 남아 있으면 여기서 걸린다.
+    expect(line!.startsWith('UTF8=1 IO=utf-8 ')).toBe(true)
+    // 그 자식이 정말 그 창(작업 폴더)에서 떴는지 — `exec` 은 셸을 대체하므로 cwd 가 유지된다.
+    const pwd = line!.split('PWD=')[1]
+    expect(realpathSync.native(pwd), '작업 폴더로 이동한 뒤 실행되지 않았다').toBe(realpathSync.native(root))
+  })
+
+  /**
+   * 검토 I-01(실행) — 윈도우 `.cmd` 판. 배치의 `set` 은 `setlocal` 범위 안에서만 유효하고,
+   * 실행 줄이 `call` 없이 자식 cmd 로 넘어가므로 **실제로 돌려야** 상속이 확인된다.
+   * 윈도우에서만 뜻이 있다(다른 OS 는 `cmd.exe` 가 없다) — CI `windows-latest` 가 돈다.
+   */
+  test('win32 런치 배치로 띄운 자식이 PYTHONUTF8·PYTHONIOENCODING 을 받는다 (I-01, 실행)', async () => {
+    test.skip(process.platform !== 'win32', 'cmd 배치 실행은 윈도우에서만 확인한다 — CI windows-latest 가 돈다')
+    const base = mkdtempSync(join(tmpdir(), 'kd-utf8-'))
+    const root = join(base, '한글 논문 폴더')
+    const agentDir = join(base, 'Program Files', 'npm')
+    mkdirSync(root, { recursive: true })
+    mkdirSync(agentDir, { recursive: true })
+    const agentPath = join(agentDir, 'claude.cmd')
+    const outFile = join(base, 'env.txt')
+    // npm shim 과 같은 모양(`@echo off` + `exit /b`)이되, 받은 두 값만 남긴다.
+    writeFileSync(agentPath, [
+      '@echo off',
+      '> "%UTF8_OUT%" echo %PYTHONUTF8% %PYTHONIOENCODING%',
+      'exit /b 0',
+      ''
+    ].join('\r\n'), 'utf-8')
+    const scriptPath = join(base, 'launch.cmd')
+    writeFileSync(scriptPath, buildLaunchScript({
+      root, agent: 'claude', agentPath, venvBin: null, bundledBin: null, firstPrompt: '시작하기'
+    }, 'win32'), 'utf-8')
+
+    const result = await new Promise<{ code: number | null, stdout: string }>((ok, fail) => {
+      const child = spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', scriptPath], {
+        // 부모에는 반대값 — 배치의 `set` 이 이기지 못하면 그대로 새어 나온다.
+        env: { ...process.env, PYTHONUTF8: '0', PYTHONIOENCODING: 'ascii', UTF8_OUT: outFile },
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      let stdout = ''
+      child.stdout.setEncoding('utf-8').on('data', (s: string) => { stdout += s })
+      child.stderr.setEncoding('utf-8').on('data', (s: string) => { stdout += s })
+      child.on('error', fail).on('close', (code) => ok({ code, stdout }))
+    })
+    expect(result.code, result.stdout).toBe(0)
+    expect(existsSync(outFile), `가짜 CLI 가 뜨지 않았다: ${result.stdout}`).toBe(true)
+    expect(readFileSync(outFile, 'utf-8').trim(), '자식이 두 값을 받지 못했다').toBe('1 utf-8')
   })
 
   test('codex gets no positional prompt and no -c without a global skill copy; sq escapes single quotes', () => {

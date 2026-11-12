@@ -1,6 +1,8 @@
-import { createElement, Fragment, type ReactNode } from 'react'
+import { createElement, Fragment, useState, type ReactNode } from 'react'
 import { chatMd } from '../../../shared/chat-md'
 import type Token from 'markdown-it/lib/token.mjs'
+import { CHAT_LINK } from '../copy'
+import { openChatLink } from './open-link'
 
 /**
  * 도우미 답변의 마크다운 — 표·제목·목록·코드·인용을 글자 대신 그린다(형님 맥 2026-11-09:
@@ -20,7 +22,7 @@ import type Token from 'markdown-it/lib/token.mjs'
  * 먹어 `[문서](C:\Thesis\(draft).md)` 가 `[문서](C:\Thesis(draft).md)` 로 바뀐다 — 형님 윈도우
  * 실기 경로가 화면에서 깨지고, 폴더 밖·모호한 경로를 **원문 그대로** 남긴다는 UI-P03 계약도 깨진다.
  * 그래서 `[라벨](대상)` 은 글자 토큰으로 남기고 아래 `markdownLinks` 가 해석한다(예전과 같은 규칙):
- * 프로젝트 안 경로만 파일 단추, `http(s)` 는 글자 + 주소, 나머지는 원문 그대로.
+ * 프로젝트 안 경로만 파일 단추, `http(s)` 는 **누를 수 있는 단추**(글자 + 주소), 나머지는 원문 그대로.
  */
 const md = chatMd
 
@@ -84,12 +86,18 @@ function isAbsolutePath(path: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|[/\\])/.test(path)
 }
 
+/**
+ * `%20` 같은 이스케이프를 되돌린다 — **파일 경로에만** 쓴다(마크다운 경로는 흔히 `%20` 으로 적힌다).
+ * 주소(http/https)에는 **쓰지 않는다**: 디코딩은 `%26`→`&`·`%23`→`#` 처럼 주소의 뜻을 바꿔,
+ * 보인 주소와 실제 요청이 달라진다(Roh ⑤ [중요]). 주소는 원문 그대로 쓰고 판정도 원문 기준이다.
+ */
 function decoded(target: string): string {
   try { return decodeURIComponent(target) } catch { return target }
 }
 
 /** 프로젝트 안 절대경로만 상대경로로 바꾼다. 밖으로 빠지는 `..` 경로는 그대로 둔다. */
 function relativeProjectPath(target: string, root: string | null): string | null {
+  // 경로는 사람이 `%20`·`%ED%95%9C` 로 적어도 실제 파일 이름으로 찾아야 하므로 여기서만 되돌린다.
   const text = decoded(target)
   if (!isAbsolutePath(text)) return INSIDE_PATH.test(text) ? text : null
   if (!root) return null
@@ -113,7 +121,16 @@ function relativeProjectPath(target: string, root: string | null): string | null
   return parts.join('/') || null
 }
 
-interface Context { root: string | null; messageId: string; onFile?: (relative: string) => void; keys: { n: number } }
+interface Context {
+  root: string | null
+  messageId: string
+  onFile?: (relative: string) => void
+  keys: { n: number }
+  /** 지금 그리는 덩어리(문단·목록 항목)의 키 — 열기 실패 안내를 그 덩어리 아래에 두려고 쓴다. */
+  blockKey: string | null
+  failed: ReadonlySet<string>
+  onLinkResult: (blockKey: string, opened: boolean) => void
+}
 
 /** 같은 부모 안에서 자리 키가 겹치지 않게 — 같은 글 토큰 여럿이 링크를 하나씩 가질 수 있다. */
 const nextKey = (ctx: Context, prefix: string): string => `${prefix}${ctx.keys.n++}`
@@ -125,7 +142,8 @@ function basename(relative: string): string {
 /**
  * 글 토큰 안의 `[라벨](대상)` 하나 → 화면 요소.
  * - 프로젝트 안 경로: 파일 단추(파일 이름), `onFile` 이 없으면 글자.
- * - `http(s)`: 앵커를 만들지 않고 `글 주소` 로 남긴다(앱에 밖으로 여는 통로가 없다, GUI-12).
+ * - `http(s)`: 파일 단추와 같은 `button.lk` — 누르면 `window.knuaf.link.open` 으로 main 에 넘긴다
+ *   (앵커·`href` 는 여전히 만들지 않는다. 검사·열기는 main, `main/links/`).
  * - 그 밖(폴더 밖·`..`·`javascript:` 등): `null` — 원문 그대로 둔다(감추지도, 누르게 하지도 않는다).
  */
 function linkTextNode(link: ParsedLink, ctx: Context, key: string): ReactNode {
@@ -142,11 +160,41 @@ function linkTextNode(link: ParsedLink, ctx: Context, key: string): ReactNode {
       onClick: () => ctx.onFile?.(relative)
     }, label)
   }
-  const target = decoded(link.target)
+  // 주소는 **원문 그대로** 쓴다 — 판정·표시·열기가 모두 같은 문자열이어야 한다(Roh ⑤ [중요]).
+  // 여기서 `decoded()` 를 거치면 `%26`→`&`·`%23`→`#`·`%2F`→`/` 로 바뀌어, 화면에 보인 주소와
+  // 실제로 나가는 요청이 달라진다(검색어 하나가 쿼리 항목 둘로 갈라지는 그 반례).
+  // `https%3A%2F%2Fevil…` 처럼 숨은 스킴이 디코딩으로 드러나 단추가 되던 것도 함께 막힌다.
+  const target = link.target
   if (!/^https?:\/\//i.test(target)) return null
-  const url = createElement('span', { key: `${key}-url`, className: 'chat-md-url' }, target)
-  if (!link.label || link.label === target) return url
-  return createElement(Fragment, { key }, link.label, ' ', url)
+  // 실제 목적지·안전성 판정은 main 이 다시 한다(그때도 디코딩하지 않는다 — `main/links/validate.ts`).
+  // 덩어리 키는 **그릴 때** 붙잡는다 — 누른 뒤에는 ctx 가 이미 다음 덩어리를 그리고 있다.
+  const blockKey = ctx.blockKey
+  return createElement(LinkButton, {
+    key,
+    url: target,
+    label: link.label && link.label !== target ? link.label : '',
+    focusKey: `chat-url:${ctx.messageId}:${target}`,
+    onResult: (opened: boolean) => { if (blockKey) ctx.onLinkResult(blockKey, opened) }
+  })
+}
+
+/**
+ * 답변 속 `http(s)` 주소 하나 — 파일 단추와 같은 `button.lk` 결. 글자와 주소를 함께 보여 주고,
+ * `title` 에 주소를 한 번 더 둔다(긴 주소는 줄바꿈으로 잘려도 마우스를 올리면 전체가 보인다).
+ *
+ * 키보드는 native `button` 이 그대로 준다(Enter·Space). 열기는 **누를 때만**이고, 실패하면
+ * 조용히 삼키지 않고 그 문단 **아래** 한 줄로 알린다 — 문장 사이에 끼어들지 않는다(형님 2026-11-11).
+ */
+function LinkButton(props: { url: string; label: string; focusKey: string; onResult: (opened: boolean) => void }): ReactNode {
+  const api = typeof window === 'undefined' ? undefined : window.knuaf?.link
+  const onClick = (): void => {
+    void openChatLink(props.url, api).then(props.onResult)
+  }
+  const url = createElement('span', { key: 'u', className: 'chat-md-url' }, props.url)
+  return createElement('button', {
+    key: 'b', type: 'button', className: 'lk chat-md-link', title: props.url,
+    'data-focus-key': props.focusKey, onClick
+  }, props.label ? createElement(Fragment, null, props.label, ' ', url) : url)
 }
 
 /**
@@ -228,7 +276,7 @@ function renderInline(tokens: Token[], ctx: Context): ReactNode[] {
   return out
 }
 
-interface Frame { tag: string | null; props: Record<string, unknown>; children: ReactNode[] }
+interface Frame { tag: string | null; props: Record<string, unknown>; children: ReactNode[]; key: string }
 
 function alignProps(token: Token): Record<string, unknown> {
   const style = token.attrGet('style')
@@ -244,15 +292,32 @@ function fenceNode(token: Token, key: string): ReactNode {
 
 function renderBlocks(tokens: Token[], ctx: Context): ReactNode[] {
   const root: ReactNode[] = []
-  const stack: Frame[] = [{ tag: null, props: {}, children: root }]
   let seq = 0
+  const stack: Frame[] = [{ tag: null, props: {}, children: root, key: `b${seq++}` }]
   const top = (): Frame => stack[stack.length - 1]
   const add = (node: ReactNode): void => { top().children.push(node) }
-  const open = (tag: string | null, props: Record<string, unknown> = {}): void => { stack.push({ tag, props, children: [] }) }
+  const open = (tag: string | null, props: Record<string, unknown> = {}): void => {
+    stack.push({ tag, props, children: [], key: `b${seq++}` })
+  }
   const close = (): void => {
-    const frame = stack.pop() ?? { tag: null, props: {}, children: [] }
-    if (frame.tag === null) top().children.push(...frame.children)
-    else top().children.push(createElement(frame.tag, { ...frame.props, key: `b${seq++}` }, ...frame.children))
+    const frame = stack.pop() ?? { tag: null, props: {}, children: [], key: `b${seq++}` }
+    const parent = top()
+    // 열기 실패는 그 덩어리 **아래** 한 줄 — 문장 사이에 끼어들지 않게 한다(형님 2026-11-11).
+    // 표 칸은 안쪽에 둔다(`tr` 바로 밑에 `div` 는 규칙 위반).
+    const notice = ctx.failed.has(frame.key)
+      ? createElement('div', {
+        key: `${frame.key}-fail`, className: 'caption chat-md-link-fail', role: 'status',
+        style: { marginTop: 2, marginBottom: 8 }
+      }, CHAT_LINK.openFailed)
+      : null
+    if (frame.tag === 'td' || frame.tag === 'th') {
+      if (notice) frame.children.push(notice)
+      parent.children.push(createElement(frame.tag, { ...frame.props, key: frame.key }, ...frame.children))
+      return
+    }
+    if (frame.tag === null) parent.children.push(...frame.children)
+    else parent.children.push(createElement(frame.tag, { ...frame.props, key: frame.key }, ...frame.children))
+    if (notice) parent.children.push(notice)
   }
 
   for (const token of tokens) {
@@ -274,7 +339,11 @@ function renderBlocks(tokens: Token[], ctx: Context): ReactNode[] {
       case 'tr_open': open('tr'); break
       case 'th_open': open('th', alignProps(token)); break
       case 'td_open': open('td', alignProps(token)); break
-      case 'inline': for (const node of renderInline(token.children ?? [], ctx)) add(node); break
+      case 'inline':
+        ctx.blockKey = top().key
+        for (const node of renderInline(token.children ?? [], ctx)) add(node)
+        ctx.blockKey = null
+        break
       case 'fence': case 'code_block': add(fenceNode(token, `b${seq++}`)); break
       case 'hr': add(createElement('hr', { key: `b${seq++}` })); break
       case 'paragraph_close':
@@ -300,6 +369,19 @@ function renderBlocks(tokens: Token[], ctx: Context): ReactNode[] {
 /** 도우미 답변 마크다운 → React 요소. 발주서의 부품 인터페이스 그대로다. */
 export function ChatMarkdown(props: { text: string; root: string | null; messageId: string; onFile?: (relative: string) => void }): ReactNode {
   const tokens = props.text.trim() ? md.parse(props.text, {}) : []
-  const ctx: Context = { root: props.root, messageId: props.messageId, onFile: props.onFile, keys: { n: 0 } }
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set())
+  const onLinkResult = (blockKey: string, opened: boolean): void => {
+    setFailed((prev) => {
+      if (opened === !prev.has(blockKey)) return prev
+      const next = new Set(prev)
+      if (opened) next.delete(blockKey)
+      else next.add(blockKey)
+      return next
+    })
+  }
+  const ctx: Context = {
+    root: props.root, messageId: props.messageId, onFile: props.onFile,
+    keys: { n: 0 }, blockKey: null, failed, onLinkResult
+  }
   return createElement('div', { className: 'chat-md' }, ...renderBlocks(tokens, ctx))
 }

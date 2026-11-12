@@ -9,12 +9,15 @@ process.once('exit', cleanupTmpdir)
 // Do not inherit playwright.config.ts or add mixed GUI/store specs such as model-chip.spec.ts.
 export default defineConfig({
   testDir: 'e2e',
+  // v0.6.4: 진행 파일·링크 열기 시험(이 갈래) + 가드 시험(배포 갈래)을 함께 둔다.
   testMatch: [
     'preparation-main.spec.ts',
     'preparation-state.spec.ts',
     'artifact-refresh-store.spec.ts',
     'chat-markdown.spec.ts',
     'progress-list.spec.ts',
+    'progress-file.spec.ts',
+    'link-open.spec.ts',
     'guard-scope.spec.ts',
     'guard-key.spec.ts',
     'guard-scan-store.spec.ts',
@@ -26,7 +29,8 @@ export default defineConfig({
     'guard-codex-tool-lock.spec.ts',
     'guard-codex-thread-lock.spec.ts',
     'guard-codex-connection.spec.ts',
-    'guard-claude-skill-host.spec.ts'
+    'guard-claude-skill-host.spec.ts',
+    'notice-bubble.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

@@ -598,6 +598,12 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
     `cd ${sq(o.root)} || exit 1`,
     `export PATH=${pathParts.join(':')}`,
     'export KNUAF_DOC_APP=1',
+    // 이 창에서 학생·도우미가 직접 돌리는 규칙집 스크립트(gg_*)도 UTF-8 로 말하게 한다 —
+    // 윈도우 기본(cp949)으로 파이프하면 받는 쪽에서 한글이 깨진다(사용자 설정도 덮는다).
+    // 대가: PYTHONUTF8 은 stdout 뿐 아니라 Python 의 기본 파일 인코딩도 UTF-8 로 바꾼다 —
+    // 인코딩 없이 cp949 파일을 읽는 다른 도구에는 영향이 갈 수 있다(규칙집은 UTF-8 전제).
+    'export PYTHONUTF8=1',
+    'export PYTHONIOENCODING=utf-8',
     // ~/.claude/CLAUDE.md 같은 사용자 메모리의 @import가 외부 경로를 가리키면 영어 보안
     // 프롬프트가 학생에게 뜬다 — 이 앱이 띄우는 도우미는 메모리 파일을 아예 읽지 않는다.
     'export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1',
@@ -670,6 +676,11 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
     `cd /d ${batQuote(o.root)} || exit /b 1`,
     `set "PATH=${dirs.join(';')}${dirs.length ? ';' : ''}%PATH%"`,
     'set "KNUAF_DOC_APP=1"',
+    // 위 맥 스크립트와 같은 이유 — cmd 의 기본 코드페이지(949)로 파이프하면 한글이 깨진다.
+    // 대가도 같다: PYTHONUTF8 은 Python 의 기본 파일 인코딩까지 UTF-8 로 바꾼다 —
+    // 인코딩 없이 cp949 파일을 읽는 다른 도구에는 영향이 갈 수 있다(규칙집은 UTF-8 전제).
+    'set "PYTHONUTF8=1"',
+    'set "PYTHONIOENCODING=utf-8"',
     'set "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"',
     'set "PYTHONDONTWRITEBYTECODE=1"',
     `echo ${batLiteral(BANNER)}`,

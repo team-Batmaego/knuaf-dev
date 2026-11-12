@@ -48,7 +48,9 @@ function normName(s: string): string {
     .replace(/I/g, 'Ⅰ')
 }
 
-export type StepState = 'done' | 'now' | 'todo'
+// progress (v0.6.4 2단계): 파일의 `unknown`(확인 필요)도 같은 단계 모양으로 그린다.
+// 소비처(`StageMenu`)는 `=== 'done'/'now'`로만 비교하므로 `unknown`은 todo 모양(빈 원)이다.
+export type StepState = 'done' | 'now' | 'todo' | 'unknown'
 
 export interface ProgressStep {
   n: number
@@ -319,7 +321,8 @@ function isStoredProgress(v: unknown): v is StoredProgress {
     if (typeof step.n !== 'number' || !Number.isInteger(step.n) || step.n < 1 || step.n > 7) return false
     if (seen.has(step.n)) return false
     seen.add(step.n)
-    if (step.state !== 'done' && step.state !== 'now' && step.state !== 'todo') return false
+    // progress (v0.6.4 2단계): `unknown`도 저장/복원 왕복에서 살아남아야 한다.
+    if (step.state !== 'done' && step.state !== 'now' && step.state !== 'todo' && step.state !== 'unknown') return false
     if (step.note !== undefined && typeof step.note !== 'string') return false
     if (step.uncertain !== undefined && typeof step.uncertain !== 'boolean') return false
   }
