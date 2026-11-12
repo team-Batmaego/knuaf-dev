@@ -13,7 +13,16 @@
 // 실패는 **전부 404**다. 이유를 화면에 내보내지 않는다: 실패한 `<img>`는 렌더러의 문서 리스너가
 // "그림을 찾지 못했어요 · <경로>"로 바꾼다(`main.tsx`). 이유를 응답 본문에 실으면 그 문구로 새어
 // 나가 경로가 두 번 보인다.
-import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  type BigIntStats
+} from 'node:fs'
 import { resolve } from 'node:path'
 import { IMAGE_MAX_BYTES, imageMimeOfExtension } from '../../shared/paper-image'
 import { insideByFileId } from '../file-identity'
@@ -21,6 +30,15 @@ import { checkImageRequest, imageMagicMatches } from './check'
 
 /** 지금 연 논문 폴더(main만 안다) — `ipc.ts`의 `currentRoot` getter. */
 export type RootGetter = () => string | null
+
+/** 시험 전용 주입 자리. 제품(`ipc.ts`)은 넘기지 않는다. */
+export interface PaperImagesHooks {
+  /**
+   * 파일을 열기 **직전**에 불린다 — "검사와 열기 사이" 교체 반례를 시험이 주입하는 자리다
+   * (Roh R1 C-01). 여기서 경로를 바꿔도 열기·검증이 거절해야 한다.
+   */
+  beforeOpen?: (realPath: string) => void
+}
 
 export interface PaperImages {
   /** `protocol.handle('knuaf-img', …)`가 부르는 하나. 실패는 404로 닫는다. */
@@ -35,7 +53,19 @@ const HEAD_BYTES = 16
 
 const notFound = (): Response => new Response(null, { status: 404 })
 
-export function createPaperImages(getRoot: RootGetter): PaperImages {
+/**
+ * "같은 파일인가"를 판정하는 키.
+ *
+ * 파일 ID를 쓸 수 있으면(ino != 0) 볼륨+inode — 이름이 아니라 파일 자체의 신원이다.
+ * exFAT·일부 네트워크 볼륨처럼 ino를 0으로 주는 곳에서는 크기+수정시각으로 물러난다. 그때도
+ * 상위 폴더 교체는 realpath가 다른 리터럴 경로를 주므로 `insideByFileId`가 먼저 잡는다.
+ */
+const identityOf = (stats: BigIntStats): string =>
+  stats.ino === 0n
+    ? `time:${stats.dev}:${stats.size}:${stats.mtimeNs}`
+    : `id:${stats.dev}:${stats.ino}`
+
+export function createPaperImages(getRoot: RootGetter, hooks: PaperImagesHooks = {}): PaperImages {
   let inflight = 0
 
   const handle = async (request: Request): Promise<Response> => {
@@ -76,24 +106,57 @@ export function createPaperImages(getRoot: RootGetter): PaperImages {
       if (!stat.isFile()) return notFound()
       if (stat.size <= 0 || stat.size > IMAGE_MAX_BYTES) return notFound()
 
-      const mime = imageMimeOfExtension(real)
-      if (!mime) return notFound()
+      // 검사한 경로와 실제로 여는 대상이 같은 순간인지 보장할 수 없다. 열기 직전 갈라진 자리는
+      // 시험만 주입한다(제품은 훅 없음).
+      hooks.beforeOpen?.(real)
 
-      // 열고 나서 fstat으로 다시 잰다 — 연 사이에 바뀐 파일을 크기 검사 없이 읽지 않게.
+      // 마지막 이름은 따라가지 않고 연다 — 검사한 이름이 심링크로 바뀌어도 다른 파일을 열지 않는다.
+      // (Windows에는 O_NOFOLLOW가 없다: 0으로 두고 아래 신원 비교가 대신 잡는다.)
+      const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0
       let fd: number
       try {
-        fd = openSync(real, 'r')
+        fd = openSync(real, constants.O_RDONLY | noFollow)
       } catch {
         return notFound()
       }
       let bytes: Buffer
+      let mime: string
       try {
-        const opened = fstatSync(fd)
-        if (!opened.isFile() || opened.size <= 0 || opened.size > IMAGE_MAX_BYTES) return notFound()
+        const opened = fstatSync(fd, { bigint: true })
+        if (!opened.isFile() || opened.size <= 0n || opened.size > BigInt(IMAGE_MAX_BYTES)) return notFound()
+        const openedId = identityOf(opened)
+
+        // **연 뒤 재확인**(Roh R1 C-01): 같은 요청 경로를 지금 다시 풀어, 그 경로가 지금 가리키는
+        // 대상의 신원이 방금 연 fd의 신원과 같아야 한다. 파일 교체·상위 폴더 교체·되돌려 놓기가
+        // 모두 여기서 걸린다 — fd는 열린 순간의 inode에 묶여 있고, 경로는 지금 것을 가리키기 때문.
+        let againReal: string
+        try {
+          againReal = realpathSync(resolve(rootReal, check.rel))
+        } catch {
+          return notFound()
+        }
+        if (!insideByFileId(rootReal, againReal)) return notFound()
+        let again: BigIntStats
+        try {
+          again = lstatSync(againReal, { bigint: true })
+        } catch {
+          return notFound()
+        }
+        if (!again.isFile()) return notFound()
+        const againId = identityOf(again)
+        if (openedId !== againId) return notFound()
+
+        // 형식 판정·Content-Type은 **연 뒤 확인한 경로**의 확장자로 한다. 폴더 안 심링크가 다른 확장자의
+        // 그림을 가리키는 정상 경우(예: `fig1.png` → `fig1-real.jpg`)를 예전처럼 그리기 위해서다.
+        const mimeOfAgain = imageMimeOfExtension(againReal)
+        if (!mimeOfAgain) return notFound()
+        mime = mimeOfAgain
+
         const head = Buffer.alloc(HEAD_BYTES)
         const headRead = readSync(fd, head, 0, HEAD_BYTES, 0)
-        if (!imageMagicMatches(real, head.subarray(0, headRead))) return notFound()
-        bytes = Buffer.alloc(opened.size)
+        if (!imageMagicMatches(againReal, head.subarray(0, headRead))) return notFound()
+        const size = Number(opened.size)
+        bytes = Buffer.alloc(size)
         let total = 0
         while (total < bytes.length) {
           const n = readSync(fd, bytes, total, bytes.length - total, total)

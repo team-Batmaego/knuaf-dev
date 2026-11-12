@@ -12,7 +12,7 @@
  * 시험용 그림은 **여기서 만든 가짜 바이트**다(실학생 자료 금지).
  */
 import { expect, test } from '@playwright/test'
-import { linkSync, mkdirSync, mkdtempSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, renameSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { renderMarkdown } from '../src/renderer/src/markdown'
@@ -225,6 +225,47 @@ test('응답: 폴더 밖은 어떤 모양으로도 못 읽는다 — ..·절대�
   // 폴더가 없으면(열린 논문 없음) 그릴 것도 없다.
   const none = createPaperImages(() => null)
   expect((await none.handle(new Request(urlOf('figures/public/ok.png')))).status).toBe(404)
+})
+
+test('응답: 검사와 열기 사이에 바뀌어도 폴더 밖 바이트를 내보내지 않는다 — 교체 2반례', async () => {
+  // Roh R1 C-01 실행 반례. `beforeOpen`은 제품이 넘기지 않는 시험 전용 자리로, "검사를 마쳤지만 아직
+  // 열지 않은" 순간에 경로를 바꿔 끼운다. 두 반례 모두 예전 구현은 200으로 폴더 밖 바이트를 냈다.
+  const outsideBytes = Buffer.concat([PNG, Buffer.from('OUTSIDE')])
+  const outside = projectFolder({ 'ok.png': outsideBytes })
+
+  // ① 마지막 이름을 폴더 밖 심링크로 바꿔 끼운다 — 여는 순간 O_NOFOLLOW가 막는다.
+  const one = projectFolder({ 'figures/public/ok.png': PNG })
+  const oneImages = createPaperImages(() => one, {
+    beforeOpen: (real) => {
+      unlinkSync(real)
+      symlinkSync(join(outside, 'ok.png'), real)
+    }
+  })
+  const swappedFile = await oneImages.handle(new Request(urlOf('figures/public/ok.png')))
+  expect(swappedFile.status).toBe(404)
+  expect(swappedFile.headers.get('content-type')).toBeNull()
+
+  // ② 상위 폴더를 폴더 밖 심링크로 바꿔 끼운다 — 마지막 이름은 그대로라 O_NOFOLLOW로는 못 막는다.
+  //    연 뒤 다시 푼 경로가 root 조상 사슬에 없으므로 거절돼야 한다.
+  const two = projectFolder({ 'figures/public/ok.png': PNG })
+  const twoImages = createPaperImages(() => two, {
+    beforeOpen: () => {
+      renameSync(join(two, 'figures/public'), join(two, 'figures/public-old'))
+      symlinkSync(outside, join(two, 'figures/public'))
+    }
+  })
+  const swappedFolder = await twoImages.handle(new Request(urlOf('figures/public/ok.png')))
+  expect(swappedFolder.status).toBe(404)
+  expect(swappedFolder.headers.get('content-type')).toBeNull()
+
+  // ③ 훅을 넘겨도 아무것도 바꾸지 않으면 그대로 200 — 훅 자체가 제품 동작을 바꾸지 않는다.
+  const three = projectFolder({ 'figures/public/ok.png': PNG })
+  let hooked = 0
+  const threeImages = createPaperImages(() => three, { beforeOpen: () => void hooked++ })
+  const ok = await threeImages.handle(new Request(urlOf('figures/public/ok.png')))
+  expect(hooked).toBe(1)
+  expect(ok.status).toBe(200)
+  expect(Buffer.from(await ok.arrayBuffer())).toEqual(PNG)
 })
 
 test('응답: 폴더가 바뀌면 옛 폴더 그림은 거절', async () => {
