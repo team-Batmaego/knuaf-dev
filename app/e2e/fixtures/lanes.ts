@@ -87,10 +87,16 @@ export function firstCard(cardId: string, state: Record<string, unknown>, create
   }
 }
 
-/** §3-3 설정 확인 창 — 켜기. 범위는 [계속]만이라 `settings-enable` 이다. */
-export function settingsCard(state: Record<string, unknown>, createdAt = at(1)): Record<string, unknown> {
+/**
+ * §3-3 설정 확인 창 — 켜기. 범위는 [계속]만이라 `settings-enable` 이다.
+ *
+ * `root` 는 **실제 폴더**여야 한다 — main 은 `cards.ts:151` 에서 `root: canonical(root)` 를 넣고,
+ * 화면은 응답 카드의 폴더가 지금 폴더와 같은지 대조한다(`laneCardGate`, 검토 C2-C02ⓑ).
+ * 빈 문자열로 두면 진짜 카드처럼 보이지 않아 조용히 버려진다.
+ */
+export function settingsCard(state: Record<string, unknown>, createdAt = at(1), root = ''): Record<string, unknown> {
   return {
-    cardId: 'card-settings-1', root: '', variant: 'settings-enable', baseVersion: 4, createdAt,
+    cardId: 'card-settings-1', root, variant: 'settings-enable', baseVersion: 4, createdAt,
     reviewDue: false, quote: null, rows: CARD_ROWS,
     fees: [{ company: 'codex', accountLabel: 'a…@gmail.com', consented: false }],
     fastDrain: false, recommendedDesign: { company: 'claude', model: 'opus', effort: 'high' }, state

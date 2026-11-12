@@ -10,6 +10,16 @@ import { Confirm } from '../components/Confirm'
 import { LanePlanCard } from '../components/LanePlanCard'
 import { Sheet } from '../components/Sheet'
 import { Popover, PopHead, PopRow } from '../components/Popover'
+import { decideIfCurrent, recheckIfCurrent, requestCard } from '../laneCardGate'
+
+/**
+ * 늦게 온 카드 응답이 지금 화면에 아직 유효한가 — 판정은 `laneCardGate` 에 두고, 이 파일은 그 값대로만
+ * 움직인다(검토 C2-C02ⓑ). 설정 창은 폴더가 바뀌어도 계속 붙어 있으므로(`SettingsModal`) 옛 폴더의
+ * 응답이 지금 폴더 화면에 닿을 수 있다. 시험은 화면 모듈에서 그대로 가져다 쓴다.
+ */
+export {
+  cardStillApplies, cardUsable, decideIfCurrent, recheckIfCurrent, requestCard
+} from '../laneCardGate'
 
 /**
  * 설정 "작업 분담"(설계 §5) — 표는 main 이 밀어 준 `LanesSettingsView` 를 그대로 그리고,
@@ -52,6 +62,18 @@ export function LanesSettings({ root }: { root: string | null }) {
     void store.callValue(({ lanes }) => lanes.consents()).then((r) => { if ('value' in r) setFetched(r.value) })
   }, [root])
 
+  /**
+   * 폴더를 옮기면 그 폴더의 카드는 뜻이 없다 — 설정 창은 대화 화면 없이도 열리고 폴더가 바뀌어도
+   * 계속 붙어 있으므로(`SettingsModal`), 옛 카드를 들고 있으면 B 폴더 화면에서 A 폴더 카드를 승인한다
+   * (검토 C2-C02ⓑ).
+   */
+  useEffect(() => {
+    setCard(null)
+    setCardOpen(false)
+    setCardInvalid(null)
+    setCardError(false)
+  }, [root])
+
   const consents = view?.consents.length ? view.consents : fetched
   const actions = laneActions()
 
@@ -72,15 +94,18 @@ export function LanesSettings({ root }: { root: string | null }) {
     trigger.current = button
     setCardError(false)
     const target = root
-    void actions.settingsCard(target, kind).then((r) => {
-      if ('error' in r) {
-        setCardError(true)
-        return
-      }
-      setCardInvalid(null)
-      setCard(r.value)
-      setCardOpen(true)
-    })
+    void requestCard(target, (r) => actions.settingsCard(r, kind), () => useLanes.getState().root)
+      .then((next) => {
+        if (next.action === 'drop') return
+        if (next.action === 'error') {
+          setCardError(true)
+          return
+        }
+        setCardError(false)
+        setCardInvalid(null)
+        setCard(next.card)
+        setCardOpen(true)
+      })
   }
 
   const closeCard = () => {
@@ -102,29 +127,33 @@ export function LanesSettings({ root }: { root: string | null }) {
 
   /** 확인 창의 결정 — 응답 카드로 접힘·무효를 그리고, 설정 묶음은 main 이 밀어 준다. */
   const decideCard = (cardId: string, baseVersion: number, action: CardAction) => {
-    if (!root) return
-    const target = root
-    void laneActions().decideCard(target, cardId, baseVersion, action).then((decision) => {
-      if (!decision) {
-        setCardError(true)
-        return
-      }
-      setCardInvalid(decision.outcome === 'invalid' ? decision.reason : null)
-      setCard(decision.card)
-    })
+    const send = laneActions().decideCard
+    void decideIfCurrent(card, root, () => useLanes.getState().root, cardId, baseVersion, action, send)
+      .then((next) => {
+        if (next.action === 'drop') return
+        if (next.action === 'error') {
+          setCardError(true)
+          return
+        }
+        setCardError(false)
+        setCardInvalid(next.decision.outcome === 'invalid' ? next.decision.reason : null)
+        setCard(next.decision.card)
+      })
   }
 
   const recheckCard = (cardId: string) => {
-    if (!root) return
-    const target = root
-    void laneActions().cardStatus(target, cardId).then((decision) => {
-      if (!decision) {
-        setCardError(true)
-        return
-      }
-      setCardInvalid(decision.outcome === 'invalid' ? decision.reason : null)
-      setCard(decision.card)
-    })
+    const send = laneActions().cardStatus
+    void recheckIfCurrent(card, root, () => useLanes.getState().root, cardId, send)
+      .then((next) => {
+        if (next.action === 'drop') return
+        if (next.action === 'error') {
+          setCardError(true)
+          return
+        }
+        setCardError(false)
+        setCardInvalid(next.decision.outcome === 'invalid' ? next.decision.reason : null)
+        setCard(next.decision.card)
+      })
   }
 
   return (

@@ -733,8 +733,12 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .chat-event.warn svg { color: var(--attn); }
 /* 기록 줄 [자세히] — `.zline button.lk` 규칙 밖이라 크기·줄바꿈을 따로 준다. */
 .chat-event button.lk { font-size: 12.5px; white-space: nowrap; flex: none; }
-/* 펼친 원문은 줄 전체 폭을 쓴다(`.zline-raw` 는 `display:block` 이라 flex 안에서도 다음 줄). */
-.chat-event .zline-raw { flex-basis: 100%; }
+/* 펼친 본문은 **줄 아래 독립 블록**이다 — `.chat-event` 안에 넣으면 flex 줄의 남은 폭(오른쪽 좁은
+   상자)으로 밀린다(검토 C06). 바깥 상자는 세로로만 쌓고, 본문은 줄 전체 폭을 쓴다. */
+.chat-event-wrap { display: block; }
+.chat-event-wrap .zline-raw { width: 100%; max-width: 100%; overflow-wrap: anywhere; }
+/* 제목(주문·넘긴 글)은 본문과 같은 회청색 계열에서 굵기로만 구별한다 — 새 색을 만들지 않는다. */
+.chat-event-wrap .zline-raw b { font-weight: 600; color: var(--ink-2); }
 
 /* ---- §4-2 한도로 멈춘 대화(읽기 전용) ---- */
 .stopped-banner .grow small { display: block; }

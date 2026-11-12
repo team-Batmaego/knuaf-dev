@@ -15,6 +15,9 @@ import type { CardAction, CardDecision, LaneCard, LaneLine } from '../src/shared
 import { LANE_ACTION, LANE_CARD, LANE_EVENT, LANE_NAME, LANES_SETTINGS } from '../src/renderer/src/copy-lanes'
 import { CHAT } from '../src/renderer/src/copy'
 import { entryText, eventView } from '../src/renderer/src/laneLines'
+import {
+  cardStillApplies, cardUsable, decideIfCurrent, recheckIfCurrent, requestCard, resolveCardResponse
+} from '../src/renderer/src/laneCardGate'
 import type { LaneEvent } from '../src/shared/lanes-ipc'
 
 const SRC = join(__dirname, '../src/renderer/src')
@@ -420,52 +423,113 @@ function renderInjected(file: string, name: string, props: Record<string, unknow
   return renderToStaticMarkup(createElement(Component, props) as never)
 }
 
-/** 전달문이 있는 delivered 사건 — `task` 는 55자, 줄에서는 40자로 접힌다(설계 §2-2). */
-const LONG_TASK = '자료 찾기 담당에게 넘긴 주문 요약이 마흔 자를 넘으면 줄임표로 접히고 전체는 자세히에서만 보인다'
+/**
+ * 전달문이 있는 delivered 사건(설계 §2-2). **주문과 전달문은 다른 문장이다** — 같은 문자열을 쓰면
+ * "읽기 실패 뒤에도 주문이 살아남았는가"를 잴 수 없다(검토 C2-C06).
+ */
+const ORDER = '감초 도매·소매 가격을 3개 지역에서 조사하고 출처 링크를 함께 적어 주세요 — 표로 정리'
+const DELIVERY = '조사 결과\n- 도매 1kg 8,900원 · 소매 12,400원\n- 출처: 한국약초유통협회 2026년 3분기'
 const DELIVERED: LaneEvent = {
   id: 'ev-1', at: '2026-11-10T11:30:00+09:00', kind: 'delivered', jobId: 'job-1', lane: 'research',
-  by: { company: 'claude', model: 'claude-sonnet-4', effort: 'null' as never }, continued: false, task: LONG_TASK
+  by: { company: 'claude', model: 'claude-sonnet-4', effort: 'null' as never }, continued: false, task: ORDER
 }
 
-test('C06: 기록 줄은 주문 번호를 보존하고 [자세히]로 전달문 원문을 펼친다', () => {
+test('C06: 기록 줄은 주문 번호와 주문 전문을 보존하고 [자세히]로 둘을 갈라 편다', () => {
   const view = eventView(DELIVERED)
   // 예전에는 여기서 jobId 가 사라져 화면이 전달문을 읽을 길이 없었다.
   expect(view?.jobId).toBe('job-1')
-  // 줄 자체는 여전히 접힌 요약이다 — 원문은 [자세히]로만 연다.
-  expect(view!.text).not.toContain(LONG_TASK)
+  // 원 주문은 접히지 않은 채 뷰에 남는다 — 줄의 `text` 만 40자 요약이다.
+  expect(view?.task).toBe(ORDER)
+  expect(view!.text).not.toContain(ORDER)
+  expect(view!.text).toContain(`${ORDER.replace(/\s+/g, ' ').trim().slice(0, 39)}…`)
 
   const closed = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine',
-    { view, root: '/A', onDeliveryText: async () => ({ text: LONG_TASK }) }, [false, { kind: 'idle' }])
+    { view, root: '/A', onDeliveryText: async () => ({ text: DELIVERY }) }, [false, { kind: 'idle' }])
   expect(closed).toContain(LANE_ACTION.details)
   expect(closed).toContain('aria-expanded="false"')
   expect(closed).not.toContain('zline-raw')
+  // 접힌 줄에는 주문 전문도 전달문도 없다.
+  expect(closed).not.toContain(ORDER)
+  expect(closed).not.toContain(DELIVERY)
 
   const opened = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine',
-    { view, root: '/A', onDeliveryText: async () => ({ text: LONG_TASK }) }, [true, { kind: 'text', text: LONG_TASK }])
-  // 줄은 40자에서 접힌 그대로 두고, 펼친 칸에만 주문 원문 전체가 들어간다.
-  expect(opened).toContain(`<code class="zline-raw">${LONG_TASK}</code>`)
+    { view, root: '/A', onDeliveryText: async () => ({ text: DELIVERY }) }, [true, { kind: 'text', text: DELIVERY }])
+  // 제목 아래에 주문 전문, 그 아래에 전달문 — 두 글을 갈라 읽게 한다.
+  expect(opened).toContain(`<b>${LANE_EVENT.detailTitle.task}\n</b>${ORDER}`)
+  expect(opened).toContain(`\n<b>${LANE_EVENT.detailTitle.delivery}\n</b>${DELIVERY}`)
+  // 주문이 전달문과 같은 상자에 뭉개지지 않는다 — 순서가 주문 먼저다.
+  expect(opened.indexOf(ORDER)).toBeLessThan(opened.indexOf(DELIVERY))
 })
 
-test('C06: [자세히]는 전달문이 없거나 읽지 못했을 때도 열리고, 읽을 길이 없으면 붙지 않는다', () => {
+test('C06: 펼친 본문은 줄 **아래** 독립 블록이다 — flex 줄 안에 갇히지 않는다', () => {
+  const view = eventView(DELIVERED)
+  const opened = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine',
+    { view, root: '/A', onDeliveryText: async () => ({ text: DELIVERY }) }, [true, { kind: 'text', text: DELIVERY }])
+  /*
+   * 예전 모양은 `<div class="chat-event">… <code class="zline-raw">` 로 본문이 flex 줄의 마지막
+   * 자식이었다 — 남은 폭(오른쪽 좁은 상자)으로 밀려 긴 한국어 줄이 잘렸다(검토 C2-C06 ⑤).
+   * 이제 본문은 줄을 닫은 **뒤** 형제다.
+   */
+  expect(opened).toContain('</div><code class="zline-raw">')
+  expect(opened.indexOf('chat-event-wrap')).toBeLessThan(opened.indexOf('class="chat-event"'))
+  // 줄(`.chat-event`)은 본문을 품지 않는다.
+  const row = opened.slice(opened.indexOf('class="chat-event"'), opened.indexOf('</div><code'))
+  expect(row).not.toContain('zline-raw')
+})
+
+test('C06: 전달문이 없거나 읽지 못해도 주문 전문은 그대로 남는다', () => {
   const view = eventView(DELIVERED)
   const missing = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine',
     { view, root: '/A', onDeliveryText: async () => ({ text: null }) }, [true, { kind: 'text', text: null }])
   expect(missing).toContain(LANE_EVENT.deliveryTextMissing)
+  expect(missing).toContain(ORDER)
+  expect(missing).toContain(`<b>${LANE_EVENT.detailTitle.task}\n</b>`)
 
   const failed = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine',
     { view, root: '/A', onDeliveryText: async () => null }, [true, { kind: 'failed' }])
   expect(failed).toContain(LANE_EVENT.deliveryTextFailed)
+  // 읽기 실패가 주문을 지우지 않는다 — 이것이 C06 의 핵심 반례다.
+  expect(failed).toContain(ORDER)
+  expect(failed).toContain(`<b>${LANE_EVENT.detailTitle.delivery}\n</b>${LANE_EVENT.deliveryTextFailed}`)
 
-  // 읽을 길이 없으면(주문 번호·폴더·통로 중 하나라도 없으면) 단추 자체가 없다 — 누를 수 없는 단추는 두지 않는다.
+  // 아직 읽지 않은(펼침 직후) 순간에도 주문은 보이고 전달문 자리는 비어 있다.
+  const idle = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine',
+    { view, root: '/A', onDeliveryText: async () => ({ text: DELIVERY }) }, [true, { kind: 'idle' }])
+  expect(idle).toContain(ORDER)
+  expect(idle).not.toContain(LANE_EVENT.detailTitle.delivery)
+})
+
+test('C06: 주문이 있으면 읽기 통로가 없어도 [자세히]가 열리고, 주문도 없으면 단추를 두지 않는다', () => {
+  const view = eventView(DELIVERED)
+  // 폴더·통로가 없어도 주문은 볼 수 있어야 한다 — 예전에는 통로가 없으면 단추 자체가 사라졌다.
   for (const props of [
     { view: { ...view!, jobId: undefined }, root: '/A', onDeliveryText: async () => ({ text: 'x' }) },
     { view, onDeliveryText: async () => ({ text: 'x' }) },
     { view, root: '/A' }
   ]) {
-    const html = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine', props, [false, { kind: 'idle' }])
-    expect(html).not.toContain(LANE_ACTION.details)
-    expect(html).not.toContain('aria-expanded')
+    const html = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine', props, [true, { kind: 'idle' }])
+    expect(html).toContain(LANE_ACTION.details)
+    expect(html).toContain(ORDER)
+    // 읽을 길이 없으므로 전달문 자리는 그리지 않는다.
+    expect(html).not.toContain(LANE_EVENT.detailTitle.delivery)
   }
+
+  // 주문도 읽기 통로도 없는 줄(검토 안내·자기 호출 등)에는 단추를 두지 않는다 — 누를 수 없는 단추는 없다.
+  const bare = eventView({ id: 'ev-2', at: DELIVERED.at, kind: 'review-skipped', reason: 'lanes-off' })
+  const html = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine', { view: bare }, [false, { kind: 'idle' }])
+  expect(html).not.toContain(LANE_ACTION.details)
+  expect(html).not.toContain('aria-expanded')
+})
+
+test('C06: 실행되지 못한 줄도 주문 전문을 남긴다', () => {
+  const notRun: LaneEvent = {
+    id: 'ev-3', at: DELIVERED.at, kind: 'not-run', jobId: 'job-3', lane: 'writing', reason: 'limit', task: ORDER
+  }
+  const view = eventView(notRun)
+  expect(view?.task).toBe(ORDER)
+  const html = renderInjected('components/LaneEventLine.tsx', 'LaneEventLine', { view, root: '/A' }, [true, { kind: 'idle' }])
+  expect(html).toContain(ORDER)
+  expect(html).toContain(LANE_EVENT.notRun(LANE_NAME.writing, 'limit'))
 })
 
 test('C06: 작업 분담 줄의 [자세히]는 상태 원문과 전달문을 한 단추로 함께 편다', () => {
@@ -524,4 +588,110 @@ test('C01: 설정 화면의 확인 창은 카드를 시트 안에 그린다', ()
   expect(html).toContain('data-screen="lane-settings-card"')
   expect(html).toContain(LANE_CARD.title['settings-enable'])
   expect(html).toContain(LANE_CARD.act.settingsContinue)
+})
+
+/*
+ * 검토 C2-C02ⓑ — 설정 창은 대화 화면 없이도 열리고 폴더가 바뀌어도 붙어 있다(`SettingsModal`).
+ * "요청할 때의 폴더"만 붙잡으면, 기다리는 사이 폴더를 옮겼을 때 옛 폴더의 카드가 새 폴더 화면에 뜨고
+ * 그 카드를 승인하면 엉뚱한 폴더의 배치가 바뀐다. 판정은 `laneCardGate` 한 곳에 모았다.
+ */
+
+test('C02ⓑ: 늦게 온 카드 응답은 지금 폴더·카드 폴더가 모두 요청 폴더일 때만 산다', () => {
+  // 폴더가 그대로 — 산다.
+  expect(cardStillApplies('/A', '/A', '/A')).toBe(true)
+  // 응답이 닿기 전에 폴더를 옮겼다 — 옛 폴더의 카드는 죽는다.
+  expect(cardStillApplies('/A', '/A', '/B')).toBe(false)
+  // 폴더가 비었다(창 닫힘·폴더 없음).
+  expect(cardStillApplies('/A', '/A', null)).toBe(false)
+  // 지금 폴더는 맞는데 카드가 다른 폴더를 말한다 — 카드가 어긋났으므로 죽는다.
+  expect(cardStillApplies('/A', '/B', '/A')).toBe(false)
+})
+
+test('C02ⓑ: 응답 처리 — 옛 폴더의 성공·실패는 모두 조용히 버리고, 지금 폴더에서만 그린다', () => {
+  const card = settingsCard()
+  expect(resolveCardResponse('/A', '/A', { value: card })).toEqual({ action: 'show', card })
+  // 기다리는 사이 폴더를 옮겼다 — 성공도 실패도 새 폴더 화면에 닿지 않는다.
+  expect(resolveCardResponse('/A', '/B', { value: card })).toEqual({ action: 'drop' })
+  expect(resolveCardResponse('/A', '/B', { error: 'internal' })).toEqual({ action: 'drop' })
+  // 지금 폴더가 맞으면 오류는 단추 자리 실패 표시로 간다.
+  expect(resolveCardResponse('/A', '/A', { error: 'internal' })).toEqual({ action: 'error' })
+  // 지금 폴더가 맞아도 카드가 다른 폴더의 것이면 버린다.
+  expect(resolveCardResponse('/A', '/A', { value: { ...card, root: '/B' } })).toEqual({ action: 'drop' })
+  // 폴더가 비면 버린다.
+  expect(resolveCardResponse('/A', null, { value: card })).toEqual({ action: 'drop' })
+})
+
+test('C02ⓑ: 승인·재확인 문지기 — 카드가 없거나 폴더가 비면 보내지 않는다', () => {
+  const card = settingsCard()
+  expect(cardUsable(card, '/A', '/A')).toBe(true)
+  expect(cardUsable(null, '/A', '/A')).toBe(false)
+  expect(cardUsable(card, null, '/A')).toBe(false)
+  expect(cardUsable(card, '/A', '/B')).toBe(false)
+  // 보이는 카드가 옛 폴더의 카드다(지금 폴더는 /B).
+  expect(cardUsable(card, '/B', '/B')).toBe(false)
+})
+
+test('C02ⓑ: 요청은 **응답이 닿은 뒤** 폴더를 다시 읽는다 — 요청 전 폴더를 박으면 반례가 산다', async () => {
+  let live: string | null = '/A'
+  const gate = Promise.withResolvers<void>()
+  const pending = requestCard('/A', async () => {
+    await gate.promise
+    return { value: settingsCard() }
+  }, () => live)
+  // 기다리는 사이 사용자가 폴더를 옮겼다.
+  live = '/B'
+  gate.resolve()
+  expect(await pending).toEqual({ action: 'drop' })
+
+  // 폴더가 그대로면 같은 요청이 카드를 연다 — 위 결과가 "항상 버림"이 아님을 같이 잰다.
+  live = '/A'
+  expect(await requestCard('/A', async () => ({ value: settingsCard() }), () => live))
+    .toEqual({ action: 'show', card: settingsCard() })
+})
+
+test('C02ⓑ: 승인은 보이는 카드가 지금 폴더의 카드일 때만 나가고, 늦은 응답도 버린다', async () => {
+  const sent: string[] = []
+  const applied: CardDecision = {
+    outcome: 'applied', reason: null, card: settingsCard({ kind: 'applied', scope: 'continue' }), boundTurn: null
+  }
+  const send = async (root: string): Promise<CardDecision> => {
+    sent.push(root)
+    return applied
+  }
+  // 옛 폴더 카드 — 보내지 않는다.
+  expect(await decideIfCurrent(settingsCard(), '/B', () => '/B', 'card-1', 4, 'continue', send)).toEqual({ action: 'drop' })
+  expect(sent).toEqual([])
+
+  // 지금 폴더 카드 — 보내고 결과를 그린다.
+  expect(await decideIfCurrent(settingsCard(), '/A', () => '/A', 'card-1', 4, 'continue', send))
+    .toEqual({ action: 'done', decision: applied })
+  expect(sent).toEqual(['/A'])
+
+  // 보낸 뒤 답이 닿기 전에 폴더를 옮겼다 — 그 답도 버린다(옛 접힘을 새 화면에 그리지 않는다).
+  let live = '/A'
+  expect(await decideIfCurrent(settingsCard(), '/A', () => live, 'card-1', 4, 'continue', async () => {
+    live = '/B'
+    return applied
+  })).toEqual({ action: 'drop' })
+
+  // 통로가 실패하면(`null`) 단추 자리 실패다 — 조용히 넘기지 않는다.
+  expect(await decideIfCurrent(settingsCard(), '/A', () => '/A', 'card-1', 4, 'continue', async () => null))
+    .toEqual({ action: 'error' })
+})
+
+test('C02ⓑ: 재확인도 같은 문지기를 쓴다', async () => {
+  const sent: string[] = []
+  const invalid: CardDecision = {
+    outcome: 'invalid', reason: 'base-version', card: settingsCard({ kind: 'invalid' }), boundTurn: null
+  }
+  const send = async (root: string): Promise<CardDecision> => {
+    sent.push(root)
+    return invalid
+  }
+  expect(await recheckIfCurrent(null, '/A', () => '/A', 'card-1', send)).toEqual({ action: 'drop' })
+  expect(await recheckIfCurrent(settingsCard(), '/A', () => '/B', 'card-1', send)).toEqual({ action: 'drop' })
+  expect(sent).toEqual([])
+  expect(await recheckIfCurrent(settingsCard(), '/A', () => '/A', 'card-1', send))
+    .toEqual({ action: 'done', decision: invalid })
+  expect(sent).toEqual(['/A'])
 })

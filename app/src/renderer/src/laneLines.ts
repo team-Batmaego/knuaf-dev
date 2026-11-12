@@ -331,6 +331,11 @@ export interface LaneEventView {
   archiveId?: string
   /** 전달문 원문을 읽을 주문 — 없으면 [자세히]를 붙이지 않는다(검토 C06). */
   jobId?: string
+  /**
+   * 원 주문 전문 — 줄의 `text` 는 40자로 접힌 요약이라 여기서 원문을 보존한다.
+   * [자세히]는 이 값과 전달문을 제목으로 갈라 함께 편다(검토 C06).
+   */
+  task?: string
 }
 
 export function eventView(event: LaneEvent): LaneEventView | null {
@@ -342,12 +347,20 @@ export function eventView(event: LaneEvent): LaneEventView | null {
         at,
         warn: false,
         jobId: event.jobId,
+        task: event.task,
         text: event.continued
           ? LANE_EVENT.continued(LANE_NAME[event.lane], modelLabel(event.by))
           : LANE_EVENT.delivered(LANE_NAME[event.lane], modelLabel(event.by), event.task)
       }
     case 'not-run':
-      return { id: event.id, at, warn: false, jobId: event.jobId, text: LANE_EVENT.notRun(LANE_NAME[event.lane], event.reason) }
+      return {
+        id: event.id,
+        at,
+        warn: false,
+        jobId: event.jobId,
+        task: event.task,
+        text: LANE_EVENT.notRun(LANE_NAME[event.lane], event.reason)
+      }
     case 'review-skipped':
       return { id: event.id, at, warn: true, text: LANE_EVENT.reviewSkipped(event.reason) }
     case 'main-takeover':

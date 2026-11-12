@@ -202,15 +202,46 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
      * 호출 기록으로 잠그고, 편 원문을 사진으로 남긴다.
      */
     const delivered = events.nth(0)
+    /*
+     * 본문은 줄(`.chat-event`) **밖** 형제다(검토 C2-C06 ⓒ) — 줄에서 `.zline-raw` 를 찾으면
+     * 영원히 못 찾는다. 감싸는 `.chat-event-wrap` 에서 찾는다.
+     */
+    const deliveredWrap = delivered.locator('xpath=..')
     await delivered.getByRole('button', { name: '자세히' }).click()
-    await expect(delivered.locator('.zline-raw')).toContainText('도매 1kg 8,900원 · 소매 12,400원')
-    // 원문에는 40자로 접힌 주문 전문이 아니라 넘긴 글이 그대로 온다.
-    await delivered.locator('.zline-raw').scrollIntoViewIfNeeded()
+    await expect(deliveredWrap.locator('.zline-raw')).toContainText('도매 1kg 8,900원 · 소매 12,400원')
+    /*
+     * 검토 C2-C06 — 펼침은 **주문 전문과 넘긴 글을 갈라** 보인다. 예전 화면은 넘긴 글만 펼쳤고,
+     * 줄의 40자 요약이 주문의 전부였다. 주문(`감초 도매·소매 가격 조사`)은 전달문과 다른 글자다.
+     */
+    const raw = deliveredWrap.locator('.zline-raw')
+    await expect(raw).toContainText('감초 도매·소매 가격 조사')
+    await expect(raw.locator('b')).toHaveText(['주문', '넘긴 글'])
+    expect((await raw.innerText()).indexOf('감초 도매·소매 가격 조사'), '주문이 넘긴 글보다 뒤에 온다')
+      .toBeLessThan((await raw.innerText()).indexOf('도매 1kg 8,900원'))
+    /*
+     * 측정 단언 — 펼침은 줄 **아래** 독립 블록이고 대화 흐름 폭을 쓴다. 예전에는 본문이 flex 줄의
+     * 마지막 자식이라 오른쪽 좁은 상자로 밀려 긴 한국어 줄이 잘렸다(검토 C2-C06 ⑤).
+     */
+    const layout = await deliveredWrap.evaluate((el) => {
+      const row = el.querySelector('.chat-event') as HTMLElement
+      const body = el.querySelector('.zline-raw') as HTMLElement
+      const thread = el.closest('.chat-thread') as HTMLElement
+      const rb = row.getBoundingClientRect()
+      const bb = body.getBoundingClientRect()
+      const tb = thread.getBoundingClientRect()
+      return {
+        below: bb.top >= rb.bottom - 1, rowWidth: rb.width, bodyWidth: bb.width, threadWidth: tb.width
+      }
+    })
+    expect(layout.below, '펼침이 줄 아래가 아니라 옆에 붙었다').toBe(true)
+    expect(layout.bodyWidth, '펼침이 줄 폭만큼만 넓다(흐름 폭을 못 쓴다)').toBeGreaterThan(layout.rowWidth - 1)
+    expect(layout.bodyWidth).toBeLessThanOrEqual(layout.threadWidth + 1)
+    await raw.scrollIntoViewIfNeeded()
     await shoot(page, 'lane-events-delivery')
     expect((await laneCalls(page)).filter(([name]) => name === 'deliveryText')).toEqual([['deliveryText', root, 'job-1']])
     // 사진은 접힌 기본 모양으로 남긴다 — 펼침은 위 사진이 이미 증거다.
     await delivered.getByRole('button', { name: '자세히' }).click()
-    await expect(delivered.locator('.zline-raw')).toHaveCount(0)
+    await expect(deliveredWrap.locator('.zline-raw')).toHaveCount(0)
     await places()
     await shoot(page, 'lane-events')
 
@@ -682,7 +713,7 @@ test('설정 카드 — 실제 클릭 · 응답으로 접힘 · 초점 복귀', 
         consents: []
       }
     })
-    await installLanesSeam(page, { card: settingsCard({ kind: 'open' }), snapshot: snap })
+    await installLanesSeam(page, { card: settingsCard({ kind: 'open' }, at(1), root), snapshot: snap })
     await inject(page, snap)
 
     await page.getByRole('button', { name: '설정' }).first().click()
@@ -691,6 +722,17 @@ test('설정 카드 — 실제 클릭 · 응답으로 접힘 · 초점 복귀', 
     // 꺼짐 상태여야 [나눠 맡기기 켜기] 하나만 그린다(켜짐이면 표가 먼저 온다).
     const turnOn = page.getByRole('button', { name: '나눠 맡기기 켜기' })
     await expect(turnOn).toBeVisible({ timeout: 15_000 })
+    /*
+     * 형님이 정한 주 버튼 색(2026-11-12) — 회청색 바탕 + 남색 글자. 토큰이 바뀌면 사진만으로는
+     * 알아채기 어려우므로 계산된 색을 직접 잰다(`tokens.css --btn-bg`/`--btn-ink`).
+     */
+    const tone = await turnOn.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return { background: s.backgroundColor, color: s.color, border: s.borderTopColor }
+    })
+    expect(tone, '주 버튼이 결정된 회청색 바탕·남색 글자가 아니다').toEqual({
+      background: 'rgb(211, 223, 243)', color: 'rgb(30, 58, 110)', border: 'rgb(184, 202, 230)'
+    })
     await turnOn.click()
     await page.waitForSelector('dialog[data-screen="lane-settings-card"][open]', { timeout: 15_000 })
 
