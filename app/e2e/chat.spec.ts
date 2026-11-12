@@ -139,6 +139,70 @@ test('subscriptionEnv disables CLAUDE.md memory loading', () => {
 })
 
 /**
+ * 도우미가 자기 셸 도구로 규칙집 스크립트(gg_doi·gg_toc_check·gg_draft_split)를 파이프로
+ * 돌리면 이 환경을 물려받는다. 윈도우 기본(cp949)으로 나가면 받는 쪽(UTF-8)에서 한글이
+ * 깨지므로 앱이 두 값을 세운다 — 학생 PC 에 이미 다른 값이 있어도 덮는다(앱 동작이 PC 설정에
+ * 좌우되지 않게).
+ */
+test('subscriptionEnv 는 Python UTF-8 을 강제한다 — 사용자 값도 덮는다', () => {
+  const saved = { PYTHONUTF8: process.env.PYTHONUTF8, PYTHONIOENCODING: process.env.PYTHONIOENCODING }
+  try {
+    process.env.PYTHONUTF8 = '0'
+    process.env.PYTHONIOENCODING = 'ascii'
+    const env = subscriptionEnv()
+    expect(env.PYTHONUTF8).toBe('1')
+    expect(env.PYTHONIOENCODING).toBe('utf-8')
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+})
+
+/**
+ * 실제 자식 파이썬이 그 환경에서 UTF-8 로 말하는지 — 조립 단언만으로는 `-X utf8=0` 같은
+ * 반대 설정이 이기는 경우를 못 잡는다.
+ *
+ * 기준선은 **로케일이 아니라 반대값**으로 만든다: `LANG=C`·`LC_ALL=C` 는 Python 3.7+ 가 스스로
+ * UTF-8 모드를 켜는 조건(PEP 538·540)이라, 그 상태의 `utf8_mode=1` 은 우리 변수 덕인지 알 수
+ * 없다(실측: 로케일 변수를 지우기만 해도 맥 3.13 은 `1 utf-8`). 부모에 `0`/`ascii` 를 넣어
+ * 두면 `subscriptionEnv()` 가 덮지 못할 때 자식이 그대로 `0 ascii` 를 보고한다.
+ * 두 값 모두 본다: `PYTHONUTF8` → `sys.flags.utf8_mode`, `PYTHONIOENCODING` → `sys.stdout.encoding`.
+ */
+test('subscriptionEnv 를 물려받은 Python 자식은 utf8_mode·stdout 인코딩을 utf-8 로 보고한다', async () => {
+  const local = resolve(appRoot, '../.venv-dev/bin/python')
+  const python = process.env.KNUAF_PYTHON ?? (existsSync(local) ? local : process.platform === 'win32' ? 'python' : 'python3')
+  const saved = { PYTHONUTF8: process.env.PYTHONUTF8, PYTHONIOENCODING: process.env.PYTHONIOENCODING }
+  let env: NodeJS.ProcessEnv
+  try {
+    process.env.PYTHONUTF8 = '0'
+    process.env.PYTHONIOENCODING = 'ascii'
+    env = subscriptionEnv()
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+  // 로케일이 UTF-8 모드를 대신 켜지 않게 지운다 — 이유는 위 주석.
+  delete env.LANG
+  delete env.LC_ALL
+  delete env.PYTHONCOERCECLOCALE
+  // 종료(`exit`)가 아니라 `close` 를 기다린다 — 파이프가 다 비워진 뒤에 읽어야 출력이 잘리지 않는다.
+  const child = spawn(python, ['-c', 'import sys; print(sys.flags.utf8_mode, sys.stdout.encoding)'], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let out = ''
+  let err = ''
+  child.stdout.setEncoding('utf-8').on('data', (c) => { out += c })
+  child.stderr.setEncoding('utf-8').on('data', (c) => { err += c })
+  const closed = Promise.withResolvers<number | null>()
+  child.on('error', closed.reject)
+  child.on('close', (code) => closed.resolve(code))
+  expect(await closed.promise, err || out).toBe(0)
+  expect(out.trim(), err).toBe('1 utf-8')
+})
+
+/**
  * 형님 승인 W1 연결 기제 ①. 윈도우에서 npm 이 깐 codex·claude 는 `.cmd` 이고, Node 는
  * 셸 없이 그것을 띄우지 못한다(EINVAL, Node ≥20.12 — CVE-2024-27980 처방). `.cmd`·`.bat` 만
  * `cmd.exe /d /s /c` 로 감싼다 — 그 밖은 손대지 않는다.
