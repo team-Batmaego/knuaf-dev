@@ -598,7 +598,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     stateDir: join(app.getPath('userData'), 'handoff'),
     // 앱이 만드는 묶음의 상한 — 넘치면 정해진 순서로 줄이고 `trimmed` 로 알린다.
     maxBytes: 24_000,
-    account: company => probeAccount(company),
+    // §0-5 4번 — 누르기 **전** 제안 판정은 실행당 회사당 1회만 읽는다(§5). `chat` 은 이 줄보다
+    // 뒤에 서므로 콜백 안에서 늦게 부른다(호출 시점엔 이미 서 있다).
+    account: company => chat.laneAccount(company, { once: true }),
     // §1-4 ① — `usage:'unknown'` 이어도 넘겨 볼 대상. 앱의 담당 연결 중 첫 턴 안 확인을
     // 실제로 하는 것은 Claude 쪽뿐이다(`claude.ts` `ClaudeRelayConnection.gateInTurn`) —
     // Codex 는 그 선언이 없어 `unknown` 이면 단추를 띄우지 않는다(안전 기본값).
@@ -661,7 +663,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       : new CodexRelayConnection(relayOptions(request.company, request.cwd), request),
     // 앱 값과 엔진 `availability()` 의 지문이 같아야 주문이 열린다 — 계정은 엔진과 같은
     // 생산자(`lanes/accounts.ts`)로 읽고, 동의만 앱 저장소 값으로 덮는다(service 가 한다).
-    jobAccount: (company, options) => probeAccount(company, options),
+    jobAccount: (company, options) => options?.once
+      ? probeAccount.once(company, options.once.epoch)
+      : probeAccount(company, options),
     // 셸 격리는 OS 샌드박스를 실제로 걸 수 있는 플랫폼만 — 맥·리눅스. 윈도우는 아직 검증이
     // 없으므로 Bash 를 빼는 쪽(보수적)이다(발주 §③ "실기기 검증 없음").
     jobShellSandboxAvailable: process.platform !== 'win32',

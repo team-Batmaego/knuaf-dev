@@ -213,7 +213,7 @@ export class ChatService {
      * 담당 회사의 구독·한도 상태. 계정이 없으면 `null`. `fresh` 면 캐시를 건너뛴 관측 —
      * 권한을 바꾸는 자리(카드 적용·동의 켜기)가 15초 전 값으로 판단하지 않게 한다([C1-06]).
      */
-    jobAccount?: (company: Provider, options?: { fresh?: boolean }) => Promise<ExecutionAccount | null>
+    jobAccount?: (company: Provider, options?: { fresh?: boolean; once?: { epoch: number } }) => Promise<ExecutionAccount | null>
     /** 셸 격리를 실제로 걸 수 있는가(배선 A의 플랫폼 확인값). 모르면 false. */
     jobShellSandboxAvailable?: boolean
     /**
@@ -893,12 +893,19 @@ export class ChatService {
     if (!runner) throw new Error('작업 분담이 꺼져 있어요.')
     return runner.beginOwnerTransition(root)
   }
-  /** 지금 담당 회사의 계정 — `consented` 는 앱 저장소 값으로 덮인다(엔진은 그 값을 모른다). */
-  async laneAccount(company: Provider, options?: { fresh?: boolean }): Promise<ExecutionAccount | null> {
-    const account = await this.opts.jobAccount?.(company, options)
+  /**
+   * 지금 담당 회사의 계정 — `consented` 는 앱 저장소 값으로 덮인다(엔진은 그 값을 모른다).
+   * `once` 면 **인계 제안 판정용 실행 메모**를 쓴다(실행당 회사당 1회, 로그인 세대가 바뀌면 1회 더).
+   * 세대는 여기서 읽는 순간의 값이다 — 늦게 온 답은 엔진 쪽 세대 비교가 버린다.
+   */
+  async laneAccount(company: Provider, options?: { fresh?: boolean; once?: boolean }): Promise<ExecutionAccount | null> {
+    const account = await this.opts.jobAccount?.(company,
+      options?.once ? { once: { epoch: this.authEpoch(company) } } : { fresh: options?.fresh })
     if (!account) return null
     return { ...account, consented: this.store().consented(company, account.accountId) }
   }
+  /** 로그인 세대 — 성공한 로그인 확인마다 하나씩 오른다(§5 "로그인 변경 뒤 1회"). */
+  authEpoch(company: Provider): number { return this.authGeneration[company] }
   /** §2-1 앱 재시작 줄 [버리기] — `interrupted` 주문만. */
   discardJob(root: string, jobId: string): JobRecord {
     const runner = this.companyJob(root, jobId)
