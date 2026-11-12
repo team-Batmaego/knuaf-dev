@@ -125,6 +125,80 @@ test('마크다운 — 이미지는 그리지 않는다. 앱이 원격 주소를
   expect(html).toContain('생산량 그래프')
 })
 
+// ------------------------------------------------------- 본문 속 HTML 표(병합 칸)
+
+test('HTML 표 — 병합 칸(rowspan·colspan)을 표로 다시 짓는다', () => {
+  const html = renderMarkdown(
+    '표 2. 밀양시 기상 현황(2021~2025년) (출처 : 기상청)\n' +
+    '<table>\n' +
+    '  <caption>밀양시 기상</caption>\n' +
+    '  <thead>\n' +
+    '    <tr><th rowspan="2">구 분</th><th colspan="3">겨울</th></tr>\n' +
+    '    <tr><th>12월</th><th>1월</th><th>2월</th></tr>\n' +
+    '  </thead>\n' +
+    '  <tbody>\n' +
+    '    <tr><th>강우량(mm)</th><td>21.2</td><td>18.4</td><td>20.1</td></tr>\n' +
+    '  </tbody>\n' +
+    '</table>\n' +
+    '(출처 : 기상청)\n'
+  )
+  expect(html).toContain('<table>')
+  expect(html).toContain('<caption>밀양시 기상</caption>')
+  expect(html).toContain('<th rowspan="2">구 분</th>')
+  expect(html).toContain('<th colspan="3">겨울</th>')
+  expect(html).toContain('<td>21.2</td>')
+  // 표 앞뒤 마크다운은 그대로 남는다(제목 줄·출처 줄이 표에 먹히지 않는다).
+  expect(html).toContain('표 2. 밀양시 기상 현황(2021~2025년) (출처 : 기상청)')
+  expect(html).toContain('(출처 : 기상청)')
+  expect(html).not.toContain('&lt;table')
+})
+
+test('HTML 표 — 칸 글자의 표식은 글자 노드로 그대로 남는다 (뷰어 B)', () => {
+  const html = renderMarkdown('<table><tr><td>GGEDITV123abc</td></tr></table>')
+  expect(html).toContain('<td>GGEDITV123abc</td>')
+})
+
+test('HTML 표 — 허용 태그 caption·thead·tbody·tfoot·br 은 그린다', () => {
+  const html = renderMarkdown(
+    '<table><caption>제목</caption><thead><tr><th>가</th></tr></thead>' +
+    '<tbody><tr><td>나<br>다</td></tr></tbody><tfoot><tr><td>합</td></tr></tfoot></table>'
+  )
+  expect(html).toContain('<caption>제목</caption>')
+  expect(html).toContain('<thead>')
+  expect(html).toContain('<td>나<br>다</td>')
+  expect(html).toContain('<tfoot>')
+})
+
+test('HTML 표 — 허용 밖이 하나라도 있으면 블록 통째로 글자 (실패 닫힘)', () => {
+  const attacks = [
+    // 이벤트 속성·style·그 밖의 속성
+    '<table><tr><td onclick="alert(1)">x</td></tr></table>',
+    '<table><tr><td style="color:red">x</td></tr></table>',
+    '<table class="a"><tr><td>x</td></tr></table>',
+    // 스크립트·이미지·링크·허용 밖 태그
+    '<table><tr><td><script>alert(1)</script></td></tr></table>',
+    '<table><tr><td><img src="https://example.com/x.png"></td></tr></table>',
+    '<table><tr><td><a href="https://example.com">x</a></td></tr></table>',
+    '<table><tr><td><div>x</div></td></tr></table>',
+    // 주석
+    '<table><!-- x --><tr><td>x</td></tr></table>',
+    // 병합 칸 값 경계
+    '<table><tr><td colspan="0">x</td></tr></table>',
+    '<table><tr><td colspan="1000">x</td></tr></table>',
+    // 굽은 따옴표 속성값(복사 과정에서 생길 수 있다) — 허용하지 않는다.
+    '<table><tr><td rowspan=“2”>x</td></tr></table>',
+    // 짝이 안 맞는 태그
+    '<table><tr><td>x</td></tr>',
+    '<table><tr><td>x</table>'
+  ]
+  for (const src of attacks) {
+    const html = renderMarkdown(src)
+    expect(html, src).not.toContain('<table')
+    expect(html, src).not.toContain('<td')
+    expect(html, src).toContain('&lt;table')
+  }
+})
+
 // ------------------------------------------------------------------ 파일 현재성
 
 test('파일 현재성 — 등록된 것만 말하고, 판정은 stale 하나로 한다', () => {
