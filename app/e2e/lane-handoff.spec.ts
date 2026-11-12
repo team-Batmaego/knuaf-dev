@@ -1,7 +1,7 @@
 // 배선 C §4 — 본대화 인계(제안 → 줄 → 넘기기 → 보관 대화)와 [이번만] 차례 끝.
 // 실제 AI 호출 0회: 본대화는 가짜 연결, 넘기기는 가짜 이음매(또는 진짜 `ConversationHandoff`).
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
@@ -293,6 +293,32 @@ test('opening a handoff mints the new conversation and closing it restores the o
   // 넘기지 못하면 대화 칸은 넘기기 전 기록으로 돌아간다.
   await f.svc.closeHandoff(owner)
   expect(f.svc.snapshot(f.root, 'claude').messages.map(message => message.text)).toEqual(['예전 학생 글'])
+})
+
+// [C1-09] 파일이 **있는데** 읽지 못하면 새 대화로 덮지 않고 인계를 실패로 멈춘다(fail-closed).
+// 고침을 빼면(`readChat` 의 `catch { return null }`) 빈 대화가 publish 되고 디스크 기록이 덮인다.
+test('fix C1-09: a handoff never overwrites a chat file it could not read', async () => {
+  const f = serviceFixture({ proposals: [] })
+  // 정상 차례 한 번으로 디스크에 대화 파일을 만든 뒤, 그 파일을 **깨진 JSON** 으로 바꾼다.
+  await f.svc.send(f.root, 'claude', '읽지 못할 기록', 'req-1')
+  const file = join(f.root, '.knuaf-gui', 'chat-claude.json')
+  expect(readFileSync(file, 'utf8')).toContain('읽지 못할 기록')
+  const broken = '{"provider":"claude","messages":[' // 잘린 JSON — parseChat 이 던진다
+  writeFileSync(file, broken)
+  // 앱을 다시 켠 상태 — 메모리 스냅샷이 없어 `openHandoff` 가 디스크를 읽는다.
+  // (재시작을 흉내 낼 통로는 이 비공개 맵뿐이라 시험에서만 직접 비운다.)
+  const memory = f.svc as unknown as { snapshots: Map<string, unknown> }
+  memory.snapshots.clear()
+
+  const controller = new AbortController()
+  await expect(f.svc.openHandoff({
+    id: 'claude\0' + f.root, root: f.root,
+    entry: { company: 'claude', model: 'opus', effort: 'high', how: 'main' },
+    firstMessage: '앞 대화를 이어 받았어요',
+    bundlePath: '/private/bundle.json', signal: controller.signal
+  })).rejects.toThrow()
+  // 이전 기록 파일은 **한 바이트도 바뀌지 않는다** — 빈 새 대화로 덮지 않았다.
+  expect(readFileSync(file, 'utf8')).toBe(broken)
 })
 
 // [C1-04 덜어냄] 예전 시험 `a temporary plan is cleared at the end of the bound student turn` 은

@@ -1435,23 +1435,23 @@ export class ChatService {
     }
   }
   /**
-   * 디스크의 대화 기록. 없거나 깨졌으면 `null` — 이 경로는 **되돌리기용 값**만 필요하므로
-   * 읽기 실패를 새 대화로 승격하지 않는다(던지면 넘기기 자체가 멈춘다).
+   * 디스크의 대화 기록. **파일이 없을 때만** `null` 이다([C1-09] fail-closed).
+   *
+   * 예전에는 모든 읽기 실패를 `null`(파일 없음)로 접었다. 그러면 파일이 **있는데** 깨졌거나
+   * 읽을 수 없을 때 `openHandoff` 가 "이전 대화 없음"으로 판단해 빈 새 대화를 `publish` 하고,
+   * 디스크의 기존 기록을 그 빈 내용으로 **덮어쓴다**(되돌릴 것도 함께 사라진다). 이제 그런
+   * 오류는 그대로 던져 인계 자체를 멈춘다 — 파일을 덮지 않고 학생에게 실패로 알린다.
    */
   private readChat(root: string, provider: Provider): ChatSnapshot | null {
-    try {
-      const got = readRecoverable(this.file(root, provider), (text) => parseChat(text, provider))
-      if (!got) return null
-      const value = got.value
-      value.root = root; value.permission = undefined
-      if (value.state === 'running' || value.state === 'permission') {
-        value.state = 'interrupted'; value.error = '앱이 작업 도중 종료됐어요. 마지막 답변은 자동 재전송하지 않았어요.'
-        for (const message of value.messages) if (message.delivery === 'pending') message.delivery = 'uncertain'
-      }
-      return value
-    } catch {
-      return null
+    const got = readRecoverable(this.file(root, provider), (text) => parseChat(text, provider))
+    if (!got) return null
+    const value = got.value
+    value.root = root; value.permission = undefined
+    if (value.state === 'running' || value.state === 'permission') {
+      value.state = 'interrupted'; value.error = '앱이 작업 도중 종료됐어요. 마지막 답변은 자동 재전송하지 않았어요.'
+      for (const message of value.messages) if (message.delivery === 'pending') message.delivery = 'uncertain'
     }
+    return value
   }
   /**
    * 새 대화의 세션 id 가 올 때까지 기다린다 — `send` 는 턴을 시작만 하고 돌아오므로
