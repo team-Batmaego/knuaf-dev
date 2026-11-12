@@ -34,6 +34,8 @@ export interface AgentConnection {
   prepare?(sessionId: string | undefined): Promise<void>
   respond(id: string, allow: boolean): void
   stop(): Promise<void>
+  /** 앱이 띄운 자식 pid — 종료 마감 뒤 회수 대상(검토 RT2-03). 모르면 생략한다. */
+  ownedPids?(): number[]
 }
 /**
  * 본대화 턴이 **사용 한도**로 끝났는지, 아니면 다른 이유로 실패했는지(설계 §1-2~1-3).

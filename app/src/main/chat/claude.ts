@@ -19,6 +19,11 @@ export class ClaudeAuthenticationError extends Error {
   constructor() { super(CLAUDE_AUTH_COPY.required) }
 }
 
+/**
+ * `cancelLogin` 이 자식 종료를 기다리는 상한. 윈도우 taskkill 의 실제 종료는 수백 ms 다.
+ * 넘기면 더 기다리지 않는다(다음 로그인을 영원히 막지 않는다) — 그 사실은 실패로 꾸미지 않는다.
+ */
+const LOGIN_STOP_WAIT_MS = 5_000
 const AUTH_FAILURE = /\b401\b[^\n]*OAuth access token (?:has expired|is invalid)|Failed to authenticate\.\s*API Error:\s*401\b/i
 
 /** 정상 답변·도구 출력에 인용된 401은 판정하지 않는다. SDK 오류 필드만 읽는다. */
@@ -1087,12 +1092,30 @@ export class ClaudeConnection implements AgentConnection {
     const timer = setTimeout(() => { release(); killTree(child) }, 180_000)
     timer.unref(); child.once('close', () => clearTimeout(timer))
   }
-  /** 취소 = 이 창에서 기다리기를 그만둔다. CLI 가 소유한 로그인 프로세스를 끝낸다. */
+  /**
+   * 취소 = 이 창에서 기다리기를 그만둔다. CLI 가 소유한 로그인 프로세스를 끝낸다.
+   *
+   * **끝난 뒤에 돌아온다**(검토 RT2-03·RT2-02 덧붙임). `killTree` 가 비동기 taskkill 이 되면서
+   * 윈도우에서는 "던지고 바로 반환"이 됐고, 그러면 `reopenLogin()` 의 `await cancelLogin();
+   * await login()` 이 **옛 프로세스가 아직 살아 있는 채로** 새 로그인을 시작할 수 있었다.
+   * 여기서 자식의 `exit`/`close` 를 상한까지 기다린다 — 이미 죽었으면 즉시 돌아온다.
+   * 맥·리눅스는 `child.kill` 이 즉시 신호를 보내므로 대기 시간은 사실상 0 이다.
+   */
   async cancelLogin() {
     const child = this.loginProcess
     this.loginProcess = undefined
     // 윈도우에서 `.cmd` 로 감싼 로그인 자식도 트리째 끝낸다 — 손자가 남으면 로그인이 계속 산다.
-    if (child) killTree(child)
+    if (!child) return
+    const gone = Promise.withResolvers<void>()
+    const done = (): void => { gone.resolve() }
+    if (child.exitCode !== null || child.signalCode !== null) { killTree(child); return }
+    child.once('exit', done)
+    child.once('close', done)
+    child.once('error', done)
+    killTree(child)
+    const timer = setTimeout(done, LOGIN_STOP_WAIT_MS)
+    timer.unref()
+    try { await gone.promise } finally { clearTimeout(timer) }
   }
   /**
    * 다시 열기 = 지금 프로세스를 끝내고 처음부터 다시 시작한다. Claude CLI 가 브라우저를
@@ -1253,6 +1276,11 @@ export class ClaudeConnection implements AgentConnection {
     const answer = this.approvals.get(id)
     if (!answer) throw new Error('이미 종료된 권한 요청이에요.')
     answer(allow)
+  }
+  /** 앱이 띄운 로그인 자식 pid — SDK 가 띄운 엔진은 여기서 소유하지 않는다(검토 RT2-03 범위). */
+  ownedPids(): number[] {
+    const pid = this.loginProcess?.pid
+    return typeof pid === 'number' && pid > 0 ? [pid] : []
   }
   async stop() {
     for (const answer of this.approvals.values()) answer(false)

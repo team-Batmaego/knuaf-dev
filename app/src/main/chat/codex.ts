@@ -582,6 +582,11 @@ export class CodexConnection implements AgentConnection {
     if (pending) this.fileChanges.delete(pending.key)
     this.pendingFileApprovals.delete(id)
   }
+  /** 앱이 띄운 엔진 pid — 종료 마감 뒤 회수 대상(검토 RT2-03). 종료 동작은 바꾸지 않는다. */
+  ownedPids(): number[] {
+    const pid = this.rpc?.closed === false ? this.rpc.pid : undefined
+    return typeof pid === 'number' && pid > 0 ? [pid] : []
+  }
   async stop() {
     this.stopped = true
     if (this.turn && this.thread && this.rpc && !this.rpc.closed) {
