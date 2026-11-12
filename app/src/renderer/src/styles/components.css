@@ -130,6 +130,10 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .paperpane .sheet table { border-collapse: collapse; width: 100%; margin: 0 0 12px; }
 .paperpane .sheet td, .paperpane .sheet th { border: var(--hairline) solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
 .paperpane .sheet ul, .paperpane .sheet ol { margin: 0 0 10px; padding-left: 22px; }
+/* 그림 — 종이 폭을 넘지 않게. `inline`으로 두어 `그림 ![](…)` 처럼 글자 옆에 있는 그림도 같은 줄에 남는다. */
+.paperpane .sheet img { max-width: 100%; height: auto; vertical-align: middle; margin: 4px 0 8px; }
+/* 못 찾은 그림 — 짧은 회색 한 줄. 상자·아이콘·색 강조 없음(형님 ts 1794469330). */
+.paper-img-miss { font-family: var(--font); font-size: 13px; color: var(--paper-faint); }
 .paperpane .sheet .blk:first-child h2, .paperpane .sheet > div:first-child h2 { margin-top: 0; }
 /* 빈 장은 제목만 흐리게 — 없는 글을 채우지 않는다(DESIGN §2). */
 .paper-empty h2 { color: var(--paper-faint); }
