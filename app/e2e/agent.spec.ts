@@ -7,15 +7,24 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   agentApi, buildLaunchScript, bundledAgentDirs, bundledDirs, codexSkillConfigOverride, findExecutable, firstPromptFor, installSkill, launch, launchScriptExt, probeVersion,
-  setAgentPlatformForTest, setBundledDirsProvider, skillBackupDir, skillSource, skillState, skillTargets, skillVersion, sq, VERSION_FILE
+  setAgentPlatformForTest, setBundledDirsProvider, setTreeAccess, skillBackupDir, skillSource, skillState, skillTargets, skillVersion, sq, VERSION_FILE
 } from '../src/main/agent'
 import { serverArgsFor } from '../src/main/chat/codex'
+import { TERMINAL_ENUM_FAILED_COPY, TERMINAL_REFUSAL_HEAD } from '../src/main/chat/codexToolLock'
 import { pathKeyOf } from '../src/main/chat/contracts'
+import { fakeCodexEnv } from './fixtures/fake-codex'
 import { ChatService } from '../src/main/chat/service'
 import { APP_NAME } from '../src/shared/name'
 
 const appRoot = resolve(__dirname, '..')
 const source = skillSource(appRoot, false, '/nonexistent')
+
+/**
+ * 앱 스킬 자리는 설치 뒤 읽기 전용(파일 0444·폴더 0555)으로 잠긴다(설계 §4.2). 그래서 이 자리를
+ * 건드리는 시험은 먼저 `chmod u+w` 에 해당하는 일을 직접 해야 한다 — 잠금이 실제로 걸렸다는
+ * 증거이기도 하다(아무것도 안 풀고 쓰면 EACCES 로 죽는다). 정리도 같은 이유로 먼저 푼다.
+ */
+function unlockTree(dir: string): void { setTreeAccess(dir, true) }
 // 시험이 process.env 를 건드리기 전 값 — 아래 복원 시험이 이 값과 비교한다(BUNDLE-WIN-ENV).
 const pathBeforeTests = process.env[pathKeyOf(process.env)]
 const homeBeforeTests = process.env.HOME
@@ -421,7 +430,7 @@ test.describe('installSkill', () => {
   test('a missing source preserves existing student copies, GUI marker and legacy skill', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-missing-source-'))
     try {
-      const target = skillTargets(root).claude
+      const target = skillTargets(root, join(root, 'user-data')).claude
       const legacy = join(dirname(target), 'knuaf-doc')
       for (const folder of [target, legacy, join(root, '.knuaf-gui')]) mkdirSync(folder, { recursive: true })
       writeFileSync(join(target, 'SKILL.md'), '# student working copy\n')
@@ -440,12 +449,15 @@ test.describe('installSkill', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-composed-install-'))
     try {
       const origin = join(root, 'bundle'), project = join(root, 'project'), home = join(root, 'home')
+      const userData = join(root, 'user-data')
       cpSync(source, origin, { recursive: true })
       mkdirSync(home)
-      const targets = skillTargets(project), previous = skillVersion(origin)
+      const targets = skillTargets(project, userData), previous = skillVersion(origin)
       const metadata = JSON.parse(readFileSync(join(origin, 'skill.json'), 'utf8'))
-      for (const target of Object.values(targets)) {
+      for (const [kind, target] of Object.entries(targets)) {
         installSkill(origin, target, previous)
+        // Claude 사본은 잠겨 있다 — 학생이 권한을 풀고 손댄 상황(백업이 보존해야 하는 것).
+        if (kind === 'claude') unlockTree(target)
         writeFileSync(join(target, 'student-note.txt'), 'preserve student annotations')
       }
       writeFileSync(join(origin, 'skill.json'), JSON.stringify({ ...metadata, version: '1.0.1' }))
@@ -474,15 +486,20 @@ runpy.run_path(sys.argv[0],run_name="__main__")`
         expect(managed.status, managed.stdout + managed.stderr).toBe(0)
         expect(JSON.parse(managed.stdout).result).toBe('managed')
       }
-      expect(readdirSync(join(project, '.claude/skills'))).toEqual(['knuaf-dev'])
+      // Claude 사본은 앱 자리(논문 폴더 밖), Codex 사본만 폴더 안 — 논문 폴더에 `.claude` 가
+      // 생기지 않는 것이 이 배선의 목적이다(그 폴더를 CLI 가 설정으로 읽지 않게).
+      expect(readdirSync(join(userData, 'skill-host', '.claude', 'skills'))).toEqual(['knuaf-dev'])
       expect(readdirSync(join(project, '.agents/skills'))).toEqual(['knuaf-dev'])
-    } finally { rmSync(root, { recursive: true, force: true }) }
+      expect(existsSync(join(project, '.claude'))).toBe(false)
+    } finally { unlockTree(root); rmSync(root, { recursive: true, force: true }) }
   })
 
   test('installs into a tmp project root, is unchanged on rerun, and backs up when tampered', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-root-'))
-    const targets = skillTargets(root)
-    expect(targets.claude).toBe(join(root, '.claude', 'skills', 'knuaf-dev'))
+    const userData = join(root, 'user-data')
+    const targets = skillTargets(root, userData)
+    // Claude 는 앱 스킬 자리(논문 폴더 밖), Codex 는 폴더 사본.
+    expect(targets.claude).toBe(join(userData, 'skill-host', '.claude', 'skills', 'knuaf-dev'))
     expect(targets.codex).toBe(join(root, '.agents', 'skills', 'knuaf-dev'))
     const version = skillVersion(source)
 
@@ -498,6 +515,7 @@ runpy.run_path(sys.argv[0],run_name="__main__")`
 
     expect(installSkill(source, targets.claude, version)).toEqual({ action: 'unchanged' })
 
+    unlockTree(targets.claude)
     writeFileSync(join(targets.claude, VERSION_FILE), 'tampered\n')
     expect(skillState(targets.claude, version)).toBe('outdated')
     const third = installSkill(source, targets.claude, version)
@@ -508,31 +526,45 @@ runpy.run_path(sys.argv[0],run_name="__main__")`
 
     // The backup must not be a sibling of the skill: anything under skills/ is
     // discovered as its own skill, so a sibling backup competes with the real one.
-    expect(readdirSync(join(root, '.claude', 'skills'))).toEqual(['knuaf-dev'])
+    expect(readdirSync(join(userData, 'skill-host', '.claude', 'skills'))).toEqual(['knuaf-dev'])
     expect(third.backup).toBe(join(skillBackupDir(targets.claude), basename(third.backup!)))
     expect(basename(third.backup!)).toMatch(/^\.claude-\d{8}-\d{6}$/)
-    expect(third.backup!.startsWith(join(root, '.knuaf-gui'))).toBe(true)
+    expect(third.backup!.startsWith(join(userData, 'skill-host', '.knuaf-gui'))).toBe(true)
+    expect(existsSync(join(root, '.claude'))).toBe(false)
+    // 다시 깐 사본은 다시 잠긴다(§4.2: 풀기→복사→잠금). 백업도 잠긴 채로 남는다.
+    expect(statSync(join(targets.claude, VERSION_FILE)).mode & 0o222).toBe(0)
+    expect(statSync(targets.claude).mode & 0o222).toBe(0)
+    unlockTree(root)
+    rmSync(root, { recursive: true, force: true })
   })
 
   test('a codex backup is named apart from a claude one', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-root-bak-'))
-    const targets = skillTargets(root)
+    const userData = join(root, 'user-data')
+    const targets = skillTargets(root, userData)
     const version = skillVersion(source)
     for (const kind of ['claude', 'codex'] as const) {
       installSkill(source, targets[kind], version)
+      // Claude 사본은 잠겨 있다 — 학생이 소유자 권한으로 푼 뒤 고친 상황을 흉내낸다.
+      if (kind === 'claude') unlockTree(targets[kind])
       writeFileSync(join(targets[kind], VERSION_FILE), 'tampered\n')
       installSkill(source, targets[kind], version)
     }
-    const backups = readdirSync(join(root, '.knuaf-gui', 'skill-backups')).sort()
-    expect(backups).toHaveLength(2)
-    expect(backups.some((n) => n.startsWith('.claude-'))).toBe(true)
-    expect(backups.some((n) => n.startsWith('.agents-'))).toBe(true)
+    // 장부는 사본마다 그 사본의 상위 뿌리에 남는다 — Claude 는 앱 자리, Codex 는 논문 폴더.
+    const claudeBackups = readdirSync(join(userData, 'skill-host', '.knuaf-gui', 'skill-backups'))
+    const codexBackups = readdirSync(join(root, '.knuaf-gui', 'skill-backups'))
+    expect(claudeBackups).toHaveLength(1)
+    expect(claudeBackups[0].startsWith('.claude-')).toBe(true)
+    expect(codexBackups).toHaveLength(1)
+    expect(codexBackups[0].startsWith('.agents-')).toBe(true)
+    unlockTree(root)
+    rmSync(root, { recursive: true, force: true })
   })
 
   test('replacing only the annual template marks an installed skill outdated', () => {
     const fixture = mkdtempSync(join(tmpdir(), 'kd-annual-template-'))
     const origin = join(fixture, 'source')
-    const target = skillTargets(join(fixture, 'project')).codex
+    const target = skillTargets(join(fixture, 'project'), join(fixture, 'user-data')).codex
     mkdirSync(join(origin, 'assets', 'templates'), { recursive: true })
     writeFileSync(join(origin, 'SKILL.md'), '# fixed rules\n')
     const template = join(origin, 'assets', 'templates', 'finance-template.xlsx')
@@ -564,9 +596,15 @@ test.describe('buildLaunchScript', () => {
     // 이 앱이 띄우는 도우미는 메모리 파일을 아예 읽지 않는다.
     expect(s).toContain('export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1')
     expect(s).toContain(`${APP_NAME}가 AI 도우미를 엽니다`)
-    // 비상구(외부 터미널)에도 채팅과 같은 가드레일 — 프로젝트 스킬만 유효 + 도구 팝업 차단.
-    // `--disallowedTools=…` 는 `=` 필수 — 공백이면 가변 인자가 첫 프롬프트를 삼킨다.
-    expect(s).toContain(`exec '/opt/homebrew/bin/claude' --setting-sources project,local '--disallowedTools=AskUserQuestion' '시작하기'`)
+    // 스킬 스크립트가 논문 폴더에 `__pycache__` 를 남기지 않는다(§4.1 표) — 채팅 경로와 같은 값.
+    expect(s).toContain('export PYTHONDONTWRITEBYTECODE=1')
+    // 비상구(외부 터미널)에도 채팅과 같은 1층(§4.1-D) — 설정 출처 0개 + 폴더 `.mcp.json` 차단 +
+    // 도구 팝업 차단. 설정 출처는 **빈 목록**이라 `=` 로 붙인다 — 공백이면 값이 빠진다.
+    // `--disallowedTools=…` 도 `=` 필수 — 공백이면 가변 인자가 첫 프롬프트를 삼킨다.
+    expect(s).toContain(`exec '/opt/homebrew/bin/claude' --setting-sources= --strict-mcp-config '--disallowedTools=AskUserQuestion' '시작하기'`)
+    // 스킬 자리·규칙 파일이 없으면 그 인자도 없다(4단계가 파일을 만들면 자동으로 붙는다).
+    expect(s).not.toContain('--plugin-dir-no-mcp')
+    expect(s).not.toContain('--append-system-prompt-file')
   })
 
   /**
@@ -601,9 +639,11 @@ test.describe('buildLaunchScript', () => {
     expect(s).toContain('set "PATH=C:\\Users\\학생\\내 논문\\.venv\\Scripts;%PATH%"')
     expect(s).toContain('set "KNUAF_DOC_APP=1"')
     expect(s).toContain('set "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"')
-    // 채팅과 같은 가드레일 — 프로젝트 스킬만, 도구 팝업은 끈다.
-    expect(s).toContain('--setting-sources project,local')
-    expect(s).toContain('--disallowedTools=AskUserQuestion')
+    // 채팅과 같은 1층 — 설정 출처 0개, 도구 팝업은 끈다. 인용 부호는 배치 이스케이프 층수에
+    // 따라 달라지므로(대상이 `.cmd` shim 이면 두 층) 토큰 자체로 확인하고, 실제 argv 는
+    // 아래 실행 시험이 잠근다.
+    for (const flag of ['--setting-sources=', '--strict-mcp-config', '--disallowedTools=AskUserQuestion']) expect(s).toContain(flag)
+    expect(s).toContain('set "PYTHONDONTWRITEBYTECODE=1"')
     // 첫 프롬프트는 **한 줄**이고 그 글자는 살아 있다(cmd 인자에는 줄바꿈이 못 들어간다).
     expect(s).toContain('이어서')
     expect(s).toContain('작업')
@@ -634,8 +674,9 @@ test.describe('buildLaunchScript', () => {
     expect(exec).not.toMatch(/(^|[^^])!/)
     // **실행 파일 경로는 한 층만** — shim 의 `%*` 로 다시 해석되지 않는다(W1C-R1-01 확인).
     // 두 층이면 첫 해석 뒤에도 `^` 가 남아 프로그램 이름을 찾지 못한다.
-    const cmdPart = exec!.split(' --setting-sources ')[0]
-    expect(cmdPart).toMatch(/Program\^ Files/)
+    // 인자들이 `^^^"` 로 시작하므로 실행 파일 경로는 첫 ` ^` 앞까지다.
+    const cmdPart = exec!.slice(0, exec!.indexOf(' ^'))
+    expect(cmdPart).toBe('C:\\Program^ Files\\npm\\claude.cmd')
     expect(cmdPart).not.toContain('^^')
     expect(cmdPart).not.toContain('^"')
     // `cd` 는 따옴표 안이라 `&` 가 그대로여도 안전하다.
@@ -720,7 +761,7 @@ test.describe('buildLaunchScript', () => {
     expect(existsSync(marker), '`&` 뒤의 부수 명령이 실행됐다').toBe(false)
     expect((await run(claude)).code, 'claude 배치가 실패했다').toBe(0)
     expect(recorded().argv, 'claude argv 가 다르다')
-      .toEqual(['--setting-sources', 'project,local', '--disallowedTools=AskUserQuestion', evil])
+      .toEqual(['--setting-sources=', '--strict-mcp-config', '--disallowedTools=AskUserQuestion', evil])
     expect(existsSync(marker), '`&` 뒤의 부수 명령이 실행됐다').toBe(false)
 
     // 실기기 QA-04 — 설치본의 동봉 `codex.exe`(npm shim 이 아님). 받은 원래 argv 를 남기는 `.exe` 로
@@ -782,6 +823,47 @@ test.describe('buildLaunchScript', () => {
     expect(firstPromptFor(null)).toBe('시작하기')
     expect(firstPromptFor(3)).toBe('이어서 하기')
   })
+  /**
+   * 1층 잠금(설계 §4.1-C) — 열거에서 "끌 수 있다"로 판정한 이름만 `-c …=false` 로 붙는다.
+   * 스크립트 생성 시점의 인자 고정이 곧 잠금이다: 학생이 그 뒤 설정을 바꿔도 이 프로세스는
+   * 따라가지 않는다(설계가 인정한 한계).
+   */
+  test('터미널 Codex 잠금 인자가 exec 줄에 그대로 실린다 — POSIX', () => {
+    const lockArgs = ['-c', 'mcp_servers.x.enabled=false', '-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false']
+    const s = buildLaunchScript({ root: '/x', agent: 'codex', agentPath: '/opt/codex', venvBin: null, bundledBin: null, firstPrompt: '', lockArgs }, 'darwin')
+    expect(s.trimEnd().split('\n').pop()).toBe(
+      `exec '/opt/codex' '-c' 'mcp_servers.x.enabled=false' '-c' 'project_doc_max_bytes=0' '-c' 'features.apps=false'`
+    )
+  })
+
+  test('잠금 인자는 전역 스킬 사본 끄기보다 앞에 온다 — 그 토큰이 계속 마지막이다', () => {
+    const home = mkdtempSync(join(tmpdir(), 'kd-home-'))
+    mkdirSync(join(home, '.codex', 'skills', 'knuaf-dev'), { recursive: true })
+    writeFileSync(join(home, '.codex', 'skills', 'knuaf-dev', 'SKILL.md'), '# old\n')
+    const lockArgs = ['-c', 'features.apps=false', '-c', 'project_doc_max_bytes=0']
+    const line = buildLaunchScript({ root: '/x', agent: 'codex', agentPath: '/opt/codex', venvBin: null, bundledBin: null, firstPrompt: '', home, lockArgs }, 'darwin')
+      .trimEnd().split('\n').pop()!
+    expect(line).toContain(`'-c' 'features.apps=false'`)
+    expect(line.indexOf('features.apps=false')).toBeLessThan(line.indexOf('skills.config'))
+    expect(line.startsWith(`exec '/opt/codex' '-c' 'features.apps=false' '-c' 'project_doc_max_bytes=0' -c 'skills.config=`)).toBe(true)
+  })
+
+  test('win32 배치에도 잠금 인자가 실린다 — .exe 는 한 층, npm shim 은 두 층', () => {
+    const lockArgs = ['-c', 'mcp_servers.x.enabled=false', '-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false']
+    const base = { root: 'C:\\Users\\이뚠냥\\Downloads\\QA 한글 시험', agent: 'codex' as const, venvBin: null, bundledBin: null, firstPrompt: '', lockArgs }
+    const exeLine = buildLaunchScript({ ...base, agentPath: 'C:\\Program Files\\knuaf\\resources\\codex\\codex.exe' }, 'win32')
+      .split('\r\n').find((l) => l.includes('codex.exe'))!
+    const shimLine = buildLaunchScript({ ...base, agentPath: 'C:\\Users\\a\\AppData\\Roaming\\npm\\codex.cmd' }, 'win32')
+      .split('\r\n').find((l) => l.includes('codex.cmd'))!
+    // 실행물 경로는 그대로, 인자만 잠금 토큰으로 이어진다.
+    expect(exeLine.startsWith('"C:\\Program Files\\knuaf\\resources\\codex\\codex.exe" ^"-c^" ^"mcp_servers.x.enabled=false^"')).toBe(true)
+    expect(exeLine).toContain('^"project_doc_max_bytes=0^"')
+    expect(exeLine).toContain('^"features.apps=false^"')
+    expect(exeLine).not.toContain('^^')
+    expect(shimLine).toContain('^^^"mcp_servers.x.enabled=false^^^"')
+    expect(shimLine).toContain('^^^"features.apps=false^^^"')
+  })
+
   test('the first work-folder prompt allows skill folders but forbids nested paper-work folders', () => {
     const prompt = firstPromptFor(0, '/tmp/논문')
     expect(prompt).toContain('작업 폴더: /tmp/논문')
@@ -808,8 +890,9 @@ test.describe('buildLaunchScript', () => {
     expect(s).toContain(`-c '${cfg}'`)
 
     // app-server 스폰에도 같은 오버라이드 — -c 는 subcommand 앞의 루트 인자다.
-    expect(serverArgsFor({ HOME: home })).toEqual(['-c', cfg, 'app-server'])
-    expect(serverArgsFor({ HOME: join(mkdtempSync(join(tmpdir(), 'kd-home-')), 'none') })).toEqual(['app-server'])
+    expect(serverArgsFor({ HOME: home })).toEqual(['-c', cfg, '-c', 'project_doc_max_bytes=0', 'app-server'])
+    // 폴더 `AGENTS.md` 차단은 전역 사본 유무와 무관하게 늘 붙는다(설계 §4.1-E).
+    expect(serverArgsFor({ HOME: join(mkdtempSync(join(tmpdir(), 'kd-home-')), 'none') })).toEqual(['-c', 'project_doc_max_bytes=0', 'app-server'])
     // ~/.agents/skills 도 스캔 대상 — 두 사본이 함께 있으면 둘 다 끈다.
     mkdirSync(join(home, '.agents', 'skills', 'knuaf-dev'), { recursive: true })
     writeFileSync(join(home, '.agents', 'skills', 'knuaf-dev', 'SKILL.md'), '# old\n')
@@ -831,10 +914,11 @@ test.describe('launch', () => {
     const body = readFileSync(r.scriptPath, 'utf-8')
     if (win) {
       // 윈도우에는 POSIX 실행 비트가 없다 — 실행물을 정하는 것은 확장자다(위 단언).
-      expect(body).toContain('--setting-sources project,local')
+      expect(body).toContain('"--setting-sources="')
+      expect(body).toContain('"--strict-mcp-config"')
     } else {
       expect(statSync(r.scriptPath).mode & 0o111).toBeTruthy()
-      expect(body).toContain(`exec '/opt/homebrew/bin/claude' --setting-sources project,local '--disallowedTools=AskUserQuestion' '시작하기'`)
+      expect(body).toContain(`exec '/opt/homebrew/bin/claude' --setting-sources= --strict-mcp-config '--disallowedTools=AskUserQuestion' '시작하기'`)
     }
     expect(opened).toBe(0)
   })
@@ -853,7 +937,8 @@ test.describe('agentApi', () => {
     const home = mkdtempSync(join(tmpdir(), 'kd-ctx-'))
     const opened: string[] = []
     const ctx = {
-      home, appRoot, isPackaged: false, resourcesPath: '/nonexistent', supportDir: join(home, 'support'), dryRun: true,
+      home, appRoot, isPackaged: false, resourcesPath: '/nonexistent', supportDir: join(home, 'support'),
+      userData: join(home, 'user-data'), dryRun: true,
       open: async (p: string) => { opened.push(p); return '' },
       venvPython: (root: string | null) => (root ? join(root, '.venv', 'bin', 'python3') : null),
       env: process.env
@@ -883,16 +968,129 @@ test.describe('agentApi', () => {
         // 윈도우: 실행물은 `.cmd` 배치이고, 같은 ctx 조합(venv·프롬프트)이 그 안에 실린다.
         expect(r.scriptPath).toMatch(/launch-[0-9a-f]{8}\.cmd$/)
         expect(script).toContain('@echo off')
-        expect(script).toContain('--setting-sources project,local')
-        expect(script).toContain('--disallowedTools=AskUserQuestion')
+        for (const flag of ['--setting-sources=', '--strict-mcp-config', '--disallowedTools=AskUserQuestion']) expect(script).toContain(flag)
+        // 앱 스킬 자리는 윈도우에서도 `/` 로 인용된다 — 스킬 자리 판정이 `\` 를 거부한다.
+        expect(script).toContain(join(ctx.userData, 'skill-host', '.claude').replace(/\\/g, '/'))
         expect(script).toContain('/tmp/논문')          // 첫 프롬프트의 작업 폴더
         expect(script).toContain('.venv')              // ctx 가 준 venv 자리
       } else {
         expect(script).toContain(`cd '/tmp/논문 폴더' || exit 1`)
         expect(script).toContain(`export PATH='/tmp/논문 폴더/.venv/bin':`)
-        expect(script).toContain(`exec '${claudePath}' --setting-sources project,local '--disallowedTools=AskUserQuestion' '이어서 하기`)
+        expect(script).toContain(`exec '${claudePath}' --setting-sources= --strict-mcp-config --plugin-dir-no-mcp '${join(ctx.userData, 'skill-host', '.claude')}' '--disallowedTools=AskUserQuestion' '이어서 하기`)
         expect(script).toContain(`작업 폴더: /tmp/논문 폴더`)
       }
     }
+  })
+
+  /**
+   * 1층 잠금(설계 §4.1-C) — 터미널 Codex 는 **열거에서 남은 것이 0개일 때만** 연다.
+   * 앱 연결이 없어도 되도록 `agentApi.launch` 가 짧게 `codex app-server` 를 띄워 열거한다.
+   */
+  function gateCtx(base: string, opened: string[], env: Record<string, string>) {
+    // 열거용 app-server 는 **논문 폴더를 cwd 로** 띄운다 — 그 폴더가 없으면 spawn 이 ENOENT 로
+    // 죽어 열거 실패로 보인다(실제 앱에서는 폴더가 열려 있으므로 늘 존재한다).
+    return {
+      home: join(base, 'home'),
+      appRoot,
+      isPackaged: false,
+      resourcesPath: '/nonexistent',
+      supportDir: join(base, 'support'),
+      userData: join(base, 'user-data'),
+      dryRun: true,
+      open: async (p: string) => { opened.push(p); return '' },
+      venvPython: () => null,
+      env
+    }
+  }
+
+  /** 열린 논문 폴더 — 열거용 app-server 의 cwd 이므로 실제로 있어야 한다. */
+  function gateRoot(base: string): string {
+    const root = join(base, '논문')
+    mkdirSync(root, { recursive: true })
+    return root
+  }
+
+  function readLog(path: string): { method: string }[] {
+    if (!existsSync(path)) return []
+    return readFileSync(path, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { method: string })
+  }
+
+  test('codex 터미널 — 끌 수 있는 외부 도구는 -c 로 끄고, 남은 것이 0개일 때만 스크립트를 쓴다', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-gate-'))
+    const binDir = join(base, 'bin')
+    const log = join(base, 'req.log')
+    const opened: string[] = []
+    const env = {
+      ...fakeCodexEnv(binDir, {
+        FAKE_CODEX_REQUEST_LOG: log,
+        FAKE_CODEX_CONFIG_READ: JSON.stringify({
+          config: { mcp_servers: { ext: { command: 'ext-server' } }, plugins: {} },
+          layers: [{ name: { type: 'user' }, config: { mcp_servers: { ext: { command: 'ext-server' } } } }]
+        })
+      }),
+      HOME: join(base, 'home')
+    }
+    const ctx = gateCtx(base, opened, env)
+    const r = await agentApi.launch(ctx, { root: gateRoot(base), kind: 'codex', revision: null })
+    const script = readFileSync(r.scriptPath, 'utf-8')
+    expect(r.scriptPath.startsWith(ctx.supportDir)).toBe(true)
+    expect(opened, 'dry-run 인데 open 을 불렀다').toEqual([])
+    if (process.platform === 'win32') {
+      expect(script).toContain('^"mcp_servers.ext.enabled=false^"')
+    } else {
+      expect(script).toContain(`'-c' 'mcp_servers.ext.enabled=false'`)
+    }
+    expect(script).toContain('project_doc_max_bytes=0')
+    expect(script).toContain('features.apps=false')
+    // Apps 는 언제나 마지막이다 — 앞의 이름 잠금과 섞이지 않는다.
+    expect(script.indexOf('features.apps=false')).toBeGreaterThan(script.indexOf('mcp_servers.ext.enabled=false'))
+    // 열거는 앱 연결이 아니라 **이 호출이 띄운** 서버로 했다(설계 §4.1-C 1번).
+    const methods = readLog(log).map((e) => e.method)
+    expect(methods).toContain('config/read')
+    expect(methods).toContain('plugin/installed')
+  })
+
+  test('codex 터미널 — 설정을 읽지 못하면 열지 않는다', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-gate-'))
+    const log = join(base, 'req.log')
+    const opened: string[] = []
+    const env = {
+      ...fakeCodexEnv(join(base, 'bin'), {
+        FAKE_CODEX_REQUEST_LOG: log,
+        FAKE_CODEX_CONFIG_READ: JSON.stringify({ fail: true })
+      }),
+      HOME: join(base, 'home')
+    }
+    const ctx = gateCtx(base, opened, env)
+    await expect(agentApi.launch(ctx, { root: gateRoot(base), kind: 'codex', revision: null }))
+      .rejects.toMatchObject({ code: 'agent_tool_lock', message: TERMINAL_ENUM_FAILED_COPY })
+    expect(opened).toEqual([])
+    const wrote = existsSync(ctx.supportDir) ? readdirSync(ctx.supportDir).filter((f) => f.startsWith('launch-')) : []
+    expect(wrote, '거부했는데 실행 스크립트를 썼다').toEqual([])
+  })
+
+  test('codex 터미널 — 앱이 끌 수 없는 도구가 켜져 있으면 이유를 적어 거부한다', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'kd-gate-'))
+    const opened: string[] = []
+    const env = {
+      ...fakeCodexEnv(join(base, 'bin'), {
+        FAKE_CODEX_CONFIG_READ: JSON.stringify({
+          config: { mcp_servers: { web: { url: 'https://example.invalid/mcp' } }, plugins: {} },
+          layers: [{ name: { type: 'user' }, config: { mcp_servers: { web: { url: 'https://example.invalid/mcp' } } } }]
+        })
+      }),
+      HOME: join(base, 'home')
+    }
+    const ctx = gateCtx(base, opened, env)
+    const error = await agentApi.launch(ctx, { root: gateRoot(base), kind: 'codex', revision: null }).then(
+      () => null,
+      (e: unknown) => e as { code?: string; message?: string }
+    )
+    expect(error?.code).toBe('agent_tool_lock')
+    expect(error?.message?.startsWith(TERMINAL_REFUSAL_HEAD)).toBe(true)
+    expect(error?.message).toContain('**web**')
+    expect(opened).toEqual([])
+    const wrote = existsSync(ctx.supportDir) ? readdirSync(ctx.supportDir).filter((f) => f.startsWith('launch-')) : []
+    expect(wrote, '거부했는데 실행 스크립트를 썼다').toEqual([])
   })
 })

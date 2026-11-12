@@ -16,12 +16,17 @@ export default defineConfig({
     'chat-markdown.spec.ts',
     'progress-list.spec.ts',
     'guard-scope.spec.ts',
+    'guard-key.spec.ts',
     'guard-scan-store.spec.ts',
     'guard-reconcile.spec.ts',
     'guard-instructions.spec.ts',
     'guard-rules.spec.ts',
     'guard-roh-stage1.spec.ts',
-    'guard-roh-stage2.spec.ts'
+    'guard-roh-stage2.spec.ts',
+    'guard-codex-tool-lock.spec.ts',
+    'guard-codex-thread-lock.spec.ts',
+    'guard-codex-connection.spec.ts',
+    'guard-claude-skill-host.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

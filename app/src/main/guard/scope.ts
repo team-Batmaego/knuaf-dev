@@ -113,6 +113,11 @@ export function skillHostDir(userData: string): string {
   return join(userData, 'skill-host', '.claude', 'skills', 'knuaf-dev')
 }
 
+/** 플러그인 뿌리(스킬 자리의 두 단계 위 `.claude`). SDK `plugins[].path` 가 이 자리다. */
+export function skillHostRoot(userData: string): string {
+  return join(userData, 'skill-host', '.claude')
+}
+
 /** `p`가 앱 스킬 자리 아래인가. `userData`를 주면 절대 경로로 대조한다. */
 export function isSkillHostPath(p: string, userData?: string): boolean {
   if (!p) return false

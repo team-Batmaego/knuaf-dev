@@ -3,7 +3,7 @@ import { generateKeyPairSync, sign } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { agentApi, probeVersion } from '../src/main/agent'
+import { agentApi, probeVersion, setTreeAccess } from '../src/main/agent'
 import { ChatService } from '../src/main/chat/service'
 import type { AgentConnection } from '../src/main/chat/contracts'
 import { agentActivity } from '../src/main/update/activity'
@@ -21,7 +21,8 @@ const pair = generateKeyPairSync('ed25519'), publicKey = pair.publicKey.export({
 const config = () => updateConfig(false, { KNUAF_UPDATE_PUBLIC_KEY: publicKey })
 const roots: string[] = []
 const temporary = (): string => { const root = mkdtempSync(join(tmpdir(), 'knuaf-app-update-')); roots.push(root); return root }
-test.afterEach(() => { agentActivity.resume(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+// 앱 스킬 자리는 읽기 전용으로 잠긴 채 남는다(설계 §4.2) — 폴더가 안 써지면 rmSync 는 ENOTEMPTY 다.
+test.afterEach(() => { agentActivity.resume(); for (const root of roots.splice(0)) { setTreeAccess(root, true); rmSync(root, { recursive: true, force: true }) } })
 function fixture(v = '0.6.0', changes: Record<string, unknown> = {}) {
   const bytes = Buffer.from(`signed fake installer ${v}`)
   const manifest = { schema: 1, name: 'knuaf-dev-app', version: v, platform: 'win32-x64', url: `${ASSET_PREFIX}v${v}/knuaf-dev-${v}-x64.exe`, size: bytes.length, sha256: sha256(bytes), ...changes }
@@ -277,7 +278,7 @@ test('browser login aborts handoff immediately; outstanding probe must finish be
 test('R8-02: post-close and post-resources injections cannot spawn a new connection or external helper', async () => {
   const h = scenario()
   await h.chat.status(h.project, 'claude'); await h.chat.globalStatus('codex')
-  const ctx = { home: h.root, appRoot: h.root, isPackaged: true, resourcesPath: h.root, supportDir: join(h.root, 'launch'), dryRun: true, open: async () => '', venvPython: () => null }
+  const ctx = { home: h.root, appRoot: h.root, isPackaged: true, resourcesPath: h.root, supportDir: join(h.root, 'launch'), userData: join(h.root, 'userData'), dryRun: true, open: async () => '', venvPython: () => null }
   const blocked = async () => {
     const count = h.spawned()
     for (const operation of [

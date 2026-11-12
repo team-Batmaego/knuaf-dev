@@ -12,7 +12,7 @@ import {
   CODEX_STARTUP_TIMEOUT_SEC, CODEX_TOOL_TIMEOUT_SEC, READ_TOOLS, codexMcpArgs, codexMcpEnv,
   advertisedReadTools, type KordocMcpSpec
 } from '../src/main/chat/kordocMcp'
-import { McpSafetyError, ROOT_DENIAL_TEXT, verifyCodexKordoc } from '../src/main/chat/kordocMcpVerify'
+import { McpSafetyError, ROOT_DENIAL_TEXT, verifyCodexKordoc, verifyKordocAbsent } from '../src/main/chat/kordocMcpVerify'
 
 const base = realpathSync(mkdtempSync(join(tmpdir(), 'kordoc-verify-')))
 const root = join(base, '논문폴더')
@@ -411,4 +411,51 @@ test('FIXCHECK1: 문장 중간에만 문구가 있는 오류는 종류를 확정
     return { content: [{ type: 'text', text: `전달 실패 — ${ROOT_DENIAL_TEXT}: /x` }], isError: true }
   })
   await expectSafety(verifyCodexKordoc(m, opts()), 'probe-a-unproven')
+})
+
+// ── 검토 FIX1 권고 R-1·R-2 — 잠글 이름이 없어도, 끝내 안 나와도 단정한다 ────────
+
+test('R-1: 잠글 이름이 없어도 상태 목록에 살아 있는 kordoc 이 보이면 거부한다', async () => {
+  // `config/read` 병합이 스레드가 받는 층과 다르면 이름이 없는데도 살아 있을 수 있다.
+  const m = rpc(() => ({ data: [server()], nextCursor: null }))
+  await expectSafety(verifyKordocAbsent(m, { threadId: 'th-1', names: [], ...clock() }), 'retry-mcp-live')
+  expect(m.calls.filter((c) => c.method === 'mcpServerStatus/list')).toHaveLength(1)
+})
+
+test('R-1: 잠글 이름이 없고 목록에도 없으면 통과한다 — 조회는 건너뛰지 않는다', async () => {
+  const m = rpc(() => ({ data: [], nextCursor: null }))
+  await verifyKordocAbsent(m, { threadId: 'th-1', names: [], ...clock() })
+  expect(m.calls.filter((c) => c.method === 'mcpServerStatus/list')).toHaveLength(1)
+})
+
+test('R-1: 잠글 이름이 없어도 꺼진(disabled) kordoc 행은 통과다', async () => {
+  const m = rpc(() => ({ data: [server({ runtimeStatus: 'disabled' })], nextCursor: null }))
+  await verifyKordocAbsent(m, { threadId: 'th-1', names: [], ...clock() })
+})
+
+test('R-2: kordoc 이름을 잠갔는데 목록에 끝내 안 나오면 5회 뒤 확정 거부한다', async () => {
+  const clocked = clock()
+  const m = rpc(() => ({ data: [], nextCursor: null }))
+  await expectSafety(
+    verifyKordocAbsent(m, { threadId: 'th-1', names: ['kordoc'], pollMs: 600, ...clocked }),
+    'retry-mcp-unconfirmed'
+  )
+  const rounds = m.calls.filter((c) => c.method === 'mcpServerStatus/list')
+  // "상한까지 다시 읽고 단정" — 시간 상한(20초)이 아니라 횟수 상한에서 끝난다.
+  expect(rounds).toHaveLength(5)
+  expect(clocked.elapsed()).toBe(600 * 4)
+})
+
+test('R-2: 5회 안에 disabled 행이 나오면 통과한다', async () => {
+  let round = 0
+  const m = rpc(() => (round++ < 4 ? { data: [], nextCursor: null } : { data: [server({ runtimeStatus: 'disabled' })], nextCursor: null }))
+  await verifyKordocAbsent(m, { threadId: 'th-1', names: ['kordoc'], pollMs: 600, ...clock() })
+  expect(round).toBe(5)
+})
+
+test('R-2: 상태가 connected 로 바뀌면 재조회를 기다리지 않고 즉시 거부한다', async () => {
+  let round = 0
+  const m = rpc(() => (round++ < 2 ? { data: [], nextCursor: null } : { data: [server()], nextCursor: null }))
+  await expectSafety(verifyKordocAbsent(m, { threadId: 'th-1', names: ['kordoc'], pollMs: 600, ...clock() }), 'retry-mcp-live')
+  expect(round).toBe(3)
 })

@@ -3,10 +3,12 @@ import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
+import { folderHash } from '../guard/scope'
+import type { GuardKey } from '../guard/store'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
-import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
+import { subscriptionEnv, type AgentConnection, type AgentOptions, type GuardContext } from './contracts'
 import { KordocMcpRegistry } from './kordocMcpRegistry'
 import type { KordocMcpSpec, KordocRuntime } from './kordocMcp'
 import { rootKey } from './kordocMcp'
@@ -102,6 +104,11 @@ export class ChatService {
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
     /** Test seam: build connections without spawning real agent processes (e2e/chat.spec.ts). */
     connectionFactory?: (provider: Provider, options: AgentOptions) => AgentConnection
+    /**
+     * 지킴이 무결성 열쇠(§4.3). 없으면(`undefined`) 디스크 장부를 못 믿는 것과 같다 —
+     * Codex 연결은 종전 경로 그대로 돌고 지킴이는 꺼진다.
+     */
+    guardKey?: GuardKey
     /** True while the app itself holds a sidecar write transaction; send() must not interleave. */
     sidecarBusy?: (root: string) => boolean
     /**
@@ -253,7 +260,15 @@ export class ChatService {
     this.owners.add(root)
     return () => { this.owners.delete(root); releaseSwitch(); releaseActivity() }
   }
-  private skillDir(root: string, provider: Provider) { return skillTargets(root)[provider] }
+  private skillDir(root: string, provider: Provider) { return skillTargets(root, this.opts.userData)[provider] }
+  /**
+   * 지킴이 보관본 자리(§4.3). 열쇠를 못 얻었으면 `undefined` — 디스크 장부를 믿지 않는 것과 같고,
+   * Codex 연결은 종전 경로로 돈다(지킴이 꺼짐이 기본).
+   */
+  private guardFor(root: string): GuardContext | undefined {
+    if (!this.opts.guardKey) return undefined
+    return { userData: this.opts.userData, folderHash: folderHash(root), key: this.opts.guardKey }
+  }
   /** 폴더의 kordoc 레지스트리 — 성공 캐시·실패 재시도·안내 1회는 이 객체가 지킨다(§3.2). */
   private kordocRegistry(root: string): KordocMcpRegistry {
     const key = rootKey(root)
@@ -374,9 +389,11 @@ export class ChatService {
     const key = this.key(root, provider)
     let c = this.connections.get(key)
     if (!c) {
+      const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
+        ...(guard ? { guard } : {}),
         // 연결은 폴더·공급자마다 한 번만 만들어진다 — 선택은 전송할 때마다 다시 읽는다.
         modelChoice: () => this.effectiveChoice(provider),
         modelChosen: () => this.opts.modelChosen?.(provider) ?? false
@@ -498,10 +515,14 @@ export class ChatService {
     let c = this.globals.get(provider)
     if (!c) {
       const root = this.connectRoot()
+      // 이 연결은 상태 확인·로그인만 한다(턴 없음). 그래도 받는 자리를 똑같이 채운다 —
+      // 공급자 코드가 guard 유무로 갈리므로 전역 연결만 종전 모양으로 남기지 않는다.
+      const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
         env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
-        openExternal: this.opts.openExternal, trusted: () => false
+        openExternal: this.opts.openExternal, trusted: () => false,
+        ...(guard ? { guard } : {})
       }
       if (this.opts.connectionFactory) {
         c = this.opts.connectionFactory(provider, options)

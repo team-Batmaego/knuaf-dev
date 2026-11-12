@@ -14,7 +14,7 @@ export function HelperSheet() {
   return (
     <Sheet open={helper.open} title={HELPER.button} onClose={closeHelper} foot={<button onClick={closeHelper}>닫기</button>}>
       {!st && !helper.error && <p className="muted">도우미를 찾는 중…</p>}
-      {helper.error && <Feedback kind={helper.error.kind} title={helper.error.title} body={helper.error.action} details={<code>{helper.error.raw}</code>} />}
+      {helper.error && <Feedback kind={helper.error.kind} title={helper.error.title} body={helper.error.action} details={<pre>{helper.error.raw}</pre>} />}
       {none && (
         <Feedback kind="warning" title={HELPER.notInstalledTitle} body={HELPER.notInstalledBody} actions={<button className="primary" onClick={() => window.knuaf.openGuide()}>{HELPER.installGuide}</button>} />
       )}

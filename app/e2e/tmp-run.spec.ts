@@ -16,7 +16,7 @@ import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { cleanupTmpdir, isolateTmpdir } from './tmp-run'
 
@@ -131,38 +131,60 @@ test('원래 없던 변수는 지운다 (중요3)', () => {
   expect(out.after, '없던 변수가 남았다').toEqual([null, null, null])
 })
 
+test('읽기 전용으로 잠긴 앱 스킬 자리가 있어도 지운다 (누수 회귀)', () => {
+  // 실제 증상: 앱 스킬 자리를 설치하면 파일 0444·폴더 0555 로 잠기고(설계 §4.2), 그 폴더 안의
+  // 것을 지우려면 폴더에 쓰기 권한이 필요해 `rmSync` 가 ENOTEMPTY 로 실패했다 — 실행마다
+  // `$TMPDIR` 에 뿌리가 하나씩 쌓였다. 정리는 지우기 전에 잠금을 푼다.
+  const out = runIsolated(tmpEnv(), [
+    'out.root = m.isolateTmpdir()',
+    'const locked = out.root + "/userData/skill-host/.claude/skills/knuaf-dev"',
+    'fs.mkdirSync(locked + "/scripts", { recursive: true })',
+    'fs.writeFileSync(locked + "/SKILL.md", "x")',
+    'fs.writeFileSync(locked + "/scripts/gg.py", "x")',
+    'fs.chmodSync(locked + "/SKILL.md", 0o444)',
+    'fs.chmodSync(locked + "/scripts/gg.py", 0o444)',
+    'fs.chmodSync(locked + "/scripts", 0o555)',
+    'fs.chmodSync(locked, 0o555)',
+    'm.cleanupTmpdir()',
+    'out.left = fs.existsSync(out.root)',
+    'out.env = process.env.TMPDIR === out.root'
+  ].join('\n'))
+  expect(out.left, '잠긴 앱 스킬 자리를 풀지 못해 뿌리가 남았다').toBe(false)
+  expect(out.env, '지운 뒤에도 뿌리를 가리킨다').toBe(false)
+})
+
 test('지우기 실패는 상태를 남겨 두 번째 시도에서 끝난다 (중요4)', () => {
   // 루트 권한은 chmod 잠금을 무시한다 — 그 환경에서는 첫 시도가 성공하므로 잠금 반례를 못 만든다.
   test.skip(process.platform === 'win32' || process.getuid?.() === 0,
     '윈도 파일 잠금·루트 권한은 이 방식으로 재현되지 않는다 — rmSync 재시도 설정이 덮는다')
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'tmp-run-retry-')))
+  // 뿌리 **안쪽** 잠금은 정리가 풀어 버리므로(위 시험), 못 푸는 자리를 만들어야 한다 — 뿌리를 담은
+  // 부모 폴더는 이 실행이 만든 뿌리가 아니라 정리 대상이 아니다. 그 폴더가 안 써지면 rmSync 는 EACCES.
+  // 부모는 **조상 `kd-run-*` 밖**에 둔다: 안쪽이면 `baseDir()` 가 그 바깥으로 새 뿌리를 만들어
+  // 잠금을 아예 지나쳐 버린다(실측: 그때 첫 시도가 성공해 반례가 사라졌다).
+  const base = realpathSync(mkdtempSync(join(dirname(isolateTmpdir()), 'tmp-run-retry-')))
   try {
     const out = runIsolated(tmpEnv({ TMPDIR: base, TMP: base, TEMP: base }), [
       'out.root = m.isolateTmpdir()',
-      'const locked = out.root + "/locked"',
-      'fs.mkdirSync(locked)',
-      'fs.writeFileSync(locked + "/file.txt", "x")',
-      'fs.chmodSync(locked, 0o000)',
+      `fs.chmodSync(${JSON.stringify(base)}, 0o555)`,
       'm.cleanupTmpdir()',
       'out.firstLeft = fs.existsSync(out.root)',
       'out.firstEnv = process.env.TMPDIR === out.root',
-      'fs.chmodSync(locked, 0o755)',
+      `fs.chmodSync(${JSON.stringify(base)}, 0o755)`,
       'm.cleanupTmpdir()',
       'out.secondLeft = fs.existsSync(out.root)',
       'out.secondEnv = process.env.TMPDIR === out.root'
     ].join('\n'))
-    expect(out.firstLeft, '잠긴 폴더가 있는데 첫 시도가 지웠다고 본다').toBe(true)
+    expect(out.firstLeft, '부모가 안 써지는데 첫 시도가 지웠다고 본다').toBe(true)
     expect(out.firstEnv, '실패했는데 정리 끝으로 처리해 상태를 버렸다').toBe(true)
     expect(out.secondLeft, '두 번째 시도가 지우지 못했다').toBe(false)
     expect(out.secondEnv, '지운 뒤에도 뿌리를 가리킨다').toBe(false)
   } finally {
-    // 두 번째 시도가 실패한 경우에도 잠금을 풀고 이 실행이 만든 것만 지운다.
+    // 첫 시도가 실패한 채 끝난 경우에도 부모 잠금을 풀고 이 실행이 만든 것만 지운다.
     for (const entry of safeReaddir(base)) {
-      const locked = join(base, entry, 'locked')
-      if (existsSync(locked)) {
-        try { chmodSync(locked, 0o755) } catch { /* 이미 지워졌다 */ }
-      }
+      const root = join(base, entry)
+      try { chmodSync(root, 0o755) } catch { /* 이미 지워졌다 */ }
     }
+    try { chmodSync(base, 0o755) } catch { /* 이미 쓰기 가능하다 */ }
     rmSync(base, { recursive: true, force: true })
   }
 })

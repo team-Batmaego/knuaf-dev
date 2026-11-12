@@ -28,6 +28,29 @@
  *   FAKE_CODEX_EPHEMERAL_FAIL_TIMES
  *                           기본값 조회용 `thread/start(ephemeral:true)` 를 그 횟수만큼 오류로 거절한다
  *   FAKE_CODEX_MODELS_FAIL_TIMES  모델 목록 조회를 처음 N회 오류로 거절한다(복구 UI 시험).
+ *
+ * 1층 잠금(§4.1-C)·턴 원장(⑨) 시험용 노브 — **설정하지 않으면 기존 동작 그대로**다.
+ *   FAKE_CODEX_CONFIG_READ          `config/read` 응답(JSON). `{config, layers}` 또는 `{fail}`/`{malformed}`
+ *   FAKE_CODEX_CONFIG_READ_FAIL_TIMES  `config/read` 를 처음 N회 오류로 거절
+ *   FAKE_CODEX_PLUGIN_INSTALLED     `plugin/installed` 목록(JSON 배열 또는 `{pages:[…]}`/`{endless}`/`{malformed}`)
+ *   FAKE_CODEX_APP_LIST             `app/list` 목록(같은 모양)
+ *   FAKE_CODEX_MCP_STATUS           `mcpServerStatus/list` 목록(같은 모양) — 장 넘김 시험용
+ *   FAKE_CODEX_THREAD_LIST          `thread/list` 목록(같은 모양)
+ *   FAKE_CODEX_THREAD_TURNS_LIST    `thread/turns/list` 목록(같은 모양)
+ *   FAKE_CODEX_THREAD_TURNS         `{threadId: [turn, …]}` — `thread/start`·`resume` 응답의 `thread.turns`
+ *   FAKE_CODEX_INSTRUCTION_SOURCES  `instructionSources` 원값(JSON) — 배열·`null`·비배열 재현
+ *   FAKE_CODEX_INSTRUCTION_SOURCES_MODE  `missing` 이면 `instructionSources` 칸 자체를 뺀다
+ *   FAKE_CODEX_THREAD_ID_MODE       `echo`(기본) | `mismatch` | `missing` | `nonstring` | `none`(응답 없음)
+ *   FAKE_CODEX_START_TIMEOUT        `1` 이면 `thread/start` 에 응답하지 않는다(미결 재현)
+ *   FAKE_CODEX_RESUME_ERROR         `active-writer` | `no-rollout` | `error` | `timeout`
+ *   FAKE_CODEX_RESUME_FAIL_TIMES    위 오류를 처음 N회만(기본 무한)
+ *   FAKE_CODEX_TURN_ID_MODE         `fixed`(기본 `u-fake`) | `unique`(턴마다 새 id) | `shared`(겹친 시작이 같은 id)
+ *   FAKE_CODEX_TURN_SEQ_FILE        `unique` 의 셈을 파일에 남겨 프로세스가 갈려도 id 가 겹치지 않게 한다
+ *   FAKE_CODEX_TURN_NOTIFY_DELAY_MS 응답과 첫 알림 사이 지연 — 원장 기록이 먼저인지 시험이 본다
+ *   FAKE_CODEX_TURN_CRASH           `before-reply` 면 턴을 남기고 응답 전에 죽는다(㉱)
+ *   FAKE_CODEX_SKILLS_LIST / FAKE_CODEX_HOOKS_LIST / FAKE_CODEX_DISABLED_PLUGIN_IDS
+ *                           목록 RPC 판정 금지(ⓞ) 시험용 가짜 응답
+ *   FAKE_CODEX_REQUEST_LOG          온 요청을 `{method, params}` 한 줄씩 남긴다(㉲·㉮ 대조)
  */
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -86,6 +109,114 @@ const MODELS = (() => {
 })()
 
 const out = (value) => process.stdout.write(`${JSON.stringify(value)}\n`)
+
+// ── 1층 잠금·턴 원장 시험용 노브 — 전부 '설정하지 않으면 기존과 같다' ───────────
+/** JSON 노브. 깨진 JSON 은 `undefined`(기본값)로 본다. */
+const jsonKnob = (name) => {
+  const raw = process.env[name]
+  if (!raw) return undefined
+  try { return JSON.parse(raw) } catch { return undefined }
+}
+const CONFIG_READ = jsonKnob('FAKE_CODEX_CONFIG_READ')
+let configReadFailures = Math.max(0, Number(process.env.FAKE_CODEX_CONFIG_READ_FAIL_TIMES ?? 0) || 0)
+const PLUGIN_INSTALLED = jsonKnob('FAKE_CODEX_PLUGIN_INSTALLED')
+const APP_LIST = jsonKnob('FAKE_CODEX_APP_LIST')
+const MCP_STATUS = jsonKnob('FAKE_CODEX_MCP_STATUS')
+const THREAD_LIST = jsonKnob('FAKE_CODEX_THREAD_LIST')
+const THREAD_TURNS_LIST = jsonKnob('FAKE_CODEX_THREAD_TURNS_LIST')
+const THREAD_TURNS_KNOB = jsonKnob('FAKE_CODEX_THREAD_TURNS')
+const THREAD_TURNS_RAW = process.env.FAKE_CODEX_THREAD_TURNS_RAW
+const INSTRUCTION_SOURCES = jsonKnob('FAKE_CODEX_INSTRUCTION_SOURCES')
+const INSTRUCTION_SOURCES_MODE = process.env.FAKE_CODEX_INSTRUCTION_SOURCES_MODE ?? ''
+/** `echo`(기본) | `mismatch` | `missing` | `nonstring` | `none`(응답 없음) */
+const THREAD_ID_MODE = process.env.FAKE_CODEX_THREAD_ID_MODE ?? 'echo'
+/** `1` 이면 `thread/start` 에 응답하지 않는다 — 미결 시작 재현. */
+const START_TIMEOUT = process.env.FAKE_CODEX_START_TIMEOUT === '1'
+/** `active-writer` | `no-rollout` | `error` | `timeout` */
+const RESUME_ERROR = process.env.FAKE_CODEX_RESUME_ERROR ?? ''
+let resumeFailures = Math.max(0, Number(process.env.FAKE_CODEX_RESUME_FAIL_TIMES ?? 0) || 0)
+/** `fixed`(기본 `u-fake`) | `unique` | `shared` */
+const TURN_ID_MODE = process.env.FAKE_CODEX_TURN_ID_MODE ?? 'fixed'
+const TURN_NOTIFY_DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_TURN_NOTIFY_DELAY_MS ?? 0) || 0)
+const TURN_CRASH = process.env.FAKE_CODEX_TURN_CRASH ?? ''
+const SKILLS_LIST = jsonKnob('FAKE_CODEX_SKILLS_LIST')
+const HOOKS_LIST = jsonKnob('FAKE_CODEX_HOOKS_LIST')
+const DISABLED_PLUGIN_IDS = jsonKnob('FAKE_CODEX_DISABLED_PLUGIN_IDS')
+const REQUEST_LOG = process.env.FAKE_CODEX_REQUEST_LOG ?? ''
+/**
+ * 턴 id 셈을 프로세스 밖에 둔다 — 앱이 프로세스를 갈아 끼워도(재시작 갈래) id 가 겹치지 않아야
+ * 실제 서버와 같다. 파일이 없으면 예전처럼 프로세스 안에서만 센다.
+ */
+const TURN_SEQ_FILE = process.env.FAKE_CODEX_TURN_SEQ_FILE ?? ''
+let startSeq = 0
+let turnSeq = 0
+if (TURN_SEQ_FILE && existsSync(TURN_SEQ_FILE)) {
+  const seeded = Number(readFileSync(TURN_SEQ_FILE, 'utf8'))
+  if (Number.isFinite(seeded) && seeded > 0) turnSeq = Math.floor(seeded)
+}
+const nextTurnSeq = () => {
+  const next = ++turnSeq
+  if (TURN_SEQ_FILE) {
+    try { writeFileSync(TURN_SEQ_FILE, String(next)) } catch { /* 셈을 못 남기면 이 프로세스 안에서만 센다 */ }
+  }
+  return next
+}
+/**
+ * 턴 목록을 `thread/start`·`resume` 응답에 싣는다. 기본(`0`)이면 예전처럼 늘 빈 배열 —
+ * 1층 잠금 이전 spec 이 보는 응답이 한 바이트도 달라지지 않게 한다.
+ */
+const TRACK_TURNS = process.env.FAKE_CODEX_TRACK_TURNS === '1'
+  || TURN_NOTIFY_DELAY_MS > 0 || TURN_CRASH !== '' || TURN_ID_MODE !== 'fixed'
+  || THREAD_TURNS_KNOB !== undefined || THREAD_TURNS_RAW !== undefined
+
+/**
+ * 목록 응답 노브 해석 — `[[…], […]]`(장별), `{pages}`, `{endless}`, `{fail: n}`,
+ * `{malformed:'null'|'object'|'string'}`. 정의하지 않았으면 `undefined`(기본 응답).
+ */
+const listPages = new Map()
+function pagedResult(key, spec) {
+  const page = listPages.get(key) ?? 0
+  listPages.set(key, page + 1)
+  if (spec === undefined) return { data: [], nextCursor: null }
+  if (Array.isArray(spec)) return { data: spec, nextCursor: null }
+  if (spec && typeof spec === 'object') {
+    if (spec.fail !== undefined && page < spec.fail) return { error: { code: -32603, message: 'temporary failure' } }
+    if (spec.error === true) return { error: { code: -32603, message: 'temporary failure' } }
+    if (spec.malformed === 'null') return { data: null, nextCursor: null }
+    if (spec.malformed === 'object') return { data: {}, nextCursor: null }
+    if (spec.malformed === 'string') return { data: 'nope', nextCursor: null }
+    if (spec.endless === true) return { data: spec.data ?? [{ id: 'n-page' }], nextCursor: `p${page + 1}` }
+    if (Array.isArray(spec.pages)) {
+      const rows = spec.pages[page] ?? []
+      const more = page + 1 < spec.pages.length
+      return { data: rows, nextCursor: more ? `p${page + 1}` : null }
+    }
+  }
+  return { data: [], nextCursor: null }
+}
+const sendPaged = (id, key, spec) => {
+  const res = pagedResult(key, spec)
+  if (res.error) return out({ id, error: res.error })
+  return out({ id, result: { data: res.data, nextCursor: res.nextCursor } })
+}
+/** 대화별 턴 — 원장 대조·바깥 턴 재현용. 노브·파일로 미리 심을 수 있다. */
+const threadTurns = new Map()
+/**
+ * 실제 응답의 `thread.turns` 는 **턴 객체**의 배열이다(`{id, items}`). 짧게 id 문자열로 심는
+ * 노브(`FAKE_CODEX_THREAD_TURNS`)도 같은 모양으로 올려 둔다 — 앱이 두 모양을 다르게 읽으면
+ * 시험이 실제 서버를 흉내 내지 못한다.
+ */
+const turnEntry = (t) => (typeof t === 'string' ? { id: t, items: [] } : t)
+const normalizeTurns = (list) => (Array.isArray(list) ? list.map(turnEntry) : [])
+const turnsOf = (id) => {
+  if (!threadTurns.has(id)) threadTurns.set(id, [])
+  return threadTurns.get(id)
+}
+if (THREAD_TURNS_KNOB && typeof THREAD_TURNS_KNOB === 'object') {
+  for (const [tid, turns] of Object.entries(THREAD_TURNS_KNOB)) threadTurns.set(tid, normalizeTurns(turns))
+}
+const instructionSources = () => INSTRUCTION_SOURCES !== undefined ? INSTRUCTION_SOURCES : []
+
 const loggedIn = () => MODE === 'logged-in' || (MODE === 'logged-out' && !!STATE && existsSync(STATE))
 const replyText = () => {
   if (!REPLY_FILE) return ''
@@ -115,15 +246,28 @@ const threadState = (id) => {
 }
 let ephemeralSeq = 0
 /** `thread/start`·`thread/resume` 응답 — 앱이 대화의 model·effort 를 읽는다. */
-const threadResult = (id, turns = []) => {
+const threadResult = (id, turns) => {
   const st = threadState(id)
-  return {
-    thread: { id, turns, ephemeral: false },
+  const listed = turns ?? (THREAD_TURNS_RAW !== undefined
+    ? (() => { try { return JSON.parse(THREAD_TURNS_RAW) } catch { return [] } })()
+    : TRACK_TURNS ? turnsOf(id) : [])
+  const result = {
+    thread: { id, turns: listed, ephemeral: false },
     model: st.model, modelProvider: 'openai', serviceTier: null,
-    disabledPluginIds: [], cwd: process.cwd(), instructionSources: [],
+    disabledPluginIds: DISABLED_PLUGIN_IDS ?? [], cwd: process.cwd(),
     approvalPolicy: 'on-request', approvalsReviewer: null, sandbox: { type: 'workspaceWrite' },
     reasoningEffort: st.effort
   }
+  // `instructionSources` 를 빼는 갈래(ⓗ′)는 키 자체를 두지 않는다.
+  if (INSTRUCTION_SOURCES_MODE !== 'missing') result.instructionSources = instructionSources()
+  return result
+}
+/** `thread/start`·`resume` 응답의 `thread.id` — 노브로 불일치/누락/비문자열을 재현한다. */
+const responseThreadId = (requested) => {
+  if (THREAD_ID_MODE === 'mismatch') return `other-${++startSeq}`
+  if (THREAD_ID_MODE === 'missing') return undefined
+  if (THREAD_ID_MODE === 'nonstring') return 12345
+  return requested
 }
 
 function handle(message) {
@@ -141,7 +285,43 @@ function handle(message) {
   if (!initialized && message.method !== 'initialize') {
     return out({ id, error: { code: -32002, message: 'Not initialized' } })
   }
+  if (REQUEST_LOG) appendFileSync(REQUEST_LOG, `${JSON.stringify({ method: message.method, params })}\n`)
   switch (message.method) {
+    // ── 1층 잠금 열거·대조(§4.1-C). 노브가 없으면 "아무것도 없는 설정"으로 답한다. ──
+    case 'config/read': {
+      if (configReadFailures > 0) {
+        configReadFailures -= 1
+        return out({ id, error: { code: -32603, message: 'config read failed' } })
+      }
+      if (CONFIG_READ === undefined) return out({ id, result: { config: { mcp_servers: {}, plugins: {} }, layers: [] } })
+      if (CONFIG_READ && typeof CONFIG_READ === 'object' && CONFIG_READ.fail === true) {
+        return out({ id, error: { code: -32603, message: 'config read failed' } })
+      }
+      if (CONFIG_READ && typeof CONFIG_READ === 'object' && CONFIG_READ.malformed === true) {
+        return out({ id, result: { config: null } })
+      }
+      return out({ id, result: CONFIG_READ })
+    }
+    case 'plugin/installed':
+      return sendPaged(id, 'plugin', PLUGIN_INSTALLED)
+    case 'app/list':
+      return sendPaged(id, 'apps', APP_LIST)
+    case 'mcpServerStatus/list':
+      return sendPaged(id, 'mcp', MCP_STATUS)
+    case 'thread/list':
+      return sendPaged(id, 'threads', THREAD_LIST)
+    case 'thread/turns/list':
+      return sendPaged(id, 'turns', THREAD_TURNS_LIST)
+    case 'skills/list': {
+      if (SKILLS_LIST !== undefined) return out({ id, result: SKILLS_LIST })
+      const cwd = (params.cwds ?? [])[0] ?? process.cwd()
+      const skill = join(cwd, '.agents', 'skills', 'knuaf-dev', 'SKILL.md')
+      // 실제 Codex처럼 설치된 파일만 보고하고 경로 별칭·구분자를 정규화한다.
+      const skills = existsSync(skill) ? [{ path: realpathSync(skill), enabled: true }] : []
+      return out({ id, result: { data: [{ skills }] } })
+    }
+    case 'hooks/list':
+      return out({ id, result: { data: HOOKS_LIST ?? [] } })
     case 'initialize':
       // userAgent 의 판(version) 토큰을 앱이 읽는다. 늦게 답해 초기화 중 상태를 만든다.
       if (INIT_DELAY_MS > 0) setTimeout(() => out({ id, result: { userAgent: 'codex_cli_rs/0.0.0-test' } }), INIT_DELAY_MS)
@@ -164,13 +344,6 @@ function handle(message) {
         out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
       } else out({ method: 'account/login/completed', params: { loginId: 'fake', success: true } })
       return
-    case 'skills/list': {
-      const cwd = (params.cwds ?? [])[0] ?? process.cwd()
-      const skill = join(cwd, '.agents', 'skills', 'knuaf-dev', 'SKILL.md')
-      // 실제 Codex처럼 설치된 파일만 보고하고 경로 별칭·구분자를 정규화한다.
-      const skills = existsSync(skill) ? [{ path: realpathSync(skill), enabled: true }] : []
-      return out({ id, result: { data: [{ skills }] } })
-    }
     case 'thread/start':
     case 'thread/resume': {
       // `ephemeral` 은 앱이 '서버 기본값'을 물을 때 쓴다 — 디스크에 남지 않는 대화 하나.
@@ -184,7 +357,25 @@ function handle(message) {
         return out({ id, result: threadResult(ephId) })
       }
       threadId = params.threadId ?? 't-fake'
-      return out({ id, result: threadResult(threadId) })
+      const isResume = message.method === 'thread/resume'
+      if (isResume) {
+        if (RESUME_ERROR && resumeFailures !== 0) {
+          if (resumeFailures > 0) resumeFailures -= 1
+          if (RESUME_ERROR === 'timeout') return // 응답 없음 — 앱이 시간 초과로 본다
+          const message_ = RESUME_ERROR === 'active-writer' ? `-32600 thread ${threadId} already has an active writer`
+            : RESUME_ERROR === 'no-rollout' ? `-32600 no rollout found for thread id ${threadId}`
+              : 'resume failed'
+          const code = RESUME_ERROR === 'error' ? -32603 : -32600
+          return out({ id, error: { code, message: message_ } })
+        }
+      } else if (START_TIMEOUT) {
+        return // 미결 시작 — 앱이 시간 초과로 본다. 이후 이 프로세스는 쓰이지 않아야 한다.
+      }
+      const result = threadResult(threadId)
+      const replyId = responseThreadId(threadId)
+      if (replyId === undefined) delete result.thread.id
+      else result.thread.id = replyId
+      return out({ id, result })
     }
     case 'model/list':
       if (modelListFailures > 0) {
@@ -214,9 +405,19 @@ function handle(message) {
       if ('effort' in params && typeof params.effort === 'string' && params.effort) st.effort = params.effort
       if (APPLIED_LOG) appendFileSync(APPLIED_LOG, `${JSON.stringify({ ...st })}\n`)
       saveThread(params.threadId ?? threadId, st)
-      const turnId = 'u-fake'
+      const turnThread = params.threadId ?? threadId
+      const turnId = TURN_ID_MODE === 'unique' ? `u-${nextTurnSeq()}`
+        : TURN_ID_MODE === 'shared' ? 'u-shared' : 'u-fake'
+      if (TURN_CRASH === 'before-reply') {
+        // 턴은 남고 응답 전에 죽는다(㉱) — 앱이 원장을 못 쓰는 갈래.
+        turnsOf(turnThread).push(turnEntry(turnId))
+        process.exit(9)
+      }
+      turnsOf(turnThread).push(turnEntry(turnId))
       out({ id, result: { turn: { id: turnId } } })
-      out({ method: 'turn/started', params: { threadId, turn: { id: turnId } } })
+      const started = () => out({ method: 'turn/started', params: { threadId: turnThread, turn: { id: turnId } } })
+      if (TURN_NOTIFY_DELAY_MS > 0) setTimeout(started, TURN_NOTIFY_DELAY_MS)
+      else started()
       if (TURN_FAILURE && (!LOGIN_COMPLETE || !existsSync(LOGIN_COMPLETE))) {
         const message = TURN_FAILURE === 'refresh' ? 'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.'
           : TURN_FAILURE === '401' ? 'HTTP 401 Unauthorized: authentication failed'

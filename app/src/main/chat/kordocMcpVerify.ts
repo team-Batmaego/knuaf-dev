@@ -304,13 +304,22 @@ const OFF_STATUS: Record<string, true> = {
   disabled: true, failed: true, cancelled: true, authenticationRequired: true
 }
 
+/** 재조회 횟수 상한(검토 R-2). 설계 §10-22 ⓕ 의 "5회" 와 같은 수. */
+export const ABSENT_ROUNDS = 5
+
 export interface AbsentOptions {
   /** `thread/start`|`thread/resume` 이 방금 만든 그 스레드. */
   threadId: string
-  /** 스레드 config 로 끈 이름들. 비면 확인할 것이 없다(설정에 그 이름이 없었다는 뜻). */
+  /**
+   * 스레드 config 로 끈 이름들. 비면 **잠글 이름이 없었다**는 뜻이지만, 그래도 상태 목록을 한 번
+   * 본다 — `config/read` 가 스레드가 실제로 받는 층과 다르게 병합하면 이름이 없는데도 살아 있을 수
+   * 있다(검토 R-1).
+   */
   names: string[]
   /** 기본 600ms — 스레드 직후의 빈 목록(읽기 경쟁)을 몇 번 더 본다. */
   pollMs?: number
+  /** 재조회 상한. 기본 5회 — 그 뒤에도 확인 못 하면 단정한다(검토 R-2). */
+  rounds?: number
   sleep?: (ms: number) => Promise<void>
   now?: () => number
   /** 기본 20초. 이 함수 전체의 상한이다. */
@@ -330,7 +339,6 @@ export interface AbsentOptions {
  * 꺼진 값이 확인될 때까지 재조회하고 상한에서 실패한다.
  */
 export async function verifyKordocAbsent(request: JsonRpcLike, opts: AbsentOptions): Promise<void> {
-  if (!opts.names.length) return
   if (typeof opts.threadId !== 'string' || !opts.threadId) {
     throw new McpSafetyError('threadId 없이는 kordoc MCP가 꺼졌는지 확인할 수 없어요', 'no-thread')
   }
@@ -338,8 +346,10 @@ export async function verifyKordocAbsent(request: JsonRpcLike, opts: AbsentOptio
   const pollMs = opts.pollMs ?? 600
   const sleep = opts.sleep ?? DEFAULT_SLEEP
   const call = budgeted(request, opts.now ?? Date.now, timeout)
-  const maxRounds = Math.ceil(timeout / Math.max(pollMs, 1)) + 2
-  let unresolved: string[] = [...opts.names]
+  // 상한은 "시간"과 "횟수" 중 먼저 오는 쪽이다(검토 R-2 — 끝내 안 나오면 그 자리에서 단정한다).
+  const maxRounds = Math.min(Math.ceil(timeout / Math.max(pollMs, 1)) + 2, Math.max(1, opts.rounds ?? ABSENT_ROUNDS))
+  const wanted = opts.names.length ? opts.names : [MCP_SERVER_NAME]
+  let unresolved: string[] = [...wanted]
   for (let round = 0; round < maxRounds; round++) {
     const servers: unknown[] = []
     const seen = new Set<string>()
@@ -365,20 +375,29 @@ export async function verifyKordocAbsent(request: JsonRpcLike, opts: AbsentOptio
       const rec = asRecord(entry)
       if (!rec) continue
       const name = typeof rec.name === 'string' ? rec.name : asRecord(rec.serverInfo)?.name
-      if (typeof name === 'string' && opts.names.includes(name) && !byName.has(name)) byName.set(name, rec)
+      if (typeof name === 'string' && wanted.includes(name) && !byName.has(name)) byName.set(name, rec)
     }
-    for (const name of opts.names) {
+    for (const name of wanted) {
       const status = byName.get(name)?.runtimeStatus
       if (typeof status === 'string' && LIVE_STATUS[status]) {
         throw new McpSafetyError(`재시도 턴에서 kordoc MCP가 꺼지지 않았어요(${name}: ${status})`, 'retry-mcp-live')
       }
     }
-    unresolved = opts.names.filter((name) => {
+    if (!opts.names.length) {
+      // 검토 R-1: 병합된 `config/read` 에 kordoc 이름이 없어 잠글 것이 없어도 **한 번은 본다**.
+      // 살아 있는 kordoc 이 보이면 거부하고(위 LIVE_STATUS), 아니면 통과한다 — 여기서 통과시키는
+      // 것은 "꺼졌다"가 아니라 "이 프로세스가 그 서버를 띄우지 않았다"이고, 설정에 이름이 없으므로
+      // 띄울 수 없다. 이름이 있을 때처럼 `disabled` 양성 증거를 요구하면 이름이 정말로 없는
+      // 정상 경로가 영원히 실패한다(회귀).
+      return
+    }
+    unresolved = wanted.filter((name) => {
       const status = byName.get(name)?.runtimeStatus
       return typeof status !== 'string' || !OFF_STATUS[status]
     })
     if (!unresolved.length) return
-    if (call.expired()) break
+    // 마지막 회차 뒤에는 자지 않는다 — 상한에서 바로 단정한다(R-2).
+    if (round === maxRounds - 1 || call.expired()) break
     await sleep(pollMs)
   }
   throw new McpSafetyError(

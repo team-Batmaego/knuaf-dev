@@ -104,6 +104,18 @@ export interface HeldLeaf {
   tries: number
 }
 
+/**
+ * Codex 스레드 잠금 장부 한 줄(§4.1-C '스레드 잠금 장부').
+ * 뜻은 "**이 스레드의 모든 턴은 앱이 잠금 지문 `fingerprint` 로 열었다**"이다.
+ * 줄이 없으면 불명이고, 불명은 오염으로 본다 — 그래서 '오염' 칸을 따로 두지 않는다.
+ */
+export interface CodexThreadRow {
+  /** 그 스레드를 처음 적재한 잠금 config 의 지문 */
+  fingerprint: string
+  /** `turn/start` 응답이 준 `turn.id` 의 집합(정렬해 둔다 — 같은 상태는 같은 글자) */
+  turns: string[]
+}
+
 /** 상태 파일 전체 모양 */
 export interface GuardState {
   version: number
@@ -115,11 +127,13 @@ export interface GuardState {
   queryOpen: boolean
   /** 보류 잎(§16.5.2 ⑦·⑧). 없는 옛 상태 파일은 `{}`로 읽는다 */
   held: Record<string, HeldLeaf>
+  /** Codex 스레드 잠금 장부(§4.1-C). 없는 옛 상태 파일은 `{}`로 읽는다 */
+  codexThreads: Record<string, CodexThreadRow>
   /** 무결성 표식(HMAC hex). 열쇠를 못 쓰면 `''` */
   integrity: string
 }
 
-export const STATE_VERSION = 1
+export const STATE_VERSION = 2
 
 /** HMAC 열쇠. Electron `safeStorage`에서 꺼낸 값을 이 모듈은 모른다. */
 export type GuardKey = Buffer | null
@@ -127,7 +141,10 @@ export type GuardKey = Buffer | null
 export type IntegrityState = 'ok' | 'missing' | 'mismatch' | 'no-key'
 
 export function defaultState(): GuardState {
-  return { version: STATE_VERSION, leaves: {}, injected: null, rules: [], queryOpen: false, held: {}, integrity: '' }
+  return {
+    version: STATE_VERSION, leaves: {}, injected: null, rules: [], queryOpen: false,
+    held: {}, codexThreads: {}, integrity: ''
+  }
 }
 
 export function guardDir(userData: string, folderHash: string): string {
@@ -199,8 +216,45 @@ function readHeld(raw: unknown): Record<string, HeldLeaf> {
 }
 
 /**
+ * 상태 파일의 `codexThreads` 를 읽는다. 없는 옛 파일은 `{}`다.
+ * 모양이 어긋난 줄은 **버린다** — 버린 줄은 '없음'이 되어 그 스레드는 새 대화로 바뀐다.
+ * 닫는 쪽으로 틀리는 것이라 안전하고, 믿을 수 없는 줄을 살리면 오염된 스레드를 이어 하게 된다.
+ */
+function readCodexThreads(raw: unknown): Record<string, CodexThreadRow> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const rows: Record<string, CodexThreadRow> = {}
+  for (const [threadId, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!threadId) continue
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const entry = value as Partial<CodexThreadRow>
+    if (typeof entry.fingerprint !== 'string' || !entry.fingerprint) continue
+    if (!Array.isArray(entry.turns) || entry.turns.some((t) => typeof t !== 'string' || !t)) continue
+    rows[threadId] = { fingerprint: entry.fingerprint, turns: [...new Set(entry.turns as string[])].sort() }
+  }
+  return rows
+}
+
+/**
+ * 옛 판(1) 상태 파일의 표식. 그 판에는 `codexThreads` 칸이 없었으므로 표식도 그 칸 없이 계산됐다.
+ * **칸이 아예 없는 파일에만** 쓴다 — 옛 판이라 적어 두고 칸을 얹은 파일은 서명 없는 값을 들이는 셈이라
+ * 변조로 읽는다. 판을 올렸다고 옛 보관본이 '불일치'가 되면 지킴이가 조용히 꺼지므로 이 길이 필요하다.
+ */
+function legacyIntegrity(state: GuardState, key: GuardKey): string {
+  const { integrity: _integrity, codexThreads: _codexThreads, ...rest } = state
+  return hmac(key, canonical(rest))
+}
+
+/** 표식을 글자 그대로 대조한다(길이가 다르면 곧바로 false — `timingSafeEqual`이 던지지 않게). */
+function sameMac(expected: string, actual: string): boolean {
+  const a = Buffer.from(expected, 'utf-8')
+  const b = Buffer.from(actual, 'utf-8')
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/**
  * 상태 파일 로드. 표식이 안 맞아도 상태는 돌려준다 — 부르는 쪽이 기능을 끈다.
  * **열쇠가 없으면 파일 유무보다 먼저 `no-key`** — 첫 실행(파일 없음)도 꺼짐이 기본이다(§4.3).
+ * 옛 판 파일은 표식이 맞으면 지금 판으로 올려 돌려준다(다음 저장 때 파일도 올라간다).
  */
 export function loadState(userData: string, folderHash: string, key: GuardKey): LoadedState {
   if (!key) return { state: defaultState(), integrity: 'no-key' }
@@ -219,13 +273,15 @@ export function loadState(userData: string, folderHash: string, key: GuardKey): 
     rules: Array.isArray(parsed.rules) ? parsed.rules : [],
     queryOpen: Boolean(parsed.queryOpen),
     held: readHeld(parsed.held),
+    codexThreads: readCodexThreads(parsed.codexThreads),
     integrity: typeof parsed.integrity === 'string' ? parsed.integrity : ''
   }
-  const expected = computeIntegrity(state, key)
-  const a = Buffer.from(expected, 'utf-8')
-  const b = Buffer.from(state.integrity, 'utf-8')
-  const ok = a.length === b.length && timingSafeEqual(a, b)
-  return { state, integrity: ok ? 'ok' : 'mismatch' }
+  if (sameMac(computeIntegrity(state, key), state.integrity)) return { state, integrity: 'ok' }
+  if (parsed.codexThreads === undefined && state.version < STATE_VERSION &&
+      sameMac(legacyIntegrity(state, key), state.integrity)) {
+    return { state: { ...state, version: STATE_VERSION, codexThreads: {} }, integrity: 'ok' }
+  }
+  return { state, integrity: 'mismatch' }
 }
 
 /** 상태 저장(임시 파일 → 이름 바꾸기). 성공해야 true. */
@@ -240,6 +296,44 @@ export function saveState(userData: string, folderHash: string, state: Omit<Guar
   } catch {
     return false
   }
+}
+
+/** 장부 한 줄의 정규형 — 턴 id 는 중복 없이 정렬한다(같은 상태는 같은 글자 → 같은 표식). */
+export function codexThreadRow(fingerprint: string, turns: string[]): CodexThreadRow {
+  return { fingerprint, turns: [...new Set(turns)].sort() }
+}
+
+/** 장부를 읽는 자리 — 논문 폴더 밖 보관본(§4.3). */
+export interface ThreadStore {
+  userData: string
+  folderHash: string
+  key: GuardKey
+}
+
+/**
+ * 스레드 잠금 장부를 읽는다. **표식이 `ok` 가 아니면 빈 장부**다 —
+ * 열쇠가 없거나 표식이 안 맞으면 디스크를 믿지 않고, 줄이 없으니 그 스레드는 새 대화로 바뀐다(ⓥ).
+ */
+export function loadCodexThreads(store: ThreadStore): Record<string, CodexThreadRow> {
+  const { state, integrity } = loadState(store.userData, store.folderHash, store.key)
+  if (integrity !== 'ok') return {}
+  return state.codexThreads
+}
+
+/**
+ * 장부를 고쳐 쓴다(임시 파일 → 이름 바꾸기, 표식 다시 계산). 성공해야 true.
+ * 표식이 안 맞는 파일은 **덮지 않는다** — 학생·다른 프로그램이 고친 파일을 앱이 지우는 쪽으로
+ * 흐르면 보관본 전체를 잃는다. 그 실행은 메모리 장부로만 이어지고, 다음 실행은 새 대화다.
+ */
+export function saveCodexThreads(
+  store: ThreadStore,
+  mutate: (rows: Record<string, CodexThreadRow>) => Record<string, CodexThreadRow>
+): boolean {
+  const { state, integrity } = loadState(store.userData, store.folderHash, store.key)
+  if (integrity === 'no-key' || integrity === 'mismatch') return false
+  const { integrity: _ignored, ...rest } = state
+  const next = { ...rest, codexThreads: mutate(state.codexThreads) }
+  return saveState(store.userData, store.folderHash, next, store.key)
 }
 
 /** 임시 파일 → 이름 바꾸기. `renameWithRetry`는 윈도우에서 잠깐 열린 파일을 넘긴다. */

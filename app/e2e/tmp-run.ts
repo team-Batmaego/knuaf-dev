@@ -27,7 +27,7 @@
  *
  * 남은 폴더를 눈으로 봐야 할 때는 `KNUAF_E2E_KEEP_TMP=1` 로 지우기를 끈다.
  */
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
@@ -116,6 +116,27 @@ export function isolateTmpdir(): string {
   return root
 }
 
+/**
+ * 지우기 전에 읽기 전용 잠금을 푼다.
+ *
+ * 앱 스킬 자리(`<userData>/skill-host/…`)는 설치 뒤 파일 `0444`·폴더 `0555` 로 잠긴다(설계 §4.2).
+ * 그 폴더 안의 것을 지우려면 **폴더**에 쓰기 권한이 필요하므로 `rmSync` 는 `ENOTEMPTY` 로 실패한다
+ * (`force`·`maxRetries` 로는 안 풀린다 — 재시도는 실패한 호출을 되풀이할 뿐이다).
+ * 이 파일은 `--experimental-strip-types` 로 자식 프로세스가 직접 import 하므로 `../src/main/agent`
+ * 를 끌어오지 않는다(확장자 없는 import 는 그 모드에서 해석되지 않는다) — 같은 규칙을 여기 둔다.
+ * 링크는 따라가지 않는다: 링크 대상은 이 실행이 만든 것이 아니다.
+ */
+function unlockTree(target: string): void {
+  let st
+  try { st = lstatSync(target) } catch { return }
+  if (st.isSymbolicLink()) return
+  try { chmodSync(target, st.isDirectory() ? 0o755 : 0o644) } catch { /* 이미 쓰기 가능하거나 지원하지 않는다 */ }
+  if (!st.isDirectory()) return
+  let names: string[]
+  try { names = readdirSync(target) } catch { return }
+  for (const name of names) unlockTree(join(target, name))
+}
+
 /** 이 프로세스가 만든 뿌리만 지운다. 워커·남의 실행·물려받은 경로는 건드리지 않는다. */
 export function cleanupTmpdir(): void {
   const owned = state().owned
@@ -127,6 +148,9 @@ export function cleanupTmpdir(): void {
   try {
     // 앱이 아직 파일을 잡고 있으면(윈도) 바로 실패한다 — 몇 번 다시 시도하고, 그래도 안 되면
     // 시험 결과를 깨뜨리지 않고 남긴다. 소유 상태를 버리지 않으므로 종료 훅이 한 번 더 시도한다.
+    // 앱 스킬 자리는 읽기 전용으로 잠긴 채 남으므로 먼저 연다 — 부모가 안 써지면 `EACCES` 로
+    // 실패하고, 그때만 상태를 남겨 재시도한다.
+    unlockTree(owned.root)
     rmSync(owned.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   } catch (error) {
     console.warn(`[e2e] 임시 폴더를 지우지 못했습니다(종료 때 다시 시도): ${owned.root}: ${(error as Error).message}`)

@@ -7,11 +7,12 @@
  */
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { accessSync, chmodSync, constants, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, chmodSync, constants, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { APP_NAME } from '../shared/name'
 import { pathKeyOf } from './chat/contracts'
 import { renameWithRetry, writeFileAtomic } from './safeWrite'
+import { isSkillHostPath, skillHostDir, skillHostRoot } from './guard/scope'
 import { resolveSkillSource } from './update/source'
 import { agentActivity } from './update/activity'
 import { winSpawn } from './win'
@@ -41,6 +42,22 @@ export interface LaunchScriptOptions {
   firstPrompt: string
   /** $HOME — codex 의 전역 스킬 사본을 끄는 `-c` 오버라이드를 만들 때 쓴다. */
   home?: string
+  /**
+   * codex 터미널의 1층 잠금 인자(`-c …`, 설계 §4.1-C). 거부가 아니면 `agentApi.launch` 가
+   * 열거 결과를 여기로 넘긴다 — 스크립트 생성은 순수 함수로 남는다.
+   */
+  lockArgs?: string[]
+  /**
+   * Claude 터미널의 앱 스킬 자리(플러그인 뿌리, `<userData>/skill-host/.claude`).
+   * 있으면 `--plugin-dir-no-mcp` 로 넘겨 폴더 밖 스킬 사본만 보이게 한다. Codex 는 무시.
+   */
+  skillHost?: string
+  /**
+   * 터미널 도우미에 붙일 시스템 지시문 파일(`--append-system-prompt-file`, §11.5).
+   * 이 단계(2단계)에는 그 파일을 만드는 쪽이 아직 없다 — 4단계가 채우면 인자가 자동으로 붙는다.
+   * 파일이 없으면 인자 자체를 넣지 않는다(빈 인자는 CLI 가 오류로 본다).
+   */
+  guardPromptFile?: string
 }
 
 export interface LaunchOptions extends LaunchScriptOptions {
@@ -58,6 +75,19 @@ export interface LaunchDeps {
 
 export interface LaunchResult { scriptPath: string }
 
+/**
+ * 터미널 Codex 를 열지 않기로 한 거부(설계 §4.1-C '거부할 때 학생이 보는 글').
+ * `message` 가 곧 학생에게 보일 글이고, ipc 가 그대로 `code` 를 실어 보낸다 —
+ * 렌더러는 `copy.ts` 의 `agent_tool_lock` 으로 제목을 잡고 원문을 '자세히'에 그대로 둔다.
+ */
+export class AgentToolLockError extends Error {
+  readonly code = 'agent_tool_lock'
+  constructor(studentCopy: string) {
+    super(studentCopy)
+    this.name = 'AgentToolLockError'
+  }
+}
+
 /** Everything the main process knows that this module needs. Built once in ipc.ts. */
 export interface AgentCtx {
   home: string
@@ -65,6 +95,11 @@ export interface AgentCtx {
   isPackaged: boolean
   resourcesPath: string
   supportDir: string
+  /**
+   * 앱 데이터 폴더(`app.getPath('userData')`). Claude 스킬 사본이 논문 폴더 밖
+   * `<userData>/skill-host/` 에 사는 자리다(설계 §4.2). Codex 쪽은 쓰지 않는다.
+   */
+  userData: string
   dryRun: boolean
   open: (path: string) => Promise<string>
   venvPython: (root: string | null) => string | null
@@ -292,12 +327,36 @@ export const SKILL_NAME = 'knuaf-dev'
  */
 export const SUPERSEDED_SKILL_NAMES = ['knuaf-doc']
 
-/** Project-local install dirs: the skill lives inside the open project, never in the user's home. */
-export function skillTargets(root: string): Record<AgentKind, string> {
+/**
+ * Install dirs. **Claude lives outside the paper folder** (`<userData>/skill-host/…`, §4.2) so
+ * folder settings can never reach it and the agent cannot rewrite its own rules; Codex keeps its
+ * project-local copy (`<root>/.agents/skills/…`) because Codex has no plugin-dir equivalent and the
+ * folder copy is how it discovers the skill at all.
+ */
+export function skillTargets(root: string, userData: string): Record<AgentKind, string> {
   return {
-    claude: join(root, '.claude', 'skills', SKILL_NAME),
+    claude: skillHostDir(userData),
     codex: join(root, '.agents', 'skills', SKILL_NAME)
   }
+}
+
+/**
+ * 앱 스킬 자리를 설치하는 동안만 쓰기 가능하게 만든다(설계 §4.2 '권한 풀기→복사→잠금').
+ *
+ * 설치본은 읽기 전용으로 잠근다 — 도우미가 자기 규칙을 고쳐 다음 턴의 권한 경계를 바꾸는 길을
+ * 막기 위해서다. 그런데 읽기 전용 폴더에는 복사도 못 하므로, 다시 깔 때는 먼저 풀고 끝나면
+ * 되잠근다. `chmod` 는 윈도우에서도 Node 가 쓰기 비트만 토글한다(읽기 전용 속성).
+ * 링크는 따라가지 않는다 — 링크 대상은 앱 자리가 아니다.
+ */
+export function setTreeAccess(target: string, writable: boolean): void {
+  let st
+  try { st = lstatSync(target) } catch { return }
+  if (st.isSymbolicLink()) return
+  try { chmodSync(target, st.isDirectory() ? (writable ? 0o755 : 0o555) : (writable ? 0o644 : 0o444)) } catch { /* 권한이 이미 그렇거나 파일시스템이 지원하지 않는다 */ }
+  if (!st.isDirectory()) return
+  let names: string[]
+  try { names = readdirSync(target) } catch { return }
+  for (const name of names) setTreeAccess(join(target, name), writable)
 }
 
 export function skillState(target: string, version: string): SkillState {
@@ -375,30 +434,40 @@ export function installSkill(source: string, target: string, version: string): I
   const state = skillState(target, version)
   if (state === 'installed') return { action: 'unchanged' }
 
-  let backup: string | undefined
-  if (state === 'outdated') {
-    const dir = skillBackupDir(target)
-    mkdirSync(dir, { recursive: true })
-    const kind = basename(dirname(dirname(target)))  // '.claude' | '.agents'
-    backup = join(dir, `${kind}-${stamp()}`)
-    let i = 1
-    while (existsSync(backup)) backup = join(dir, `${kind}-${stamp()}-${i++}`)
-    renameWithRetry(target, backup)
-  }
+  // 앱 스킬 자리(논문 폴더 밖)만 읽기 전용으로 잠근다(§4.2). Codex 의 폴더 사본은 잠그지 않는다 —
+  // 그 자리는 학생 폴더 안이고, 다른 도구·학생이 손댈 수 있어야 한다(설치 때마다 덮어쓴다).
+  const lock = isSkillHostPath(target)
+  if (lock) setTreeAccess(target, true)
+  try {
+    let backup: string | undefined
+    if (state === 'outdated') {
+      const dir = skillBackupDir(target)
+      mkdirSync(dir, { recursive: true })
+      const kind = basename(dirname(dirname(target)))  // '.claude' | '.agents'
+      backup = join(dir, `${kind}-${stamp()}`)
+      let i = 1
+      while (existsSync(backup)) backup = join(dir, `${kind}-${stamp()}-${i++}`)
+      renameWithRetry(target, backup)
+      // 위에서 복사를 위해 풀었던 권한이 백업에 그대로 따라간다 — 백업도 다시 잠근다.
+      if (lock) setTreeAccess(backup, false)
+    }
 
-  mkdirSync(target, { recursive: true })
-  cpSync(skillMd, join(target, 'SKILL.md'))
-  for (const dir of ['references', 'scripts', 'assets']) {
-    const from = join(source, dir)
-    if (existsSync(from)) cpSync(from, join(target, dir), { recursive: true, filter: copyFilter })
-  }
-  for (const name of SKILL_METADATA) {
-    const from = join(source, name)
-    if (existsSync(from)) cpSync(from, join(target, name))
-  }
-  writeFileSync(join(target, VERSION_FILE), version + '\n', 'utf-8')
+    mkdirSync(target, { recursive: true })
+    cpSync(skillMd, join(target, 'SKILL.md'))
+    for (const dir of ['references', 'scripts', 'assets']) {
+      const from = join(source, dir)
+      if (existsSync(from)) cpSync(from, join(target, dir), { recursive: true, filter: copyFilter })
+    }
+    for (const name of SKILL_METADATA) {
+      const from = join(source, name)
+      if (existsSync(from)) cpSync(from, join(target, name))
+    }
+    writeFileSync(join(target, VERSION_FILE), version + '\n', 'utf-8')
 
-  return backup ? { action: 'updated', backup } : { action: 'installed' }
+    return backup ? { action: 'updated', backup } : { action: 'installed' }
+  } finally {
+    if (lock) setTreeAccess(target, false)
+  }
 }
 
 // ---------------------------------------------------------------- 6. launch script
@@ -501,14 +570,28 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
   const pathParts = agentBinDirs(o).map(sq)
   pathParts.push('"$HOME/.local/bin"', '"$PATH"')
 
-  // 비상구(외부 터미널)에도 앱 채팅과 같은 가드레일을 둔다 — 프로젝트 스킬만 유효하게
-  // (--setting-sources project,local / 전역 knuaf-dev 사본 비활성) 하고 도구 팝업
-  // (AskUserQuestion)은 끈다. `--disallowedTools=…` 는 `=` 로 묶어야 한다 — 공백이면
-  // 가변 인자가 뒤따르는 첫 프롬프트까지 삼킨다(7364349).
+  // 비상구(외부 터미널)에도 앱 채팅과 같은 1층을 건다(설계 §4.1-D·§15 2단계).
+  //   `--setting-sources=` 빈 목록 — 폴더·사용자 설정을 하나도 읽지 않는다(앱 채팅의
+  //   `settingSources: []` 와 같은 값). `=` 로 붙여야 한다 — 공백이면 뒤 인자를 삼킨다.
+  //   `--strict-mcp-config` — 폴더 `.mcp.json` 을 끈다.
+  //   `--plugin-dir-no-mcp` — 스킬은 논문 폴더가 아니라 앱 자리에서만 공급하고, 그 플러그인의
+  //     MCP 발견도 끈다(`claudeIsolationOptions` 의 `skipMcpDiscovery` 와 같은 뜻).
+  //   `--append-system-prompt-file` — §11.5 의 학생 규칙 구획. 파일이 없으면 인자도 없다.
+  //   `--disallowedTools=…` 는 `=` 로 묶어야 한다 — 공백이면 가변 인자가 뒤따르는 첫 프롬프트까지
+  //     삼킨다(7364349).
   const skillOff = o.agent === 'codex' ? codexSkillConfigOverride(o.home) : null
+  // 1층 잠금(§4.1-C) — 열거에서 끌 수 있다고 판정한 이름만 `-c …=false` 로 붙는다.
+  const lockArgs = (o.lockArgs ?? []).map((a) => ' ' + sq(a)).join('')
+  const claudeFlags = [
+    '--setting-sources=',
+    '--strict-mcp-config',
+    ...(o.skillHost ? ['--plugin-dir-no-mcp', sq(o.skillHost)] : []),
+    ...(o.guardPromptFile ? ['--append-system-prompt-file', sq(o.guardPromptFile)] : []),
+    "'--disallowedTools=AskUserQuestion'"
+  ].join(' ')
   const execLine = o.agent === 'claude'
-    ? `exec ${sq(o.agentPath)} --setting-sources project,local '--disallowedTools=AskUserQuestion' ${sq(o.firstPrompt)}`
-    : `exec ${sq(o.agentPath)}${skillOff ? ` -c ${sq(skillOff)}` : ''}` // codex: no positional prompt; the user types in the TUI
+    ? `exec ${sq(o.agentPath)} ${claudeFlags} ${sq(o.firstPrompt)}`
+    : `exec ${sq(o.agentPath)}${lockArgs}${skillOff ? ` -c ${sq(skillOff)}` : ''}` // codex: no positional prompt; the user types in the TUI
 
   return [
     '#!/bin/bash',
@@ -518,6 +601,9 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
     // ~/.claude/CLAUDE.md 같은 사용자 메모리의 @import가 외부 경로를 가리키면 영어 보안
     // 프롬프트가 학생에게 뜬다 — 이 앱이 띄우는 도우미는 메모리 파일을 아예 읽지 않는다.
     'export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1',
+    // 스킬 스크립트가 논문 폴더에 `__pycache__` 를 남기지 않게 한다(§4.1 표). 앱 채팅도 같은 값을
+    // 넘긴다(`contracts.ts subscriptionEnv`·`claude.ts` query 옵션) — 세 경로가 같은 값이어야 한다.
+    'export PYTHONDONTWRITEBYTECODE=1',
     `printf '%s\\n' ${sq(BANNER)}`,
     "printf '%s\\n' ''",
     execLine,
@@ -528,7 +614,8 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
 /**
  * 윈도우 대응 실행물 — `.command`(bash) 대신 `.cmd`(배치)다. 같은 일을 한다: 작업 폴더로
  * 이동하고, 프로젝트 .venv·번들 파이썬 자리를 PATH 앞에 두고, 같은 환경변수를 세우고,
- * 같은 가드레일(`--setting-sources project,local` / 전역 knuaf-dev 사본 끄기)로 도우미를 띄운다.
+ * 같은 가드레일(`--setting-sources=` / `--strict-mcp-config` / 앱 스킬 자리 / 전역 knuaf-dev 사본
+ * 끄기)로 도우미를 띄운다.
  *
  * 다른 곳 둘: cmd 에는 `exec` 가 없고(그냥 실행한다), **한 인자에 줄바꿈을 담을 수 없다** —
  * 첫 프롬프트의 줄바꿈은 한 칸으로 눌러 한 줄로 만든다(문장 뜻은 그대로다).
@@ -550,9 +637,19 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
   const dbl = isBatchShim(o.agentPath)
   // .exe의 명령 이름은 argv[0]으로도 읽힌다. cmd escape 대신 경로 전체를 인용해야 한다.
   const command = dbl ? batCommand(o.agentPath) : batQuote(o.agentPath)
+  const lockArgs = (o.lockArgs ?? []).map((a) => ' ' + batArg(a, dbl)).join('')
+  // Claude 1층 인자 — POSIX 판과 같은 값. 경로는 `/` 구분자로 넘긴다(스킬 자리 판정이 `\` 를
+  // 거부하고, CLI 도 윈도우에서 `/` 를 그대로 받는다). 배치에서 `=` 가 든 한 낱말은 그대로 인용.
+  const claudeFlags = [
+    batArg('--setting-sources=', dbl),
+    batArg('--strict-mcp-config', dbl),
+    ...(o.skillHost ? [batArg('--plugin-dir-no-mcp', dbl), batArg(o.skillHost, dbl)] : []),
+    ...(o.guardPromptFile ? [batArg('--append-system-prompt-file', dbl), batArg(o.guardPromptFile, dbl)] : []),
+    batArg('--disallowedTools=AskUserQuestion', dbl)
+  ].join(' ')
   const execLine = o.agent === 'claude'
-    ? `${command} --setting-sources project,local ${batArg('--disallowedTools=AskUserQuestion', dbl)} ${batArg(oneLine(o.firstPrompt), dbl)}`
-    : `${command}${skillOff ? ` -c ${batArg(skillOff, dbl)}` : ''}`
+    ? `${command} ${claudeFlags} ${batArg(oneLine(o.firstPrompt), dbl)}`
+    : `${command}${lockArgs}${skillOff ? ` -c ${batArg(skillOff, dbl)}` : ''}`
 
   return [
     '@echo off',
@@ -574,6 +671,7 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
     `set "PATH=${dirs.join(';')}${dirs.length ? ';' : ''}%PATH%"`,
     'set "KNUAF_DOC_APP=1"',
     'set "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"',
+    'set "PYTHONDONTWRITEBYTECODE=1"',
     `echo ${batLiteral(BANNER)}`,
     'echo.',
     execLine,
@@ -622,13 +720,13 @@ export async function getStatus(ctx: AgentCtx, root: string | null): Promise<Age
   }
   const [claude, codex] = await Promise.all([probe('claude'), probe('codex')])
   const version = skillVersion(skillSource(ctx.appRoot, ctx.isPackaged, ctx.resourcesPath))
-  const targets = root ? skillTargets(root) : null
+  // Claude 사본은 폴더 밖(앱 자리)이라 폴더가 없어도 판정할 수 있다(§4.2). Codex 는 폴더 사본.
   return {
     claude,
     codex,
     skill: {
-      claude: targets ? skillState(targets.claude, version) : 'missing',
-      codex: targets ? skillState(targets.codex, version) : 'missing'
+      claude: skillState(skillHostDir(ctx.userData), version),
+      codex: root ? skillState(skillTargets(root, ctx.userData).codex, version) : 'missing'
     },
     skillVersion: version
   }
@@ -640,17 +738,21 @@ export const agentApi = {
 
   installSkill: (ctx: AgentCtx, kind: AgentKind, root: string | null): InstallResult => {
     agentActivity.ensureActive()
-    if (!root) throw new Error('먼저 작업 폴더를 열어 주세요.')
+    // Claude 사본은 폴더 밖(앱 자리)이라 연 폴더가 필요 없다(§4.2). Codex 는 폴더 사본이라 필요하다.
+    if (kind === 'codex' && !root) throw new Error('먼저 작업 폴더를 열어 주세요.')
     const source = skillSource(ctx.appRoot, ctx.isPackaged, ctx.resourcesPath)
-    return installSkill(source, skillTargets(root)[kind], skillVersion(source))
+    return installSkill(source, skillTargets(root ?? ctx.userData, ctx.userData)[kind], skillVersion(source))
   },
 
   launch: (ctx: AgentCtx, o: { root: string; kind: AgentKind; revision: number | null }): Promise<LaunchResult> => {
     return agentActivity.run(async () => {
-    const agentPath = findExecutable(o.kind, ctx.env ?? process.env, { leadingDirs: bundledAgentDirs(ctx) })
+    const env = ctx.env ?? process.env
+    const agentPath = findExecutable(o.kind, env, { leadingDirs: bundledAgentDirs(ctx) })
     if (!agentPath) throw new Error(`${o.kind} 실행 파일을 찾지 못함 (PATH에 없음)`)
     const venv = ctx.venvPython(o.root)
     const bundled = ctx.bundledPython?.() ?? null
+    // 1층 잠금(설계 §4.1-C '터미널 Codex — 실패 닫힘') — 열거에서 남은 것이 0개일 때만 연다.
+    const lockArgs = o.kind === 'codex' ? await terminalLockArgs(agentPath, o.root, env) : undefined
     return launch({
       root: o.root,
       agent: o.kind,
@@ -660,8 +762,40 @@ export const agentApi = {
       firstPrompt: firstPromptFor(o.revision, o.root),
       home: ctx.home,
       supportDir: ctx.supportDir,
-      dryRun: ctx.dryRun
+      dryRun: ctx.dryRun,
+      // 앱 스킬 자리는 Claude 터미널에만 붙는다(§15 2단계). `/` 구분자로 넘긴다 — 스킬 자리
+      // 판정(`isSkillHostPath`)과 CLI 인자가 같은 모양을 보게.
+      ...(o.kind === 'claude' ? { skillHost: skillHostRoot(ctx.userData).replace(/\\/g, '/') } : {}),
+      ...(lockArgs ? { lockArgs } : {})
     }, { open: ctx.open })
     })
+  }
+}
+
+/**
+ * 터미널 Codex 의 `-c` 잠금 인자. 앱 연결이 없을 수도 있으므로 **짧게 띄운** `codex app-server`
+ * 로 열거한다(설계 §4.1-C 1번 "앱 연결로; 없으면 띄운다"). 띄우기·열거 어느 쪽이 실패해도
+ * 열지 않는다 — 2층 비상구는 닫히고 앱 안 대화는 그대로 남는다.
+ */
+async function terminalLockArgs(agentPath: string, root: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  const [{ serverArgsFor }, { JsonRpcProcess }, { codexToolLock, TERMINAL_ENUM_FAILED_COPY }] = await Promise.all([
+    import('./chat/codex'),
+    import('./chat/transport'),
+    import('./chat/codexToolLock')
+  ])
+  const rpc = new JsonRpcProcess(agentPath, serverArgsFor(env), root, env)
+  try {
+    await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.2' }, capabilities: { experimentalApi: true } })
+    rpc.send({ method: 'initialized', params: {} })
+    const outcome = await codexToolLock({ root, form: 'terminal', injected: [], rpc })
+    if (!outcome.ok) throw new AgentToolLockError(outcome.studentCopy)
+    // `form` 은 요청이 고정한 값이다 — 서버 응답이 아니라 이 호출의 결과 꼴을 다시 확인한다.
+    if (outcome.form !== 'terminal') throw new AgentToolLockError(TERMINAL_ENUM_FAILED_COPY)
+    return outcome.args
+  } catch (error) {
+    if (error instanceof AgentToolLockError) throw error
+    throw new AgentToolLockError(TERMINAL_ENUM_FAILED_COPY)
+  } finally {
+    await rpc.stop().catch(() => {})
   }
 }

@@ -25,6 +25,8 @@ export function writeCliShim(dir: string, name: string, unixBody: string, winBod
 }
 
 export const FAKE_SERVER = resolve(__dirname, 'fake-codex-server.mjs')
+/** 가짜 CLI — `--version` 에 즉시 답하고 나머지는 `FAKE_SERVER` 로 넘긴다(터미널 잠금 열거용). */
+export const FAKE_CODEX_CLI = resolve(__dirname, 'fake-codex-cli.mjs')
 export const FAKE_CLAUDE = resolve(__dirname, 'fake-claude-server.mjs')
 
 /** 질문 원문 — `skills/knuaf-dev/references/interview-ui.md` 의 질문 화면 형식 그대로. */
