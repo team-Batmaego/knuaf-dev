@@ -359,17 +359,25 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   // 로 부르고, 기본 예산(300ms)은 타이머 flush 에만 쓴다.
   // 20+30=50ms 는 **파일 하나**의 상한이다(검토 RT3 정정) — 초안이 N개면 50×N ms 까지 늘어난다.
   // 이 시험은 파일 하나만 두므로 그 합이 그대로 상한이 된다.
+  // ⓐ 예산값 자체를 잠근다. 시도 횟수만으로는 지연이 [200,200] 으로 늘어도 3회라 통과한다(검토 I-01).
+  expect(QUIT_FLUSH_DELAYS_MS, '종료 예산이 [20,30] 에서 벗어났다').toEqual([20, 30])
+  expect(QUIT_FLUSH_DELAYS_MS.reduce((a, b) => a + b, 0), '파일 하나 상한 50ms 를 넘었다').toBeLessThanOrEqual(50)
   const { root, draft } = project()
   let blocked = true
   // 판별값은 **시도 횟수**다(러너 속도와 무관). 종료 예산 [20,30] 이면 초기 1 + 재시도 2 = 3회,
   // 기본 예산 [20,40,80,160] 이면 5회 — 이 시험이 가르려는 것이 정확히 그 차이다.
+  // 시도 사이 간격도 함께 잰다(hrtime — 단조 증가라 벽시계 조정에 안 흔들린다). 하한이므로
+  // 예산을 키운 쪽은 못 잡고(그건 ⓐ 가 값으로 잡는다) **대기를 건너뛴 쪽**을 잡는다 — [0,0] 처럼
+  // 횟수만 3회로 맞춘 경우가 여기서 걸린다(ⓑ).
   let attempts = 0
   let writes = 0
+  const attemptAt: bigint[] = []
   const svc = service(() => {}, faultyFs({ write: (p) => {
     if (!p.startsWith(draft)) return null
     writes++
     if (!blocked) return null
     attempts++
+    attemptAt.push(process.hrtime.bigint())
     return eacces()
   } }))
   svc.setDraft(root, '쓰다 만 글')
@@ -378,6 +386,13 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   const elapsed = Date.now() - started
   // 시도 횟수가 먼저다 — 벽시계보다 흔들리지 않는 판별값이라, 예산이 새면 이 줄이 먼저 짚는다.
   expect(attempts, '종료 예산인데 재시도가 기본 예산(5회)만큼 돌았다').toBe(3)
+  // ⓑ 하한 — 재시도 i 는 `delays[i-1]` 만큼 동기로 기다린 뒤에야 다음 시도를 한다.
+  // 상한이 아니라 하한이라 러너가 느린 것은 걸리지 않는다(1ms 는 시계 눈금 여유).
+  for (let i = 1; i < attemptAt.length; i++) {
+    const wait = QUIT_FLUSH_DELAYS_MS[i - 1]
+    const gap = Number(attemptAt[i] - attemptAt[i - 1]) / 1e6
+    expect(gap, `${i}번째 재시도가 예산 ${wait}ms 를 기다리지 않았다`).toBeGreaterThanOrEqual(wait - 1)
+  }
   // 벽시계는 **멈춤 방지** 상한일 뿐이다(판별은 위 시도 횟수). 50ms 예산에 러너 스케줄링 지연이 얹혀
   // 맥 CI 에서 290ms 까지 나왔다 — 그 사례에 경계가 붙지 않도록 넉넉히 둔다. 1초를 넘으면 그건
   // 지연이 아니라 동기 대기(Atomics.wait)가 예산 밖에서 돌았다는 뜻이다.
