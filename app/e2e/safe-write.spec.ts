@@ -382,8 +382,26 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   } }))
   svc.setDraft(root, '쓰다 만 글')
   const started = Date.now()
-  expect(() => svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })).not.toThrow()
+  // ⓒ 실제로 넘어간 지연값 — `sleepSync` 는 `Atomics.wait(…, ms)` 로 자므로, flush 가 도는 동안만
+  // 그 함수를 감싸 `ms` 를 모은다. 값 잠금(ⓐ)·하한(ⓑ)만으로는 "예산을 **키운** 회귀"가 남는다:
+  // 지연이 [200,300] 으로 늘어도 상수는 [20,30] 이고 간격은 하한을 넘으므로 둘 다 통과한다(검토 FIX1).
+  // 제품 코드가 아니라 **시험이 부르는 전역**을 잠깐 바꾸는 것이라 finally 로 반드시 되돌린다 —
+  // 새면 뒤따르는 시험의 대기까지 가로챈다.
+  const waits: number[] = []
+  const atomics = Atomics as unknown as { wait: typeof Atomics.wait }
+  const realWait = atomics.wait
+  try {
+    atomics.wait = ((...args: Parameters<typeof Atomics.wait>) => {
+      waits.push(Number(args[3]))
+      return realWait(...args)
+    }) as typeof Atomics.wait
+    expect(() => svc.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })).not.toThrow()
+  } finally {
+    atomics.wait = realWait
+  }
   const elapsed = Date.now() - started
+  // 넘어간 지연값이 예산 그대로여야 한다 — 위 두 단언이 못 잡는 "값을 키운" 회귀가 여기서 걸린다.
+  expect(waits, '재시도 대기에 넘어간 지연값이 종료 예산 [20,30] 과 다르다').toEqual([20, 30])
   // 시도 횟수가 먼저다 — 벽시계보다 흔들리지 않는 판별값이라, 예산이 새면 이 줄이 먼저 짚는다.
   expect(attempts, '종료 예산인데 재시도가 기본 예산(5회)만큼 돌았다').toBe(3)
   // ⓑ 하한 — 재시도 i 는 `delays[i-1]` 만큼 동기로 기다린 뒤에야 다음 시도를 한다.
