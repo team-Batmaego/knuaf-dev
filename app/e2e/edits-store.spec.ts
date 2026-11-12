@@ -510,3 +510,50 @@ test('중요1(배선) — running→error 면 그 건이 pending 으로 돌아�
     expect(useEdits.getState().attach('다시').ids).toEqual(['e1'])
   })
 })
+
+/**
+ * 이 파일은 `useProject.loadSections()` 를 직접 불러 **모듈 변수** `sectionHashes`(절마다 직전에 본
+ * 지문)를 채운다. 그 값은 폴더를 열 때만(`store/project.ts:470`) 비워지므로, 같은 워커에서 이어
+ * 도는 다음 파일(`paper-events.spec.ts`)이 '앱 켠 직후 첫 읽기'를 기대하면 이미 있던 절이
+ * '도우미가 바꾼 절'로 보인다(맥 CI 1 failed). 상태만 `setState` 해서는 그 변수에 닿지 않으므로,
+ * 실제 폴더 전환과 **같은 길**(`open()`)로 되돌린다.
+ */
+test.afterAll(async () => {
+  /**
+   * Node 에는 `window`·`location` 이 없다. 있는지만 되돌리면 값이 `undefined` 로 남아
+   * `typeof window` 검사가 통과하고 `window.knuaf` 가 다른 오류를 낸다 — 원래 없던 것은 지운다.
+   */
+  const had = { window: 'window' in globalThis, location: 'location' in globalThis }
+  const holder = globalThis as { window?: unknown; location?: unknown }
+  const oldWindow = holder.window, oldLocation = holder.location
+  // `open()` 이 부르는 것만 답하는 최소 모형 — 준비(`deps.doctor`)는 실패해도 스스로 삼킨다.
+  const model = {
+    knuaf: {
+      openProject: async () => ({ result: { hasProject: false, sidecar: { python: '/bundled/python', kind: 'bundled' } } }),
+      peekProject: async () => ({ hasProject: false }),
+      getSettings: async () => ({}),
+      sidecarInfo: async () => ({ python: '/bundled/python', kind: 'bundled', running: false }),
+      call: async () => ({ result: null }),
+      depsEnsure: async () => ({ result: { ok: true } }),
+      cancel: async () => false,
+      chat: {
+        snapshot: async () => ({ result: { messages: [], state: 'idle', provider: 'codex' } }),
+        status: async () => ({ result: { connected: false, installed: false } }),
+        draft: async () => ({ result: '' })
+      }
+    }
+  }
+  // `closeSheet()` 이 `location.hash` 를 쓴다(Node 에는 `location` 이 없다).
+  Object.assign(globalThis, { window: model, location: { hash: '' } })
+  try {
+    await useProject.getState().open('/edits-store/reset', { local: true })
+  } finally {
+    // `open()` 이 건 2초 정본 감시 타이머는 폴더가 없을 때만 서므로, 여기서 끈다.
+    useProject.setState({ root: null, sections: null, events: [] })
+    await useProject.getState().watchCanon()
+    if (had.window) holder.window = oldWindow
+    else delete holder.window
+    if (had.location) holder.location = oldLocation
+    else delete holder.location
+  }
+})

@@ -12,6 +12,18 @@
 import { expect, test, type Page } from '@playwright/test'
 import { join } from 'node:path'
 import { launch, openProject, paperReady, synthProject } from './helpers'
+import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
+
+/**
+ * 도우미 연결이 **확인된** 상태로 앱을 띄운다. 막대(`.selbar`)는 연결이 끊겨 있으면 서지 않는다 —
+ * `zoneOf` 가 `disconnected` 를 돌려주고 `canQuote` 가 거짓이 된다. CI 에는 codex 가 없으므로
+ * 이 시험은 가짜 CLI 를 PATH 앞자리에 심어 실제 기계와 같은 장면을 만든다.
+ */
+async function launchEdit() {
+  const dir = scratch()
+  const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
+  return launch({ env })
+}
 
 
 /**
@@ -69,7 +81,7 @@ async function selectText(page: Page, needle: string, phrase: string): Promise<v
 
 test('드래그 → 직접 수정 → 저장하면 그 글자만 바뀌고 "고쳤어요." 한 줄이 남는다', async () => {
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -110,7 +122,7 @@ test('드래그 → 직접 수정 → 저장하면 그 글자만 바뀌고 "고�
 
 test('편집칸에서 취소하면 원고가 그대로다', async () => {
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -133,7 +145,7 @@ test('편집칸에서 취소하면 원고가 그대로다', async () => {
 
 test('고친 곳이 없으면 종이 머리에 목록 단추가 없다 — 고치지 않는 학생의 화면은 그대로다', async () => {
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -145,7 +157,7 @@ test('고친 곳이 없으면 종이 머리에 목록 단추가 없다 — 고�
 
 test('확인이 필요한 고침은 "직접 고친 곳 1" 과 확인 전 목록으로 보인다', async () => {
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -191,7 +203,7 @@ test('복구 알림은 확인을 누를 때까지 남고, 누르면 사라진다
   }) + '\n', 'utf-8')
   fs.unlinkSync(raw)
 
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     // 첫 화면 읽기가 복구한다 — 원고는 A 로 돌아오고 알림이 남는다.
@@ -213,7 +225,7 @@ test('복구 알림은 확인을 누를 때까지 남고, 누르면 사라진다
 test('고친 부분 보기를 켜면 직접 수정이 흐려지고 이유를 말한다', async () => {
   const { rewriteSection } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -237,7 +249,7 @@ test('고친 부분 보기를 켜면 직접 수정이 흐려지고 이유를 말
 
 test('저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다', async () => {
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -267,7 +279,7 @@ test('저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다'
 test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치기로 한 번에 저장된다', async () => {
   const { addSectionBody } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -308,7 +320,7 @@ test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치�
 test('본문이 바뀌면 같은 낱말 제안은 접힌다 — 체크가 다른 자리로 옮겨 가지 않는다 (Roh 02)', async () => {
   const { addSectionBody, rewriteSection } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -348,7 +360,7 @@ test('본문이 바뀌면 같은 낱말 제안은 접힌다 — 체크가 다른
 test('편집 중에 건너뛴 본문 갱신은 취소하면 따라잡는다 (Roh 06)', async () => {
   const { rewriteSection } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -371,7 +383,7 @@ test('편집 중에 건너뛴 본문 갱신은 취소하면 따라잡는다 (Roh
 test('그대로를 누르면 그 낱말 제안만 닫힌다 (Roh 08)', async () => {
   const { addSectionBody } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -423,7 +435,7 @@ test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (
   spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-review.json'),
     '--expected-revision', String(revision)], { encoding: 'utf-8' })
 
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -453,7 +465,7 @@ test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (
 test('체크를 뺀 자리는 확정 뒤에도 원고 그대로다 (Roh 03)', async () => {
   const { addSectionBody } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -505,7 +517,7 @@ test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (
   const root = synthProject()
   const revision = (): number =>
     (JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }).revision
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -561,7 +573,7 @@ test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (
 test('같이 고치기 목록에 장 제목이 보인다 (Roh 03)', async () => {
   const { addSectionBody } = await import('./helpers')
   const root = synthProject()
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
@@ -622,7 +634,7 @@ test('검토가 낡은 장은 목록 머리에 남고, 검토가 다시 유효�
     path: 'sections/01.md', coverage: [{ axis: 'content', locator: '전체' }]
   } }])
 
-  const { electronApp, page } = await launch()
+  const { electronApp, page } = await launchEdit()
   try {
     await openProject(page, root)
     await paperReady(page, '600평')
