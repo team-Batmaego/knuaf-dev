@@ -14,7 +14,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { ClaudeConnection, isSubagentTool, subagentGuardHook } from '../src/main/chat/claude'
-import { CodexConnection, SUBAGENT_SPAWNED_NOTE } from '../src/main/chat/codex'
+import { CodexConnection } from '../src/main/chat/codex'
+
+/** 하위 담당 알림은 학생 화면에 띄우지 않는다(형님 11-13: 한도·요금 문구 빼기) — 기록만 남는다. */
+const subagentNotes = (notes: string[]) => notes.filter((n) => n.includes('하위 담당') || n.includes('요금'))
 import { findExecutable } from '../src/main/agent'
 import type { AgentEvents } from '../src/main/chat/contracts'
 import { fakeCodexEnv } from './fixtures/fake-codex'
@@ -205,12 +208,12 @@ const childMessage = {
   method: 'item/completed', params: { threadId: 't-child', turnId: 'u-child', item: { id: 'child-msg', type: 'agentMessage', text: '담당이 조사한 중간 결과' } }
 }
 
-test('U5: Codex 메인이 띄운 하위 담당은 기록·알림만 — 담당의 말은 대화에 섞이지 않는다', async () => {
+test('U5: Codex 메인이 띄운 하위 담당은 기록만 — 화면 알림 없음, 담당의 말은 대화에 섞이지 않는다', async () => {
   const r = codexRig([spawnCall('t-fake', 't-child'), activityStarted('t-child', 't-child'), childMessage])
   try {
     await r.conn.run('자료 조사해 줘', undefined, r.agentEvents)
-    // ① 알림 — 학생에게 한 번, 그 사용량이 한도·요금에 들어간다는 것까지.
-    expect(r.notes.filter((n) => n === SUBAGENT_SPAWNED_NOTE)).toHaveLength(1)
+    // ① 알림 없음 — 학생 화면에는 아무 줄도 뜨지 않는다.
+    expect(subagentNotes(r.notes)).toHaveLength(0)
     // ② 기록 — 띄운 사실과 실제값이 감사 자리에 남는다(요청값 = spawnAgent 의 model).
     const records = r.audit()
     const spawned = records.find((x) => x.event === 'spawned')
@@ -239,8 +242,8 @@ test('U5b(중요 2): 자식 thread id 는 완료 알림에만 온다 — 시작�
   const r = codexRig([begin, end, activityStarted('t-child', 't-child')])
   try {
     await r.conn.run('자료 조사해 줘', undefined, r.agentEvents)
-    // 알림은 한 번(시작에서 이미 띄웠다).
-    expect(r.notes.filter((n) => n === SUBAGENT_SPAWNED_NOTE)).toHaveLength(1)
+    // 화면 알림은 없다(시작·완료 어느 쪽에서도).
+    expect(subagentNotes(r.notes)).toHaveLength(0)
     // 기록은 id 가 확정된 뒤 한 번, 그 id 와 요청값을 들고.
     const spawned = r.audit().filter((x) => x.event === 'spawned')
     expect(spawned).toHaveLength(1)
@@ -270,7 +273,7 @@ test('U5: 다른 collab 도구(sendInput 등)는 담당 생성이 아니다 — 
   const r = codexRig([send])
   try {
     await r.conn.run('계속해 줘', undefined, r.agentEvents)
-    expect(r.notes.filter((n) => n === SUBAGENT_SPAWNED_NOTE)).toHaveLength(0)
+    expect(subagentNotes(r.notes)).toHaveLength(0)
     expect(r.audit()).toEqual([])
   } finally { await r.conn.stop() }
 })

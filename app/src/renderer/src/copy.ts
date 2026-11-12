@@ -1164,10 +1164,7 @@ export const MODEL_PICKER = {
   connectFirst: 'AI에 연결하면 이 계정에서 쓸 수 있는 모델이 보여요.',
   chooseForDepth: '모델을 고르면 생각 깊이도 바꿀 수 있어요.',
   sameConversationFor: (company: string) => `같은 ${company} 대화에서 다음 메시지부터 적용돼요.`,
-  /** ultra 는 깊이만 올리는 단계가 아니다 — 동봉 설명이 "Maximum reasoning with automatic task delegation"이다. */
-  ultraNotice: '울트라는 Codex가 스스로 담당을 여러 개 띄워요 — 한도가 빨리 줄고, 작업 분담표와 따로 돌아요.',
   reviewNotice: '검토는 새 대화로 하세요. 검토용 새 대화 열기는 아직 지원하지 않아요.',
-  limitNotice: 'Sol 같은 무거운 모델은 구독 한도를 더 빨리 쓸 수 있어요.',
   subscription: '앱은 AI를 팔지 않아요. 내 구독 계정을 써요.'
 }
 

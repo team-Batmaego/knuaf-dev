@@ -70,7 +70,7 @@ test('U1 화면: Claude 칩에서 모델과 생각 깊이를 고를 수 있다',
   }
 })
 
-test('U1 화면: ultra 를 고르면 자동 분담 안내 한 줄이 칩 안에 뜬다', async () => {
+test('U1 화면: ultra·무거운 모델을 골라도 한도 안내 줄은 뜨지 않는다', async () => {
   const s = scene('codex-chat', {
     SETTINGS: JSON.stringify({ chat_models: { codex: { model: 'gpt-6-sol', effort: 'ultra' } } })
   })
@@ -91,7 +91,8 @@ test('U1 화면: ultra 를 고르면 자동 분담 안내 한 줄이 칩 안에 
     await expect(dialog).toBeVisible()
     // 이름표도 한국어로 뜬다(F22: 예전에는 영어 "ultra" 가 그대로 나왔다).
     await expect(dialog.getByLabel('생각 깊이').locator('option', { hasText: '울트라(자동 분담)' })).toHaveCount(1)
-    await expect(dialog.getByText('울트라는 Codex가 스스로 담당을 여러 개 띄워요 — 한도가 빨리 줄고, 작업 분담표와 따로 돌아요.')).toBeVisible({ timeout: 20_000 })
+    // 한도 안내 줄은 뺐다(형님 11-13) — 울트라를 골라도 '한도' 문장이 뜨지 않는다.
+    await expect(dialog.getByText(/한도/)).toHaveCount(0)
   } finally {
     await electronApp.close()
   }
