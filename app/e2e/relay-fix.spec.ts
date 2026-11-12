@@ -366,3 +366,31 @@ test('[㉠] Claude 담당 연결이 gateInTurn 을 선언한다', () => {
   expect(codex.gateInTurn).toBeUndefined()
   expect(new JobFailure('limit', 'x').status).toBe('limit')
 })
+
+/**
+ * §0-5 3 — 담당 이어 하기의 한도 판정도 **구조 신호**만 본다.
+ *
+ * 예전 `classifyRelayResult` 는 오류 글에 `한도`·`rate limit` 이 있으면 `limit` 으로 닫았다.
+ * 그러면 정상 답변이 그 낱말을 인용하기만 해도 이어 하기 단추가 뜨고, 반대로 문구가 바뀐
+ * 진짜 한도는 놓친다. 한도는 그 턴의 `rate_limit_event{status:'rejected'}` 만 근거로 삼는다.
+ */
+test('relay-limit: 담당 정규식 대신 구조 신호', async () => {
+  const { root, out, skill } = fixtureRoot('relay-limit')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay-limit-')))
+  const logFile = join(root, 'claude-query.jsonl'); writeFileSync(logFile, '')
+  const fixture = join(appRoot, 'e2e', 'fixtures', 'fake-claude-query.mjs')
+  const binary = join(root, process.platform === 'win32' ? 'claude.cmd' : 'claude')
+  const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`
+  writeFileSync(binary, process.platform === 'win32'
+    ? `@echo off\r\n"${process.execPath}" "${fixture}" %*\r\n`
+    : `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} "$@"\n`, { mode: 0o755 })
+  // 거절 사건은 없다 — 오류 **글에만** '한도' 낱말이 있다(정상 답변이 인용한 경우와 같은 모양).
+  const connection = new ClaudeRelayConnection(agentOptions(binary, root, skill, {
+    W1_QUERY_LOG: logFile, W1_QUERY_ERROR: 'network',
+    W1_QUERY_ERROR_TEXT: 'API Error: 429 usage limit · rate limit · quota · 한도 초과'
+  }), relayRequest(root, out, skill), appDir)
+  try {
+    await expect(connection.runJob('/knuaf-dev 담당 모드: 주문서', recorder().events))
+      .rejects.toMatchObject({ status: 'unknown' })
+  } finally { await connection.stop() }
+})

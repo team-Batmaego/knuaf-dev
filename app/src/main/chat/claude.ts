@@ -1638,11 +1638,15 @@ export class ClaudeRelayConnection implements JobConnection {
 }
 
 /** 담당 턴이 실패로 끝났을 때 그 까닭을 분류한다. 문구 추측이 아니라 원인을 나눈다. */
-function classifyRelayResult(message: { errors?: unknown[]; result?: unknown }): 'limit' | 'auth' | 'unknown' {
-  const detail = relayResultDetail(message)
-  if (/usage limit|rate limit|quota|한도/i.test(detail)) return 'limit'
-  if (/401|authenticat/i.test(detail)) return 'auth'
-  return 'unknown'
+/**
+ * 결과 오류의 종류 — **구조 신호**로만 가른다(§1-2). 한도는 이 함수가 아니라 그 턴의
+ * `rate_limit_event{status:'rejected'}`(`runJob` 의 `verdict`)가 정한다. 오류 글에 '한도'가
+ * 들어 있는지로 판정하면 정상 답변이 인용한 낱말에도 걸린다([C4 3번]).
+ * 인증은 SDK 오류 필드 문구만 본다 — `claudeAuthenticationFailed` 와 같은 규칙이다.
+ */
+function classifyRelayResult(message: { errors?: unknown[]; result?: unknown }): 'auth' | 'unknown' {
+  return Array.isArray(message.errors) && message.errors.some(e => typeof e === 'string' && AUTH_FAILURE.test(e))
+    ? 'auth' : 'unknown'
 }
 
 function relayResultDetail(message: { errors?: unknown[]; result?: unknown }): string {
