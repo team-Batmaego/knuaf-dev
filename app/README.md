@@ -160,6 +160,15 @@ CI는 e2e를 OS × 샤드로 나눠 돕니다(윈도 5개, 맥 2개). 한 샤드
 단계가 먼저 막습니다). 표에는 `e2e/` 접두와 `.spec.ts` 확장자를 뺀 이름을 적습니다 — `e2e/docx-zip.spec.ts`는
 `docx-zip`, `e2e/sub/foo.spec.ts`는 `sub/foo`입니다.
 
+Electron 시험은 `await electronApp.close()` 대신 `await closeApp(electronApp, log)`로 앱을 닫습니다.
+Playwright의 `close()`는 앱 종료가 아니라 **런치 래퍼 프로세스의 `close` 이벤트**를 무타임아웃으로
+기다리므로(윈도우 래퍼는 `shell: true`의 `cmd.exe`), 래퍼가 안 죽으면 앱이 정상 종료해도 시험이 매달립니다.
+`closeApp`은 상한(기본 20초)을 두고 넘기면 프로세스 트리를 강제 정리하며, 그 사실을 `close:force`로
+`app-log.txt`에 남깁니다. `close:end`도 이 함수가 남기므로 `captureAppLog`의 5초 헬스비트가 워커 종료까지
+돌지 않습니다. 상한 갈래의 계약은 `e2e/close-app.spec.ts`가 고정합니다.
+브라우저를 실제로 띄우는 시험은 `stubExternal(electronApp)`을 함께 씁니다(기록을 남기지 않으므로
+`shellCalls(log)`를 정확 배열로 단언하는 시험과 충돌하지 않습니다).
+
 `pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
 별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
 `test:e2e`·기본 Playwright 설정은 GUI용입니다. `model-chip.spec.ts`처럼 GUI와 store가 섞인 파일은

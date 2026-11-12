@@ -223,6 +223,73 @@ export function shellCalls(log: string): string[] {
   return existsSync(log) ? readFileSync(log, 'utf-8').split('\n').filter(Boolean) : []
 }
 
+/**
+ * 로그인 창을 띄우는 `shell.openExternal` 만 **아무것도 하지 않게** 바꾼다.
+ *
+ * `spyShell` 에 넣지 않는 이유: 그 기록 파일을 `shellCalls(log)` 로 **정확 배열** 단언하는
+ * 시험이 다섯 개 있어, `external\t` 줄이 하나라도 새면 전부 깨진다. 여기서는 기록도 남기지 않는다.
+ *
+ * 왜 필요한가: 가짜 codex 서버는 `authUrl: 'about:blank'` 를 주고, 제품 코드는 그 주소를
+ * 실제 기본 브라우저로 연다. CI 윈도우에서 브라우저 프로세스가 런치 래퍼(`cmd.exe`)의 핸들을
+ * 물고 남으면 앱이 정상 종료해도 `close()` 가 안 돌아온다 — 재로그인 시험은 매번 브라우저를
+ * 띄우므로 그 경로에 특히 취약하다. 화면 문구(`브라우저에서 로그인`)는 제품 상태라 그대로다.
+ */
+export async function stubExternal(electronApp: ElectronApplication): Promise<void> {
+  await electronApp.evaluate(({ shell }) => { shell.openExternal = async () => {} })
+}
+
+/**
+ * 앱을 닫되 **상한을 둔다**.
+ *
+ * 왜 필요한가: Playwright 의 `ElectronApplication.close()` 는 앱 종료가 아니라 **런치 래퍼
+ * 프로세스의 `close` 이벤트**를 무타임아웃으로 기다린다(playwright-core 1.63.0, `appClosePromise`).
+ * 윈도우에서는 `shell: true` 때문에 그 래퍼가 `cmd.exe` 다. 래퍼가 안 죽으면 앱이
+ * `[shutdown] stage=process-exit code=0` 으로 정상 종료했는데도 `close()` 가 영영 돌아오지
+ * 않는다 — 시험은 90초 타임아웃으로 죽고, 워커 정리까지 90초를 더 쓴다(run 43296520840
+ * 윈도우 샤드 4, 같은 시험이 main 단일 잡에서는 38.1s 통과).
+ *
+ * 앱이 스스로 끝나면 이 상한은 아무 일도 하지 않는다. 넘겼을 때만 프로세스 **트리**를
+ * 강제로 정리하고 그 사실을 `close:force` 로 남긴다 — 조용히 넘기면 다음 사람이 못 본다.
+ *
+ * `close:end` 는 여기서 **반드시** 남긴다. 안 남기면 `captureAppLog` 의 5초 헬스비트가
+ * 워커 종료까지 계속 찍혀, 통과한 시험도 매달린 것처럼 보인다(오탐).
+ */
+export async function closeApp(
+  electronApp: ElectronApplication,
+  log: { mark: (stage: string) => void },
+  ms = 20_000
+): Promise<void> {
+  log.mark('close:start')
+  const proc = electronApp.process()
+  const expiry = Promise.withResolvers<'expired'>()
+  const timer = setTimeout(() => expiry.resolve('expired'), ms)
+  timer.unref?.()
+  try {
+    // 강제 종료 뒤 원래 약속이 늦게 거절해도 시험을 오염시키지 않는다.
+    const closed = electronApp.close().then(() => 'closed' as const, () => 'closed' as const)
+    if (await Promise.race([closed, expiry.promise]) === 'expired') {
+      const pid = proc.pid
+      log.mark(`close:force pid=${pid ?? '없음'} 상한=${ms}ms`)
+      if (typeof pid === 'number') {
+        // 윈도우에서 `proc.kill()` 은 래퍼(`cmd.exe`)만 죽이고 그 아래는 남는다 — 트리째 죽여야 한다.
+        // Playwright 자신도 강제 종료에 같은 모양(taskkill /T /F)을 쓴다(1.63.0 `killProcess`).
+        // 그 외 플랫폼은 `shell: false` 라 이 pid 가 곧 electron 이고, 이 갈래에 닿는 일은 사실상 없다
+        // (앱이 정상 종료하면 상한이 발동하지 않는다). 여기서 자식 사이드카까지 거두지는 않는다.
+        try {
+          if (process.platform === 'win32') spawnSync(`taskkill /pid ${pid} /T /F`, { shell: true, windowsHide: true })
+          else proc.kill('SIGKILL')
+        } catch (e) {
+          // 이미 죽었다면(ESRCH) 실패로 만들지 않는다 — 할 일은 다 했다.
+          log.mark(`close:force-failed ${(e as NodeJS.ErrnoException).code ?? String(e)}`)
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timer)
+    log.mark('close:end')
+  }
+}
+
 /** 두 공급자 모두에 같은 도우미 답변을 심는다 — 어느 공급자로 열려도 그 글이 보인다. */
 export function seedChat(root: string, text: string): void {
   mkdirSync(join(root, '.knuaf-gui'), { recursive: true })
