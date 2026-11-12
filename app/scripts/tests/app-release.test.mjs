@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { assertNoPendingChannelUpdates } from '../check-channel-update-state.mjs'
+import { archiveTag, assertNoPendingChannelUpdates, cleanupCommands } from '../check-channel-update-state.mjs'
+import { checkSkillReleaseWorkflow } from './check-skill-workflow.mjs'
 import { verifyPublicAsset } from '../check-app-channel.mjs'
 import { buildSignedChannel, releasePage, signingKeyFromEnvironment, verifyAppChannel, verifyAppEnvelope } from '../sign-app.mjs'
 
@@ -100,14 +101,105 @@ test('the signing key must match current and mismatch errors never print its val
   assert.equal(existsSync(result.outputPath), false)
 })
 
-test('channel conflicts block open PRs and unmerged branches but allow branches contained in main', () => {
+test('channel conflicts block a run that has a new release to publish', () => {
+  const sha = 'a'.repeat(40)
   assert.doesNotThrow(() => assertNoPendingChannelUpdates([], [
-    { name: 'app-channel-v0.6.0', status: 'ahead' },
-    { name: 'skill-channel-update', status: 'identical' }
+    { name: 'app-channel-v0.6.0', status: 'ahead', sha },
+    { name: 'skill-channel-update', status: 'identical', sha }
   ]))
   assert.throws(() => assertNoPendingChannelUpdates(['app-channel-v0.6.1'], []), /Open channel PR/)
-  assert.throws(() => assertNoPendingChannelUpdates([], [{ name: 'skill-channel-update', status: 'behind' }]), /not on main/)
-  assert.throws(() => assertNoPendingChannelUpdates([], [{ name: 'app-channel-vbad', status: 'diverged' }]), /Unexpected app channel branch/)
+  assert.throws(() => assertNoPendingChannelUpdates([], [{ name: 'skill-channel-update', status: 'behind', sha }]), /not on main/)
+  assert.throws(() => assertNoPendingChannelUpdates([], [{ name: 'app-channel-vbad', status: 'diverged', sha }]), /Unexpected app channel branch/)
+  assert.throws(() => assertNoPendingChannelUpdates([], [{ name: 'app-channel-v0.6.2', status: 'behind', sha }]),
+    /git fetch origin a{40}[\s\S]*git tag archive\/app-channel-v0\.6\.2-aaaaaaa a{40}[\s\S]*git push origin --delete app-channel-v0\.6\.2/)
+})
+
+test('archiving the same reused channel branch twice never reuses a tag name', () => {
+  const first = '1'.repeat(40)
+  const second = '2'.repeat(40)
+  const firstCommands = cleanupCommands('skill-channel-update', first)
+  const secondCommands = cleanupCommands('skill-channel-update', second)
+  assert.notEqual(firstCommands, secondCommands)
+  assert.match(firstCommands, /archive\/skill-channel-update-1111111/)
+  assert.match(secondCommands, /archive\/skill-channel-update-2222222/)
+  // The tag target is the full head SHA fetched by value, the tag must reach origin and read back
+  // as that same SHA, and only then may the branch be deleted. No force, no annotated tag.
+  for (const [commands, sha, suffix] of [[firstCommands, first, '1111111'], [secondCommands, second, '2222222']]) {
+    const steps = commands.split('\n').map(line => line.trim().replace(/^&& /, '').replace(/ \\$/, ''))
+    assert.deepEqual(steps.map(step => step.startsWith('test ') ? 'test' : step.split(' ')[1]),
+      ['fetch', 'test', 'tag', 'push', 'test', 'push'])
+    assert.equal(steps[0], `git fetch origin ${sha}`)
+    assert.equal(steps[1], `test "$(git rev-parse FETCH_HEAD)" = ${sha}`)
+    assert.equal(steps[2], `git tag archive/skill-channel-update-${suffix} ${sha}`)
+    assert.equal(steps[3], `git push origin refs/tags/archive/skill-channel-update-${suffix}`)
+    assert.equal(steps[4], `test "$(git ls-remote origin refs/tags/archive/skill-channel-update-${suffix} | cut -f1)" = ${sha}`)
+    assert.equal(steps[5], 'git push origin --delete skill-channel-update')
+    // An annotated tag reads back its own tag object SHA, not the commit, so `-a`/`-m` would
+    // break the read-back check. The local tracking ref can point at an older proposal.
+    assert.doesNotMatch(commands, /-f\b|--force|git tag -a|git tag -m|origin\/skill-channel-update/)
+  }
+  assert.throws(() => archiveTag('skill-channel-update', 'abc1234'), /full branch head commit SHA/)
+  assert.throws(() => cleanupCommands('skill-channel-update', ''), /full branch head commit SHA/)
+})
+
+test('an idle run reports the same conflicts without failing', () => {
+  const blocked = assertNoPendingChannelUpdates(['skill-channel-update'], [{ name: 'app-channel-v0.6.2', status: 'behind', sha: 'b'.repeat(40) }],
+    { pendingNewRelease: false })
+  assert.equal(blocked.conflicts.length, 2)
+  assert.match(blocked.conflicts.join('\n'), /Open channel PR/)
+  assert.match(blocked.conflicts.join('\n'), /not on main/)
+  assert.deepEqual(assertNoPendingChannelUpdates([], [], { pendingNewRelease: false }).conflicts, [])
+})
+
+test('only an explicit pendingNewRelease=false downgrades a conflict to a warning', () => {
+  assert.throws(() => assertNoPendingChannelUpdates(['skill-channel-update'], [], { pendingNewRelease: undefined }), /Open channel PR/)
+  assert.throws(() => assertNoPendingChannelUpdates(['skill-channel-update'], [], { pendingNewRelease: 'false' }), /Open channel PR/)
+})
+
+test('the skill-release workflow keeps the guard between planning and reserving work', () => {
+  const workflow = readFileSync(resolve(import.meta.dirname, '../../../.github/workflows/skill-release.yml'), 'utf8').replace(/\r\n/g, '\n')
+  assert.equal(checkSkillReleaseWorkflow(workflow), true)
+  // Each mutation below recreates one way this fix can silently regress, including the five
+  // variants the first review showed the earlier contract let through.
+  const mutations = [
+    [/\n[ \t]*CHANNEL_PENDING_NEW_RELEASE:.*\n/, '\n', /raw plan/],
+    [/\n[ \t]*CHANNEL_PENDING_NEW_RELEASE:.*\n/, '\n          CHANNEL_PENDING_NEW_RELEASE: ${{ steps.plan.outputs.changed == \'true\' }}\n', /raw plan/],
+    [/version: \$\{\{ steps\.reserve\.outputs\.version \}\}/, 'version: ${{ steps.plan.outputs.version }}', /reserved version/],
+    [/VERSION: \$\{\{ steps\.reserve\.outputs\.version \}\}/, 'VERSION: ${{ steps.plan.outputs.version }}', /reserved version/],
+    [/        continue-on-error: true\n/, '', /tolerate the repository policy failure/],
+    [/- name: Report manual pull request step/, '- name: Skip the manual report', /manual pull request step/],
+    [/git ls-remote --heads origin "refs\/heads\/\$branch"/, 'true', /compare the branch blobs/],
+    // Roh 1: skipping the guard hides a blocked release.
+    [/- name: Refuse concurrent channel proposals\n/, '- name: Refuse concurrent channel proposals\n        if: false\n', /never be skipped/],
+    // Roh 2: continuing past a guard failure hides a blocked release.
+    [/- name: Refuse concurrent channel proposals\n/, '- name: Refuse concurrent channel proposals\n        continue-on-error: true\n', /must not tolerate its own failure/],
+    // Roh 3: skipping the report leaves "released but no channel PR" green.
+    [/if: steps\.channel_pr\.outcome == 'failure'/, 'if: false', /exactly when automatic creation failed/],
+    // Roh 4: reporting then exiting 0 does the same.
+    [/채널 PR 자동 생성 실패 — 실행 요약의 안내에 따라 사람이 마무리해야 합니다\."\n            exit 1\n/,
+      '채널 PR 자동 생성 실패 — 실행 요약의 안내에 따라 사람이 마무리해야 합니다."\n            exit 0\n', /exit non-zero|never exit successfully/],
+    // Roh 5: deleting the plan's changed output removes the fact the guard reads.
+    [/appendFileSync\(process\.env\.GITHUB_OUTPUT, 'changed=false\\n'\)\n/, '', /changed=false/],
+    // FIX2: the printed archive command must tag the full head SHA read from origin, must be a
+    // lightweight tag, must verify the origin read-back, and must never force or tag a tracking ref.
+    ['git tag archive/$branch-$head7 $head', 'git tag archive/$branch-$head7 origin/$branch', /full-SHA archive chain/],
+    ['git tag archive/$branch-$head7 $head', 'git tag -a archive/$branch-$head7 $head -m archived', /full-SHA archive chain/],
+    [' && test \\"\\$(git ls-remote origin refs/tags/archive/$branch-$head7 | cut -f1)\\" = $head', '', /full-SHA archive chain/],
+    ['git push origin refs/tags/archive/$branch-$head7', 'git push --force origin refs/tags/archive/$branch-$head7', /full-SHA archive chain/],
+    ['git fetch origin $head && ', '', /full-SHA archive chain/],
+    // The PR body is the other place a person reads the same instruction.
+    ['git tag archive/skill-channel-update-<sha7> <FULL>', 'git tag archive/skill-channel-update-<sha7> origin/skill-channel-update', /full-SHA archive chain/]
+  ]
+  for (const [pattern, replacement, expected] of mutations) {
+    const mutated = workflow.replace(pattern, replacement)
+    assert.notEqual(mutated, workflow)
+    assert.throws(() => checkSkillReleaseWorkflow(mutated), expected)
+  }
+  const guard = workflow.match(/ {6}- name: Refuse concurrent channel proposals\n[\s\S]*?run: node app\/scripts\/check-channel-update-state\.mjs\n/)[0]
+  const movedGuard = workflow.replace(guard, '')
+    .replace('      - name: Resolve public release and compare source commit plus overlay hash',
+      guard + '      - name: Resolve public release and compare source commit plus overlay hash')
+  assert.throws(() => checkSkillReleaseWorkflow(movedGuard), /plan, then guard the channel, then reserve/)
 })
 
 test('anonymous app asset check hashes bounded response bytes and rejects an untrusted redirect', async () => {
