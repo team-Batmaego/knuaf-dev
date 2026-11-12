@@ -2,7 +2,7 @@
 // 실제 AI 호출 0회: 계정은 스텁, 러너는 기록만 돌려준다. 계약: lanes:decide-card, lanes:card-status,
 // lanes:settings-card, lanes:review-models, lanes:pick-review, lanes:disable.
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { JobStore } from '../src/main/chat/jobs/store'
@@ -549,4 +549,62 @@ test('card fix: apply re-reads the account instead of trusting a cached probe', 
   await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
   // 카드가 묶은 두 회사 중 하나라도 캐시를 건너뛰지 않으면 15초 동안 계정 변경을 못 본다.
   expect(f.freshReads).toEqual(['claude', 'codex'])
+})
+
+// ---------------------------------------------------------------------------------
+// §0-5 5번 — 무효 사유는 카드 **상태**에 남는다(계약 `CardState.invalid.reason`).
+// 다시 그릴 때 사유별 문구를 고르려면 화면이 아니라 main 저장소가 정본이어야 한다.
+// ---------------------------------------------------------------------------------
+
+test('card: invalid 사유 저장·재시작 뒤 유지', async () => {
+  // 계정이 바뀐 카드 — 사유가 카드 상태에 남고, 재시작한 앱의 [다시 확인]도 같은 사유를 본다.
+  const f = setup()
+  const opened = await openCard(f.deps, f.root, writingToClaude)
+  const changed = async (company: Provider) =>
+    ({ ...(await f.deps.account(company))!, accountId: `other-${company}` })
+  const decision = await decideCard({ ...f.deps, freshAccount: changed }, f.root,
+    opened.cardId, opened.baseVersion, 'continue')
+  expect(decision.outcome).toBe('invalid')
+  expect(decision.reason).toBe('account-changed')
+  // 응답의 카드에도 사유가 실린다 — 화면이 상태를 다시 묻지 않고 바로 그릴 수 있다.
+  expect(decision.card.state).toEqual({ kind: 'invalid', reason: 'account-changed' })
+  const reopened = new JobStore(join(f.base, 'jobs'))
+  expect(cardStatus({ store: reopened }, f.root, opened.cardId))
+    .toMatchObject({ outcome: 'invalid', reason: 'account-changed' })
+
+  // 판이 바뀐 카드도 같은 자리에 사유를 남긴다(끄기가 먼저 끝난 뒤 늦게 온 단추).
+  const g = setup()
+  const stale = await openCard(g.deps, g.root, writingToClaude)
+  await disable(g.deps, g.root)
+  const raced = await decideCard(g.deps, g.root, stale.cardId, stale.baseVersion, 'continue')
+  expect(raced).toMatchObject({ outcome: 'invalid', reason: 'base-version' })
+  const again = new JobStore(join(g.base, 'jobs'))
+  expect(cardStatus({ store: again }, g.root, stale.cardId))
+    .toMatchObject({ outcome: 'invalid', reason: 'base-version' })
+})
+
+test('card: 옛 자료 null', () => {
+  // 이 칸이 생기기 전에 저장된 카드 = `{ kind: 'invalid' }` 뿐이다. 저장소가 그대로 읽어도
+  // 사유는 `null`(§3-5 기본 문구)이어야 한다 — 없는 값을 지어내지 않는다.
+  const f = setup()
+  const legacy = {
+    cardId: 'legacy-invalid', root: f.root, variant: 'first' as const, baseVersion: f.store.versionOf(f.root),
+    createdAt: '2026-11-10T00:00:00.000Z', reviewDue: false, quote: null, rows: [], fees: [],
+    fastDrain: false, recommendedDesign: null, state: { kind: 'open' as const }
+  }
+  f.store.addCard(legacy, {})
+  f.store.settleCard('legacy-invalid', { kind: 'invalid', reason: null })
+  // 파일에서 사유 칸을 지워 **옛 판이 쓴 모양 그대로** 만든다(옛 앱은 이 칸을 쓰지 않았다).
+  const file = join(f.base, 'jobs', 'store.json')
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as {
+    cards: Record<string, { cardId: string; state: Record<string, unknown> }[]>
+  }
+  const saved = raw.cards[f.root]!.find(card => card.cardId === 'legacy-invalid')!
+  delete saved.state.reason
+  writeFileSync(file, JSON.stringify(raw))
+  const reopened = new JobStore(join(f.base, 'jobs'))
+  // 읽을 때 이관한다 — 계약이 필수 칸이 됐으므로 저장소 밖으로 사유 없는 무효 카드가 나가지 않는다.
+  expect(reopened.card('legacy-invalid')!.state).toEqual({ kind: 'invalid', reason: null })
+  expect(cardStatus({ store: reopened }, f.root, 'legacy-invalid'))
+    .toMatchObject({ outcome: 'invalid', reason: null })
 })

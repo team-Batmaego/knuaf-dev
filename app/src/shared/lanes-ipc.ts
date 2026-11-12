@@ -272,7 +272,7 @@ export type LaneLine =
    * 화면: "{to.company}도 지금 한도에 걸렸어요" + [나중에]만. 칸이 없거나 null이면(옛 자료 포함)
    * 지금 문구 + [다시 하기] [나중에].
    */
-  | (LineBase & { kind: 'handoff-failed'; tier: 2; proposalId: string; to: ModelRef; reason?: 'target-limit' | null })
+  | (LineBase & { kind: 'handoff-failed'; tier: 2; proposalId: string; to: ModelRef; reason: 'target-limit' | null })
 
 export type LaneLineKind = LaneLine['kind']
 
@@ -369,7 +369,7 @@ export type CardState =
    * [C0b A3] `reason`은 다시 그릴 때도 사유별 문구(r3c "로그인 계정이 바뀌어…")를 내기 위한 칸.
    * 칸이 없거나 null이면(옛 저장 자료 포함) §3-5 기본 무효 문구.
    */
-  | { kind: 'invalid'; reason?: CardInvalidReason | null }
+  | { kind: 'invalid'; reason: CardInvalidReason | null }
   /** §3-5·U6-04 더 새 카드로 밀려남 — "새 카드로 바뀌었어요". */
   | { kind: 'superseded'; by: string }
 

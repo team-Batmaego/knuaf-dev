@@ -157,6 +157,17 @@ function isStoredCard(value: unknown): value is StoredCard {
   return true
 }
 
+/**
+ * [C0b A3] 이관 — 이 칸이 생기기 전에 저장된 `{kind:'invalid'}` 에는 `reason` 이 없다.
+ * 읽을 때 `null`(§3-5 기본 문구)로 채운다: 계약이 필수 칸이 됐으므로 사유 없는 무효 카드가
+ * 저장소 밖으로 나가면 안 된다(DESIGN-C0b §4 이관).
+ */
+function withInvalidReason(card: StoredCard): StoredCard {
+  if (card.state.kind !== 'invalid' || 'reason' in card.state) return card
+  card.state = { kind: 'invalid', reason: null }
+  return card
+}
+
 function isEvent(value: unknown): value is LaneEvent {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const event = value as { id?: unknown; at?: unknown; kind?: unknown }
@@ -180,7 +191,7 @@ function parse(text: string): StoreState {
     approvals: state.approvals as Record<string, LanePlan>,
     consent: {},
     deliveries: state.deliveries as Record<string, DeliveryRecord>,
-    cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}
+    cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}, thesisBaseline: {}
   }
   for (const [key, record] of Object.entries(state.consent as Record<string, unknown>)) {
     const consent = consentOf(record)
@@ -291,7 +302,7 @@ export class JobStore {
     for (const list of Object.values(this.state.cards)) {
       for (const card of list) {
         if (card.state.kind !== 'applying') continue
-        card.state = { kind: 'invalid' }
+        card.state = { kind: 'invalid', reason: null }
         recovered = true
       }
     }
