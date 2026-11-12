@@ -48,10 +48,33 @@ const CELLS: Record<string, true> = { th: true, td: true }
 /** 표 구조 사이의 글자는 공백뿐이어야 한다(줄바꿈·들여쓰기). 그 밖의 글자는 실패. */
 const STRUCTURAL: Record<string, true> = { '': true, table: true, thead: true, tbody: true, tfoot: true, tr: true }
 
+/** 칸 글자에서 되돌릴 엔티티 — kordoc 이 칸 글자를 `escapeHtml` 해 내보내기 때문이다(실측 4.17.1·4.24.66). */
+const CELL_ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', nbsp: '\u00a0'
+}
+
+/**
+ * 칸 글자의 정해진 엔티티만 되돌린다(`R&amp;D` → `R&D`). 여기 없는 `&…;` 는 글자 그대로 둔다.
+ * 한 번만 훑으므로 `&amp;lt;` 는 `&lt;` 에서 멈춘다(두 번 풀지 않는다). 되돌린 글자는 곧바로
+ * 다시 이스케이프하므로 마크업이 될 길은 없고, 영숫자 표식(`GGEDITV…`)은 애초에 해당 없다.
+ */
+function decodeCellEntities(text: string): string {
+  return text.replace(/&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|amp|lt|gt|quot|nbsp);/g, (all: string, name: string) => {
+    if (name[0] === '#') {
+      const hex = name[1] === 'x' || name[1] === 'X'
+      const code = parseInt(hex ? name.slice(2) : name.slice(1), hex ? 16 : 10)
+      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return all
+      return String.fromCodePoint(code)
+    }
+    return CELL_ENTITIES[name] ?? all
+  })
+}
+
 /**
  * `<table…>…</table>` 원문 한 덩이 → 앱이 다시 지은 표 HTML. 하나라도 허용 밖이면 `null`.
  * 칸 글자는 이스케이프만 한다 — 바꾸거나 쪼개지 않는다(뷰어 B 의 `GGEDITV…` 표식이 글자
- * 노드로 남아야 한다).
+ * 노드로 남아야 한다). 다만 kordoc 이 이미 이스케이프해 둔 엔티티는 한 번 되돌린 뒤 다시
+ * 이스케이프한다(안 그러면 `R&amp;D` 가 화면에 `R&amp;D` 로 보인다).
  */
 function rebuildTable(src: string): string | null {
   const out: string[] = []
@@ -63,7 +86,7 @@ function rebuildTable(src: string): string | null {
       if (text.trim() !== '') return false
       out.push(text)
     } else {
-      out.push(md.utils.escapeHtml(text))
+      out.push(md.utils.escapeHtml(decodeCellEntities(text)))
     }
     return true
   }

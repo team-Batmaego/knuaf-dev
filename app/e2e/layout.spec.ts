@@ -158,6 +158,42 @@ test('HTML 표 — 칸 글자의 표식은 글자 노드로 그대로 남는다 
   expect(html).toContain('<td>GGEDITV123abc</td>')
 })
 
+// kordoc 은 칸 글자를 escapeHtml 해 내보낸다(실측: 4.17.1·4.24.66 모두 `R&D` → `R&amp;D`,
+// `p < 0.05` → `p &lt; 0.05`). 그 엔티티를 그대로 두면 화면에 `R&amp;D` 로 보이므로 한 번 되돌린다.
+test('HTML 표 — kordoc 이 이스케이프한 칸 글자는 화면에 원래 글자로 보인다', () => {
+  const html = renderMarkdown(
+    '<table><tr><td>R&amp;D</td><td>a &lt; b</td><td>3&nbsp;개</td></tr></table>'
+  )
+  // 되돌린 뒤 곧바로 다시 이스케이프한다 — 마크업이 아니라 글자다.
+  expect(html).toContain('<td>R&amp;D</td>')
+  expect(html).toContain('<td>a &lt; b</td>')
+  expect(html).toContain('<td>3\u00a0개</td>')
+  expect(html).not.toContain('&amp;amp;')
+  expect(html).not.toContain('&amp;lt;')
+  expect(html).not.toContain('&amp;nbsp;')
+})
+
+test('HTML 표 — 엔티티는 한 번만 되돌린다(두 번 풀지 않는다)', () => {
+  const html = renderMarkdown('<table><tr><td>&amp;lt;b&amp;gt;</td></tr></table>')
+  // `&amp;lt;` → `&lt;` 에서 멈춘다. 화면에는 `&lt;b&gt;` 라는 글자가 그대로 보인다.
+  expect(html).toContain('<td>&amp;lt;b&amp;gt;</td>')
+})
+
+test('HTML 표 — 정해진 엔티티 밖의 &…; 는 글자 그대로 둔다', () => {
+  const html = renderMarkdown(
+    '<table><tr><td>&copy;</td><td>&#65;</td><td>&#x41;</td><td>&#0;</td></tr></table>'
+  )
+  expect(html).toContain('<td>&amp;copy;</td>')  // 모르는 이름은 손대지 않는다
+  expect(html).toContain('<td>A</td>')           // 십진·십육진 숫자 엔티티는 되돌린다
+  expect(html).toContain('<td>A</td>')
+  expect(html).toContain('<td>&amp;#0;</td>')    // 0 은 글자로 남긴다(빈 문자로 만들지 않는다)
+})
+
+test('HTML 표 — 표식은 엔티티 되돌리기에도 안 깨진다 (뷰어 B)', () => {
+  const html = renderMarkdown('<table><tr><td>GGEDITV123abc R&amp;D</td></tr></table>')
+  expect(html).toContain('<td>GGEDITV123abc R&amp;D</td>')
+})
+
 test('HTML 표 — 허용 태그 caption·thead·tbody·tfoot·br 은 그린다', () => {
   const html = renderMarkdown(
     '<table><caption>제목</caption><thead><tr><th>가</th></tr></thead>' +
