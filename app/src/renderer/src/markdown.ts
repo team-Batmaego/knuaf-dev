@@ -154,33 +154,88 @@ function rebuildTable(src: string): string | null {
   return sawTable && stack.length === 0 ? out.join('') : null
 }
 
-/** `<table` 로 시작한 줄부터 그 표를 닫는 줄까지. 닫는 줄 뒤에 다른 글이 있으면 표가 아니다. */
-function tableSource(state: StateBlock, startLine: number, endLine: number): { src: string, next: number } | null {
+/**
+ * 표 후보 탐색 결과 — 닫는 줄을 찾음(`table`) / 표가 아님(`none`, 기존 문단 경로).
+ * 닫는 줄을 찾았는데 다시 짓지 못하면 호출자가 그 범위를 글자 한 덩이로 소비한다.
+ */
+type TableSpan =
+  | { kind: 'table', src: string, next: number }
+  | { kind: 'none' }
+
+/**
+ * 이미 훑어 본 구간 — `from`~`until` 줄에서 시작한 탐색은 표가 아니라고 알고 있다.
+ * - 닫는 줄을 못 찾고 문서 끝까지 갔으면 `until` 이 마지막 줄,
+ * - 코드 펜스나 닫는 줄이 아닌 `</table` 에서 멈췄으면 `until` 이 그 줄이다. 그 줄 앞줄들은
+ *   전부 계속 훑기였으므로, 그 사이 어느 줄에서 시작해도 같은 줄에서 멈춘다.
+ * `endLimit` 은 그 결론을 얻은 훑기 범위의 끝이다. 더 넓은 범위(바깥 블록)에서는 닫는 줄이
+ * 뒤에 있을 수 있으므로 재사용하지 않는다.
+ * (검토 I-02: `<table>` 줄이 반복될 때 재탐색이 제곱으로 늘어 16,000줄이 9.5초 걸렸다.)
+ * 파싱 하나가 StateBlock 하나를 쓰므로 이 기억도 파싱 하나짜리다.
+ */
+const exhaustedSearch = new WeakMap<StateBlock, { from: number, until: number, endLimit: number }>()
+
+/**
+ * `<table` 로 시작한 줄부터 그 표를 닫는 줄까지. 닫는 줄 뒤에 다른 글이 있으면 표가 아니다.
+ * 후보 안에 코드 펜스 시작 줄이 있으면 표가 아니다 — 펜스 안의 `</table>` 를 표 끝으로 쓰지
+ * 않는다(검토 R-01). 찾은 범위를 다시 짓는 일은 호출자가 한다.
+ *
+ * `silent`(문단 종료 판정)에서도 같은 탐색을 한다 — 그 반복이 곧 재탐색이므로 기억을 쓴다.
+ */
+function tableSource(state: StateBlock, startLine: number, endLine: number): TableSpan {
+  const seen = exhaustedSearch.get(state)
+  if (seen && startLine >= seen.from && startLine <= seen.until && endLine <= seen.endLimit) return { kind: 'none' }
   for (let line = startLine; line < endLine; line++) {
     const text = state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line])
+    if (/^(`{3,}|~{3,})/.test(text)) return giveUp(state, startLine, line, endLine)
     const at = text.toLowerCase().indexOf('</table')
     if (at < 0) continue
-    if (!/^<\/table\s*>\s*$/i.test(text.slice(at))) return null
-    return { src: state.getLines(startLine, line + 1, state.blkIndent, false), next: line + 1 }
+    if (!/^<\/table\s*>\s*$/i.test(text.slice(at))) return giveUp(state, startLine, line, endLine)
+    return { kind: 'table', src: state.getLines(startLine, line + 1, state.blkIndent, false), next: line + 1 }
   }
-  return null
+  // 여기까지 왔으면 이 시작 줄 뒤에는 닫는 줄이 없다 — 뒤 시작 줄도 마찬가지다.
+  return giveUp(state, startLine, endLine - 1, endLine)
+}
+
+/** `from`~`until` 줄에서 시작하면 표가 아니라는 사실을 기억하고 표 아님을 돌려준다. */
+function giveUp(state: StateBlock, from: number, until: number, endLimit: number): TableSpan {
+  const seen = exhaustedSearch.get(state)
+  const joins = seen !== undefined && endLimit <= seen.endLimit && from <= seen.until + 1 && until >= seen.from
+  exhaustedSearch.set(state, joins
+    ? { from: Math.min(from, seen.from), until: Math.max(until, seen.until), endLimit: seen.endLimit }
+    : { from, until, endLimit })
+  return { kind: 'none' }
 }
 
 /**
- * 표 블록 규칙 — 문단보다 먼저 돈다. 다시 짓지 못하면 `false` 를 돌려주고, 그러면 문단·글자
- * 경로가 지금처럼 원문을 이스케이프해 그린다(실패 닫힘). `silent`(문단 종료 판정)에는
- * 토큰을 넣지 않고 표 시작 여부만 알린다.
+ * 다시 짓지 못한 표 후보 한 덩이 → 글자 한 덩이. 안쪽 줄을 다시 표 후보로 해석하지 않는다
+ * (검토 I-01: 여러 줄 중첩 표의 안쪽 표가 실제 표로 살아남았다).
+ *
+ * 문단 경로와 같은 인라인 규칙을 쓴다 — `R&amp;D`·`*강조*`·`[링크](…)` 가 기준(81458e3)과
+ * 똑같이 보이고, 링크·이미지는 이미 앱 규칙이 글자만 남긴다.
+ */
+function textBlock(src: string): string {
+  return `<p>${md.renderInline(src)}</p>\n`
+}
+
+/**
+ * 표 블록 규칙 — 문단보다 먼저 돈다. `rebuildTable` 이 성공하면 표 HTML 을 낸다.
+ *
+ * 표 후보 범위(`<table` ~ `</table>`)를 찾았는데 다시 짓지 못하면 **그 범위 전체를 이스케이프한
+ * 글자 한 덩이로 소비**한다 — 실패 닫힘이면서 안쪽 줄이 다시 표 후보로 해석되지 않는다
+ * (검토 I-01: 여러 줄 중첩 표의 안쪽 표가 실제 표로 살아남았다). 닫는 줄이 아예 없거나 후보
+ * 안에 코드 펜스가 있으면 표가 아니므로 `false` — 기존 문단·글자 경로가 그린다(검토 R-01).
+ * `silent`(문단 종료 판정)에는 토큰을 넣지 않고 블록 시작 여부만 알린다.
  */
 const paperHtmlTable: RuleBlock = (state, startLine, endLine, silent) => {
   const first = state.src.slice(state.bMarks[startLine] + state.tShift[startLine], state.eMarks[startLine])
   if (!/^<table(?=[\s>])/i.test(first)) return false
   const found = tableSource(state, startLine, endLine)
-  const html = found ? rebuildTable(found.src) : null
-  if (!found || html === null) return false
+  if (found.kind === 'none') return false
+  const html = rebuildTable(found.src)
   if (silent) return true
   const token = state.push('paper_html_table', '', 0)
   token.map = [startLine, found.next]
-  token.content = html
+  token.content = html ?? textBlock(found.src)
   state.line = found.next
   return true
 }

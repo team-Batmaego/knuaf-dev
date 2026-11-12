@@ -235,6 +235,78 @@ test('HTML 표 — 허용 밖이 하나라도 있으면 블록 통째로 글자 
   }
 })
 
+test('HTML 표 — 여러 줄 중첩 표는 안쪽까지 블록 통째로 글자 (검토 I-01)', () => {
+  const html = renderMarkdown(
+    '<table>\n' +
+    '<tr><td>\n' +
+    '<table>\n' +
+    '<tr><td>안쪽</td></tr>\n' +
+    '</table>\n' +
+    '</td></tr>\n' +
+    '</table>\n'
+  )
+  expect(html).not.toContain('<table')
+  expect(html).not.toContain('<td')
+  expect(html).toContain('&lt;table')
+  expect(html).toContain('안쪽')
+})
+
+test('HTML 표 — 금지 속성 외곽 표 안의 정상 표도 살아남지 않는다 (검토 I-01)', () => {
+  const html = renderMarkdown(
+    '<table class="a">\n' +
+    '<tr><td>x</td></tr>\n' +
+    '<table>\n' +
+    '<tr><td>안쪽</td></tr>\n' +
+    '</table>\n' +
+    '</table>\n'
+  )
+  expect(html).not.toContain('<table')
+  expect(html).not.toContain('<td')
+  expect(html).toContain('&lt;table')
+  expect(html).toContain('&lt;table class=&quot;a&quot;&gt;')
+})
+
+test('HTML 표 — 거절된 후보의 글자는 기존 문단 경로와 똑같이 그린다 (검토 I-01)', () => {
+  // 뒤에 글자를 붙이면 표 후보가 아니라 문단 경로다 — 두 출력의 본문이 같아야 한다.
+  const rejected = renderMarkdown('<table><tr><td colspan="0">R&amp;D *강조* `코드`</td></tr></table>\n')
+  const paragraph = renderMarkdown('<table><tr><td colspan="0">R&amp;D *강조* `코드`</td></tr></table> 꼬리\n')
+  expect(rejected).not.toContain('<table')
+  expect(paragraph.replace(' 꼬리', '')).toBe(rejected)
+  expect(rejected).toContain('R&amp;D')
+  expect(rejected).not.toContain('R&amp;amp;D')
+  expect(rejected).toContain('<em>강조</em>')
+  expect(rejected).toContain('<code>코드</code>')
+})
+
+test('HTML 표 — 닫히지 않는 시작 줄이 반복돼도 다시 훑지 않는다 (검토 I-02)', () => {
+  const src = '<table>\n'.repeat(16000)
+  const started = performance.now()
+  const html = renderMarkdown(src)
+  const elapsed = performance.now() - started
+  // 기준 코드(81458e3)와 같은 출력: 전부 글자, 표 없음.
+  expect(html).not.toContain('<table')
+  expect(html).toContain('&lt;table')
+  expect(html.split('&lt;table').length - 1).toBe(16000)
+  // 기준 39.7ms, 고치기 전 9,539.3ms(검토 측정). 재탐색이 남으면 여기서 걸린다.
+  expect(elapsed).toBeLessThan(500)
+})
+
+test('HTML 표 — 후보 안 코드 펜스의 닫는 태그를 표 끝으로 쓰지 않는다 (검토 R-01)', () => {
+  const html = renderMarkdown(
+    '<table>\n' +
+    '<tr><td>\n' +
+    '```\n' +
+    '</table>\n' +
+    '```\n' +
+    '뒤 문단\n'
+  )
+  expect(html).not.toContain('<table')
+  expect(html).not.toContain('<td')
+  // 펜스는 코드 블록 그대로다 — `</table>` 은 글자로 남는다.
+  expect(html).toContain('<pre><code>')
+  expect(html).toContain('&lt;/table&gt;')
+})
+
 // ------------------------------------------------------------------ 파일 현재성
 
 test('파일 현재성 — 등록된 것만 말하고, 판정은 stale 하나로 한다', () => {
