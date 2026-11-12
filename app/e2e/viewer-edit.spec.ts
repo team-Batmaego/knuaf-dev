@@ -43,6 +43,20 @@ function bumpRevision(root: string, expected: number): void {
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
 }
 
+/**
+ * 바깥에서 정본을 쓴 뒤 — 앱이 그 변경을 **저장에 쓰는 값까지** 받아들일 때까지 기다린다.
+ *
+ * 채팅 칸의 `… 썼어요` 줄은 `refresh()`(store/project.ts) 안에서 `set({ status })` 가 끝난 뒤에만
+ * 불리는 `loadSections()` 가 `sections` 와 같은 `set` 에서 넣는다(:596-598, :383). 그래서 이 줄이
+ * 보인다는 것은 종이 글자만이 아니라 저장이 쓰는 개정 번호(`status.revision`)도 새 값이라는 뜻이다.
+ * 종이 글자(`Ⅲ. 결론`)만 기다리면 글은 보이는데 기록 번호가 옛값이어서 저장이 `stale_view` 로
+ * 거절된다(윈도 CI 43204858056 — `app (windows-latest)`, `Roh 03`).
+ */
+async function wroteLine(page: Page, text: string): Promise<void> {
+  await expect(page.locator('.chat-pane .chat-event').filter({ hasText: text }).first())
+    .toBeVisible({ timeout: 30_000 })
+}
+
 /** 그 글자를 담은 문단을 고른다(화면 선택과 같은 경로 — `mouseup` 이 선택을 읽는다). */
 async function selectParagraph(page: Page, needle: string): Promise<void> {
   await page.evaluate((text) => {
@@ -286,6 +300,7 @@ test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치�
     // 둘째 장에 같은 낱말(`재배`)을 심는다. 첫 장에서 그 낱말을 바꾸면 '사라진 낱말'이 된다.
     addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
+    await wroteLine(page, 'Ⅱ. 본문을 썼어요')
 
     // 숫자만 바꾸면 §3-4 대상이 아니다(숫자는 후보에서 빠진다) — 낱말을 바꾼다.
     await selectText(page, '재배 면적은 600평이다', '재배 면적')
@@ -326,6 +341,7 @@ test('본문이 바뀌면 같은 낱말 제안은 접힌다 — 체크가 다른
     await paperReady(page, '600평')
     addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
+    await wroteLine(page, 'Ⅱ. 본문을 썼어요')
 
     await selectText(page, '재배 면적은 600평이다', '재배 면적')
     await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
@@ -389,6 +405,7 @@ test('그대로를 누르면 그 낱말 제안만 닫힌다 (Roh 08)', async () 
     await paperReady(page, '600평')
     addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
+    await wroteLine(page, 'Ⅱ. 본문을 썼어요')
 
     await selectText(page, '재배 면적은 600평이다', '재배 면적')
     await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
@@ -473,6 +490,7 @@ test('체크를 뺀 자리는 확정 뒤에도 원고 그대로다 (Roh 03)', as
     addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
     addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 2 })
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 기록은 따로', { timeout: 30_000 })
+    await wroteLine(page, 'Ⅲ. 결론을 썼어요')
 
     await selectText(page, '재배 면적은 600평이다', '재배 면적')
     await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
@@ -580,6 +598,7 @@ test('같이 고치기 목록에 장 제목이 보인다 (Roh 03)', async () => 
     addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
     addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 2 })
     await expect(page.locator('.paperpane .sheet')).toContainText('Ⅲ. 결론', { timeout: 30_000 })
+    await wroteLine(page, 'Ⅲ. 결론을 썼어요')
 
     await selectText(page, '재배 면적은 600평이다', '재배 면적')
     await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
