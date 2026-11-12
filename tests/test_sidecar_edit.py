@@ -741,20 +741,41 @@ def test_review_batch_failure_preserves_external_update(two_sections, monkeypatc
     assert backups, "감춰 둔 원래 글이 보존 폴더에 남아야 한다"
 
 
+def _expect_open_handle_refusal(root, path, original):
+    """열린 핸들 때문에 저장이 거절됐을 때의 사실 — 원고 자리는 A 그대로다.
+
+    윈도는 열려 있는 파일의 이름 바꾸기를 거절한다(WinError 32). 거절은 첫 밀어내기에서
+    나므로 `core.apply` 단계(외부 글 B 를 쓰는 자리)에 닿지 않는다 — B 가 남는지가 아니라
+    **원고를 건드리지 않았는지**를 확인한다. 개정 번호와 원장 끝줄도 함께 본다.
+    """
+    revision_before = core.load(root)["revision"]
+    with path.open("r+b"):  # 다른 프로그램이 원고를 열어 둔 상태
+        with pytest.raises(RpcError) as refused:
+            methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
+    assert refused.value.code == "edit_failed"
+    assert core.load(root)["revision"] == revision_before
+    assert [row["state"] for row in _ledger(root)][-1] == "aborted"
+    assert path.read_bytes() == original
+
+
 def test_review_success_preserves_preopened_writer(two_sections, monkeypatch):
     """Roh 차단 2 — 성공한 저장이 미리 열어 둔 핸들이 쓴 B 를 지우지 않는다.
 
-    윈도는 열려 있는 파일의 이름 바꾸기를 거절한다(WinError 32). 그때 저장은 원고를 한 번도
-    움직이지 않은 채 `edit_failed` 로 닫히고 남의 글 B 는 자리에 그대로 남는다 — 맥과 같은
-    결론(남의 글을 지우지 않는다)을 다른 경로로 확인한다.
+    맥: 저장은 끝나고, 그 핸들이 쓴 B 는 밀려난 원본 자리(보존 폴더)에 남는다.
+    윈도: 저장은 첫 이름 바꾸기에서 `edit_failed` 로 닫히고 원고 A 는 손대지 않은 채 남는다
+    — 어느 쪽도 남의 글을 지우지 않는다.
     """
     root = two_sections
     path = root / "sections" / "01.md"
     outsider = b"UNIQUE_PREOPENED_HANDLE_STUDENT_UPDATE_B"
+    original = path.read_bytes()
+
+    if sys.platform == "win32":
+        _expect_open_handle_refusal(root, path, original)
+        return
+
     real_apply = core.apply
     clock = {"n": 0}
-    revision_before = core.load(root)["revision"]
-
     with path.open("r+b") as external:
         def apply(root_arg, change, expected):
             with external as handle:
@@ -768,19 +789,64 @@ def test_review_success_preserves_preopened_writer(two_sections, monkeypatch):
             return real_apply(root_arg, change, expected)
 
         monkeypatch.setattr(core, "apply", apply)
-        if sys.platform == "win32":
-            with pytest.raises(RpcError) as refused:
-                methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
-            assert refused.value.code == "edit_failed"
-            assert core.load(root)["revision"] == revision_before
-            assert [row["state"] for row in _ledger(root)][-1] == "aborted"
-            # 거절됐으니 원고 자리는 손대지 않은 그대로다.
-            assert path.read_bytes() == outsider
-        else:
-            result = methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
-            # 청소는 그 자리에서 돌지 않는다(10분 규칙) — 보존본에 B 가 남아 있어야 한다.
-            assert result["revision"] == core.load(root)["revision"]
+        result = methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
+        # 청소는 그 자리에서 돌지 않는다(10분 규칙) — 보존본에 B 가 남아 있어야 한다.
+        assert result["revision"] == core.load(root)["revision"]
     assert _has_bytes(root, outsider), "저장이 미리 열어 둔 핸들의 글을 지웠다"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="실기기에서는 원래 윈도 갈래가 돈다")
+def test_review_winerror_32_at_move_keeps_manuscript_untouched(two_sections, monkeypatch):
+    """윈도 갈래를 맥에서도 밟는다 — 밀어내기가 WinError 32 로 거절되면 원고는 A 그대로.
+
+    실기기 없이 윈도 조건을 만드는 주입이다: 플랫폼을 win32 로 두고 `_displace` 만 공유
+    위반으로 실패시킨다. 저장·원복 코드는 제품 그대로다.
+    """
+    root = two_sections
+    path = root / "sections" / "01.md"
+    original = path.read_bytes()
+
+    def displace(source, dest):
+        error = PermissionError(13, "WinError 32: 다른 프로세스가 파일을 쓰고 있음")
+        error.winerror = 32
+        raise error
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(methods_edit, "_displace", displace)
+    _expect_open_handle_refusal(root, path, original)
+
+
+def test_review_refused_at_move_keeps_external_update(two_sections, monkeypatch):
+    """§4-4-1 — 원고를 옮기기 직전에 남이 쓴 B 는 거절 뒤에도 지워지지 않는다.
+
+    옮기기 직전은 맥과 윈도가 함께 지나는 마지막 지점이다(윈도는 바로 그 옮기기에서
+    거절한다). 그 순간 B 가 자리에 생겼다면 지문이 어긋나 저장은 `stale_view` 로 닫히고,
+    되돌리기는 B 를 자리에 그대로 놓는다.
+    """
+    root = two_sections
+    path = root / "sections" / "01.md"
+    outsider = b"UNIQUE_EXTERNAL_STUDENT_UPDATE_AT_MOVE_B"
+    revision_before = core.load(root)["revision"]
+    real_displace = methods_edit._displace
+    injected = False
+
+    def displace(source, dest):
+        nonlocal injected
+        if source == path and not injected:
+            injected = True
+            path.write_bytes(outsider)  # 옮기기 직전에 다른 프로그램이 쓴 글
+        return real_displace(source, dest)
+
+    monkeypatch.setattr(methods_edit, "_displace", displace)
+    with pytest.raises(RpcError) as refused:
+        methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
+    assert injected
+    assert refused.value.code == "stale_view"
+    # 남의 글은 자리에 그대로 돌아온다 — 덮어쓰지도 지우지도 않는다.
+    assert path.read_bytes() == outsider
+    assert _has_bytes(root, outsider)
+    assert core.load(root)["revision"] == revision_before
+    assert [row["state"] for row in _ledger(root)][-1] == "aborted"
 
 
 def test_review_disk_full_restore_never_leaves_partial_manuscript(two_sections, monkeypatch):
