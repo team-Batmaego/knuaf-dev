@@ -344,7 +344,13 @@ export const LANE_EVENT = {
   handoffDone: (from: string, to: string) =>
     `${from} 대화가 한도로 멈춰 ${subjectOf(to)} 이어 받았어요. 논문 파일과 진행 상황은 그대로예요`,
   handoffEnd: (to: string) => `한도로 멈췄어요 — ${subjectOf(to)} 이어 받았어요`,
-  archiveLink: '멈춘 대화 보기'
+  archiveLink: '멈춘 대화 보기',
+  /**
+   * [자세히]가 전달문 원문을 펼칠 때, 원문이 없거나 읽지 못한 경우(설계에 문구가 없다 → `QUESTIONS-C2.md` Q6).
+   * 읽기는 실패해도 화면을 막지 않는다 — 학생은 원문이 없다는 사실만 알면 된다.
+   */
+  deliveryTextMissing: '아직 전달문이 없어요',
+  deliveryTextFailed: '전달문을 읽지 못했어요'
 } as const
 
 // =====================================================================================
@@ -527,6 +533,17 @@ export const LANES_TEST_EVENT = 'knuaf:lanes-test'
  * (`LanesApi.archive`) 주입한 묶음만으로는 §4-2 화면을 그릴 수 없다. 배선 뒤에는 쓰이지 않는다.
  */
 export const LANES_TEST_ARCHIVE_EVENT = 'knuaf:lanes-test-archive'
+
+/**
+ * 이음매(`window.knuaf.lanes`·`jobs`) 자체를 갈아 끼우는 시험 통로 — 검토 C07-①.
+ *
+ * 왜 `window.knuaf` 를 직접 대입하지 않는가: contextBridge 가 노출한 값은
+ * `SetReadOnlyNonConfigurable` + `DeepFreeze` 라 Electron 창 안에서 교체·부분 대입이 불가능하다.
+ * 그래서 store 가 읽는 이음매를 이 사건으로만 바꾼다. 설계 §7(`UI-DESIGN.md:330`)이
+ * "실 AI 호출 없음(가짜 store 상태로 그림·e2e)" 을 이미 정본으로 두었으므로 범위 안이다.
+ * 배선 C1 뒤에는 쓰이지 않는다.
+ */
+export const LANES_TEST_SEAM_EVENT = 'knuaf:lanes-seam-test'
 
 /** 폴더가 없거나 이음매가 없을 때 화면이 쓰는 빈 값 대신 — 계산하지 않는다는 원칙상 store 가 `null` 로 둔다. */
 export type LaneModelRef = ModelRef

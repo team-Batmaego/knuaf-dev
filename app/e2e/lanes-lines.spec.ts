@@ -137,6 +137,9 @@ test('나머지 담당 줄 — 종류·닫기 가능 여부가 계약대로다',
   expect(changed.tone).toBe('bad')
   expect(changed.alert).toBe(true)
   expect(changed.sub).toBe(LANE_LINE.keptResult)
+  // C06: 이 줄에도 [자세히]가 있어야 하고(예전에는 `detail` 자체가 없었다), 전달문을 읽을 주문이 남아야 한다.
+  expect(changed.detail).toBe('오류 · violation\nboom')
+  expect(changed.jobId).toBe('job-1')
 })
 
 test('검토 안내 — 사유마다 단추가 갈린다', () => {
@@ -221,12 +224,16 @@ test('기록 줄 — 경고 표시와 "멈춘 대화 보기" 손잡이가 계약
   expect(delivered?.warn).toBe(false)
   expect(delivered?.at).toBe(Date.parse(AT))
   expect(delivered?.archiveId).toBeUndefined()
+  // C06: 주문 번호를 줄까지 나른다 — 버리면 화면이 전달문을 읽을 길이 없다.
+  expect(delivered?.jobId).toBe('j')
 
   const continued = eventView({ ...base, kind: 'delivered', jobId: 'j', lane: 'research', by, continued: true, task: '요약' })
   expect(continued?.text).toBe(LANE_EVENT.continued('자료 찾기', 'Claude Sonnet'))
 
-  expect(eventView({ ...base, kind: 'not-run', jobId: 'j', lane: 'writing', reason: 'limit', task: 't' })?.text)
-    .toBe(LANE_EVENT.notRun('글쓰기', 'limit'))
+  const notRun = eventView({ ...base, kind: 'not-run', jobId: 'j', lane: 'writing', reason: 'limit', task: 't' })
+  expect(notRun?.text).toBe(LANE_EVENT.notRun('글쓰기', 'limit'))
+  // 미실행 전달도 결과가 주문 칸에 남는다 — [자세히]가 그 전달문을 읽는다(설계 §2-1).
+  expect(notRun?.jobId).toBe('j')
 
   const skipped = eventView({ ...base, kind: 'review-skipped', reason: 'model-missing' })
   expect(skipped?.warn).toBe(true)

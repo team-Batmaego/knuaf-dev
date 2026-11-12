@@ -1,11 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { WORK_LANES, LANE_TABLE, type LaneEntry } from '../../../shared/lanes'
-import type { ConsentRow, LanesSettingsView, ReviewModelGroup, SettingsRow } from '../../../shared/lanes-ipc'
+import type { CardAction, CardInvalidReason, ConsentRow, LaneCard, LanesSettingsView, ReviewModelGroup, SettingsRow } from '../../../shared/lanes-ipc'
 import { useLanes, laneActions } from '../store/lanes'
+import { useProject } from '../store/project'
 import { LANE_CARD, LANE_NAME, LANES_SETTINGS, depthName, modelLabel, modelName, providerName, dayKo } from '../copy-lanes'
 import { isDirect } from '../laneLines'
 import { Icon } from '../components/Icon'
 import { Confirm } from '../components/Confirm'
+import { LanePlanCard } from '../components/LanePlanCard'
+import { Sheet } from '../components/Sheet'
 import { Popover, PopHead, PopRow } from '../components/Popover'
 
 /**
@@ -17,12 +20,26 @@ import { Popover, PopHead, PopRow } from '../components/Popover'
  */
 export function LanesSettings({ root }: { root: string | null }) {
   const snapshot = useLanes((s) => s.snapshot)
-  const view = snapshot?.settings ?? null
+  // 다른 폴더의 묶음이 늦게 닿아도 이 논문의 배치로 보이면 안 된다(검토 C02).
+  const view = snapshot && snapshot.root === root ? snapshot.settings : null
   /** 폴더 없이도 보이는 동의 묶음 — `consents()` 는 묶음 밖의 답이라 한 번 받아 둔다. */
   const [fetched, setFetched] = useState<ConsentRow[]>([])
   const [confirm, setConfirm] = useState<{ kind: 'consent' | 'withdraw'; row: ConsentRow } | null>(null)
   const [offConfirm, setOffConfirm] = useState(false)
   const [pick, setPick] = useState<{ open: boolean; loading: boolean; groups: ReviewModelGroup[] }>({ open: false, loading: false, groups: [] })
+  /**
+   * 켜기·되돌리기 카드는 `snapshot.cards` 에 오지 않는다(계약 §3 [F5] — 확정 순간에만 접힌 카드로
+   * 들어간다). 그래서 응답 값을 화면이 들고 확인 창에 같은 카드 부품을 띄운다(설계 §3-3).
+   */
+  const [card, setCard] = useState<LaneCard | null>(null)
+  const [cardInvalid, setCardInvalid] = useState<CardInvalidReason | null>(null)
+  const [cardOpen, setCardOpen] = useState(false)
+  const [cardError, setCardError] = useState(false)
+  /** 확인 창을 닫으면 누른 설정 단추로 돌아간다(설계 §3-5 초점). */
+  const trigger = useRef<HTMLButtonElement | null>(null)
+  /** 대화에서 온 카드 요청(설계 §2-2 지속 안내) — 소비하면 store 가 비운다. */
+  const cardRequest = useProject((s) => s.lanesCardRequest)
+  const consumeLanesCardRequest = useProject((s) => s.consumeLanesCardRequest)
 
   /**
    * 설정 창은 대화 화면 없이도 열린다 — 이음매를 여기서도 붙이고 이 폴더의 묶음을 받는다.
@@ -37,13 +54,76 @@ export function LanesSettings({ root }: { root: string | null }) {
 
   const consents = view?.consents.length ? view.consents : fetched
   const actions = laneActions()
-  const reviewRow = view?.rows.find((row) => row.note === 'review-unavailable') ?? null
 
   const openPick = (company: ProviderOf<ReviewModelGroup>) => {
     if (!root) return
     setPick({ open: true, loading: true, groups: [] })
     void useLanes.getState().callValue(({ lanes }) => lanes.reviewModels(root)).then((r) => {
       setPick({ open: true, loading: false, groups: 'value' in r ? r.value : [] })
+    })
+  }
+
+  /**
+   * 켜기·되돌리기 — 응답 카드를 확인 창에 띄운다. 응답이 없으면 단추를 누른 자리에서 실패를 알린다
+   * (묶음에는 카드가 오지 않으므로 기다려도 화면이 바뀌지 않는다).
+   */
+  const openCard = (kind: 'enable' | 'revert', button: HTMLButtonElement | null) => {
+    if (!root) return
+    trigger.current = button
+    setCardError(false)
+    const target = root
+    void actions.settingsCard(target, kind).then((r) => {
+      if ('error' in r) {
+        setCardError(true)
+        return
+      }
+      setCardInvalid(null)
+      setCard(r.value)
+      setCardOpen(true)
+    })
+  }
+
+  const closeCard = () => {
+    setCardOpen(false)
+    setCard(null)
+    setCardInvalid(null)
+    trigger.current?.focus()
+  }
+
+  /**
+   * 대화의 [나눠 맡기기 켜기]는 설정 창을 열면서 카드 요청을 남긴다(설계 §2-2 지속 안내 → §5 상태 ③).
+   * 설정 화면이 그 요청을 여기서 한 번만 소비해 확인 창을 띄운다 — 요청은 곧바로 비운다.
+   */
+  useEffect(() => {
+    if (!cardRequest || !root) return
+    consumeLanesCardRequest()
+    openCard(cardRequest, null)
+  })
+
+  /** 확인 창의 결정 — 응답 카드로 접힘·무효를 그리고, 설정 묶음은 main 이 밀어 준다. */
+  const decideCard = (cardId: string, baseVersion: number, action: CardAction) => {
+    if (!root) return
+    const target = root
+    void laneActions().decideCard(target, cardId, baseVersion, action).then((decision) => {
+      if (!decision) {
+        setCardError(true)
+        return
+      }
+      setCardInvalid(decision.outcome === 'invalid' ? decision.reason : null)
+      setCard(decision.card)
+    })
+  }
+
+  const recheckCard = (cardId: string) => {
+    if (!root) return
+    const target = root
+    void laneActions().cardStatus(target, cardId).then((decision) => {
+      if (!decision) {
+        setCardError(true)
+        return
+      }
+      setCardInvalid(decision.outcome === 'invalid' ? decision.reason : null)
+      setCard(decision.card)
     })
   }
 
@@ -55,13 +135,14 @@ export function LanesSettings({ root }: { root: string | null }) {
         <>
           <p style={{ fontSize: 14 }}>{LANES_SETTINGS.offBody}</p>
           <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
-            <button type="button" className="primary" disabled={!root} onClick={() => root && void actions.settingsCard(root, 'enable')}>{LANES_SETTINGS.turnOn}</button>
+            <button type="button" className="primary" disabled={!root} onClick={(e) => openCard('enable', e.currentTarget)}>{LANES_SETTINGS.turnOn}</button>
           </div>
         </>
       ) : (
-        <Placement view={view} root={root} onDisable={() => setOffConfirm(true)}
+        <Placement view={view} root={root} onDisable={() => setOffConfirm(true)} onOpenCard={openCard}
           pick={pick} onOpenPick={openPick} onClosePick={() => setPick({ open: false, loading: false, groups: [] })} />
       )}
+      {cardError && <p className="caption" role="alert" style={{ marginTop: 'var(--sp-2)' }}>{LANE_CARD.unknown}</p>}
 
       <h3 className="set-sub" style={{ marginTop: 'var(--sp-6)' }}>{LANES_SETTINGS.consentTitle}<span className="caption"> · {LANES_SETTINGS.consentNote}</span></h3>
       {consents.map((row) => (
@@ -92,7 +173,28 @@ export function LanesSettings({ root }: { root: string | null }) {
           setConfirm(null)
           if (target) void actions.setConsent(target.row.company, target.row.accountId, target.kind !== 'withdraw')
         }} />
+      <SettingsCardSheet open={cardOpen} card={card} invalidReason={cardInvalid}
+        onDecide={decideCard} onStatus={recheckCard} onClose={closeCard} />
     </div>
+  )
+}
+
+/**
+ * 설정 확인 창 — 켜기·되돌리기의 승인 카드(설계 §3-3). 대화 카드와 **같은 부품**을 쓰므로 보는 값과
+ * 누르는 단추가 같다. 카드가 제목(`h3`)을 직접 그리므로 시트 머리 글자는 비운다.
+ */
+export function SettingsCardSheet({ open, card, invalidReason, onDecide, onStatus, onClose }: {
+  open: boolean
+  card: LaneCard | null
+  invalidReason: CardInvalidReason | null
+  onDecide: (cardId: string, baseVersion: number, action: CardAction) => void
+  onStatus: (cardId: string) => void
+  onClose: () => void
+}) {
+  return (
+    <Sheet open={open} title="" screen="lane-settings-card" onClose={onClose}>
+      {card && <LanePlanCard card={card} invalidReason={invalidReason} onDecide={onDecide} onStatus={onStatus} />}
+    </Sheet>
   )
 }
 
@@ -104,15 +206,15 @@ const JOB_LANES: SettingsRow['lane'][] = WORK_LANES
   .filter((lane): lane is SettingsRow['lane'] => lane !== 'design')
 
 /** 배치 묶음 — 상태 ①·③. 표·출처·지금만·다음 메시지·단추. */
-function Placement({ view, root, onDisable, pick, onOpenPick, onClosePick }: {
+function Placement({ view, root, onDisable, onOpenCard, pick, onOpenPick, onClosePick }: {
   view: LanesSettingsView
   root: string | null
   onDisable: () => void
+  onOpenCard: (kind: 'enable' | 'revert', button: HTMLButtonElement | null) => void
   pick: { open: boolean; loading: boolean; groups: ReviewModelGroup[] }
   onOpenPick: (company: ProviderOf<ReviewModelGroup>) => void
   onClosePick: () => void
 }) {
-  const actions = laneActions()
   const rows = view.rows
   const reviewRow = rows.find((row) => row.note === 'review-unavailable') ?? null
   return (
@@ -163,11 +265,11 @@ function Placement({ view, root, onDisable, pick, onOpenPick, onClosePick }: {
       <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>{LANES_SETTINGS.hint}</p>
       <div className="row" style={{ gap: 'var(--sp-2)', flexWrap: 'wrap' }}>
         <button type="button" disabled={!root || !view.differsFromRecommendation}
-          onClick={() => root && void actions.settingsCard(root, 'revert')}>{LANES_SETTINGS.revert}</button>
+          onClick={(e) => onOpenCard('revert', e.currentTarget)}>{LANES_SETTINGS.revert}</button>
         <button type="button" className="quiet" disabled={!root} onClick={onDisable}>{LANES_SETTINGS.turnOff}</button>
         {view.mode === 'undecided' && (
           <button type="button" className="primary" disabled={!root}
-            onClick={() => root && void actions.settingsCard(root, 'enable')}>{LANES_SETTINGS.turnOn}</button>
+            onClick={(e) => onOpenCard('enable', e.currentTarget)}>{LANES_SETTINGS.turnOn}</button>
         )}
       </div>
     </>

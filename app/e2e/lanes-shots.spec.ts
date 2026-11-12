@@ -46,6 +46,16 @@ async function open(settings: Record<string, unknown>, after: (page: Page, root:
 test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본대화 한도 · 멈춘 대화', async () => {
   test.setTimeout(300_000)
   await open({}, async (page, root) => {
+    /*
+     * 검토 C06 의 화면 증거 — 기록 줄 [자세히]가 **전달문 원문**까지 여는지 사진으로 남긴다.
+     * preload 에 `lanes` 가 없으므로 이음매를 가짜로 갈아 끼우고 `jobs.deliveryText` 만 값을 준다.
+     */
+    const DELIVERY = '감초 도매·소매 가격 조사 결과\n- 도매 1kg 8,900원 · 소매 12,400원\n- 출처: 농림축산식품부 유통 실태 2026-10'
+    await installLanesSeam(page, {
+      card: firstCard('card-unused', { kind: 'open' }, at(2)),
+      deliveryText: DELIVERY
+    })
+
     /** 줄·카드·기록 줄이 설계가 말한 **자리**에 있는가 — 사진만으로는 회귀를 못 잡는다. */
     const places = async (): Promise<void> => {
       // §2-0: 알림 줄은 입력칸 자리(`chat-zone`) 안, 입력칸보다 위.
@@ -187,6 +197,20 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
     await expect(uncertain).toContainText('글쓰기 결과를 도우미에게 넘겼는지 확인하지 못했어요')
     await expect(uncertain).toContainText('넘어갔을 수도 있어 다시 넘기지 않아요')
     expect(await uncertain.getByRole('button', { name: '다시 넘기기' }).count(), '확인 불가 줄에 다시 넘기기가 붙었다').toBe(0)
+    /*
+     * 검토 C06 화면 증거 — 전달문 원문은 [자세히]로만 열린다. 받은 주문 번호를 그대로 읽으러 가는지
+     * 호출 기록으로 잠그고, 편 원문을 사진으로 남긴다.
+     */
+    const delivered = events.nth(0)
+    await delivered.getByRole('button', { name: '자세히' }).click()
+    await expect(delivered.locator('.zline-raw')).toContainText('도매 1kg 8,900원 · 소매 12,400원')
+    // 원문에는 40자로 접힌 주문 전문이 아니라 넘긴 글이 그대로 온다.
+    await delivered.locator('.zline-raw').scrollIntoViewIfNeeded()
+    await shoot(page, 'lane-events-delivery')
+    expect((await laneCalls(page)).filter(([name]) => name === 'deliveryText')).toEqual([['deliveryText', root, 'job-1']])
+    // 사진은 접힌 기본 모양으로 남긴다 — 펼침은 위 사진이 이미 증거다.
+    await delivered.getByRole('button', { name: '자세히' }).click()
+    await expect(delivered.locator('.zline-raw')).toHaveCount(0)
     await places()
     await shoot(page, 'lane-events')
 
@@ -217,6 +241,30 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
     await places()
     await shoot(page, 'lane-main-limit')
 
+    /*
+     * 시안 `mainlimittrim-light.png` — 길어서 묶음을 **줄여** 넘기는 갈래(계약 `trimmed:true`).
+     * 검토가 "대응 사진 없음"으로 적은 장면이다. 문구가 "전부"라고 말하지 않는지 글자로 잰다.
+     */
+    await inject(page, snapshot(root, 6, {
+      lines: [{
+        kind: 'main-limit-offer', tier: 2, id: 'line-main-limit-trim', at: at(1), dismissible: false,
+        proposalId: 'proposal-2',
+        to: { company: 'codex', model: 'sol', effort: null },
+        tooLong: false, trimmed: true
+      }],
+      events: [],
+      announcement: { seq: 5, kind: 'line', lane: null, lineId: 'line-main-limit-trim' }
+    }))
+    const trim = page.locator('#line-main-limit-trim')
+    await expect(trim).toBeVisible({ timeout: 15_000 })
+    await expect(trim.locator('small')).toContainText('내가 쓴 글 일부(길어서 앞부분을 줄였어요)와 마지막 답을 ChatGPT에 넘겨요')
+    await expect(trim).not.toContainText('내가 쓴 글과 마지막 답')
+    await trim.getByRole('button', { name: '자세히' }).click()
+    await expect(page.locator('.zline-raw')).toContainText('내가 쓴 글 — 길어서 앞부분 일부는 빠져요')
+    await places()
+    await shoot(page, 'lane-main-limit-trimmed')
+    await trim.getByRole('button', { name: '자세히' }).click()
+
     // ⑥ 한도로 멈춘 대화 보기 — 기록 줄 [멈춘 대화 보기] → 읽기 전용 화면
     const archive = {
       summary: {
@@ -232,7 +280,7 @@ test('대화 장면 — 진행 줄 · 카드(열림/접힘) · 기록 줄 · 본
     await page.evaluate((value) => {
       window.dispatchEvent(new CustomEvent('knuaf:lanes-test-archive', { detail: value }))
     }, archive)
-    await inject(page, snapshot(root, 6, {
+    await inject(page, snapshot(root, 7, {
       events: [{
         kind: 'handoff-done', id: 'ev-handoff', at: at(5),
         from: { company: 'claude', model: 'opus', effort: 'high' },

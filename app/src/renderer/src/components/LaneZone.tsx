@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { LaneAnnouncement, LaneLine } from '../../../shared/lanes-ipc'
 import type { LaneActionId, LaneLineView } from '../laneLines'
 import { LESS_LABEL, moreLabel, sayText, tierGroups } from '../laneLines'
+import type { DeliveryRead } from './useDeliveryText'
 import { ZoneLine } from './ZoneLine'
 
 /**
@@ -11,12 +12,16 @@ import { ZoneLine } from './ZoneLine'
  * 줄 자체에는 role 을 주지 않는다(막힘만 `alert`) — 같은 말이 두 번 읽히지 않게 낭독은 늘 있는
  * `.sr-only` 한 칸(`#lane-say`)이 `announcement.seq` 가 바뀔 때만 맡는다.
  */
-export function LaneZone({ lines, announcement, onAction, onShowCard }: {
+export function LaneZone({ lines, announcement, onAction, onShowCard, root, delivery }: {
   lines: LaneLine[]
   announcement: LaneAnnouncement | null
   onAction: (action: LaneActionId, line: LaneLine) => void
   /** 미결 카드 [카드 보기] — 카드 제목으로 스크롤·초점. */
   onShowCard: (cardId: string) => void
+  /** 전달문을 읽을 폴더 — 없으면 [자세히]가 상태 원문만 편다(검토 C06). */
+  root?: string
+  /** `jobs.deliveryText` — 줄마다 `jobId` 가 있을 때만 [자세히]가 전달문까지 편다. */
+  delivery?: DeliveryRead
 }) {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({})
   /** "{n}분째"만 시계로 센다 — 30초마다 새 값(설계 §2-1: 낭독 칸 밖). */
@@ -52,10 +57,12 @@ export function LaneZone({ lines, announcement, onAction, onShowCard }: {
         return (
           <Fragment key={group.tier}>
             <LaneZoneLine view={head.view} line={head.line} onAction={onAction} onShowCard={onShowCard}
+              root={root} delivery={delivery}
               more={rest.length > 0 && !open ? { count: rest.length, onOpen: () => toggle(true) } : undefined}
               less={rest.length > 0 && open ? { onClose: () => toggle(false) } : undefined} />
             {open && rest.map(({ view, line }) => (
-              <LaneZoneLine key={view.id} view={view} line={line} onAction={onAction} onShowCard={onShowCard} />
+              <LaneZoneLine key={view.id} view={view} line={line} onAction={onAction} onShowCard={onShowCard}
+                root={root} delivery={delivery} />
             ))}
           </Fragment>
         )
@@ -64,11 +71,13 @@ export function LaneZone({ lines, announcement, onAction, onShowCard }: {
   )
 }
 
-function LaneZoneLine({ view, line, onAction, onShowCard, more, less }: {
+function LaneZoneLine({ view, line, onAction, onShowCard, root, delivery, more, less }: {
   view: LaneLineView
   line: LaneLine
   onAction: (action: LaneActionId, line: LaneLine) => void
   onShowCard: (cardId: string) => void
+  root?: string
+  delivery?: DeliveryRead
   more?: { count: number; onOpen: () => void }
   less?: { onClose: () => void }
 }) {
@@ -84,6 +93,7 @@ function LaneZoneLine({ view, line, onAction, onShowCard, more, less }: {
   )
   return (
     <ZoneLine tone={view.tone} title={view.title} sub={subOf(view.sub)} raw={view.detail}
+      rawTitle={view.title} root={root} jobId={view.jobId} onDeliveryText={delivery}
       detailFirst={!view.detailAfterActions}
       role={view.alert ? 'alert' : 'none'} id={view.id} actions={actions}
       onClose={view.close ? () => onAction('dismiss', line) : undefined} />

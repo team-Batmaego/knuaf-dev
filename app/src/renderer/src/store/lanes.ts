@@ -12,7 +12,7 @@ import type {
   ReviewModelGroup
 } from '../../../shared/lanes-ipc'
 import type { Provider } from '../../../shared/chat'
-import { LANES_TEST_ARCHIVE_EVENT, LANES_TEST_EVENT } from '../copy-lanes'
+import { LANES_TEST_ARCHIVE_EVENT, LANES_TEST_EVENT, LANES_TEST_SEAM_EVENT } from '../copy-lanes'
 
 /**
  * 작업 분담(단위 6) 상태 — **계산하지 않는다.**
@@ -57,8 +57,16 @@ type JobsApi = {
 /** `window.knuaf` 의 preload 타입(`preload/index.d.ts`)에 아직 없는 두 갈래 — 배선 C1이 더한다. */
 type LanesWindow = { knuaf?: { lanes?: LanesApi; jobs?: JobsApi } }
 
+/**
+ * 시험용 이음매 — `knuaf:lanes-seam-test` 로만 채워진다(검토 C07-①). Electron 의 `window.knuaf` 는
+ * contextBridge 가 `SetReadOnlyNonConfigurable` + `DeepFreeze` 로 잠그므로 창 안에서 교체할 수 없다.
+ * 실제 이음매가 있으면 늘 그쪽을 쓴다 — 이 값은 preload 배선 전 화면 시험 전용이다.
+ */
+let testSeam: { lanes: LanesApi; jobs: JobsApi } | null = null
+
 /** preload 이 노출했는지만 본다. 없으면 화면은 조용히 비활성이다. */
 function seam(): { lanes: LanesApi | null; jobs: JobsApi | null } {
+  if (testSeam) return testSeam
   // preload 타이핑에 아직 lanes/jobs 가 없다(preload/index.d.ts 2행) — 캐스팅으로 확장 지점만 연다.
   const api = window as unknown as LanesWindow
   const knuaf = api.knuaf
@@ -156,6 +164,14 @@ export const useLanes = create<LanesState>((set, get) => ({
         const kept = list.filter((chat) => chat && chat.summary && Array.isArray(chat.messages))
         if (kept.length > 0) set({ testArchives: kept })
       }) as EventListener)
+      /**
+       * 이음매 교체(검토 C07-①) — `window.knuaf` 는 contextBridge 가 잠가서 바꿀 수 없다.
+       * `detail: null` 이면 실제 이음매로 되돌린다. 이 사건은 `attach()` 가 한 번 걸어 두면
+       * 이후 `seam()` 호출(`load`·`ask`·`callValue`)마다 새 값이 쓰인다.
+       */
+      window.addEventListener(LANES_TEST_SEAM_EVENT, ((event: Event) => {
+        testSeam = (event as CustomEvent<{ lanes: LanesApi; jobs: JobsApi } | null>).detail ?? null
+      }) as EventListener)
     }
   },
 
@@ -232,23 +248,26 @@ export function laneActions() {
      * 카드 승인. 응답의 `reason` 은 묶음에 실리지 않으므로 여기서 `invalid` 에 적어 둔다 —
      * 접힌 줄이 `account-changed` 만 다른 문구를 쓰기 때문이다(설계 §3-5 [r3c C0]).
      */
-    decideCard: async (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<string | null> => {
+    decideCard: async (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<CardDecision | null> => {
       const r = await useLanes.getState().callValue(({ lanes }) => lanes.decideCard(root, cardId, baseVersion, action))
-      if ('error' in r) return r.error
+      if ('error' in r) return null
       const reason = r.value.outcome === 'invalid' ? r.value.reason : null
       if (reason) useLanes.setState((state) => ({ invalid: { ...state.invalid, [cardId]: reason } }))
-      return null
+      // 설정 확인 창은 카드가 `snapshot.cards` 에 없어(계약 §3 [F5]) 응답 값으로 접힘·무효를 그린다.
+      return r.value
     },
-    cardStatus: async (root: string, cardId: string): Promise<string | null> => {
+    cardStatus: async (root: string, cardId: string): Promise<CardDecision | null> => {
       const r = await useLanes.getState().callValue(({ lanes }) => lanes.cardStatus(root, cardId))
-      if ('error' in r) return r.error
+      if ('error' in r) return null
       if (r.value.outcome === 'invalid' && r.value.reason) {
         const reason = r.value.reason
         useLanes.setState((state) => ({ invalid: { ...state.invalid, [cardId]: reason } }))
       }
-      return null
+      return r.value
     },
-    settingsCard: (root: string, kind: 'enable' | 'revert') => ask(({ lanes }) => lanes.settingsCard(root, kind)),
+    /** 설정 켜기·되돌리기 — 카드는 응답으로만 오므로(계약 §3 [F5]) 값을 그대로 돌려준다(검토 C01). */
+    settingsCard: (root: string, kind: 'enable' | 'revert') =>
+      useLanes.getState().callValue(({ lanes }) => lanes.settingsCard(root, kind)),
     disable: (root: string) => ask(({ lanes }) => lanes.disable(root)),
     dismiss: (root: string, lineId: string) => ask(({ lanes }) => lanes.dismiss(root, lineId)),
     handoffContinue: (root: string, proposalId: string) => ask(({ lanes }) => lanes.handoffContinue(root, proposalId)),
@@ -259,6 +278,12 @@ export function laneActions() {
     retry: (root: string, jobId: string) => ask(({ jobs }) => jobs.retry(root, jobId)),
     discard: (root: string, jobId: string) => ask(({ jobs }) => jobs.discard(root, jobId)),
     redeliver: (root: string, jobId: string) => ask(({ jobs }) => jobs.redeliver(root, jobId)),
+    /**
+     * [자세히]의 전달문 원문 — **읽기만 한다**(다시 넘기지 않는다, 계약 `JobsApi.deliveryText`).
+     * `ask` 가 아니라 값이 필요해 `callValue` 로 받고, 실패·없음은 화면이 문구로 바꾼다.
+     */
+    deliveryText: (root: string, jobId: string) =>
+      useLanes.getState().callValue(({ jobs }) => jobs.deliveryText(root, jobId)),
     authLater: (root: string, jobId: string) => ask(({ jobs }) => jobs.authLater(root, jobId)),
     archives: (root: string) => ask(({ lanes }) => lanes.archives(root)),
     archive: (root: string, archiveId: string) => ask(({ lanes }) => lanes.archive(root, archiveId)),

@@ -731,6 +731,10 @@ button.lk:hover { border-bottom-color: var(--ink); }
 /* §2-2 기록 줄 — 경고(한도·넘김)만 아이콘 색을 경고색으로. 바탕은 `.chat-event` 그대로.
    부모 색을 바꾸면 본문 글자까지 주황이 되므로(검토 C2-V02) 아이콘 색만 바꾼다. */
 .chat-event.warn svg { color: var(--attn); }
+/* 기록 줄 [자세히] — `.zline button.lk` 규칙 밖이라 크기·줄바꿈을 따로 준다. */
+.chat-event button.lk { font-size: 12.5px; white-space: nowrap; flex: none; }
+/* 펼친 원문은 줄 전체 폭을 쓴다(`.zline-raw` 는 `display:block` 이라 flex 안에서도 다음 줄). */
+.chat-event .zline-raw { flex-basis: 100%; }
 
 /* ---- §4-2 한도로 멈춘 대화(읽기 전용) ---- */
 .stopped-banner .grow small { display: block; }

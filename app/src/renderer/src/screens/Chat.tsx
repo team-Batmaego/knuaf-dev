@@ -237,6 +237,7 @@ export function Chat() {
   const setPaneTab = useProject((s) => s.setPaneTab)
   const revision = useProject((s) => s.status?.revision ?? s.peek?.revision ?? null)
   const openSettings = useProject((s) => s.openSettings)
+  const requestLanesCard = useProject((s) => s.requestLanesCard)
   /** 작업 분담 — preload 이 아직 `lanes` 를 안 내보내면(배선 C1 몫) 조용히 꺼진 채로 둔다. */
   const lanesSnapshot = useLanes((s) => s.snapshot)
   const lanesUnavailable = useLanes((s) => s.unavailable)
@@ -449,6 +450,16 @@ export function Chat() {
     void laneActions().cardStatus(projectRoot, cardId)
   }
   /**
+   * [자세히]의 전달문 원문 — **읽기만 한다**(검토 C06). 통로 오류·값 이상은 `null`(읽기 실패)로 접는다.
+   * 줄마다 `root`·`jobId` 가 있을 때만 부르므로 여기서 root 를 다시 검사하지 않는다.
+   */
+  const laneDeliveryText = async (root: string, jobId: string): Promise<{ text: string | null } | null> => {
+    const r = await laneActions().deliveryText(root, jobId)
+    if ('error' in r) return null
+    const text = r.value.text
+    return typeof text === 'string' || text === null ? { text } : null
+  }
+  /**
    * 보관 대화 열기(설계 §4-2). 응답 값이 필요해 `callValue` 로 받는다 — 묶음에는 실리지 않는다.
    * 설정 창에서 부르면 창을 먼저 닫고 대화 칸에 그린다.
    */
@@ -529,7 +540,7 @@ export function Chat() {
         break
       case 'show-card': if (line.kind === 'card-pending') showCard(line.cardId); break
       case 'review-models': openSettings('lanes:review'); break
-      case 'enable-lanes': void lanes.settingsCard(projectRoot, 'enable'); break
+      case 'enable-lanes': openSettings('lanes:enable'); requestLanesCard('enable'); break
       case 'new-chat': {
         // 그 회사 새 대화를 연다 — 기존 회사 바꾸기(AccountChooser)와 같은 길.
         const next: Provider = line.kind === 'main-limit-offer' ? line.to.company : provider
@@ -831,7 +842,13 @@ export function Chat() {
   /** §2-2 기록 줄 — 대화 기록·카드와 같은 시각 순서로 선다. 미지의 종류는 그리지 않는다. */
   for (const e of laneEvents) {
     const view = eventView(e)
-    if (view) thread.push({ key: `lane-ev-${view.id}`, at: view.at, node: <LaneEventLine view={view} onArchive={openArchive} /> })
+    if (view) {
+      thread.push({
+        key: `lane-ev-${view.id}`,
+        at: view.at,
+        node: <LaneEventLine view={view} onArchive={openArchive} root={projectRoot} onDeliveryText={laneDeliveryText} />
+      })
+    }
   }
   thread.sort((a, b) => a.at - b.at)
 
@@ -879,9 +896,12 @@ export function Chat() {
           <button type="button" className="to-bottom" title={CHAT.toBottom} aria-label={CHAT.toBottom} onClick={() => toBottom(true)}><Icon name="down" size={18} /></button>
         )}
         {/* 입력칸 위 한 줄 알림 — 기다림·경고·오류가 쓰는 한 자리(알림창 B안). */}
-        {/* 작업 분담 줄(설계 §2-1) — 기존 줄보다 위, 종류 1~5 순서. 낭독 전용 칸을 늘 안에 둔다. */}
-        {!lanesUnavailable && laneLines.length > 0 && (
-          <LaneZone lines={laneLines} announcement={laneAnnouncement} onAction={laneAction} onShowCard={showCard} />
+        {/* 작업 분담 줄(설계 §2-1) — 기존 줄보다 위, 종류 1~5 순서. 낭독 전용 칸을 늘 안에 둔다.
+            줄 수와 무관하게 붙여 둔다 — 마지막 담당이 끝나며 줄이 사라지는 순간의 완료 낭독도
+            같은 칸이 읽어야 한다(검토 C05). 이음매가 없을 때만 붙이지 않는다. */}
+        {!lanesUnavailable && (
+          <LaneZone lines={laneLines} announcement={laneAnnouncement} onAction={laneAction} onShowCard={showCard}
+            root={projectRoot} delivery={laneDeliveryText} />
         )}
         {waiting && <ZoneLine tone="wait" title={waiting === 'prep' ? CHAT.preparingLine : CHAT.appBusyTitle}
           sub={waitingPrep ? CHAT.preparingQueued : waiting === 'write' ? CHAT.appBusyWaitSub : undefined} />}

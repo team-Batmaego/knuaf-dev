@@ -71,6 +71,11 @@ export interface LaneLineView {
   close: boolean
   /** 막힘(종류 1)만 줄 자체가 `role="alert"` — 낭독 칸과 겹치지 않게 나머지는 역할 없음. */
   alert: boolean
+  /**
+   * 전달문 원문을 읽을 주문 — 있으면 [자세히]가 `jobs.deliveryText` 로 원문을 펼친다(설계 §2-1).
+   * 주문에 묶이지 않은 줄(검토 안내·카드 미결·본대화 한도)은 없다.
+   */
+  jobId?: string
 }
 
 /** 한 종류(1~5)의 줄 묶음. 앞의 하나만 보이고 나머지는 펼침 뒤에 있다. */
@@ -98,7 +103,9 @@ export function lineView(line: LaneLine, now: number): LaneLineView {
     tone: TIER_TONE[line.tier],
     close: line.dismissible,
     alert: line.tier === 1,
-    actions: [] as LaneActionView[]
+    actions: [] as LaneActionView[],
+    // [자세히]가 전달문 원문까지 펼치려면 주문 번호가 화면까지 와야 한다(검토 C06).
+    jobId: 'jobId' in line ? line.jobId : undefined
   }
   // 주문에 묶인 줄만 담당·역할이 있다. 나머지(검토 안내·카드 미결·본대화 한도)는 각 갈래가 직접 짓는다.
   const model = 'assignee' in line ? modelLabel(line.assignee) : ''
@@ -209,6 +216,8 @@ export function lineView(line: LaneLine, now: number): LaneLineView {
         ...base,
         title: LANE_LINE.folderChanged(lane),
         sub: LANE_LINE.keptResult,
+        // 설계 §2-1 "담당 중 논문 파일 바뀜" — [자세히]가 상태·사유·원문 오류를 펼친다(검토 C06).
+        detail: detailText(line.detail),
         actions: [{ id: 'report', label: LANE_ACTION.report }]
       }
     case 'review-missing':
@@ -320,6 +329,8 @@ export interface LaneEventView {
   text: string
   /** "멈춘 대화 보기" — 이어 받은 뒤 첫 줄에서 옛 대화를 연다. */
   archiveId?: string
+  /** 전달문 원문을 읽을 주문 — 없으면 [자세히]를 붙이지 않는다(검토 C06). */
+  jobId?: string
 }
 
 export function eventView(event: LaneEvent): LaneEventView | null {
@@ -330,12 +341,13 @@ export function eventView(event: LaneEvent): LaneEventView | null {
         id: event.id,
         at,
         warn: false,
+        jobId: event.jobId,
         text: event.continued
           ? LANE_EVENT.continued(LANE_NAME[event.lane], modelLabel(event.by))
           : LANE_EVENT.delivered(LANE_NAME[event.lane], modelLabel(event.by), event.task)
       }
     case 'not-run':
-      return { id: event.id, at, warn: false, text: LANE_EVENT.notRun(LANE_NAME[event.lane], event.reason) }
+      return { id: event.id, at, warn: false, jobId: event.jobId, text: LANE_EVENT.notRun(LANE_NAME[event.lane], event.reason) }
     case 'review-skipped':
       return { id: event.id, at, warn: true, text: LANE_EVENT.reviewSkipped(event.reason) }
     case 'main-takeover':
