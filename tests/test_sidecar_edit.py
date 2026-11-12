@@ -187,6 +187,7 @@ def test_a_change_made_outside_the_app_is_not_adopted(sidecar, project):
     assert "남이 쓴 글." in path.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="윈도는 폴더 chmod(쓰기 금지)로 쓰기를 막지 않는다 — 폴더 권한으로 원장 쓰기 실패를 만들 수 없다")
 def test_an_unwritable_ledger_stops_the_save_closed(sidecar, project, monkeypatch):
     holder = project / ".knuaf-gui"
     holder.mkdir(exist_ok=True)
@@ -741,12 +742,18 @@ def test_review_batch_failure_preserves_external_update(two_sections, monkeypatc
 
 
 def test_review_success_preserves_preopened_writer(two_sections, monkeypatch):
-    """Roh 차단 2 — 성공한 저장이 미리 열어 둔 핸들이 쓴 B 를 지우지 않는다."""
+    """Roh 차단 2 — 성공한 저장이 미리 열어 둔 핸들이 쓴 B 를 지우지 않는다.
+
+    윈도는 열려 있는 파일의 이름 바꾸기를 거절한다(WinError 32). 그때 저장은 원고를 한 번도
+    움직이지 않은 채 `edit_failed` 로 닫히고 남의 글 B 는 자리에 그대로 남는다 — 맥과 같은
+    결론(남의 글을 지우지 않는다)을 다른 경로로 확인한다.
+    """
     root = two_sections
     path = root / "sections" / "01.md"
     outsider = b"UNIQUE_PREOPENED_HANDLE_STUDENT_UPDATE_B"
     real_apply = core.apply
     clock = {"n": 0}
+    revision_before = core.load(root)["revision"]
 
     with path.open("r+b") as external:
         def apply(root_arg, change, expected):
@@ -761,10 +768,19 @@ def test_review_success_preserves_preopened_writer(two_sections, monkeypatch):
             return real_apply(root_arg, change, expected)
 
         monkeypatch.setattr(core, "apply", apply)
-        result = methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
-        # 청소는 그 자리에서 돌지 않는다(10분 규칙) — 보존본에 B 가 남아 있어야 한다.
-        assert result["revision"] == core.load(root)["revision"]
-    assert _has_bytes(root, outsider), "성공한 저장이 미리 열어 둔 핸들의 글을 지웠다"
+        if sys.platform == "win32":
+            with pytest.raises(RpcError) as refused:
+                methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
+            assert refused.value.code == "edit_failed"
+            assert core.load(root)["revision"] == revision_before
+            assert [row["state"] for row in _ledger(root)][-1] == "aborted"
+            # 거절됐으니 원고 자리는 손대지 않은 그대로다.
+            assert path.read_bytes() == outsider
+        else:
+            result = methods_edit.section_edit(None, _params(root, before_block=BODY, after_block=TYPED))
+            # 청소는 그 자리에서 돌지 않는다(10분 규칙) — 보존본에 B 가 남아 있어야 한다.
+            assert result["revision"] == core.load(root)["revision"]
+    assert _has_bytes(root, outsider), "저장이 미리 열어 둔 핸들의 글을 지웠다"
 
 
 def test_review_disk_full_restore_never_leaves_partial_manuscript(two_sections, monkeypatch):

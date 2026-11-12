@@ -810,6 +810,8 @@ export function Chat() {
           <>
             <div className="qcard-wrap">
               {quote && quote.root === projectRoot && <ReviewQuoteChip quote={quote} onRemove={clearQuote} style={{ marginTop: 'var(--sp-4)', marginBottom: -8, position: 'relative', zIndex: 1 }} />}
+              {/* 질문 카드는 입력칸 자리를 대신 차지해 아래 칩 줄이 안 보인다 — 같은 자리에 여기서 띄운다(B4). */}
+              {pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
               <QuestionCard key={zone.messageId} card={zone.card} draft={draft} onDraft={setDraft} onSend={send}
                 onSendFree={() => sendBody()} canSendFree={canSend && !busy && !waiting} freeRequest={freeRequest?.messageId === zone.messageId ? freeRequest.seq : 0} />
             </div>
@@ -819,6 +821,9 @@ export function Chat() {
 
         {zone.kind === 'form' && (
           <>
+            {/* 여러 칸 질문도 입력칸 자리를 대신 쓴다 — 칩을 여기서 띄운다(B4). 직접 입력으로
+                넘어가면 아래 입력칸 줄이 칩을 맡으므로 겹치지 않게 `!freeForm` 일 때만. */}
+            {!freeForm && pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
             <div hidden={freeForm}><QuestionForm key={zone.messageId} form={zone.form} onFree={() => setFreeFormId(zone.messageId)} onSend={send} disabled={busy || !!waiting} /></div>
             {!freeForm && <div className="crow question-model"><ComposerModelChip /></div>}
           </>
