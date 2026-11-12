@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { RecentEntry, Settings } from '../shared/types'
 
-const DEFAULTS: Settings = { recent: [], credit_shown_at: null, python_override: null, permission_mode: 'trust', provider_choice: null, onboarded_at: null }
+const DEFAULTS: Settings = { recent: [], credit_shown_at: null, python_override: null, permission_mode: 'trust', provider_choice: null, onboarded_at: null, report_consent: 'unset' }
 const RECENT_MAX = 8
 
 function file(): string { return join(app.getPath('userData'), 'settings.json') }
@@ -47,6 +47,15 @@ function normalisePermissionMode(raw: unknown): Settings['permission_mode'] {
 }
 
 /**
+ * 오류 보고 동의 — `normalisePermissionMode` 와 같은 모양이되 **세 번째 상태**가 있다.
+ * 값이 없거나 모양이 어긋나면 `'unset'`(보내지 않음)이다. `saveSettings` 도 이 함수를 타야
+ * `settings:set` 으로 들어온 임의 문자열이 디스크에 남지 않는다.
+ */
+function normaliseReportConsent(raw: unknown): Settings['report_consent'] {
+  return raw === 'on' || raw === 'off' ? raw : 'unset'
+}
+
+/**
  * 학생이 고른 공급자. **`helper_mode` 를 여기로 승격하지 않는다**(IMPL-R1-02) —
  * `helper_mode` 는 고른 적이 없어도 기본 `codex-chat` 이 채워져 저장되므로,
  * 그 값을 선택으로 읽으면 첫 실행 화면을 영영 건너뛴다. 값이 없거나 모양이 어긋나면
@@ -64,7 +73,7 @@ export function loadSettings(): Settings {
   try {
     if (existsSync(file())) {
       const parsed = JSON.parse(readFileSync(file(), 'utf-8')) as Partial<Settings> & { recent?: unknown }
-      return { ...DEFAULTS, ...parsed, recent: normaliseRecent(parsed.recent), helper_mode: migrateHelperMode(parsed), permission_mode: normalisePermissionMode(parsed.permission_mode), provider_choice: normaliseProviderChoice(parsed.provider_choice) }
+      return { ...DEFAULTS, ...parsed, recent: normaliseRecent(parsed.recent), helper_mode: migrateHelperMode(parsed), permission_mode: normalisePermissionMode(parsed.permission_mode), provider_choice: normaliseProviderChoice(parsed.provider_choice), report_consent: normaliseReportConsent(parsed.report_consent) }
     }
   } catch { /* corrupt settings fall back to defaults */ }
   return { ...DEFAULTS, helper_mode: 'codex-chat' }
@@ -73,6 +82,8 @@ export function loadSettings(): Settings {
 export function saveSettings(next: Partial<Settings>): Settings {
   const merged: Settings = { ...loadSettings(), ...next }
   if ('recent' in next) merged.recent = normaliseRecent(next.recent)
+  // `settings:set` 으로 임의 문자열이 들어와도 디스크에는 세 값만 남는다.
+  merged.report_consent = normaliseReportConsent(merged.report_consent)
   mkdirSync(app.getPath('userData'), { recursive: true })
   writeFileSync(file(), JSON.stringify(merged, null, 2), 'utf-8')
   return merged

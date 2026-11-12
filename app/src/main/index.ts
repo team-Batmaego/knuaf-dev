@@ -11,12 +11,20 @@ import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { defaultWindowSize } from '../shared/window'
 import { openHandles, shutdownWithin } from './shutdown'
+import { flush as flushCrashQueue, installCrashHooks, watchRenderer } from './crash'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
 // 표시이름이 바뀌며 생긴 옛 userData 폴더에서 설정을 이어 받는다(userdata.ts).
 // 테스트(KNUAF_USER_DATA 지정)에서는 돌리지 않는다.
 else migrateUserDataDir(app.getPath('userData'), LEGACY_USERDATA_NAMES.map((n) => join(app.getPath('appData'), n)))
+
+/**
+ * 오류 수집 훅은 **`userData` 확정 뒤·`whenReady` 앞**에 단다(DESIGN §2-1). 큐 경로가 `userData`
+ * 아래라 위 두 줄보다 먼저 달면 엉뚱한 폴더에 쌓이고, `whenReady` 뒤에 달면 초기화 중 예외를 놓친다.
+ * 보낼 곳이 없는 실행(개발 모드 기본)에서는 이 호출이 아무것도 하지 않는다.
+ */
+installCrashHooks()
 
 let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
@@ -101,6 +109,8 @@ function createWindow(): void {
     }
   })
   if (!hidden) win.once('ready-to-show', () => win?.show())
+  // 렌더러가 죽으면 화면이 없다 — 이 실행에서는 묻지 않고 큐에만 남긴다(DESIGN §2-1).
+  watchRenderer(win.webContents)
   win.webContents.on('did-finish-load', () => { if (pendingOpen) { sendMenu({ type: 'open-recent', root: pendingOpen }); pendingOpen = null } })
   win.on('closed', () => { win = null })
   if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -122,6 +132,8 @@ else {
     chat = services.chat
     installMenu(sendMenu)
     createWindow()
+    // 창이 뜬 뒤 1회 — 죽은 실행이 남긴 큐를 여기서 보낸다(전송 시점은 언제나 다음 실행).
+    void flushCrashQueue()
     nativeTheme.on('updated', () => {
       if (!win || isMac) return
       const c = chromeColors()

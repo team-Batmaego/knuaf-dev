@@ -156,7 +156,15 @@ export interface Settings {
    * 없으면(null/키 없음) 지금까지처럼 모델·effort 를 보내지 않는다.
    */
   chat_models?: Partial<Record<'codex' | 'claude', ModelChoice | null>> | null
+  /**
+   * 오류 자동 보고 동의 — `'unset'`(아직 안 물음) · `'on'` · `'off'`.
+   * **키가 없으면 `unset`** 으로 읽고, `unset` 은 보내지 않는다. 값이 없을 때 전송으로
+   * 해석되는 경로는 없다. `unset` 에서만 한 번 묻고, 답하면 그 뒤로는 묻지 않는다.
+   */
+  report_consent?: ReportConsent
 }
+/** 오류 자동 보고 동의 상태 — `unset` 은 "아직 묻지 않음"이며 전송하지 않는다. */
+export type ReportConsent = 'unset' | 'on' | 'off'
 /** Window chrome hints for the renderer (macOS vibrancy/inset title bar vs. overlay controls elsewhere). */
 export interface WindowInfo { platform: string; vibrancy: boolean; titleBarInset: boolean; overlay: boolean }
 /** Cheap look at `<root>/project.json` without starting the sidecar. */
