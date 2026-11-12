@@ -285,11 +285,13 @@ async function decideCardLocked(
       }
       return { outcome: 'already-handled', reason: null, card: publicCard(claim.card), boundTurn: null }
     }
-    // 아직 열려 있는데 판이 바뀐 카드 — 적용하지 않고 무효로 접는다.
-    const settled = deps.store.settleCard(cardId, { kind: 'invalid' })
+    // 아직 열려 있는데 판이 바뀐 카드 — 적용하지 않고 무효로 접는다. 사유를 카드 상태에 함께
+    // 남긴다([C0b A3] `CardState.invalid.reason`) — 두 창·재시작 뒤 [다시 확인]도 같은 문구.
+    const reason: CardInvalidReason | null = claim.reason === 'base-version' ? 'base-version' : null
+    const settled = deps.store.settleCard(cardId, { kind: 'invalid', reason })
     return {
       outcome: 'invalid',
-      reason: claim.reason === 'base-version' ? 'base-version' : null,
+      reason,
       card: publicCard(settled ?? stored),
       boundTurn: null
     }
@@ -357,9 +359,10 @@ export function cardStatus(deps: Pick<CardDeps, 'store'>, root: string, cardId: 
       return { outcome: 'pending', reason: null, card, boundTurn: null }
     case 'superseded':
       return { outcome: 'invalid', reason: 'superseded', card, boundTurn: null }
-    // 계약 `CardState` 는 무효 사유를 담지 않는다 — 두 창·판 불일치·계정 변경을 구별할 수 없다.
+    // [C0b A3] 무효 사유는 카드 상태에 남는다 — 두 창·판 불일치·계정 변경을 다시 그릴 때도
+    // 구별해 문구를 고른다. 옛 저장 자료에는 칸이 없어 `null`(기본 문구)이다.
     case 'invalid':
-      return { outcome: 'invalid', reason: null, card, boundTurn: null }
+      return { outcome: 'invalid', reason: stored.state.reason ?? null, card, boundTurn: null }
     default:
       return { outcome: 'already-handled', reason: null, card, boundTurn: null }
   }
@@ -390,7 +393,7 @@ function settle(
 }
 
 function closeAsInvalid(deps: CardDeps, cardId: string, reason: CardInvalidReason | null): CardDecision {
-  const settled = deps.store.settleCard(cardId, { kind: 'invalid' })
+  const settled = deps.store.settleCard(cardId, { kind: 'invalid', reason })
   if (!settled) throw new LaneFailure('not-found', '카드를 찾지 못했어요.')
   return { outcome: 'invalid', reason, card: publicCard(settled), boundTurn: null }
 }

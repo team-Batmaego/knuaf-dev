@@ -209,7 +209,7 @@ test('card: a stale baseVersion is refused and the card closes as invalid', asyn
   const decision = await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
   expect(decision.outcome).toBe('invalid')
   expect(decision.reason).toBe('base-version')
-  expect(decision.card.state).toEqual({ kind: 'invalid' })
+  expect(decision.card.state).toEqual({ kind: 'invalid', reason: 'base-version' })
   expect(f.store.approvedPlan(f.root)).toBeNull()
   expect(f.store.consents()).toEqual([])
 })
@@ -240,7 +240,7 @@ test('card: a changed login account invalidates the card and saves no consent', 
   const decision = await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
   expect(decision.outcome).toBe('invalid')
   expect(decision.reason).toBe('account-changed')
-  expect(decision.card.state).toEqual({ kind: 'invalid' })
+  expect(decision.card.state).toEqual({ kind: 'invalid', reason: 'account-changed' })
   expect(f.store.approvedPlan(f.root)).toBeNull()
   expect(f.store.consents()).toEqual([])
 })
@@ -388,7 +388,7 @@ test('card: a design switch the seam reports as unchanged is not "applied"', asy
     { ...f.deps, applyDesign: async () => false }, f.root, opened.cardId, opened.baseVersion, 'continue'
   )
   expect(decision.outcome).toBe('invalid')
-  expect(decision.card.state).toEqual({ kind: 'invalid' })
+  expect(decision.card.state).toEqual({ kind: 'invalid', reason: null })
   expect(f.store.approvedPlan(f.root)).toBeNull()
 })
 
@@ -410,7 +410,7 @@ test('card: status never re-applies and old cards without a stored plan close as
   f.store.addCard(legacy, {})
   const decision = await decideCard(f.deps, f.root, 'legacy', legacy.baseVersion, 'continue')
   expect(decision.outcome).toBe('invalid')
-  expect(decision.card.state).toEqual({ kind: 'invalid' })
+  expect(decision.card.state).toEqual({ kind: 'invalid', reason: null })
   expect(f.store.approvedPlan(f.root)).toBeNull()
 })
 
@@ -528,7 +528,8 @@ test('card fix: a card interrupted while applying is invalid after restart, neve
   const reopened = new JobStore(join(f.base, 'jobs'))
   const status = cardStatus({ store: reopened }, f.root, opened.cardId)
   expect(status.outcome).not.toBe('pending')
-  expect(status.card.state).toEqual({ kind: 'invalid' })
+  // 사유는 `null` — 결과를 모르는 카드라 사유별 문구(계정 바뀜·판 불일치)를 지어내지 않는다.
+  expect(status.card.state).toEqual({ kind: 'invalid', reason: null })
   // 판은 그대로다 — 남은 카드가 옛 판으로 밀리지 않는다.
   expect(reopened.versionOf(f.root)).toBe(f.store.versionOf(f.root))
 
@@ -537,7 +538,7 @@ test('card fix: a card interrupted while applying is invalid after restart, neve
   const other = await openCard(g.deps, g.root, writingToClaude)
   g.store.beginCard(other.cardId, other.baseVersion)
   const reopenedAgain = new JobStore(join(g.base, 'jobs'))
-  expect(cardStatus({ store: reopenedAgain }, g.root, other.cardId).card.state).toEqual({ kind: 'invalid' })
+  expect(cardStatus({ store: reopenedAgain }, g.root, other.cardId).card.state).toEqual({ kind: 'invalid', reason: null })
 })
 
 // [C1-06] 적용 직전 계정 대조는 캐시가 아니라 **지금** 관측을 쓴다.
