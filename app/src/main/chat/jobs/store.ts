@@ -71,6 +71,12 @@ interface StoreState {
    * 주문 판정에도 쓰지 않는다(`effectivePlan`). 옛 자료가 파싱에서 깨지지 않게 읽기만 남긴다.
    */
   temporary: Record<string, TemporaryPlan>
+  /**
+   * 폴더별 **첫 본대화 차례 직전**의 파일 해시(설계 §1-3 ⑤). 인계 묶음의 `changedFiles` 는
+   * 이 값과 실패 직전 값을 비교해 만든다. 한 번 적으면 덮지 않는다 — 나중 차례가 기준을
+   * 밀면 "이 대화에서 바뀐 것"이 아니라 "마지막 차례에서 바뀐 것"이 된다.
+   */
+  thesisBaseline: Record<string, Record<string, string>>
 }
 
 /** [이번만]으로 도는 배치와 그것이 묶인 차례. [v0.7.1] — v0.7은 만들지 않는다. */
@@ -187,7 +193,7 @@ function parse(text: string): StoreState {
     if (!isRecord(state.cards)) throw new Error('Invalid job store')
     for (const [root, list] of Object.entries(state.cards as Record<string, unknown>)) {
       if (!Array.isArray(list)) throw new Error('Invalid job store')
-      parsed.cards[root] = list.filter(isStoredCard)
+      parsed.cards[root] = list.filter(isStoredCard).map(withInvalidReason)
     }
   }
   if (state.baseVersion !== undefined) {
@@ -234,6 +240,19 @@ function parse(text: string): StoreState {
       parsed.temporary[root] = { plan: value.plan, boundTurn: value.boundTurn, at: value.at }
     }
   }
+  // 옛 파일에는 없다 — 없으면 "기록 없음"이고, 인계 묶음은 그때 `changedFiles` 를 비운다.
+  if (state.thesisBaseline !== undefined) {
+    if (!isRecord(state.thesisBaseline)) throw new Error('Invalid job store')
+    for (const [root, hashes] of Object.entries(state.thesisBaseline as Record<string, unknown>)) {
+      if (!isRecord(hashes)) throw new Error('Invalid job store')
+      const record: Record<string, string> = {}
+      for (const [path, hash] of Object.entries(hashes)) {
+        if (typeof hash !== 'string') throw new Error('Invalid job store')
+        record[path] = hash
+      }
+      parsed.thesisBaseline[root] = record
+    }
+  }
   return parsed
 }
 
@@ -255,7 +274,7 @@ export class JobStore {
     // The store file only ever lives in app storage; readRecoverable also restores a complete .tmp.
     this.state = readRecoverable(this.file, parse)?.value ?? {
       version: 1, approvals: {}, consent: {}, deliveries: {},
-      cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}
+      cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}, thesisBaseline: {}
     }
     // Delivery claim happened before the crash: surface it once, never resend automatically.
     let recovered = false
@@ -366,6 +385,26 @@ export class JobStore {
     delete this.state.temporary[key]
     this.persist()
     return true
+  }
+
+  /**
+   * 인계 묶음의 기준값(설계 §1-3 ⑤) — 그 폴더 본대화 **첫 차례 직전** 해시. 없으면 `null`
+   * 이고, 그때 묶음은 `changedFiles` 를 비운다(비교할 기준이 없다).
+   */
+  thesisBaseline(root: string): Record<string, string> | null {
+    const record = this.state.thesisBaseline[rootKey(root)]
+    return record ? structuredClone(record) : null
+  }
+
+  /** 기준값은 **한 번만** 적는다 — 있으면 덮지 않고 그 값을 돌려준다. */
+  setThesisBaseline(root: string, hashes: Record<string, string>): Record<string, string> {
+    const key = rootKey(root)
+    const existing = this.state.thesisBaseline[key]
+    if (existing) return structuredClone(existing)
+    const record = structuredClone(hashes)
+    this.state.thesisBaseline[key] = record
+    this.persist()
+    return structuredClone(record)
   }
 
   /** 동의는 **지우지 않는다** — 거둠도 날짜와 함께 남아야 §5 가 `withdrawn` 을 그린다(Q4). */

@@ -6,16 +6,16 @@ import { findExecutable, installSkill, skillState, skillTargets, skillVersion, V
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
-import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
+import { MainTurnUsageError, subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
 import { chatConnectionKey } from './jobs/key'
 import { JobRunner, type JobConnection, type JobRecord, type JobResult, type JobSpec, type RelayRequest } from './jobs'
 import { JobStore, type ConsentRecord } from './jobs/store'
-import { canonical } from './jobs/isolation'
+import { canonical, thesisHashes } from './jobs/isolation'
 import { LaneFailure } from '../lanes/failure'
 import { providerOf } from '../lanes/providers'
 import type { ConversationOwner, ExecutionAccount } from './jobs/types'
 import type {
-  ConversationProposal, HandoffSource
+  ConversationProposal, HandoffOpenResult, HandoffSource
 } from './jobs/conversation'
 import type { OwnerTransition } from './jobs/transition'
 import type { ArchivedChat, ArchivedChatSummary, LaneLine } from '../../shared/lanes-ipc'
@@ -169,6 +169,10 @@ export class ChatService {
    * 넘기지 않은 대화가 그 폴더의 대화인 척 남으면 학생 글·세션이 사라진다.
    */
   private handoffOpened = new Map<string, ChatSnapshot | null>()
+  /** 인계로 여는 중인 대화 칸 — 그 턴의 한도가 **세 번째 제안**을 열지 않게 막는다(§1-4 ②). */
+  private handoffOpening = new Set<string>()
+  /** 방금 끝난 턴이 §1-2 의 `limit` 으로 실패했는가(인계 첫 턴 게이트가 읽는다). */
+  private limitTurns = new Set<string>()
   constructor(private opts: {
     skillSource: () => string; userData: string; env?: NodeJS.ProcessEnv
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
@@ -742,6 +746,14 @@ export class ChatService {
       const m = s.messages.find((x) => x.id === requestId)
       if (m?.delivery === 'pending') m.delivery = 'sent'
     }
+    // §1-3 ⑤ — 이 폴더 **첫 본대화 차례 직전** 상태를 기준값으로 남긴다. 이미 있으면 읽기만
+    // 하고 다시 해시하지 않는다(폴더 전체를 훑는 일이다). 실패해도 턴은 그대로 간다 —
+    // 기준값이 없으면 인계 묶음이 `changedFiles` 를 비울 뿐이다.
+    try {
+      if (this.store().thesisBaseline(s.root) === null) this.store().setThesisBaseline(s.root, thesisHashes(s.root))
+    } catch (error) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'thesis-baseline', error: error instanceof Error ? error.message : String(error) }))
+    }
     try {
       await connection.run(text, s.sessionId, {
         session: id => { s.sessionId = id; this.publish(s) },
@@ -788,6 +800,14 @@ export class ChatService {
         }
         if (s.state !== 'interrupted') s.state = 'error'
         s.error ??= e instanceof Error ? e.message : '작업이 완료되지 않았어요.'
+        // §1-3 ③④ — **확인된 한도**일 때만, 한 턴에 한 번 이어 하기 제안을 연다. 열리면 그 턴의
+        // 오류 줄을 지우고 상태를 'idle' 로 되돌린다(제안 줄이 오류 줄 자리를 대신한다).
+        // 인계로 연 첫 턴이면 그 판정을 `openHandoff` 에 넘긴다(제안은 열지 않는다 — 재귀 금지).
+        if (e instanceof MainTurnUsageError && e.usage === 'limit') this.limitTurns.add(key)
+        if (e instanceof MainTurnUsageError && e.usage === 'limit' && this.opts.handoff) {
+          const proposal = await this.proposeHandoff(s, e)
+          if (proposal) { s.error = undefined; s.state = 'idle'; s.authRequired = undefined; this.publish(s) }
+        }
       }
     } finally {
       s.permission = undefined; this.waiting.delete(key)
@@ -1323,6 +1343,47 @@ export class ChatService {
   }
 
   // ---------------------------------------------------------------- §4 본대화 인계
+
+  /**
+   * §1-3 — 확인된 한도로 끝난 턴 하나에서 이어 하기 묶음을 짓고 제안을 **한 번** 연다.
+   * 열린 제안이 있으면 그 턴은 실패 문구를 지우지 않는다(이미 단추가 떠 있다).
+   *
+   * 보내는 값은 모두 **실패 당시** 사실이다: 공급자·모델·깊이는 연결이 붙인 `entry`(턴 지역),
+   * 학생 글과 마지막 답변은 그 턴의 스냅샷, 파일 변화는 첫 차례 기준값 대 실패 직전 값이다.
+   */
+  private async proposeHandoff(s: ChatSnapshot, error: MainTurnUsageError): Promise<ConversationProposal | null> {
+    const seam = this.opts.handoff
+    if (!seam) return null
+    // §1-4 ② — 인계로 여는 중인 대화의 한도는 **대상도 한도**라는 뜻이다. 여기서 또 제안을
+    // 열면 A→B→A 로 끝없이 이어진다. `openHandoff` 가 첫 턴 결과로 접는다.
+    if (this.handoffOpening.has(this.key(s.root, s.provider))) return null
+    try {
+      const lastAssistant = [...s.messages].reverse().find(m => m.role === 'assistant')
+      const delivered = new Set(this.jobRunner?.deliveredRootJobs() ?? [])
+      const root = canonical(s.root)
+      const store = this.store()
+      const source: HandoffSource = {
+        rootConversationId: `${s.provider}\0${root}`,
+        owner: { id: `${s.provider}\0${root}`, sessionId: s.sessionId ?? '', company: s.provider },
+        root: s.root,
+        entry: error.entry,
+        reason: 'limit',
+        students: s.messages.filter(m => m.role === 'user').map(m => ({ text: m.text, attachments: [] })),
+        lastAssistant: lastAssistant ? { text: lastAssistant.text, interrupted: false } : null,
+        beforeHashes: store.thesisBaseline(s.root) ?? {},
+        afterHashes: thesisHashes(s.root),
+        approvedPlan: store.effectivePlan(s.root) ?? null,
+        jobs: (this.jobRunner?.records() ?? []).filter(job => job.root === root)
+          .map(job => ({ id: job.spec.id, status: job.status, delivered: delivered.has(job.spec.id) })),
+        skillVersion: skillVersion(this.opts.skillSource()),
+        sourceLocation: this.file(s.root, s.provider)
+      }
+      return await seam.propose(source)
+    } catch (caught) {
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'handoff-propose', error: caught instanceof Error ? caught.message : String(caught) }))
+      return null
+    }
+  }
 
   /** §4-1 줄에 쓸 제안 — 열린 것·넘기는 중·넘기지 못한 것. 이음매가 없으면 빈 배열. */
   handoffLines(root: string): LaneLine[] {

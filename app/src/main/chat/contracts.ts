@@ -1,5 +1,6 @@
 import { delimiter } from 'node:path'
 import type { ChatModelInfo, ConnectionStatus, ModelChoice, PermissionRequest } from '../../shared/chat'
+import type { LaneEntry } from '../../shared/lanes'
 export interface AgentEvents {
   message: (id: string, text: string) => void
   permission: (request: PermissionRequest) => void
@@ -33,6 +34,22 @@ export interface AgentConnection {
   prepare?(sessionId: string | undefined): Promise<void>
   respond(id: string, allow: boolean): void
   stop(): Promise<void>
+}
+/**
+ * 본대화 턴이 **사용 한도**로 끝났는지, 아니면 다른 이유로 실패했는지(설계 §1-2~1-3).
+ *
+ * `usage:'limit'` 은 그 턴 안에서 **구조 신호**를 받았을 때만 붙는다 — Claude
+ * `rate_limit_event{status:'rejected'}`, Codex `codexErrorInfo:'usageLimitExceeded'`.
+ * 오류 글을 정규식으로 훑어 "한도"라는 낱말을 찾지 않는다. `entry` 는 **그 턴이 실제로
+ * 보낸** 회사·모델·깊이(턴 지역 값)다 — 실패 뒤 칩을 다시 읽으면 보내지 않은 값이 된다.
+ *
+ * `message` 는 공급자별 기존 문구를 그대로 받는다. 단추가 열리지 않으면 `ChatService` 가
+ * 예전처럼 그 문구를 `s.error` 에 남긴다(문구 회귀 없음).
+ */
+export class MainTurnUsageError extends Error {
+  constructor(readonly usage: 'limit' | 'unknown', readonly entry: LaneEntry, message: string) {
+    super(message)
+  }
 }
 export interface AgentOptions {
   binary: string; root: string; skill: string; env: NodeJS.ProcessEnv

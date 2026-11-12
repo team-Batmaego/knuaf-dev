@@ -6,10 +6,10 @@ import { JsonRpcProcess } from './transport'
 import { applyRejection, recordRejection } from './rejectLog'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import { writeFileAtomic } from '../safeWrite'
-import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
+import { MainTurnUsageError, type AgentConnection, type AgentEvents, type AgentOptions } from './contracts'
 import type { ChatModelInfo, ConnectionStatus, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId, resolveCodexAlias } from '../../shared/chat'
-import type { ModelCatalogEntry } from '../../shared/lanes'
+import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
 import { codexTokens } from './jobs/tokens'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 
@@ -89,6 +89,12 @@ export class CodexConnection implements AgentConnection {
   /** 마지막 `thread/start`/`thread/resume` 응답이 알려 준 그 대화의 model·effort. */
   private threadModel: string | null = null
   private threadEffort: string | null = null
+  /**
+   * 마지막 `turn/start` 에 **실제로 실어 보낸** model·effort(설계 §1-3 ②). 거절은
+   * `connect()` 의 `turn/completed` 처리에서 오는데 거기엔 `run()` 지역 값이 없다 —
+   * 실패 당시의 출처를 만들려면 보낸 값을 여기 남겨야 한다. 턴마다 새로 덮는다.
+   */
+  private turnChoice: { model: string | null; effort: string | null } = { model: null, effort: null }
   /** 재개한 대화가 기본값과 다른지 한 번만 본다. */
   private resumeChecked = false
   /** 서버가 새 대화에 실제로 쓰는 기본값(계정·CLI 설정). `model/list` 나 설정을 추측하지 않는다. */
@@ -271,7 +277,17 @@ export class CodexConnection implements AgentConnection {
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') w?.resolve()
         else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
-        else w?.reject(new Error(p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
+        // 한도는 **구조 코드** `usageLimitExceeded` 만 인정한다(설계 §1-2, p1X 11-11).
+        // `rateLimitExceeded` 는 한도가 아니라 `unknown` 이다 — 단추를 덜 띄우는 방향.
+        else if (p.turn.error?.codexErrorInfo === 'usageLimitExceeded') {
+          w?.reject(new MainTurnUsageError('limit',
+            { company: 'codex', model: this.turnChoice.model, effort: this.turnChoice.effort, how: 'main' },
+            p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
+        } else {
+          w?.reject(new MainTurnUsageError('unknown',
+            { company: 'codex', model: this.turnChoice.model, effort: this.turnChoice.effort, how: 'main' },
+            p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
+        }
       }
     }
     rpc.onRequest = (id, method, p) => {
@@ -457,6 +473,9 @@ export class CodexConnection implements AgentConnection {
      * 서버가 새 대화에 쓰는 기본값을 명시적으로 다시 보낸다(검토 MC1-01).
      */
     const turnModel = await this.turnModelParams(!!sessionId)
+    // 실패 당시 출처는 **이 턴이 실제로 실어 보낸** 값이다(설계 §1-3 ②). 거절은
+    // `connect()` 의 `turn/completed` 에서 오므로 여기에 남긴다.
+    this.turnChoice = { model: turnModel.params.model ?? null, effort: turnModel.params.effort ?? null }
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {

@@ -5,14 +5,14 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, re
 import type { Dirent } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
-import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
+import { MainTurnUsageError, type AgentConnection, type AgentEvents, type AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import { claudeTokens } from './jobs/tokens'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 import type { ChatModelInfo, ConnectionStatus } from '../../shared/chat'
-import type { ModelCatalogEntry } from '../../shared/lanes'
+import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
 import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 
 export class ClaudeAuthenticationError extends Error {
@@ -1174,6 +1174,23 @@ export class ClaudeConnection implements AgentConnection {
         }
       }
     })
+    /**
+     * **이 턴 안에서** 한도 거절 사건을 받았는가(설계 §1-2). `run()` 지역 변수라 다음 턴이
+     * 물려받지 않는다 — 앞 턴의 거절로 다음 턴 실패에 단추를 띄우면 안 된다.
+     */
+    let rejectedSeen = false
+    /**
+     * 이 턴이 **실제로 보낸** 값. 한도는 **위 거절 사건만** 근거로 삼는다 — 결과 오류
+     * 문구에 "한도"가 들어 있는지로 정하지 않는다(§1-2).
+     *
+     * 모델을 보내지 않은 턴은 **이 턴의 init 이 알려 준 계정 기본값**이 실제로 쓴 모델이다.
+     * 그래서 값을 미리 굳히지 않고 던지는 자리에서 만든다 — 시작할 때 만들면 init 이 오기
+     * 전 값(`null`)이 남아 "실패 당시 보낸 모델"이 비고, 반대로 실패 뒤 칩을 다시 읽으면
+     * 보내지 않은 값이 된다. 둘 다 아니다: 턴 계획 + **이 턴에 배운** 기본값이다(중요 1·5).
+     * 턴 지역 변수라 앞 턴의 기본값이 새지도 않는다.
+     */
+    let turnModel: string | null = plan.sentModel ?? null
+    const entryOf = (): LaneEntry => ({ company: 'claude', model: turnModel, effort: plan.effort ?? null, how: 'main' })
     try {
       const commands = await q.supportedCommands()
       if (!commands.some(c => c.name === 'knuaf-dev' || c.name.endsWith(':knuaf-dev'))) throw new Error('Claude가 knuaf-dev 스킬을 찾지 못했어요.')
@@ -1185,6 +1202,7 @@ export class ClaudeConnection implements AgentConnection {
       // 칩이 바뀌면 보내지 않은 값으로 경고하거나 저장하게 된다(중요 5).
       let verified = false
       for await (const message of q) {
+        if (message.type === 'rate_limit_event' && claudeUsageState(message.rate_limit_info) === 'limit') rejectedSeen = true
         if (claudeAuthenticationFailed(message)) throw new ClaudeAuthenticationError()
         if ('session_id' in message && message.session_id) events.session(message.session_id)
         // 계정 기본값은 **모델을 보내지 않은** 대화의 첫 init 에서만 인정한다. 첫 턴부터
@@ -1198,7 +1216,7 @@ export class ClaudeConnection implements AgentConnection {
            * 새 대화의 init 이 곧 그때의 답이다. 처음 본 값만 붙들면 기본값이 바뀐 뒤에도
            * 옛 모델을 계속 명시해 보낸다. 모델을 보낸 턴(핀 포함)은 여전히 제외한다.
            */
-          if (!sessionId && !plan.sentModel && actual) this.accountDefault = actual
+          if (!sessionId && !plan.sentModel && actual) { this.accountDefault = actual; turnModel = actual }
           // 새 대화의 표식은 초기화가 왔으므로 이제 붙인다(위 주석) — 다음 턴부터 같은 대화다.
           if (plan.marksOverride && message.session_id) this.overriddenFor = message.session_id
           if (plan.sentModel && actual && !this.sameModel(plan.sentModel, actual)) {
@@ -1210,13 +1228,18 @@ export class ClaudeConnection implements AgentConnection {
           const text = message.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
           if (text) events.message(message.uuid, text)
         }
-        if (message.type === 'result' && message.is_error) throw new Error('Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
+        if (message.type === 'result' && message.is_error) throw new MainTurnUsageError(rejectedSeen ? 'limit' : 'unknown', entryOf(), 'Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
       }
       // 턴이 성공으로 끝나도 그 안에서 조용히 죽은 작업이 있으면 그대로 말한다.
       // 이걸 안 하면 도우미의 마무리 인사만 남고 실패는 아무 데도 안 보인다.
       if (lost > 0) events.note(`도우미가 이번 작업 중에 파일 ${lost}건을 저장하지 못했어요. 앱이 승인 창을 띄우기 전에 통로가 닫혀서, 그 저장은 일어나지 않았어요. 필요하면 다시 요청해 주세요.`)
     } catch (e) {
       if (claudeAuthenticationFailed(e)) throw new ClaudeAuthenticationError()
+      // 결과 줄 없이 스트림이 끊겨도, **그 턴 안에서** 거절 사건을 봤다면 한도 실패다(§1-2).
+      if (rejectedSeen && !(e instanceof MainTurnUsageError)) {
+        throw new MainTurnUsageError('limit', entryOf(), e instanceof Error && e.message
+          ? e.message : 'Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
+      }
       throw e
     } finally {
       q.close(); this.active = undefined
