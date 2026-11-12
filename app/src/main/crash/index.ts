@@ -12,7 +12,9 @@
  */
 import { app } from 'electron'
 import type { Details as ChildProcessGoneDetails, RenderProcessGoneDetails, WebContents } from 'electron'
+import { readdirSync } from 'node:fs'
 import { release as osRelease } from 'node:os'
+import { join } from 'node:path'
 import type { Settings } from '../../shared/types'
 import { loadSettings, saveSettings } from '../settings'
 import {
@@ -26,6 +28,7 @@ import {
   readQueue,
   readState,
   safely,
+  setBundleAssets,
   writeQueue,
   writeState,
   type CrashRecord,
@@ -114,6 +117,23 @@ function recordGone(source: CrashSource, name: string, details: { reason: string
 }
 
 /**
+ * 렌더러 청크 허용 목록 — 앱 묶음 안 `out/renderer/assets` 를 **실행 중에** 읽는다(C-01).
+ * 빌드 때 생성한 목록 파일을 두지 않는 이유: 설치판에서 묶음 경로가 실행 중에만 정해지고,
+ * 목록과 실제 산출물이 어긋나면 조용히 다른 이름이 통과하기 때문이다.
+ * 실패는 빈 목록 = 렌더러 프레임 미수집으로 끝난다(진단 1줄 손실 < 잘못된 이름 통과).
+ */
+function loadBundleAssets(): void {
+  try {
+    const dir = join(app.getAppPath(), 'out', 'renderer', 'assets')
+    setBundleAssets(readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name))
+  } catch {
+    setBundleAssets([])
+  }
+}
+
+/**
  * 훅 설치 — `app.setPath('userData')` 뒤, `whenReady` 앞에서 1회. 주소가 없으면 **아무것도
  * 하지 않고 반환**한다(수집·큐·질문 0).
  */
@@ -122,6 +142,7 @@ export function installCrashHooks(): void {
   reportUrl = resolveReportUrl()
   if (!reportUrl) return
   installed = true
+  loadBundleAssets()
   // `uncaughtException`·`unhandledRejection` 리스너는 **달지 않는다** — 달면 앱이 안 죽거나
   // (전자) 거부가 경고로 강등된다(후자). monitor 는 원래 종료 동작을 바꾸지 않는다.
   process.on('uncaughtExceptionMonitor', (error, origin) => {
@@ -184,6 +205,9 @@ async function post(item: QueueItem): Promise<number | null> {
     const response = await fetch(reportUrl as string, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
+      // 3xx 를 **따라가지 않는다**(I-02). 따라가면 보고 본문이 다른 수신지로 한 번 더 나가고,
+      // 원래 응답 코드도 사라져 `outcomeFor` 가 폐기로 분류할 기회를 잃는다(DESIGN §2-4 표).
+      redirect: 'manual',
       // `rec` 만 보낸다 — `attempt`·`first_seen` 은 로컬 관리용이라 본문에 섞지 않는다.
       body: JSON.stringify(item.rec),
       signal: abort.signal
@@ -238,9 +262,11 @@ async function runFlush(): Promise<void> {
  * 이미 진행 중이면 새로 만들지 않고 그 promise 에 합류한다(C-02).
  */
 export function flush(): Promise<void> {
+  // `throttled` 는 **이번 실행 내내** 유지한다(R-01) — 429 는 같은 IP 한도라 재시도가 악화시킨다.
+  // 여기서 되돌리면 같은 실행의 두 번째 flush 가 곧바로 다시 POST 한다(계약 위반).
   inflight ??= runFlush()
     .catch((error) => { logQuietly(`[crash] flush failed ${String(error)}`) })
-    .finally(() => { inflight = null; throttled = false })
+    .finally(() => { inflight = null })
   return inflight
 }
 

@@ -120,10 +120,22 @@ export const ERROR_CODES: readonly string[] = [...ERROR_ERRNO, ...ERROR_ERR, ...
 export const BUNDLE_FILES: readonly string[] = ['out/main/index.js', 'out/preload/index.js']
 
 /**
- * 렌더러 해시 청크. 길이·문자 집합은 추측값이 아니라 `pnpm build` 산출물 실측이다
- * (`out/renderer/assets/index-D9UkElgs.js`·`DocxHtmlView-B8MfJWQz.js` — 이름 ≤64자 + `-` + 해시 8자 + `.js`).
+ * 설치판의 렌더러 청크 이름 — **실행 중에 자기 산출물 목록을 읽어 채운다**(C-01).
+ * 정규식 추측은 임의 이름을 통과시켰다(학번·논문 제목형 파일명 반례). 목록이 비어 있으면
+ * 렌더러 청크는 하나도 통과하지 못하고 `BUNDLE_FILES` 만 남는다 — 조용한 실패 쪽이 안전하다.
  */
-export const RENDERER_ASSET_RE = /^out\/renderer\/assets\/[A-Za-z0-9._-]{1,64}-[A-Za-z0-9_-]{8}\.js$/
+let bundleAssets: ReadonlySet<string> = new Set()
+
+/** 시작 때 한 번 — `out/renderer/assets` 의 실제 파일 이름만 받는다(`crash/index.ts`). */
+export function setBundleAssets(files: readonly string[]): void {
+  const out = new Set<string>()
+  for (const name of files) {
+    // 우리 디렉터리 목록에서 온 값이지만 경계는 여기서도 지킨다 — 경로 구분자·상위 참조 금지.
+    if (typeof name !== 'string' || !name || name === '.' || name === '..' || /[\\/]/.test(name) || name.length > 128) continue
+    out.add(`out/renderer/assets/${name}`)
+  }
+  bundleAssets = out
+}
 
 const SOURCES: readonly string[] = ['main', 'renderer', 'child']
 const ORIGINS: readonly string[] = ['uncaughtException', 'unhandledRejection', 'Utility']
@@ -146,6 +158,9 @@ export const DAILY_MAX = 3
 export const MAX_KEYS = 20
 /** 재시도 상한 — 넘으면 항목을 버린다. */
 export const MAX_ATTEMPT = 3
+/** 큐 항목 수명(일) — 넘으면 읽을 때 버린다(DESIGN §2-6 "30일 뒤 폐기"). */
+export const MAX_AGE_DAYS = 30
+const MAX_AGE_MS = MAX_AGE_DAYS * 24 * 60 * 60 * 1000
 
 export type CrashSource = 'main' | 'renderer' | 'child'
 export type CrashOrigin = 'uncaughtException' | 'unhandledRejection' | 'Utility'
@@ -201,13 +216,16 @@ export function coerceCode(raw: unknown): string | null {
 
 /** 허용 목록에 있는 파일 이름만. `out/` 로 시작해도 목록 밖이면 버린다. */
 function coerceFile(raw: unknown): string | null {
-  return typeof raw === 'string' && (BUNDLE_FILES.includes(raw) || RENDERER_ASSET_RE.test(raw)) ? raw : null
+  return typeof raw === 'string' && (BUNDLE_FILES.includes(raw) || bundleAssets.has(raw)) ? raw : null
 }
 
 /**
- * 스택 프레임의 경로에서 앱 묶음 기준 상대 이름을 얻는다. 통과 경로는 둘뿐이다 —
- * ①경로에 `app.asar/` 가 있으면 그 뒤 전부(설치판은 앱이 asar 안에 있다)
- * ②`appRoot` 아래면 그 상대.
+ * 스택 프레임의 경로에서 앱 묶음 기준 상대 이름을 얻는다. 통과 경로는 하나뿐이다 —
+ * **정규화한 실제 앱 루트(`app.getAppPath()`)로 정확히 시작**할 때 그 뒤 상대 이름.
+ *
+ * 설치판은 앱이 asar 안에 있어 루트 자체가 `…/app.asar` 로 끝난다 — 그때도 "경로 어딘가에
+ * `app.asar/` 가 있다"가 아니라 "이 루트로 시작한다"로 판정한다. 부분문자열 신뢰는
+ * `/Users/student/notapp.asar/…` 를 통과시켰다(C-01).
  *
  * `/Users/김대욱/out/main/index.js` 는 통과하지 **못한다** — 경로 조각만 보고 `out/` 뒤를
  * 잘라 쓰면 사용자 경로가 앱 산출물로 위장한다(C-01 · §2-3 마지막 행).
@@ -221,16 +239,12 @@ function relativeToApp(path: string, appRoot: string): string | null {
     try { p = decodeURIComponent(p) } catch { /* 인코딩이 깨졌으면 원문 그대로 */ }
   }
   p = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
-  const asar = p.lastIndexOf('app.asar/')
-  if (asar >= 0) p = p.slice(asar + 'app.asar/'.length)
-  else {
-    const root = appRoot.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '')
-    if (!root || !p.startsWith(root + '/')) {
-      // 앱 루트 기준 상대 경로(`out/main/index.js`)로 이미 정규화된 스택만 통과한다.
-      if (p.startsWith('/') || /^[A-Za-z]:/.test(p) || p.startsWith('node:')) return null
-      p = '/' + p
-    } else p = p.slice(root.length)
-  }
+  const root = appRoot.replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+  // 루트로 시작하지 않으면 방법이 둘뿐이다 — 이미 앱 루트 기준 상대 경로(`out/main/index.js`)거나
+  // 버리는 경로. 절대 경로·드라이브 경로·스킴 경로는 상대일 수 없으므로 여기서 끊는다.
+  if (root && p.startsWith(root + '/')) p = p.slice(root.length)
+  else if (p.startsWith('/') || /^[A-Za-z]:/.test(p) || p.startsWith('node:')) return null
+  else p = '/' + p
   const out: string[] = []
   for (const seg of p.split('/')) {
     if (!seg || seg === '.') continue
@@ -396,7 +410,17 @@ function writeJson(path: string, value: unknown): void {
   }
 }
 
-/** 큐 읽기 — 손상·상한 초과·모양 위반 항목은 버리고 남은 것만 돌려준다. */
+/** `first_seen` 이 유효한 날짜면 그 값, 아니면 레코드 시각 — 둘 다 만료 판정을 탄다. */
+function seenAt(firstSeen: unknown, rec: CrashRecord): number {
+  for (const raw of [firstSeen, rec.at]) {
+    if (typeof raw !== 'string' || !AT_RE.test(raw)) continue
+    const t = Date.parse(raw)
+    if (Number.isFinite(t)) return t
+  }
+  return Number.NaN
+}
+
+/** 큐 읽기 — 손상·상한 초과·모양 위반·만료(30일) 항목은 버리고 남은 것만 돌려준다. */
 export function readQueue(userData: string, now: Date = new Date()): QueueItem[] {
   const raw = readJson(crashPaths(userData).queue, MAX_QUEUE_BYTES)
   const items = field(raw, 'items')
@@ -407,6 +431,9 @@ export function readQueue(userData: string, now: Date = new Date()): QueueItem[]
     if (!rec) continue
     const attempt = Number(field(item, 'attempt'))
     const firstSeen = field(item, 'first_seen')
+    const at = seenAt(firstSeen, rec)
+    // 만료 판정이 불가능한 값은 버린다 — 시계가 못 믿을 값이면 30일 계약도 못 지킨다.
+    if (!Number.isFinite(at) || now.getTime() - at > MAX_AGE_MS) continue
     const next: QueueItem = {
       rec,
       attempt: Number.isInteger(attempt) && attempt >= 0 ? attempt : 0,
