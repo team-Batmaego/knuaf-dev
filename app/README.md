@@ -151,7 +151,14 @@ pnpm install
 KNUAF_PYTHON=$(which python3.13) pnpm dev          # stage 호환 게이트 → compose 묶음으로 개발 실행
 pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
+node scripts/e2e-shards.mjs --check                # e2e 샤드 묶음표(e2e/shards.json)가 실제 스펙을 다 덮는지
 ```
+
+CI는 e2e를 OS × 샤드로 나눠 돕니다(윈도 5개, 맥 2개). 한 샤드만 로컬에서 돌려 보려면 `node scripts/e2e-shards.mjs windows 3`
+또는 `node scripts/e2e-shards.mjs macos 1`을 씁니다. `e2e/**/*.spec.ts`(하위 폴더 포함)를 새로 추가하면 `--check`가
+실패하므로 그 파일을 `e2e/shards.json`의 한 샤드에 넣어야 합니다(넣지 않으면 CI에서 조용히 안 도는 대신 검사
+단계가 먼저 막습니다). 표에는 `e2e/` 접두와 `.spec.ts` 확장자를 뺀 이름을 적습니다 — `e2e/docx-zip.spec.ts`는
+`docx-zip`, `e2e/sub/foo.spec.ts`는 `sub/foo`입니다.
 
 `pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
 별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
@@ -187,7 +194,7 @@ Electron E2E는 각 실행의 시험 output에 `doctor-<시각>.jsonl`을 남깁
 개별 현재/프로젝트 import·Kordoc·history·마지막 임시 파일 순회 구간의 소요를 request_id·pid로 구분합니다.
 학생 경로·본문·RPC payload·환경변수는 기록하지 않습니다. 끝이 없는 start가 있으면 그 단계가 미완료인 증거이며,
 이 기록만으로 특정 Windows 하위 원인을 미리 단정하지 않습니다. CI 실패 아티팩트에 JSONL이 함께 보존되며,
-Windows는 성공 여부와 관계없이 `doctor-timings-windows` 아티팩트로도 올립니다.
+Windows는 성공 여부와 관계없이 `doctor-timings-windows-<샤드>` 아티팩트로도 올립니다.
 
 `navTo(page, '자료' | '결과물')`는 종이 머리의 `head-materials` / `head-files` 단추와 그 단추의
 팝오버만 대상으로 삼습니다. 열린 자료 목록 안의 **파일 고르기…**도 `/파일/`에 걸리므로,
