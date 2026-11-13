@@ -139,6 +139,12 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).
   if (env.KNUAF_E2E_HIDDEN === undefined && env.KNUAF_E2E_VISIBLE !== '1') env.KNUAF_E2E_HIDDEN = '1'
+  /**
+   * 시험용 주입 통로(`knuaf:lanes-test*`)를 연다 — preload 가 이 값을 `knuaf.testHooks` 로 내보내고
+   * `store/lanes.ts` `attach()` 가 그때만 리스너를 건다(검토 I-01). **제품 실행은 이 값을 켜지
+   * 않으므로 리스너가 아예 없다** — 음성 시험은 `env: { KNUAF_E2E_TEST_HOOKS: '0' }` 로 끈다.
+   */
+  if (env.KNUAF_E2E_TEST_HOOKS === undefined) env.KNUAF_E2E_TEST_HOOKS = '1'
   const electronApp = await electron.launch({
     args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
     env,

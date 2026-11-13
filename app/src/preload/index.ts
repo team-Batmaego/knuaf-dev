@@ -54,6 +54,14 @@ const api = {
   /** Platform of the main process (renderer has no Node). */
   platform: process.platform,
   /**
+   * 시험 통로가 열린 실행인가 — e2e 도우미가 켜는 `KNUAF_E2E_TEST_HOOKS=1` 이 있을 때만 `true`.
+   * 제품 실행(사용자가 앱을 열 때)은 이 환경값이 없으므로 늘 `false` 이고, 화면은 이 값이 `true` 일
+   * 때만 `knuaf:lanes-test*` 시험 리스너를 건다(`store/lanes.ts` `attach`). I-01: 제품 renderer 안
+   * 스크립트가 그 사건을 쏘아 실제 화면 상태를 옛/가짜 묶음으로 덮지 못하게 한다.
+   * 읽기 전용 — contextBridge 가 노출 객체를 얼려 둔다.
+   */
+  testHooks: process.env.KNUAF_E2E_TEST_HOOKS === '1',
+  /**
    * Call a sidecar method. `onEvent` receives progress/log events for this call only.
    * Pass your own `clientId` when you want to be able to `cancel(clientId)` while it runs.
    */

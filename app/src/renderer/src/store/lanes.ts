@@ -54,8 +54,8 @@ type JobsApi = {
   deliveryText(root: string, jobId: string): Promise<LanesReply<{ text: string | null }>>
 }
 
-/** `window.knuaf` 의 preload 타입(`preload/index.d.ts`)에 아직 없는 두 갈래 — 배선 C1이 더한다. */
-type LanesWindow = { knuaf?: { lanes?: LanesApi; jobs?: JobsApi } }
+/** `window.knuaf` 의 preload 타입(`preload/index.d.ts`)에 아직 없는 갈래 — 배선 C1이 더한다. */
+type LanesWindow = { knuaf?: { lanes?: LanesApi; jobs?: JobsApi; testHooks?: boolean } }
 
 /**
  * 시험용 이음매 — `knuaf:lanes-seam-test` 로만 채워진다(검토 C07-①). Electron 의 `window.knuaf` 는
@@ -147,19 +147,27 @@ export const useLanes = create<LanesState>((set, get) => ({
         get().apply(snapshot)
       })
     }
-    // 시험·개발용 주입 통로 — preload 배선 전에 실제 화면을 그려 보기 위한 것(설계 §7).
-    if (!bound.test) {
+    // 시험·개발용 주입 통로 — e2e 도우미가 `KNUAF_E2E_TEST_HOOKS=1` 로 띄운 실행에서만 열린다(검토 I-01).
+    // 제품 실행은 리스너 자체가 없으므로 같은 사건을 쏴도 상태가 바뀌지 않는다. `bound.test` 는
+    // "걸었나"가 아니라 "시도했나"로 둔다 — 그래야 attach 가 화면을 오갈 때마다 다시 검사하지 않는다.
+    if (!bound.test && (window as unknown as LanesWindow).knuaf?.testHooks === true) {
       bound.test = true
       window.addEventListener(LANES_TEST_EVENT, ((event: Event) => {
         const detail = (event as CustomEvent<LanesSnapshot>).detail
-        if (detail && typeof detail.seq === 'number') {
-          /**
-           * 배선(C4) 뒤로는 실제 이음매가 늘 있으므로 `load` 가 먼저 실제 묶음(seq 1부터)을 넣어 둔다.
-           * `apply` 의 `seq` 가드는 "늦게 온 옛 묶음 버리기"라 시험 묶음이 그 아래로 깔린다 —
-           * 시험 통로는 순서 경쟁 대상이 아니므로 가드를 지나 바로 넣는다.
-           */
-          set({ injected: true, unavailable: false, root: get().root ?? detail.root, snapshot: detail })
-        }
+        if (!detail || typeof detail.seq !== 'number') return
+        /**
+         * 폴더 검사는 시험 통로에서도 살린다(검토 I-01 (b)) — 지금 보이는 폴더의 묶음이 아니면
+         * 화면 상태를 갈아치우지 않는다. `apply()` 와 같은 규칙이고, 폴더를 아직 안 정했으면
+         * (설정 화면이 폴더 없이 열린 경우) 받은 묶음의 폴더를 채택한다.
+         */
+        const root = get().root
+        if (root !== null && detail.root !== root) return
+        /**
+         * 배선(C4) 뒤로는 실제 이음매가 늘 있으므로 `load` 가 먼저 실제 묶음(seq 1부터)을 넣어 둔다.
+         * `apply` 의 `seq` 가드는 "늦게 온 옛 묶음 버리기"라 시험 묶음이 그 아래로 깔린다 —
+         * 시험 통로는 순서 경쟁 대상이 아니므로 그 검사만 지나 바로 넣는다(시험 실행 한정).
+         */
+        set({ injected: true, unavailable: false, root: root ?? detail.root, snapshot: detail })
       }) as EventListener)
       window.addEventListener(LANES_TEST_ARCHIVE_EVENT, ((event: Event) => {
         const detail = (event as CustomEvent<ArchivedChat | ArchivedChat[]>).detail
