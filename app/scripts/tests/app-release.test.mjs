@@ -223,6 +223,10 @@ test('the skill-release workflow keeps the guard between planning and reserving 
       '채널 PR 자동 생성 실패 — 실행 요약의 안내에 따라 사람이 마무리해야 합니다."\n            exit 0\n', /exit non-zero|never exit successfully/],
     // Roh 5: deleting the plan's changed output removes the fact the guard reads.
     [/appendFileSync\(process\.env\.GITHUB_OUTPUT, 'changed=false\\n'\)\n/, '', /changed=false/],
+    // FIX3: publishing a skill release without --latest=false moves GitHub's "Latest" marker onto
+    // the skill release, so README's releases/latest link stops pointing at the app installers.
+    ['gh release edit "skill-v$VERSION" --draft=false --latest=false', 'gh release edit "skill-v$VERSION" --draft=false', /--latest=false/],
+    ['--draft=false --latest=false', '--draft=false --latest=true', /--latest=false/],
     // FIX2: the printed archive command must tag the full head SHA read from origin, must be a
     // lightweight tag, must verify the origin read-back, and must never force or tag a tracking ref.
     ['git tag archive/$branch-$head7 $head', 'git tag archive/$branch-$head7 origin/$branch', /full-SHA archive chain/],
