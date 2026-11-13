@@ -44,4 +44,4 @@
 - [ ] `updates/channel.json`은 앱·스킬이 한 파일을 공유하므로 쪼개지 않는다. 이미 배포된 앱 0.6.1·0.6.2가 이 경로만 읽기 때문이다. 두 채널 PR을 동시에 열지 않는다.
 
 ## 6. 릴리스 공개와 "Latest" 표시
-- [ ] 앱 릴리스(`v*`, `release.yml` 초안)를 공개할 때는 사람이 `gh release edit <tag> --draft=false --latest`로 공개해 Latest를 앱에 붙인다. 스킬 릴리스(`skill-v*`)는 워크플로가 `--latest=false`로 공개하며 손으로 다시 공개하지 않는다 — README의 설치본 링크 3곳이 `releases/latest`를 쓰므로, 스킬 릴리스가 Latest를 가져가면 학생이 설치본 대신 규칙집 zip 페이지로 간다(2026-11-13 `skill-v1.0.4`). 공개 뒤 `gh api repos/{owner}/{repo}/releases/latest --jq .tag_name`이 앱 판(`v<버전>`)인지 확인하고, 아니면 그 릴리스에서 `gh release edit <tag> --latest`로 되돌린 뒤 원인을 기록한다.
+- [ ] 앱 릴리스(`v*`, `release.yml` 초안)를 공개할 때는 사람이 `gh release edit <tag> --draft=false --latest`로 공개해 Latest를 앱에 붙인다. 스킬 릴리스(`skill-v*`)는 워크플로가 `--latest=false`로 공개하며 손으로 다시 공개하지 않는다 — README의 설치본 링크 3곳이 `releases/latest`를 쓰므로, 스킬 릴리스가 Latest를 가져가면 학생이 설치본 대신 규칙집 zip 페이지로 간다(2026-11-13 `skill-v1.0.4`). 공개 뒤 `gh api repos/{owner}/{repo}/releases/latest --jq .tag_name`으로 반환된 태그가 설치 자산을 포함한 앱 릴리스(`v<버전>`)인지 확인한다. 잘못된 태그라면 정상 앱 릴리스 태그를 별도로 확인한 후 `gh release edit <정상-앱-태그> --latest`로 Latest를 복구한다. 조회된 스킬 릴리스 태그에 `--latest`를 실행하지 않는다. 복구 후 API 결과를 다시 확인하고 원인을 기록한다.
