@@ -422,6 +422,29 @@ export async function setWindowWidth(electronApp: ElectronApplication, width: nu
 }
 
 /**
+ * 폭·높이를 함께 바꾼다 — 검토 C07-⑤: 높이를 지정하지 않으면 900×600 조건의 증거가 안 된다.
+ * `page.setViewportSize` 는 렌더러 뷰포트만 바꾸고 창(그리고 그 안의 modal 높이 기준 `100vh`)은 그대로다.
+ */
+export async function setWindowBounds(electronApp: ElectronApplication, width: number, height: number): Promise<void> {
+  await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, { width, height })
+}
+
+/**
+ * 창을 바꾼 뒤 렌더러가 **정말 그 크기를 받았는지** 확인한다 — 검토 C07-⑤.
+ *
+ * `setBounds` 는 비동기로 반영되고, 예전 코드는 `page.setViewportSize` 로 뷰포트를 따로 고정해 두어
+ * 창 크기가 화면에 닿지 않아도 시험이 통과했다. 창 안쪽 높이는 제목줄 몫만큼 작을 수 있으므로
+ * 아래쪽 여유(60px)를 두되, **옛 크기(800)가 그대로면 위쪽 경계에서 걸린다**.
+ */
+export async function expectWindowInner(page: Page, width: number, height: number): Promise<void> {
+  await page.waitForFunction(
+    ({ w, h }) => Math.abs(window.innerWidth - w) <= 2 && window.innerHeight <= h && window.innerHeight > h - 60,
+    { w: width, h: height },
+    { timeout: 5000 }
+  )
+}
+
+/**
  * 대화의 진행 표시 — 작업 중이면 정확히 하나다(형님 확정 2026-10-19 전송 중 A안): 마지막 학생 메시지가 아직
  * 보내는 중이면 그 말풍선 밖 "보내는 중" 글자, 아니면 입력칸 위 빙글이 줄. 작업이 끝나면 0개.
  */

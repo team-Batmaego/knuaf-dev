@@ -1,7 +1,7 @@
 .splash {
   position: fixed; inset: 0; z-index: 10000; overflow: hidden;
   background: #101a13; color: #f4efe4; cursor: default;
-  font-family: 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  font-family: var(--font, "Pretendard Variable", -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif);
   -webkit-app-region: no-drag;
   transition: opacity .3s linear;
 }

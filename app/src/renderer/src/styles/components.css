@@ -56,7 +56,8 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .project-remove { border: 0; background: transparent; color: var(--muted); padding: 6px; }
 .project-drawer-toggle, .project-drawer-backdrop { display: none; }
 .new-chat { flex: 1; width: min(760px, 100%); min-height: 0; margin: 0 auto; padding: 12vh 24px 24px; overflow-y: auto; }
-.new-chat h1 { font-family: var(--serif); text-align: center; }
+/* 인앱 화면 글꼴은 Pretendard 하나다(설계 SUR-04). 신명조는 논문 종이(`.paperpane .sheet`)에만. */
+.new-chat h1 { font-family: var(--font); text-align: center; }
 .new-chat > p { text-align: center; color: var(--muted); }
 .new-chat .chat-composer { margin-top: 24px; }
 .first-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
@@ -165,7 +166,8 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .pop-row .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-row .c b { font-weight: 600; }
 .pop-row .c small { color: var(--muted); font-size: 12.5px; }
-.pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--serif); text-align: center; }
+/* 단계 번호·보관 번호 같은 인앱 목록 낱말도 Pretendard 다(신명조는 논문 종이에만). */
+.pop-row .rn { width: 22px; flex: none; color: var(--muted); font-family: var(--font); text-align: center; }
 .pop-sep { height: var(--hairline); background: var(--line); margin: 6px 4px; }
 .pop-empty { padding: 6px 10px 10px; }
 .pop-make { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; }
@@ -685,6 +687,103 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .desk:hover::-webkit-scrollbar-thumb, .desk[data-scrolling]::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--ink) 50%, transparent); }
 .chat-thread::-webkit-scrollbar-thumb:hover, .desk::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--ink) 65%, transparent); border-width: 1px; }
 
+/* =====================================================================================
+   작업 분담(v0.7 단위 6) — 설계 UI-DESIGN r3c §2~§5, 시안 mock/v07.r3.html.
+   파일 끝에만 덧붙인다(다른 칸과 동시 수정 충돌을 피하려고). 값은 시안 CSS 그대로.
+   ===================================================================================== */
+
+/* ---- §3 배치 카드 — 대화 흐름 안에 앉는다(입력칸 자리는 차지하지 않는다) ---- */
+.lane-card { align-self: stretch; background: var(--panel); border: var(--hairline) solid var(--line); border-radius: var(--r-lg); padding: 14px 16px; font-size: 14px; }
+.lane-card h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.lane-card .lead { margin: 0 0 10px; color: var(--ink-2); font-size: 13.5px; }
+.lane-card .quote { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+/* 인용 [전체 보기] — 읽기 범위 [자세히]와 다른 단추이고 같은 작은 크기를 쓴다(검토 C2-C09). */
+.lane-card .quote .lk { margin-left: 4px; font-size: 12.5px; white-space: nowrap; }
+.lane-dl { display: grid; grid-template-columns: 84px 1fr; gap: 6px 12px; margin: 0 0 10px; }
+.lane-dl dt { color: var(--muted); font-size: 13.5px; }
+.lane-dl dd { margin: 0; font-size: 14px; }
+.lane-dl dd .was { color: var(--muted); }
+.lane-dl dd .arrow { color: var(--faint); margin: 0 6px; }
+.lane-dl dd.rej { color: var(--ink-2); display: flex; gap: 6px; align-items: baseline; }
+.lane-dl dd.rej .ic { color: var(--bad); flex: none; }
+.lane-dl .chipref { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+.lane-risk { background: var(--panel-2); border-radius: 10px; padding: 9px 12px; font-size: 13px; color: var(--ink-2); line-height: 1.6; margin: 0 0 12px; }
+.lane-risk ul { margin: 4px 0 0; padding-left: 18px; }
+.lane-risk .i { color: var(--accent); margin-right: 4px; }
+.lane-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.lane-card .scope, .lane-card .data, .lane-folded .scope, .lane-folded .data { margin: 6px 0 10px; font-size: 12.5px; color: var(--muted); }
+.lane-card .data .lk, .lane-folded .data .lk { font-size: 12.5px; }
+/* 접힌 카드는 테두리 없는 기록 한 줄이다(설계 §3-5, 시안 `v07.r3.html:142`).
+   [자세히]를 열면 표·범위 줄이 줄 아래로 내려온다 — 줄은 그대로 한 줄로 남는다. */
+.lane-folded { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.lane-folded > svg { flex: none; }
+.lane-folded .lk { font-size: 12.5px; white-space: nowrap; flex: none; }
+.lane-folded-body { flex-basis: 100%; min-width: 0; margin: 4px 0 0 22px; color: var(--ink); font-size: 14px; }
+.lane-folded-body .lane-dl { margin: 0 0 6px; }
+.lane-folded-body .lane-risk { margin: 0 0 6px; }
+
+/* ---- §2-1 알림 줄 안의 단추·작은 글 — 줄 높이를 키우지 않는 크기 ---- */
+.zline .grow small .lk { font-size: 12px; }
+.zline button.primary { padding: 4px 12px; font-size: 13px; white-space: nowrap; flex: none; }
+.zline button.quiet { padding: 4px 10px; font-size: 13px; white-space: nowrap; flex: none; }
+.zline .more { font-size: 12px; white-space: nowrap; flex: none; }
+.zline-more { margin-top: 4px; }
+/* §2-2 기록 줄 — 경고(한도·넘김)만 아이콘 색을 경고색으로. 바탕은 `.chat-event` 그대로.
+   부모 색을 바꾸면 본문 글자까지 주황이 되므로(검토 C2-V02) 아이콘 색만 바꾼다. */
+.chat-event.warn svg { color: var(--attn); }
+/* 기록 줄 [자세히] — `.zline button.lk` 규칙 밖이라 크기·줄바꿈을 따로 준다. */
+.chat-event button.lk { font-size: 12.5px; white-space: nowrap; flex: none; }
+/* 펼친 본문은 **줄 아래 독립 블록**이다 — `.chat-event` 안에 넣으면 flex 줄의 남은 폭(오른쪽 좁은
+   상자)으로 밀린다(검토 C06). 바깥 상자는 세로로만 쌓고, 본문은 줄 전체 폭을 쓴다. */
+.chat-event-wrap { display: block; }
+.chat-event-wrap .zline-raw { width: 100%; max-width: 100%; overflow-wrap: anywhere; }
+/* 제목(주문·넘긴 글)은 본문과 같은 회청색 계열에서 굵기로만 구별한다 — 새 색을 만들지 않는다. */
+.chat-event-wrap .zline-raw b { font-weight: 600; color: var(--ink-2); }
+
+/* ---- §4-2 한도로 멈춘 대화(읽기 전용) ---- */
+.stopped-banner .grow small { display: block; }
+.stopped-others { position: relative; flex: none; }
+.lane-pick { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; min-width: 260px;
+  background: var(--panel); border: var(--hairline) solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow-sheet); padding: 6px; display: flex; flex-direction: column; }
+.lane-pick button { text-align: left; }
+
+/* ---- §4-2 설정 › 폴더 보관 목록 ---- */
+.set-sub { font-size: 13px; font-weight: 600; margin: 18px 0 4px; }
+.set-row2 { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: var(--hairline) solid var(--line); font-size: 14px; }
+.set-row2:last-of-type { border-bottom: 0; }
+.set-row2 .nm { width: 80px; font-weight: 500; flex: none; }
+.set-row2 .grow { flex: 1; color: var(--ink-2); }
+
+/* ---- §5 설정 "작업 분담" 표 ----
+   `auto` 표는 긴 예외 설명이 남는 폭을 다 먹어 짧은 값 열을 1글자로 압축한다(검토 C2-V01 —
+   "기/본", "높/게", "새/대화"). 열 폭을 `colgroup` 으로 고정하고(`table-layout: fixed`),
+   짧은 값 칸은 `.nw` 로 줄바꿈을 막는다. 예외 설명이 든 둘째 칸만 남는 폭에서 접힌다. ---- */
+.lane-table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 8px 0 6px; table-layout: fixed; }
+.lane-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12.5px; padding: 6px 8px; border-bottom: var(--hairline) solid var(--line); white-space: nowrap; }
+.lane-table td { padding: 8px; border-bottom: var(--hairline) solid var(--line); vertical-align: top; word-break: keep-all; }
+.lane-table .nw { white-space: nowrap; }
+.lane-table tr:last-child td { border-bottom: 0; }
+.lane-table .muted { color: var(--muted); }
+.lane-table .exc { color: var(--ink-2); font-size: 13px; }
+.lane-table .exc .ic { color: var(--attn); }
+
+/* ---- 좁은 설정 창(설계 §5 [r3 U6-07]) — 내용 칸이 480px 미만이면 표를 줄마다 두 줄로.
+   분류 칸 축소는 설정 창 본문의 `container-type: inline-size`(Settings.tsx) 기준이다. ---- */
+@container (max-width: 479px) {
+  .lane-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .lane-table, .lane-table tbody, .lane-table tr { display: block; }
+  .lane-table tr { padding: 8px 0; border-bottom: var(--hairline) solid var(--line); }
+  .lane-table tr:last-child { border-bottom: 0; }
+  .lane-table td { display: inline; padding: 0; border: 0; }
+  /* 두 줄 갈래에서는 값이 한 줄에 이어 붙으므로 `.nw` 를 풀어야 좁은 폭에서 넘치지 않는다. */
+  .lane-table .nw { white-space: normal; }
+  .lane-table td:first-child { display: block; font-weight: 600; margin-bottom: 2px; }
+  .lane-table td + td:not(:last-child)::after { content: " · "; color: var(--faint); }
+  .set-row2 { flex-wrap: wrap; gap: 4px 12px; }
+  .set-row2 .grow { flex: 1 1 100%; order: 2; }
+  .set-row2 button { order: 3; }
+}
 /* ---- 도우미 답 마크다운(ChatMarkdown) ----
    `.prose` 의 `pre-wrap` 은 학생 말풍선용이라 그대로 두고, 이 상자 안에서만 블록이 간격을
    직접 잡는다(줄바꿈은 파서의 `breaks: true` 가 `<br>` 로 옮긴다). 값은 토큰만 쓴다.
@@ -722,3 +821,10 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .chat-md .chat-md-alt { color: var(--muted); font-style: italic; }
 /* 대화 칸의 `button { margin-top }` 은 블록 단추용이다 — 문단 안 파일 링크는 줄에 붙인다. */
 .chat-md button.lk { margin-top: 0; }
+
+/* ---- 설정 분류 칸 — 본문이 좁아지면 함께 줄어 글자가 한 글자씩 꺾이지 않게(설계 §5 [r3 U6-07]) ---- */
+/* 임계값은 설계의 "내용 칸 480px 미만"에서 역산한다: 480(내용) + 196(분류) + 32(좌우 여백) = 708. */
+.settings-nav { width: 196px; flex: 0 0 196px; }
+@container settings-wrap (max-width: 708px) {
+  .settings-nav { width: 156px; flex: 0 0 156px; }
+}
