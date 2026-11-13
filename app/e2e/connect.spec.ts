@@ -387,6 +387,7 @@ function pendingConnections(): {
 test('한 공급자의 로그인 시작은 다른 공급자의 폴링·시도 번호를 건드리지 않는다 (W2 D1)', async () => {
   // W1 재현 ②: Claude 로그인을 시작하는 것만으로 GPT 의 로그인 응답이 무효가 되고 폴링이
   // 사라져, GPT 가 실제로 연결됐는데도 행이 "로그인 중"에 멈췄다.
+  // 감시는 이제 로그인 IPC 응답을 기다리지 않고 시작 시점에 생긴다(RT2) — 개수는 그 시점부터 센다.
   const clock = countingTimers()
   const ipc = pendingConnections()
   try {
@@ -394,14 +395,16 @@ test('한 공급자의 로그인 시작은 다른 공급자의 폴링·시도 �
     store.stopPolling()
     const codexRun = store.login('codex')
     await new Promise((r) => setTimeout(r, 0))
+    expect(clock.timers.size, 'GPT 로그인의 감시가 생기지 않았다').toBe(1)
     const claudeRun = store.login('claude')
     await new Promise((r) => setTimeout(r, 0))
     expect(useConnect.getState().loggingIn, '두 로그인이 동시에 진행 중이어야 한다').toEqual({ codex: true, claude: true })
+    expect(clock.timers.size, 'Claude 시작이 GPT 감시를 지웠다').toBe(2)
 
     ipc.release('codex', { result: true })
     await codexRun
-    // GPT 응답이 버려지지 않았다 — 그 공급자의 폴링이 생겼다.
-    expect(clock.timers.size, 'GPT 로그인 응답이 Claude 시작 때문에 버려졌다').toBe(1)
+    // GPT 응답이 버려지지 않았다 — 그 공급자의 감시가 그대로 있다.
+    expect(clock.timers.size, 'GPT 로그인 응답이 Claude 시작 때문에 버려졌다').toBe(2)
     ipc.release('claude', { result: true })
     await claudeRun
     // 둘 다 저마다의 타이머를 갖는다 — 하나가 다른 하나를 지우지 않는다.
@@ -623,6 +626,202 @@ test('취소 뒤 늦은 로그인 응답은 폴링을 되살리지 않는다 (P2
     for (const t of timers) realClearInterval(t as never)
     globalThis.setInterval = realSetInterval
     globalThis.clearInterval = realClearInterval
+    ;(globalThis as { window?: unknown }).window = realWindow
+  }
+})
+
+test('로그인 IPC 가 늦게 끝나도 완료 감시는 그 전에 돌아 로그인 중 표시를 내린다 (RT2)', async () => {
+  // 윈도우 codex-relogin 재발(2026-11-10, run 42782201647 401-with-secret-marker): 화면은
+  // 10초 넘게 "로그인 중"이었고 `connect:login` 은 그동안 안 끝나 있었다. 감시가 IPC 응답
+  // **뒤에** 설치되던 때에는 그 사이 아무도 상태를 다시 묻지 않아 완료 알림을 놓쳤다.
+  const clock = manualTimers()
+  const realWindow = (globalThis as { window?: unknown }).window
+  let release: (v: unknown) => void = () => {}
+  const loginIpc = new Promise<unknown>((resolve) => { release = resolve })
+  /** 로그인 서버가 완료를 알린 뒤의 상태 — 감시 tick 이 물을 때 답한다. */
+  let connected = false
+  const status = () => ({ result: { installed: true, connected, version: null, detail: '', probe: 'ok' } })
+  ;(globalThis as { window?: unknown }).window = {
+    knuaf: { connect: {
+      status: async () => status(),
+      login: () => loginIpc,                  // 브라우저 열기까지 기다리느라 늦게 정착한다
+      cancel: async () => ({ result: true }),
+      reopen: async () => ({ result: true })
+    } }
+  }
+  try {
+    const store = useConnect.getState()
+    store.stopPolling()
+    const started = store.login('codex')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(useConnect.getState().loggingIn.codex, '로그인 시작이 표시되지 않았다').toBe(true)
+    expect(clock.timers.size, '감시가 로그인 응답 뒤로 밀렸다').toBe(1)
+
+    // 로그인은 아직 IPC 응답을 못 받았지만 서버는 이미 연결됐다 — 감시가 그것을 집어야 한다.
+    connected = true
+    await clock.runAll()
+    expect(useConnect.getState().codex.state).toBe('connected')
+    expect(useConnect.getState().loggingIn.codex, '완료를 봤는데도 로그인 중 표시가 남았다').toBe(false)
+    expect(clock.timers.size, '연결을 확인한 감시가 남았다').toBe(0)
+
+    // 늦게 도착한 성공 응답은 감시를 되살리지 않는다.
+    release({ result: true })
+    await started
+    expect(clock.timers.size, '늦은 응답이 감시를 되살렸다').toBe(0)
+    expect(useConnect.getState().loggingIn.codex).toBe(false)
+  } finally {
+    useConnect.getState().stopPolling()
+    clock.restore()
+    ;(globalThis as { window?: unknown }).window = realWindow
+  }
+})
+
+test('로그인 IPC 가 실패하면 감시를 즉시 없애고 실패로 말한다 (RT2)', async () => {
+  const clock = manualTimers()
+  const realWindow = (globalThis as { window?: unknown }).window
+  ;(globalThis as { window?: unknown }).window = {
+    knuaf: { connect: {
+      status: async () => ({ result: { installed: true, connected: false, version: null, detail: '', probe: 'ok' } }),
+      login: async () => ({ error: { code: 'chat', message: '브라우저를 열지 못했어요' } }),
+      cancel: async () => ({ result: true }),
+      reopen: async () => ({ result: true })
+    } }
+  }
+  try {
+    const store = useConnect.getState()
+    store.stopPolling()
+    await store.login('codex')
+    expect(useConnect.getState().codex.state, '실패가 실패로 보이지 않는다').toBe('failed')
+    expect(useConnect.getState().loggingIn.codex).toBe(false)
+    expect(clock.timers.size, '실패한 시도의 감시가 남았다').toBe(0)
+  } finally {
+    useConnect.getState().stopPolling()
+    clock.restore()
+    ;(globalThis as { window?: unknown }).window = realWindow
+  }
+})
+
+/**
+ * 손으로 돌리는 완전한 시계 — `setInterval` 뿐 아니라 `setTimeout` 까지 붙잡는다.
+ * 감시의 tick 안전 타이머(15초)와 만료(180초)를 시험이 직접 발화시키기 위해서다.
+ * `flush` 만 진짜 타이머를 쓴다(그 대기까지 가짜로 만들면 promise 가 안 흐른다).
+ */
+function manualClock(): {
+  intervals: Map<unknown, () => void>
+  timeouts: Map<unknown, { ms: number }>
+  fireIntervals: () => void
+  /** `minMs ≤ ms ≤ maxMs` 인 예약 콜백을 지금 실행한다. 실행한 개수를 돌려준다. */
+  fireTimeouts: (minMs: number, maxMs?: number) => number
+  flush: () => Promise<void>
+  restore: () => void
+} {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  const intervals = new Map<unknown, () => void>()
+  const timeouts = new Map<unknown, { ms: number; fn: () => void }>()
+  globalThis.setInterval = ((fn: () => void) => { const t = {}; intervals.set(t, fn); return t }) as unknown as typeof setInterval
+  globalThis.clearInterval = ((t?: unknown) => { if (t !== undefined) intervals.delete(t); return 0 }) as unknown as typeof clearInterval
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { const t = {}; timeouts.set(t, { ms: ms ?? 0, fn }); return t }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((t?: unknown) => { if (t !== undefined) timeouts.delete(t); return 0 }) as unknown as typeof clearTimeout
+  return {
+    intervals,
+    timeouts,
+    fireIntervals: () => { for (const fn of [...intervals.values()]) fn() },
+    fireTimeouts: (minMs, maxMs = Number.POSITIVE_INFINITY) => {
+      const due = [...timeouts].filter(([, v]) => v.ms >= minMs && v.ms <= maxMs)
+      for (const [handle, value] of due) { timeouts.delete(handle); value.fn() }
+      return due.length
+    },
+    flush: async () => { for (let i = 0; i < 6; i++) await new Promise((r) => realSetTimeout(r, 0)) },
+    restore: () => {
+      globalThis.setTimeout = realSetTimeout; globalThis.clearTimeout = realClearTimeout
+      globalThis.setInterval = realSetInterval; globalThis.clearInterval = realClearInterval
+    }
+  }
+}
+
+test('상태 조회가 안 끝나도 감시가 잠기지 않고, 다음 시도가 옛 요청에 막히지 않는다 (RT2-01)', async () => {
+  // 검토 RT2-01 재현: 첫 `connect.status` 가 정착하지 않으면 `inFlight` 에서 공급자가 빠지지
+  // 않아 이후 tick 이 모두 건너뛰어지고, 그 Set 이 Map 에 귀속돼 **취소 뒤 새 로그인까지**
+  // 막혔다. 지금은 잠금이 감시 세대 안에 있고 tick 마다 상한이 있다.
+  const clock = manualClock()
+  const realWindow = (globalThis as { window?: unknown }).window
+  let statusCalls = 0
+  let stuck = true
+  const hung = Promise.withResolvers<unknown>()
+  ;(globalThis as { window?: unknown }).window = {
+    knuaf: { connect: {
+      status: () => { ++statusCalls; return stuck && statusCalls === 1 ? hung.promise : Promise.resolve({ result: { installed: true, connected: false, version: null, detail: '', probe: 'ok' } }) },
+      login: async () => ({ result: true }),
+      cancel: async () => ({ result: true }),
+      reopen: async () => ({ result: true })
+    } }
+  }
+  try {
+    const store = useConnect.getState()
+    store.stopPolling()
+    await store.login('codex')
+    await clock.flush()
+    clock.fireIntervals(); await clock.flush()
+    expect(statusCalls, '첫 tick 이 상태를 묻지 않았다').toBe(1)
+    // 매달린 동안의 tick 은 겹치지 않는다.
+    clock.fireIntervals(); await clock.flush()
+    expect(statusCalls, '매달린 요청 위에 겹쳐 물었다').toBe(1)
+
+    // tick 상한이 지나면 잠금이 풀려 다음 간격에 다시 묻는다 — 예전에는 영원히 1회였다.
+    expect(clock.fireTimeouts(10_000, 60_000), 'tick 상한 타이머가 없다').toBeGreaterThan(0)
+    clock.fireIntervals(); await clock.flush()
+    expect(statusCalls, '상한이 지났는데도 다시 묻지 않는다').toBe(2)
+
+    // 취소한 뒤 새 로그인도 옛 미정착 요청에 막히지 않는다.
+    await store.cancel('codex')
+    stuck = false
+    statusCalls = 0
+    await store.login('codex')
+    await clock.flush()
+    clock.fireIntervals(); await clock.flush()
+    expect(statusCalls, '새 시도가 옛 미정착 요청에 막혔다').toBe(1)
+    hung.resolve({ result: { installed: true, connected: false, version: null, detail: '', probe: 'ok' } })
+  } finally {
+    useConnect.getState().stopPolling()
+    clock.restore()
+    ;(globalThis as { window?: unknown }).window = realWindow
+  }
+})
+
+test('3분 동안 확인하지 못하면 로그인 중 표시를 내리고 확인 실패로 말한다 (RT2-01)', async () => {
+  // 검토 RT2-01 재현 2: 180초 deadline 은 타이머만 지우고 `loggingIn` 을 내리지 않아,
+  // 정상적으로 `connected:false` 만 오는 동안 화면이 '로그인 중'에 영구 고정됐다.
+  const clock = manualClock()
+  const realWindow = (globalThis as { window?: unknown }).window
+  ;(globalThis as { window?: unknown }).window = {
+    knuaf: { connect: {
+      status: async () => ({ result: { installed: true, connected: false, version: null, detail: '', probe: 'ok' } }),
+      login: async () => ({ result: true }),
+      cancel: async () => ({ result: true }),
+      reopen: async () => ({ result: true })
+    } }
+  }
+  try {
+    const store = useConnect.getState()
+    store.stopPolling()
+    await store.login('codex')
+    await clock.flush()
+    clock.fireIntervals(); await clock.flush()
+    expect(useConnect.getState().codex.state).toBe('need-login')
+    expect(useConnect.getState().loggingIn.codex).toBe(true)
+
+    expect(clock.fireTimeouts(100_000), '만료 타이머가 없다').toBe(1)
+    await clock.flush()
+    expect(useConnect.getState().loggingIn.codex, '만료 뒤에도 로그인 중 표시가 남았다').toBe(false)
+    // 그 행에 붙는 기존 '다시 확인' 단추가 보이도록 확인 실패로 말한다(새 문구를 만들지 않는다).
+    expect(useConnect.getState().codex.state).toBe('failed')
+    expect(clock.intervals.size, '만료 뒤에도 감시가 남았다').toBe(0)
+  } finally {
+    useConnect.getState().stopPolling()
+    clock.restore()
     ;(globalThis as { window?: unknown }).window = realWindow
   }
 })

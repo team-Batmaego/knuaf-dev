@@ -3,13 +3,13 @@ name: ci
 #
 # 왜 워크플로 단위 `paths-ignore` 가 아닌가: 그렇게 하면 워크플로가 아예 안 돌아 필수 체크가
 # "대기 중(Pending)"으로 남아 머지를 막는다(GitHub 문서 "Troubleshooting required status checks").
-# 왜 작업(job) 단위 `if:` 가 아닌가: matrix 작업을 job 수준에서 건너뛰면 matrix 가 확장되지 않아
-# `app (macos-latest)`·`app (windows-latest)` 체크 자체가 생기지 않는다(actions/runner#952).
-# 그래서 matrix 는 항상 확장하고, 바뀐 파일을 본 뒤 단계만 건너뛴다 — 작업은 성공으로 끝나고
-# 체크 이름도 그대로다. 코드가 바뀐 변경은 이 조건에 걸리지 않아 지금과 똑같이 전부 돈다.
+# 왜 작업(job) 단위 `if:` 가 아닌가: `app` 을 작업 수준에서 건너뛰면 샤드 묶음이 돌지 않고, 요약
+# 작업(`app-summary`)이 `skipped` 를 실패로 판정해 문서만 바뀐 PR 이 빨개진다. 그래서 matrix 는
+# 항상 확장하고, 바뀐 파일을 본 뒤 단계만 건너뛴다 — 작업은 성공으로 끝나고 체크 이름도 그대로다.
+# 코드가 바뀐 변경은 이 조건에 걸리지 않아 지금과 똑같이 전부 돈다.
 on:
   push:
-    branches: ["**"]
+    branches: ["main", "release/**"]
   pull_request:
   workflow_dispatch:
 concurrency:
@@ -186,7 +186,8 @@ jobs:
       - name: Prepare pinned runtime and run tests
         run: node app/scripts/test-with-skill.mjs --python python
   py39-guard:
-    runs-on: ubuntu-latest
+    # ubuntu-latest 가 26.04 로 넘어가 3.9 휠이 없어졌다 — 이 잡만 24.04 로 고정한다(행렬의 ubuntu-latest 는 필수 체크 이름이라 불변).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -218,17 +219,35 @@ jobs:
     if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
+      # 샤드 수는 OS 마다 다르다. 윈도는 시험당 맥보다 3.4배 느려 5개(137분/5≈28분), 맥은 2개면 된다
+      # (41분/2≈20분). 배분표는 `app/e2e/shards.json` 이고, e2e 단계가 `${{ matrix.shard }}` 번째 묶음을 돈다.
+      # 필수 체크 이름은 이 다리들이 아니라 아래 `app-summary` 의 `app (<os>)` 두 개가 만든다 —
+      # 샤드 수를 바꿔도 필수 체크 목록은 그대로다.
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: windows-latest
+            shard: 1
+          - os: windows-latest
+            shard: 2
+          - os: windows-latest
+            shard: 3
+          - os: windows-latest
+            shard: 4
+          - os: windows-latest
+            shard: 5
+          - os: macos-latest
+            shard: 1
+          - os: macos-latest
+            shard: 2
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: app
     steps:
       # 문서만 바뀐 실행에서는 아래 단계를 전부 건너뛴다. 작업을 job `if:` 로 통째로 건너뛰면
-      # matrix 가 확장되지 않아 `app (macos-latest)`·`app (windows-latest)` 체크가 사라지고,
-      # 필수 체크가 '대기 중'으로 남는다(actions/runner#952). 그래서 단계만 건너뛴다 — 작업은
-      # 성공으로 끝나고 체크 이름은 그대로다. 코드가 바뀐 실행은 예전과 똑같이 전부 돈다.
+      # `app-summary` 가 보는 `needs.app.result` 가 `skipped` 가 되고, 요약은 성공만 통과시키므로
+      # 문서만 바뀐 PR 이 빨개진다. 그래서 단계만 건너뛴다 — 작업은 성공으로 끝나고 체크 이름도
+      # 그대로다. 코드가 바뀐 실행은 예전과 똑같이 전부 돈다.
       - name: 문서만 바뀐 실행 — 앱 시험 건너뜀
         if: needs.changes.outputs.docs_only == 'true'
         # 이 작업의 기본 작업 폴더는 app 인데, checkout 을 건너뛰었으니 저장소 루트에 선다.
@@ -259,7 +278,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.docs_only != 'true'
-      - run: node --test scripts/tests/app-release.test.mjs
+      - run: node --test scripts/tests/app-release.test.mjs scripts/tests/ci-sharding.test.mjs scripts/tests/skill-staging.test.mjs
         if: needs.changes.outputs.docs_only != 'true'
       - run: node scripts/tests/check-skill-workflow.mjs
         if: needs.changes.outputs.docs_only != 'true'
@@ -290,21 +309,29 @@ jobs:
       # ui-shots`(git 에 안 들어감)라 시험 실행이 추적되는 `docs/images` 를 덮어쓰지 않는다.
       # 안내서 사진을 갱신할 때만 `KNUAF_SHOT_DIR=../docs/images` 로 명시해 돌린다.
       #
+      # 묶음표(`app/e2e/shards.json`) 검사 — 새 스펙이 어느 샤드에도 없으면 조용히 안 도는 일이 생긴다.
+      # 그래서 e2e 전에 표와 e2e 실제 파일을 대조한다(누락·중복·없는 파일 셋 다 실패).
+      - run: node scripts/e2e-shards.mjs --check
+        if: needs.changes.outputs.docs_only != 'true'
+      # `--check` 는 폴더만 훑는다 — `testIgnore`·설정 오류로 "파일은 있는데 안 도는" 스펙은 못 잡는다.
+      # 여기서 Playwright 자신에게 스펙 목록을 물어 샤드 합집합과 대조한다(빠짐·중복·못 찾음 셋 다 실패).
+      # OS 별 표가 다르므로 OS 마다 한 번씩만 돈다(1번 샤드 다리에서) — 다리마다 돌리면 같은 검사가 7번이다.
+      - run: node scripts/e2e-shards.mjs --verify-discovery ${{ runner.os == 'Windows' && 'windows' || 'macos' }}
+        if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
+      # e2e 는 이제 OS × 샤드로 나눠 돈다. 샤드 수는 위 matrix 가 정하고(윈도 5, 맥 2), 어느 파일이
+      # 어느 샤드인지는 `e2e/shards.json` 이 정한다. 스크립트가 자기 묶음의 스펙 경로로 Playwright CLI 를
+      # 띄우므로 셸별 인자 분할·Windows `pnpm.cmd` 문제가 없다. 마지막 줄에 이 샤드의 시험 수를 찍어
+      # OS 별 합계가 `playwright test --list` 총계와 같은지 사람이 로그로 확인할 수 있게 한다.
+      #
       # e2e runs on macOS and Windows alike. `KNUAF_PYTHON` must be an absolute path — the app
       # tests `existsSync(KNUAF_PYTHON)` in choosePython, so a bare name is ignored and it falls
       # back to a PATH python; narrow-PATH specs (those that plant a fake codex) would then hit
       # macOS' stock 3.9.6 and fail project:open. On Windows the interpreter is python.exe.
-      - name: e2e (macOS)
-        if: needs.changes.outputs.docs_only != 'true' && runner.os == 'macOS'
-        run: pnpm exec playwright test --grep-invert "real window capture" --output test-results/e2e-artifacts
+      - name: e2e (${{ matrix.os }}, ${{ matrix.shard }})
+        if: needs.changes.outputs.docs_only != 'true' && (runner.os != 'Windows' || github.event_name != 'pull_request')
+        run: node scripts/e2e-shards.mjs ${{ runner.os == 'Windows' && 'windows' || 'macos' }} ${{ matrix.shard }}
         env:
-          KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
-          KNUAF_SHOT_DIR: test-results/ui-shots
-      - name: e2e (Windows)
-        if: needs.changes.outputs.docs_only != 'true' && runner.os == 'Windows'
-        run: pnpm exec playwright test --grep-invert "real window capture" --output test-results/e2e-artifacts
-        env:
-          KNUAF_PYTHON: ${{ env.pythonLocation }}\python.exe
+          KNUAF_PYTHON: ${{ runner.os == 'Windows' && format('{0}\\python.exe', env.pythonLocation) || format('{0}/bin/python', env.pythonLocation) }}
           KNUAF_SHOT_DIR: test-results/ui-shots
       # 실패했을 때만 Playwright 의 흔적(trace·스크린샷·error-context)을 남긴다. 기본은 러너와 함께
       # 사라져서 CI 전용 실패를 나중에 볼 수 없었다(맥에서만 깨진 실제 드래그 시험이 그랬다 —
@@ -313,7 +340,7 @@ jobs:
         if: failure() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-artifacts-macos
+          name: e2e-artifacts-macos-${{ matrix.shard }}
           path: app/test-results/e2e-artifacts
           if-no-files-found: warn
           retention-days: 7
@@ -321,7 +348,7 @@ jobs:
         if: failure() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-artifacts-windows
+          name: e2e-artifacts-windows-${{ matrix.shard }}
           path: app/test-results/e2e-artifacts
           if-no-files-found: warn
           retention-days: 7
@@ -330,8 +357,22 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: doctor-timings-windows
-          path: app/test-results/e2e-artifacts/**/doctor-*.jsonl
+          name: doctor-timings-windows-${{ matrix.shard }}
+          path: |
+            app/test-results/e2e-artifacts/**/doctor-*.jsonl
+            app/test-results/e2e-artifacts/**/app-log.txt
+          if-no-files-found: warn
+          retention-days: 7
+      # 종료 진단 로그 — `electronApp.close()` 가 안 돌아오면 시험이 실패하고 아티팩트도 사라져
+      # 원인을 볼 수 없었다(PR #102). 통과한 실행에서도 올려 "어디까지 갔는지"를 비교한다.
+      # 이름에 샤드를 붙인다 — 맥은 2샤드라 같은 이름으로 두 번 올리면 upload-artifact v4 가
+      # "artifact name already exists" 로 죽는다(main 은 샤드가 없어 접미사가 없었다).
+      - name: Shutdown diagnostics (macOS)
+        if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log-macos-${{ matrix.shard }}
+          path: app/test-results/e2e-artifacts/**/app-log.txt
           if-no-files-found: warn
           retention-days: 7
       # 시안 대조용 캡처 — 시험이 실패해도 남긴다(`always()`). 이름에 OS 를 넣어 구분한다.
@@ -339,7 +380,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: ui-shots-macos
+          name: ui-shots-macos-${{ matrix.shard }}
           path: |
             app/test-results/ui-shots
             app/test-results/onboarding-shots
@@ -351,7 +392,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true' && always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: ui-shots-windows
+          name: ui-shots-windows-${{ matrix.shard }}
           path: |
             app/test-results/ui-shots
             app/test-results/onboarding-shots
@@ -359,3 +400,47 @@ jobs:
             app/test-results/p1-shots
           if-no-files-found: warn
           retention-days: 14
+
+  # 필수 체크 이름은 계속 `app (macos-latest)`·`app (windows-latest)` 두 개다 — 저장소 규칙(ruleset)의
+  # 필수 목록을 건드리지 않으려고, 샤드로 쪼갠 `app` 다리 대신 이 요약 다리가 그 이름을 그대로 만든다.
+  # 샤드 수(윈도 5·맥 2)나 샤드별 통과 여부는 여기서 하나로 접는다: 하나라도 실패·건너뜀·취소면 실패다.
+  #
+  # `!cancelled()` 로 두는 이유는 `app` 과 같다 — 문서만 바뀐 실행(모든 무거운 단계 skip)에서 초록으로
+  # 남아야 한다. 그래서 판정은 `needs.app.result == 'success'` 를 직접 확인한다(성공이 아니면 무조건 실패:
+  # `skipped`·`cancelled` 를 성공으로 세지 않는다).
+  app-summary:
+    needs: app
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+    runs-on: ubuntu-latest
+    # 실패한 샤드를 로그에 찍으려면 작업 목록 API 만 읽으면 된다 — 쓰기 권한도, 저장소 내용 읽기도 주지 않는다.
+    permissions:
+      actions: read
+    name: app (${{ matrix.os }})
+    steps:
+      - name: 결과 판정
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_RESULT: ${{ needs.app.result }}
+        run: |
+          echo "app (${{ matrix.os }}) 샤드 묶음 결과: $NEEDS_RESULT"
+          if [ "$NEEDS_RESULT" != "success" ]; then
+            # 어느 샤드가 깨졌는지 로그로 바로 보이게 한다. 판정 기준(`needs.app.result`)은 두 OS
+            # 샤드를 모두 접은 값이라 어느 OS 가 깨져도 두 요약이 함께 빨개진다 — 그래서 실패 목록도
+            # OS 로 가르지 않고 `app (<os>, <샤드>)` 다리 전부를 보여 준다. 목록을 못 얻어도
+            # (권한·API 실패·아직 목록에 없음) 판정은 그대로이므로 여기서는 best effort 로만 돈다.
+            failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+              --jq '.jobs[] | select(.name | test("^app \\(.+, [0-9]+\\)$")) | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "실패한 다리: \(.name) — \(.conclusion)"' \
+              || true)
+            if [ -n "$failed" ]; then
+              echo "$failed"
+            else
+              echo "실패한 다리 이름을 못 얻었다 — 샤드별 결과는 위 작업 목록 참조"
+            fi
+            exit 1
+          fi

@@ -9,6 +9,9 @@ import { mergeFoldSpans, progressHide } from '../../../shared/progress-list'
 import { ChatMarkdown } from '../components/ChatMarkdown'
 import { ProgressFold } from '../components/ProgressFold'
 import { ReviewQuoteChip } from '../components/ReviewQuote'
+import { recheckChipLabel, splitRecheck } from '../../../shared/recheck'
+import { useEdits } from '../store/edits'
+import { EDIT } from '../editcopy'
 import { ComposerModelChip } from '../components/ComposerModelChip'
 import { PermissionCard } from '../components/PermissionCard'
 import { QuestionCard } from '../components/QuestionCard'
@@ -132,7 +135,10 @@ function Message({ m, onResend, onFileLink, fold, hide, sending = false }: { m: 
   const shown = long && !open ? cutAtLine(text, LONG_MESSAGE) : text
   // 접은 줄은 "더 보기"로 되돌릴 글도 아니다 — 수는 지금 화면 기준으로 센다.
   const hidden = hiddenChars(text, shown)
-  const quoted = m.role === 'user' ? /^> ([^\n]+)\n\(([^\n]+)에서\)\n\n([\s\S]+)$/.exec(shown) : null
+  // 재확인 메모를 **먼저** 떼어 낸다 — 인용 정규식보다 앞서야 한다(§6-1). 순서가 바뀌면
+  // 인용 본문 끝에 메모 전문이 드러난다. 옛 말풍선(대화 기록에 남은 것)도 같은 접기를 탄다.
+  const recheck = m.role === 'user' ? splitRecheck(shown) : { body: shown, memo: null, count: 0 }
+  const quoted = m.role === 'user' ? /^> ([^\n]+)\n\(([^\n]+)에서\)\n\n([\s\S]+)$/.exec(recheck.body) : null
   // 도우미는 **테두리·상자·발화자/시간 머리 없는 본문**, 학생만 오른쪽 말풍선(시안 D/E/G, N-I01).
   return (<>
     <div className={`chat-msg ${m.role}`}>
@@ -141,7 +147,10 @@ function Message({ m, onResend, onFileLink, fold, hide, sending = false }: { m: 
           <b style={{ display: 'block', fontWeight: 500, fontSize: 11.5, color: 'var(--faint)' }}>{REVIEW.quoteLead(quoted[2])}</b>
           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{quoted[1]}</span>
         </span>{quoted[3]}
-      </> : shown}</div>
+      </> : recheck.body}
+        {recheck.memo && (
+          <span className="msg-recheck" title={recheck.memo}>{recheckChipLabel(recheck.count)}</span>
+        )}</div>
       {folding && fold && (
         <div className="q-fold">
           <span className="caption">{fold.kind === 'fields' ? CHAT.foldFields(fold.count) : CHAT.foldHint(fold.count)}</span>
@@ -517,6 +526,8 @@ export function Chat() {
    * 전송 중 새로 쓴 글은 지켜진다(QA2B-R1-02). 보낸 뒤에는 그 인용이 아직 그대로일 때만 지운다
    * — 늦게 온 결과가 그사이 새로 붙인 인용을 지우지 않게.
    */
+  /** 확인 전 고침 수 — 칩·`지금 확인받기`가 이 값을 본다(§3-3, §6-4). */
+  const pendingEdits = useEdits((s) => s.rows.filter((row) => row.state === 'pending').length)
   const sendBody = async (text?: string): Promise<boolean> => {
     const q = useReview.getState().quote
     if (!q || q.root !== projectRoot) return send(text)
@@ -799,6 +810,8 @@ export function Chat() {
           <>
             <div className="qcard-wrap">
               {quote && quote.root === projectRoot && <ReviewQuoteChip quote={quote} onRemove={clearQuote} style={{ marginTop: 'var(--sp-4)', marginBottom: -8, position: 'relative', zIndex: 1 }} />}
+              {/* 질문 카드는 입력칸 자리를 대신 차지해 아래 칩 줄이 안 보인다 — 같은 자리에 여기서 띄운다(B4). */}
+              {pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
               <QuestionCard key={zone.messageId} card={zone.card} draft={draft} onDraft={setDraft} onSend={send}
                 onSendFree={() => sendBody()} canSendFree={canSend && !busy && !waiting} freeRequest={freeRequest?.messageId === zone.messageId ? freeRequest.seq : 0} />
             </div>
@@ -808,6 +821,9 @@ export function Chat() {
 
         {zone.kind === 'form' && (
           <>
+            {/* 여러 칸 질문도 입력칸 자리를 대신 쓴다 — 칩을 여기서 띄운다(B4). 직접 입력으로
+                넘어가면 아래 입력칸 줄이 칩을 맡으므로 겹치지 않게 `!freeForm` 일 때만. */}
+            {!freeForm && pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
             <div hidden={freeForm}><QuestionForm key={zone.messageId} form={zone.form} onFree={() => setFreeFormId(zone.messageId)} onSend={send} disabled={busy || !!waiting} /></div>
             {!freeForm && <div className="crow question-model"><ComposerModelChip /></div>}
           </>
@@ -824,6 +840,9 @@ export function Chat() {
             )}
             {/* 인용 칩 — 입력칸 바로 위(N-I03). 이 논문의 인용만 보여 준다(QA2B-R1-01). */}
             {quote && quote.root === projectRoot && <ReviewQuoteChip quote={quote} onRemove={clearQuote} />}
+            {/* 직접 고친 문장 칩 — 확인 전 고침이 있으면 보낼 때 함께 확인받는다는 것을 알린다(§3-3).
+                인용 칩과 **같은 자리**를 쓰되 겹쳐 뜨지 않게 둘 다 있으면 위아래로 쌓인다. */}
+            {pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
             <div className="chat-composer" data-dragging={dragging || undefined}
               onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true) }}
               onDragLeave={() => setDragging(false)}

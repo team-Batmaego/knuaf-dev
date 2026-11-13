@@ -8,6 +8,9 @@ import { insideByFileId } from './file-identity'
 import { registerProgressIpc } from './progress'
 // link (v0.6.4 ⑤): 대화 속 http(s) 주소 열기 — 채널 하나(`link:open`), main이 주소를 다시 본다.
 import { registerLinkIpc } from './links'
+// paper-images (v0.6.4 사진 갈래): 종이 칸 그림 — 스킴(`knuaf-img:`) 처리기 하나. electron 값 import 없음.
+import { createPaperImages } from './paper-images'
+import type { PaperImages } from './paper-images'
 import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
@@ -81,13 +84,18 @@ function findNestedProject(root: string): string | null {
   return null
 }
 
-/** Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit. */
-export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService } {
+/**
+ * Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit.
+ * `images`는 스킴 처리기다 — `index.ts`만 `protocol`을 알므로 등록도 거기서 한다(ipc는 electron을 값으로 더 잡지 않는다).
+ */
+export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages } {
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
   // link (v0.6.4 ⑤): 대화의 http(s) 주소 하나를 기본 브라우저로. 검사는 이 모듈 안에서 다시 한다.
   registerLinkIpc((url) => shell.openExternal(url), ipcMain)
+  // paper-images (v0.6.4 사진 갈래): 그림 하나를 읽어 응답한다. 폴더 안 판정은 이 모듈이 다시 한다.
+  const images = createPaperImages(() => currentRoot)
   /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
   let openSeq = 0
   /** Published visit survives failed open attempts; openSeq still rejects stale successes. */
@@ -875,5 +883,5 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   sidecar.on('log', (entry) => win()?.webContents.send('sidecar:log', entry))
   sidecar.on('exit', (entry) => win()?.webContents.send('sidecar:exit', entry))
-  return { chat }
+  return { chat, images }
 }
