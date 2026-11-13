@@ -60,7 +60,9 @@
       "notice-bubble",
       "notice-real-screen",
       "progress-list",
-      "token-usage"
+      "token-usage",
+      "edits-store",
+      "sameword"
     ],
     [
       "artifacts-states",
@@ -89,7 +91,10 @@
       "link-open",
       "notice-choose-main",
       "progress-file",
-      "progress-titlebar"
+      "progress-titlebar",
+      "edit",
+      "recheck",
+      "viewer-edit"
     ],
     [
       "app-update-install-mode",
@@ -119,7 +124,8 @@
       "u1c-astra-findings",
       "ui-polish",
       "update-ui",
-      "workflows"
+      "workflows",
+      "recheck-screen"
     ],
     [
       "agent",
@@ -227,7 +233,10 @@
       "notice-bubble",
       "notice-real-screen",
       "progress-list",
-      "token-usage"
+      "token-usage",
+      "edits-store",
+      "recheck-screen",
+      "viewer-edit"
     ],
     [
       "agent-busy",
@@ -300,7 +309,10 @@
       "link-open",
       "notice-choose-main",
       "progress-file",
-      "progress-titlebar"
+      "progress-titlebar",
+      "edit",
+      "recheck",
+      "sameword"
     ]
   ]
 }

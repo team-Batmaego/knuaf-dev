@@ -3,6 +3,30 @@ import { CLAUDE_AUTH_COPY, CODEX_AUTH_COPY } from '../../../shared/copy'
 import { isPreparing, preparationFailureTitle, usePrep, waitPrepared } from './prep'
 import { beginLoginAttempt, connInfoOf, loginAttemptLive, startPoll, stopPoll, useConnect, type ConnState } from './connect'
 import type { ChatModelInfo, ChatModels, ChatSnapshot, ConnectionStatus, ModelChoice, Provider } from '../../../shared/chat'
+import { useEdits } from './edits'
+import { useProject } from './project'
+import type { RunState } from '../../../shared/chat'
+
+/** 직전 스냅샷의 실행 상태 — 턴이 정상으로 끝났는지(진행→idle) 판정한다(§6-3). */
+let previousState: RunState | null = null
+
+/**
+ * 이 알림이 **턴의 끝**인가 — 상태가 끝 상태로 넘어가는 순간만 참이다.
+ *
+ * 진행 중 상태끼리의 이동(`running`→`running` 진행 알림, `permission`→`running` 승인)은
+ * 끝이 아니다. 이것을 끝으로 보면 턴 도중 매 알림마다 메모가 실린 건을 `pending` 으로
+ * 되돌려 칩이 되살아난다(실제로 그렇게 났고 화면 시험이 잡았다).
+ */
+export function turnEnded(before: RunState | null, after: RunState): boolean {
+  const was = before === 'running' || before === 'permission'
+  const now = after === 'idle' || after === 'error' || after === 'interrupted' || after === 'stopped'
+  return was && now
+}
+
+/** 그 턴이 **정상으로** 끝났는가 — `answered` 는 이때만 켠다(§5). */
+export function turnSucceeded(after: RunState): boolean {
+  return after === 'idle'
+}
 
 /** 어떤 도우미로 채팅하는지. 인앱 터미널 모드는 제거됐다 — 내 논문은 항상 앱 채팅이다. */
 export type ChatMode = 'codex-chat' | 'claude-chat'
@@ -278,8 +302,16 @@ export const useChat = create<ChatState>((set, get) => ({
   },
   send: async (text, opts) => {
     const { root, provider, draft } = get()
-    const body = (text ?? draft).trim()
+    // 재확인 메모를 **보내기 직전** 붙인다(설계 §6-1). 보내는 길 셋(자유 입력·질문 카드 보기·
+    // 여러 칸 폼)이 모두 이 함수를 지나므로 여기 한 곳이면 다 덮인다. 확인 전 고침이 없으면
+    // 본문 그대로다. 제목은 지금 등록된 절 목록에서 읽는다(옛 제목을 붙이지 않는다).
+    const titles = Object.fromEntries((useProject.getState().sections ?? []).map((sec) => [sec.id, sec.title]))
+    const attached = useEdits.getState().attach((text ?? draft), titles)
+    const body = attached.text.trim()
     if (!root || !body) return false
+    // 실패 복구 초안에 메모를 넣지 않는다 — 입력칸에 메모 전문이 드러나면 §6-1 위반이고,
+    // 다시 보낼 때 `attach` 가 또 붙여 메모가 2벌이 된다(검토 B-R1 권고 3).
+    const bare = attached.memo ? body.slice(0, body.length - attached.memo.length).trim() : body
     // 보낼 때의 폴더·공급자와 초안 편집 번호. 응답은 몇 초 뒤에 온다 — 그 사이 학생이 다른
     // 논문을 열었을 수 있고, 그러면 이 응답은 지금 화면의 것이 아니다(검토 P1-R1-01).
     // 저장할 초안의 소유 폴더는 늘 `setDraft` 에 넘기는 root 여야 한다.
@@ -291,7 +323,7 @@ export const useChat = create<ChatState>((set, get) => ({
     set({ busy: true, error: null })
     let recovery: string | undefined
     if (opts?.preserveDraftOnFailure) {
-      recovery = draft ? (draft.endsWith('\n') ? draft + body : draft + '\n' + body) : body
+      recovery = draft ? (draft.endsWith('\n') ? draft + bare : draft + '\n' + bare) : bare
       seqAtSend += 1
       set({ draft: recovery, draftSeq: seqAtSend })
       const saved = await window.knuaf.chat.setDraft(root, recovery) as Reply<boolean>
@@ -336,6 +368,15 @@ export const useChat = create<ChatState>((set, get) => ({
       return 'result' in r
     }
     if ('result' in r) {
+      // 전달이 **받아들여진 순간** 그 고침들을 `sent` 로 닫는다(§6-3). 턴 끝을 기다리지 않는다 —
+      // 턴 도중 앱이 꺼져도 메시지는 이미 갔다. 실패면 위 갈래에서 `pending` 그대로다.
+      // `attach` 가 돌려준 목록만 닫는다 — 보내는 사이 새로 저장된 고침은 `pending` 그대로 남아
+      // 다음 메시지에 붙는다(§6-3: 하나도 확인 없이 지나가지 않게). 이 메시지의 턴은 `requestId`
+      // 로 가리킨다 — 메모가 실린 그 턴이 정상으로 끝날 때만 `answered` 가 켜진다.
+      // 보낸 말이 실제로 갔는지(`delivery`)는 턴이 끝날 때 스냅샷으로 판정한다 — 메인이 전송
+      // 결과를 `uncertain` 으로 바꾸는 것은 나중이다(`service.ts:507`). 그때 `turnFailed` 가
+      // `pending` 으로 되돌린다(§6-3).
+      if (!left()) void useEdits.getState().markSent(root, attached, requestId)
       // 보기를 눌러 보낸 `send(text)` 는 초안을 건드리지 않는다 — 학생이 쓰던 글이 남는다.
       // 인용을 합쳐 보낸 경우(`consumeDraft`)는 그 초안을 **소비**하므로 일반 전송과 같은
       // `draftSeq` 규칙을 쓴다 — 보낸 글이 입력칸에 남지 않고, 그 사이 새로 쓴 글은 지켜진다.
@@ -365,6 +406,22 @@ export const useChat = create<ChatState>((set, get) => ({
   onSnapshot: (snapshot) => {
     const detail = snapshot.provider === 'codex' ? CODEX_AUTH_COPY.required : CLAUDE_AUTH_COPY.required
     if (snapshot.authRequired) useConnect.getState().observeChat(snapshot.provider, { state: 'need-login', detail, version: null })
+    // 턴이 **정상으로** 끝났는가 — 진행 중이던 턴이 `idle` 로 돌아온 순간이다(§6-3 `answered`).
+    // 실패·중단(`error`·`interrupted`·`stopped`)은 정상 종료가 아니므로 `answered` 로 닫지 않는다;
+    // 그 건은 `sent` 로 남아 점 표시가 그대로이고, 학생이 다시 물으면 그때 확인된다.
+    // 직전 상태를 **덮어쓰기 전에** 잡는다 — 덮어쓴 뒤에 넘기면 늘 (x, x) 라 `ended` 가
+    // 영영 거짓이 되고 이 갈래 전체가 꺼진다.
+    const prev = previousState
+    previousState = snapshot.state
+    if (turnEnded(prev, snapshot.state) && snapshot.root === get().root) {
+      // 그 턴을 가리키는 id 는 그 턴의 학생 메시지 id 다 — `send` 가 넘긴 `requestId` 와 같다.
+      const turn = [...snapshot.messages].reverse().find((m) => m.role === 'user')?.id
+      // 전달이 불확실하면 닫지 않는다(§6-3). 정상으로 끝나기 전에 메모가 실린 건은 `sent` 다.
+      const uncertain = turn !== undefined && snapshot.messages.find((m) => m.id === turn)?.delivery === 'uncertain'
+      if (turn) {
+        void useEdits.getState()[turnSucceeded(snapshot.state) && !uncertain ? 'markTurnDone' : 'turnFailed'](snapshot.root, turn)
+      }
+    }
     if (snapshot.root === get().root && snapshot.provider === get().provider) set({ snapshot,
       ...(snapshot.authRequired ? { status: { installed: true, connected: false, version: null, probe: 'ok' as const, detail }, statusFailed: false, connState: 'need-login' as const } : {})
     })

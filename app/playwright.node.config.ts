@@ -9,7 +9,7 @@ process.once('exit', cleanupTmpdir)
 // Do not inherit playwright.config.ts or add mixed GUI/store specs such as model-chip.spec.ts.
 export default defineConfig({
   testDir: 'e2e',
-  // v0.6.4: 진행 파일·링크 열기 시험(이 갈래) + 가드 시험(배포 갈래) + 표·사진·배치 시험(main)을 함께 둔다.
+  // v0.6.4: 진행 파일·링크 열기 시험(배포 갈래) + 가드 시험(배포 갈래) + 표·사진·배치 시험(main) + 뷰어 편집 시험(이 갈래)을 함께 둔다.
   testMatch: [
     'preparation-main.spec.ts',
     'preparation-state.spec.ts',
@@ -17,6 +17,8 @@ export default defineConfig({
     'chat-markdown.spec.ts',
     'paper-images.spec.ts',
     'layout.spec.ts',
+    'edits-store.spec.ts',
+    'recheck.spec.ts',
     'progress-list.spec.ts',
     'progress-file.spec.ts',
     'link-open.spec.ts',
