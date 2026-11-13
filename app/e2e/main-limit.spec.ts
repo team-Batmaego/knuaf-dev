@@ -322,7 +322,8 @@ function probeSource(rootConversationId: string, root: string, model = 'gpt-6.1-
 /** 제안만 여는 최소 이음매 — 열기·닫기는 이 시험의 관심 밖이다(대역). */
 function probeHandoff(account: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>): ConversationHandoff {
   return new ConversationHandoff({
-    stateDir: mkdtempSync(join(tmpdir(), 'kd-handoff-once-')), maxBytes: 10_000, account,
+    stateDir: mkdtempSync(join(tmpdir(), 'kd-handoff-once-')), maxBytes: 10_000,
+    account: { propose: account, click: account },
     gateInTurn: company => company === 'claude',
     open: async request => ({ id: request.id, sessionId: 'new-session', company: 'claude', firstTurn: 'ok' }),
     close: async () => {},
@@ -460,5 +461,28 @@ test('handoff: 계정 읽기는 실행당 1 + 로그인 변경 뒤 1', async () 
     reads.length = 0
     await svc.laneAccount('claude', { once: true })
     expect(reads).toEqual([{ company: 'claude', options: { once: { epoch: 1 } } }])
+    // 클릭 자리는 **상한을 타지 않는다** — 누를 때마다 새로 읽어야 같은 세대 계정 교체를 잡는다(I-01).
+    reads.length = 0
+    await svc.laneAccount('claude', { fresh: true })
+    expect(reads).toEqual([{ company: 'claude', options: { fresh: true } }])
   } finally { await svc.close() }
+})
+
+// §1-4 ① — 클릭 자리의 `fresh` 는 15초 캐시와 진행 중 약속 **둘 다** 건너뛴다. 하나라도 붙잡으면
+// 같은 세대에서 계정이 바뀌어도 옛 값을 다시 읽어 지문 대조가 무의미해진다(REVIEW-C4 I-01).
+test('handoff: fresh 읽기는 캐시와 진행 약속을 건너뛴다', async () => {
+  const rig = claudeRig({ W1_MODELS: JSON.stringify([...MODELS, SONNET]) })
+  const probe = laneAccountProbe({
+    appDir: rig.dir, env: () => rig.env, openExternal: async () => {}, binary: () => rig.binary
+  })
+  // 평범한 읽기는 캐시·진행 약속을 쓴다 — 동시 2회도 실제 실행은 1회.
+  await Promise.all([probe('claude'), probe('claude')])
+  expect(spawns(rig)).toBe(1)
+  await probe('claude')
+  expect(spawns(rig)).toBe(1)
+  // `fresh` 는 매번 새로 띄운다 — 캐시에 남은 값이 있어도 그대로 읽는다.
+  await probe('claude', { fresh: true })
+  expect(spawns(rig)).toBe(2)
+  await Promise.all([probe('claude', { fresh: true }), probe('claude', { fresh: true })])
+  expect(spawns(rig)).toBe(4)
 })

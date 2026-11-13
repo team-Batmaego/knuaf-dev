@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildHandoffBundle, ConversationHandoff, type HandoffOpenResult, type HandoffSource } from '../src/main/chat/jobs/conversation'
+import { sha256 } from '../src/main/chat/jobs/isolation'
 import { planFromRow } from '../src/shared/lanes'
 import type { ConversationOwner, ExecutionAccount } from '../src/main/chat/jobs/types'
 
@@ -21,9 +22,17 @@ function fixture() {
   }
   const opened: { id: string; firstMessage: string }[] = [], activated: object[] = [], transfers: object[] = [], audits: object[] = []
   const closed: ConversationOwner[] = []
-  let readAccount = async () => structuredClone(account)
+  /** 두 자리의 읽기 횟수 — "제안은 1회, 클릭은 누를 때마다"를 이 수로 잠근다(I-01). */
+  const reads = { propose: 0, click: 0 }
+  let readPropose = async () => structuredClone(account)
+  let readClick = async () => structuredClone(account)
   const options = {
-    stateDir, maxBytes: 10_000, account: async () => readAccount(),
+    stateDir, maxBytes: 10_000,
+    // 제안 판정과 클릭 판정은 **다른 자리**다 — 같은 함수를 쓰면 한쪽 상한이 다른 쪽 값을 굳힌다.
+    account: {
+      propose: async () => { reads.propose += 1; return readPropose() },
+      click: async () => { reads.click += 1; return readClick() }
+    },
     // §1-4 ② — 인계는 **첫 턴이 성공으로 끝난 뒤에만** 성립한다. 대역도 그 계약을 지킨다.
     open: async (request: { id: string; firstMessage: string }): Promise<HandoffOpenResult> => {
       opened.push(request)
@@ -39,8 +48,10 @@ function fixture() {
       cancel: () => {}, flush: async () => {}
     }), audit: (record: object) => { audits.push(record) }
   }
-  return { source, account, options, opened, activated, transfers, audits, closed,
-    handoff: new ConversationHandoff(options), readAccount: (fn: typeof readAccount) => { readAccount = fn } }
+  return { source, account, options, opened, activated, transfers, audits, closed, reads,
+    handoff: new ConversationHandoff(options),
+    readPropose: (fn: typeof readPropose) => { readPropose = fn },
+    readClick: (fn: typeof readClick) => { readClick = fn } }
 }
 
 test('main confirmed limit proposes design model without relay consent, opens one fresh packet and transfers jobs', async () => {
@@ -112,10 +123,10 @@ test('account change invalidates displayed choice and refreshes; packet modifica
 test('later/stop/switch and restart invalidate stale clicks and in-flight lookup', async () => {
   const f = fixture(), p = (await f.handoff.propose(f.source))!
   const { promise, resolve } = Promise.withResolvers<ExecutionAccount>()
-  f.readAccount(() => promise)
+  f.readClick(() => promise)
   const click = f.handoff.continue(p.proposalId); f.handoff.invalidate('root'); resolve(f.account)
   expect(await click).toBeNull(); expect(f.opened).toEqual([])
-  f.readAccount(async () => structuredClone(f.account))
+  f.readClick(async () => structuredClone(f.account))
   const next = (await f.handoff.propose(f.source))!
   const restarted = new ConversationHandoff(f.options)
   expect(await restarted.continue(next.proposalId)).toBeNull(); expect(restarted.proposals()).toEqual([])
@@ -193,6 +204,42 @@ test('handoff: 클릭 때 지문 다르면 0', async () => {
   expect(f.handoff.proposals()).toMatchObject([{ accountId: 'replacement' }])
 })
 
+// §1-4 ① — 제안 판정과 클릭 판정은 **다른 자리**다. 같은 세대 안에서 계정이 바뀌면 제안 시점
+// 값은 그대로여도 클릭은 새로 읽은 값으로 지문을 대조해야 한다(REVIEW-C4 I-01).
+test('handoff: 클릭은 누를 때마다 새로 읽고 같은 세대 계정 교체를 잡는다', async () => {
+  const f = fixture(), p = (await f.handoff.propose(f.source))!
+  expect(f.reads).toEqual({ propose: 1, click: 0 })
+  const replacement: ExecutionAccount = { ...structuredClone(f.account), accountId: 'replacement' }
+  // 제안 시점 값은 옛 계정 그대로 — 클릭만 새 계정을 본다.
+  f.readClick(async () => structuredClone(replacement))
+  expect(await f.handoff.continue(p.proposalId)).toBeNull()
+  expect(f.opened).toEqual([]); expect(f.transfers).toEqual([]); expect(f.closed).toEqual([])
+  // 누를 때 정확히 1회, 제안 자리는 다시 태우지 않는다.
+  expect(f.reads).toEqual({ propose: 1, click: 1 })
+  // 새로 열린 제안은 **클릭 때 읽은 값**으로 지어진다 — 옛 지문을 되살리면 새 단추도 같은 이유로 실패한다.
+  const refreshed = f.handoff.proposals()[0]
+  expect(refreshed).toMatchObject({ state: 'open', accountId: 'replacement' })
+  expect(refreshed.accountFingerprint).toBe(sha256(JSON.stringify(replacement)))
+  expect(f.reads.propose).toBe(1)
+  // 그 단추는 실제로 눌린다 — 새 제안의 지문이 클릭 값과 같기 때문이다.
+  expect(await f.handoff.continue(refreshed.proposalId)).toMatchObject({ company: 'codex' })
+  expect(f.reads).toEqual({ propose: 1, click: 2 })
+})
+
+// §1-4 ① — 누를 때마다 1회. 두 제안을 각각 누르면 클릭 읽기는 2회이고, 그 사이 상한 자리는 늘지 않는다.
+test('handoff: 두 번 누르면 클릭 읽기도 두 번', async () => {
+  const f = fixture()
+  const second = structuredClone(f.source)
+  second.rootConversationId = 'root-b'; second.root = '/thesis-b'
+  second.owner = { id: 'old-b', sessionId: 'old-session-b', company: 'claude' }
+  const [a, b] = [(await f.handoff.propose(f.source))!, (await f.handoff.propose(second))!]
+  expect(f.reads).toEqual({ propose: 2, click: 0 })
+  expect(await f.handoff.continue(a.proposalId)).not.toBeNull()
+  expect(await f.handoff.continue(b.proposalId)).not.toBeNull()
+  expect(f.reads).toEqual({ propose: 2, click: 2 })
+  expect(f.opened).toHaveLength(2); expect(f.transfers).toHaveLength(2)
+})
+
 // §0-5 2 — `usage:'unknown'` 은 연결이 첫 턴 안 확인을 선언했을 때만 Claude 대상 단추를 연다.
 test('handoff: gateInTurn 없으면 Claude 대상 단추 0', async () => {
   const f = fixture()
@@ -206,6 +253,45 @@ test('handoff: gateInTurn 없으면 Claude 대상 단추 0', async () => {
   expect(await f.handoff.propose(f.source)).toMatchObject({
     entry: { company: 'claude', model: 'opus', effort: 'high', how: 'main' }
   })
+})
+
+// §1-4 ① — 제안이 연 단추는 **같은 판정**으로 눌러야 열린다. `unknown`+첫 턴 확인으로 띄운
+// Claude 단추를 클릭에서 `allowed` 만 보면 아예 열리지 않는다(REVIEW-C4 I-02).
+test('handoff: gateInTurn 단추는 같은 판정으로 눌러진다', async () => {
+  const f = fixture()
+  f.source.entry = { company: 'codex', model: 'gpt-6.1-sol', effort: 'high', how: 'main' }
+  f.account.accountId = 'claude-subscription'
+  f.account.usage = 'unknown'
+  f.account.account = { company: 'claude', subscriptionType: 'max', apiKeySource: 'none',
+    models: [{ model: 'opus', name: 'Opus', efforts: ['high'] }] }
+  f.options.gateInTurn = company => company === 'claude'
+  // 기본 대역 `open` 은 codex 세션을 돌려준다 — 이 인계의 대상 회사는 claude 다.
+  // 기록(`opened`)도 그대로 남겨야 "첫 턴을 실제로 열었는가"를 이 시험이 잠근다.
+  f.options.open = async (request: { id: string; firstMessage: string }): Promise<HandoffOpenResult> => {
+    f.opened.push(request)
+    return { id: request.id, sessionId: 'new-session', company: 'claude', firstTurn: 'ok' }
+  }
+  const p = (await f.handoff.propose(f.source))!
+  expect(p).toMatchObject({ entry: { company: 'claude', model: 'opus', effort: 'high' } })
+  const owner = await f.handoff.continue(p.proposalId)
+  expect(owner).toMatchObject({ company: 'claude', sessionId: 'new-session' })
+  expect(f.opened).toHaveLength(1); expect(f.transfers).toHaveLength(1); expect(f.audits).toHaveLength(1)
+  // 클릭도 새로 읽었다 — 같은 판정을 새 값으로 다시 본다.
+  expect(f.reads).toEqual({ propose: 1, click: 1 })
+})
+
+// §1-4 ① — 선언이 없으면(`false`) 클릭도 닫힌다. 단추가 없는데 눌린 것처럼 넘어가면 안 된다.
+test('handoff: gateInTurn false 면 클릭도 닫힌다', async () => {
+  const f = fixture()
+  f.source.entry = { company: 'codex', model: 'gpt-6.1-sol', effort: 'high', how: 'main' }
+  f.account.accountId = 'claude-subscription'
+  f.account.usage = 'unknown'
+  f.account.account = { company: 'claude', subscriptionType: 'max', apiKeySource: 'none',
+    models: [{ model: 'opus', name: 'Opus', efforts: ['high'] }] }
+  f.options.gateInTurn = () => false
+  expect(await f.handoff.propose(f.source)).toBeNull()
+  expect(f.handoff.proposals()).toEqual([])
+  expect(f.opened).toEqual([]); expect(f.reads.click).toBe(0)
 })
 
 // §0-5 2 — 기준값(beforeHashes)이 없으면 무엇이 바뀌었는지 알 수 없다 — 비우고 `truncated` 로 알린다.

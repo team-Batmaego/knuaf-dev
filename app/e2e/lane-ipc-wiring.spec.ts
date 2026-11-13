@@ -565,7 +565,7 @@ test('fix C1-10: invalidating a folder drops open proposals but keeps archives',
   }
   const handoff = new ConversationHandoff({
     stateDir, maxBytes: 10_000,
-    account: async () => structuredClone(account),
+    account: { propose: async () => structuredClone(account), click: async () => structuredClone(account) },
     open: async request => ({ id: request.id, sessionId: `s-${request.id}`, company: 'codex' as const, firstTurn: 'ok' as const }),
     close: async () => {}, prepareActivation: async () => () => {},
     beginTransition: () => ({ ready: async () => {}, commit: () => true, cancel: () => {}, flush: async () => {} }),

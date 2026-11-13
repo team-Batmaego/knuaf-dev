@@ -600,7 +600,11 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     maxBytes: 24_000,
     // §0-5 4번 — 누르기 **전** 제안 판정은 실행당 회사당 1회만 읽는다(§5). `chat` 은 이 줄보다
     // 뒤에 서므로 콜백 안에서 늦게 부른다(호출 시점엔 이미 서 있다).
-    account: company => chat.laneAccount(company, { once: true }),
+    // 누르는 순간은 다르다 — 그때는 **매번 새로** 읽어야 같은 세대의 계정 교체를 잡는다(REVIEW-C4 I-01).
+    account: {
+      propose: company => chat.laneAccount(company, { once: true }),
+      click: company => chat.laneAccount(company, { fresh: true })
+    },
     // §1-4 ① — `usage:'unknown'` 이어도 넘겨 볼 대상. 앱의 담당 연결 중 첫 턴 안 확인을
     // 실제로 하는 것은 Claude 쪽뿐이다(`claude.ts` `ClaudeRelayConnection.gateInTurn`) —
     // Codex 는 그 선언이 없어 `unknown` 이면 단추를 띄우지 않는다(안전 기본값).

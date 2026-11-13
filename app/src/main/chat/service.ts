@@ -101,7 +101,12 @@ export class ChatService {
    */
   ownedPids(): number[] {
     const pids: number[] = []
-    for (const connection of new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections, ...this.reclaimPending])) {
+    const connections = [...new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections, ...this.reclaimPending])]
+    // 담당 연결은 러너가 소유한다 — 마감을 넘긴 담당은 서비스 맵에 없으므로 여기서 합친다(검토 C4 I-03).
+    for (const connection of this.jobRunner?.unsettledConnections() ?? []) {
+      if (!connections.includes(connection)) connections.push(connection)
+    }
+    for (const connection of connections) {
       if (typeof connection.ownedPids === 'function') pids.push(...connection.ownedPids())
     }
     return pids
@@ -1731,15 +1736,43 @@ export class ChatService {
     }
     await this.invalidate(root)
   }
-  /** 수명 정리 — 러너를 쓰지 않았어도 부르는 자리는 같다. */
-  private async stopJobs(): Promise<void> {
+  /**
+   * 수명 정리의 **동기 절반** — 대상 폴더마다 주문·제안을 닫고 폴더 목록을 돌려준다.
+   *
+   * 예전에는 `stopJobs` 가 폴더마다 `JobRunner.stop` 을 **마감 없이** 기다렸다. 그 안에서 담당
+   * 연결 `stop()` 과 `draining` 이 겹겹이 쌓여 인계 4,209ms·종료 마감을 갉아먹었다
+   * (REVIEW-C4 I-03). 지금은 상태를 먼저 확정하고, 기다림은 `settleJobs` 가 **남은 예산** 안에서만 진다.
+   * 무효화(`invalidate`)도 기다리지 않는다 — 화면 통로라 정리 마감의 이유가 되면 안 된다.
+   */
+  private markJobsStopped(): string[] {
     this.jobsClosing = true
     const roots = new Set<string>(this.jobRoots)
     try { for (const record of this.jobRunner?.records() ?? []) roots.add(record.root) } catch { /* 상태를 못 읽으면 아는 것만 멈춘다 */ }
-    await Promise.allSettled([...roots].map(async root => {
-      try { await this.jobRunner?.stop(root) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: error instanceof Error ? error.message : String(error) })) }
-      await this.invalidate(root)
-    }))
+    for (const root of roots) {
+      try { this.jobRunner?.markStopped(root) } catch (error) { console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: error instanceof Error ? error.message : String(error) })) }
+      // `invalidate` 는 스스로 거절을 삼킨다 — `void` 로 두어도 unhandled rejection 이 나지 않는다.
+      void this.invalidate(root)
+    }
+    return [...roots]
+  }
+  /**
+   * `markJobsStopped` 가 남긴 담당 정리 — **호출자가 준 예산** 안에서만 기다린다.
+   * 마감을 넘긴 담당 연결은 `reclaimPending` 에 넣어 소유권(pid)을 유지하고 돌려준다.
+   */
+  private async settleJobs(roots: readonly string[], deadlineMs: number): Promise<JobConnection[]> {
+    const runner = this.jobRunner
+    if (!runner) return []
+    let settled: { pending: JobConnection[]; failed: unknown[] }
+    try {
+      settled = await runner.settleStopped(roots, deadlineMs)
+    } catch (error) {
+      // `settleStopped` 는 던지지 않는다 — 그래도 정리 실패가 종료를 막지는 않는다.
+      console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: error instanceof Error ? error.message : String(error) }))
+      return []
+    }
+    for (const connection of settled.pending) this.reclaimPending.add(connection)
+    for (const reason of settled.failed) console.error('[knuaf] jobs', JSON.stringify({ type: 'stop', error: reason instanceof Error ? reason.message : String(reason) }))
+    return settled.pending
   }
 
   /**
@@ -1752,7 +1785,8 @@ export class ChatService {
    */
   async closeForUpdate(confirmStopped: () => Promise<void>): Promise<'settled' | 'pending'> {
     // 연결을 끊기 전에 담당·제안을 먼저 멈춘다 — 끊은 뒤에는 멈출 대상이 사라진다(설계 §3.5).
-    await this.stopJobs()
+    // 상태 확정은 **첫 await 전에** 끝난다: 담당 `stop()` 이 안 끝나도 주문·제안은 이미 닫혀 있다.
+    const roots = this.markJobsStopped()
     try {
       for (const connection of [...this.connections.values(), ...this.globals.values()]) this.closingConnections.add(connection)
       this.connections.clear()
@@ -1775,7 +1809,14 @@ export class ChatService {
         list.map((connection, i) => ({ name: `stop:${i}`, start: () => connection.stop() })),
         CLOSE_CONNECTION_DEADLINE_MS
       )
-      if (traced) diag(`closeForUpdate:stop:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+      /**
+       * 담당 정리도 **같은 마감의 남은 예산** 안에서만 기다린다. 예전에는 `stopJobs` 가
+       * 이 3초 **앞에서** 마감 없이 돌아 인계가 4,209ms 에 미완료로 끝났다(REVIEW-C4 I-03).
+       * 주문·제안은 이미 `markJobsStopped` 로 닫혔으므로 여기서는 연결만 정리한다.
+       * 넘긴 담당 연결은 `settleJobs` 가 `reclaimPending` 에 넣는다 — 완료 판정이 그대로 본다.
+       */
+      const jobsPending = await this.settleJobs(roots, Math.max(0, CLOSE_CONNECTION_DEADLINE_MS - stopped.elapsedMs))
+      if (traced) diag(`closeForUpdate:stop:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length} jobs=${jobsPending.length}`)
       if (stopped.pending.length) console.error(`[shutdown] 연결 정리: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
       const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
       for (const connection of pending) this.reclaimPending.add(connection)
@@ -1834,7 +1875,8 @@ export class ChatService {
     this.beginShutdown()
     if (this.pendingTimer) { clearTimeout(this.pendingTimer); this.pendingTimer = null }
     // 러너를 먼저 멈춘다 — 진행 담당 연결이 본대화 연결 정리 뒤에 남지 않게.
-    await this.stopJobs()
+    // 상태 확정은 첫 await 전에 끝난다(REVIEW-C4 I-03): 담당 `stop()` 이 안 끝나도 주문은 닫혀 있다.
+    const roots = this.markJobsStopped()
     const connections = new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])
     /**
      * 연결 정리에도 **상한**을 둔다. 예전에는 이 `Promise.allSettled` 가 `shutdownWithin` **밖**이라
@@ -1850,6 +1892,9 @@ export class ChatService {
       CLOSE_CONNECTION_DEADLINE_MS
     )
     if (traced) diag(`close:connections:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+    // 담당 정리 — 같은 마감의 남은 예산만 쓴다(REVIEW-C4 I-03). 넘긴 연결은 `reclaimPending` 에 들어간다.
+    const jobsPending = await this.settleJobs(roots, Math.max(0, CLOSE_CONNECTION_DEADLINE_MS - stopped.elapsedMs))
+    if (traced && jobsPending.length) diag(`close:jobs:pending n=${jobsPending.length} elapsed=${Date.now() - startedAt}ms`)
     if (stopped.pending.length) console.error(`[shutdown] close: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
     const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
     for (const connection of pending) this.reclaimPending.add(connection)

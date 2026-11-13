@@ -112,7 +112,7 @@ function handoffFixture() {
   }
   const options = {
     stateDir, maxBytes: 10_000,
-    account: async () => structuredClone(account),
+    account: { propose: async () => structuredClone(account), click: async () => structuredClone(account) },
     open: async (request: { id: string }) => ({ id: request.id, sessionId: `s-${request.id}`, company: 'codex' as const, firstTurn: 'ok' as const }),
     close: async () => {},
     prepareActivation: async () => () => {},
@@ -164,7 +164,7 @@ test('later closes a proposal and folder invalidation aborts an in-flight handof
   const gate = Promise.withResolvers<ExecutionAccount>()
   const slow = new ConversationHandoff({
     ...f.options,
-    account: () => gate.promise
+    account: { propose: () => gate.promise, click: () => gate.promise }
   })
   // 앞 제안은 이미 넘긴 것으로 기록돼 다시 열리지 않는다 — 새 인스턴스 상태는 따로다.
   const click = slow.continue(second.proposalId)

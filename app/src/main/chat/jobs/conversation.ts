@@ -92,7 +92,19 @@ interface HandoffState { version: 1; proposals: ConversationProposal[]; attempts
 export interface ConversationHandoffOptions {
   stateDir: string
   maxBytes: number
-  account: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
+  /**
+   * 계정을 읽는 **두 자리** — 두 자리가 같은 함수를 쓰면 한쪽 상한이 다른 쪽 판정을 굳힌다.
+   *
+   * - `propose`: 제안을 그리기 **전** 판정. 실행당 회사당 1회 + 로그인 세대당 1회(§0-5 4번).
+   *   누르기 전에는 숨은 모델 턴·사용량 조회가 없어야 하므로 상한이 필요하다.
+   * - `click`: 단추를 누른 순간의 판정. **누를 때마다 새로** 읽는다 — 제안 시점 값을 재사용하면
+   *   같은 세대에서 계정이 바뀐 것을 놓치고(지문도 옛 값이라 통과한다) 지난 사용량을 근거로
+   *   소유를 넘긴다(REVIEW-C4 I-01).
+   */
+  account: {
+    propose: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
+    click: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
+  }
   /**
    * §1-4 ② — 누르기 전 단추 조건에 쓰는 연결 쪽 선언(㉠). `true` 인 연결만 `usage:'unknown'`
    * 이어도 첫 턴 안 확인으로 넘긴다. 넘기지 않으면 `false`(안전 기본값 = 단추 없음).
@@ -202,19 +214,35 @@ export class ConversationHandoff {
     return structuredClone(this.state.proposals.filter(p => p.state !== 'discarded' && p.state !== 'consumed'))
   }
   proposals(): ConversationProposal[] { return structuredClone(this.state.proposals.filter(p => p.state === 'open')) }
-  async propose(source: HandoffSource): Promise<ConversationProposal | null> {
+  /**
+   * §1-4 ① — `allowed` 면 띄운다. `unknown`(사용량을 모름)이면 **대상이 Claude** 이고 그 연결이
+   * 첫 턴 안 확인을 선언했을 때만 넘긴다 — 넘긴 뒤 첫 턴에서 한도가 드러나면 되돌린다(§1-4 ②).
+   * `limit`·`auth`·`null` 은 단추 없음.
+   *
+   * 제안과 클릭이 **같은** 함수를 쓴다: 두 벌이던 때 클릭은 `usage === 'allowed'` 만 봐서
+   * `unknown`+첫 턴 확인으로 띄운 단추가 누르면 거절됐다(REVIEW-C4 I-02).
+   */
+  private gateAllowed(other: ExecutionAccount | null): boolean {
+    return other?.usage === 'allowed' ||
+      (other?.usage === 'unknown' && other.account.company === 'claude' && this.options.gateInTurn?.('claude') === true)
+  }
+  /**
+   * `known` 은 **이미 읽은 계정**이다 — 클릭이 지문 불일치로 제안을 다시 열 때 쓴다. 그 자리에서
+   * 방금 읽은 값으로 다시 지으면 새 단추도 같은 값으로 판정된다. `propose` 상한(회사당 1회)을
+   * 다시 태우면 옛 값을 되살려 새 단추가 똑같이 실패한다(REVIEW-C4 I-01). `null` 은 "읽었지만
+   * 쓸 수 없다"는 뜻이라 새 제안을 열지 않는다.
+   */
+  async propose(source: HandoffSource, known?: ExecutionAccount | null): Promise<ConversationProposal | null> {
     if (source.reason !== 'limit' || source.entry.how !== 'main') return null
     const rootId = source.rootConversationId
     const generation = this.generations.get(rootId) ?? 0
     const existing = this.state.proposals.find(p => p.rootConversationId === rootId && p.state === 'open')
     if (existing) return structuredClone(existing)
     if (this.reservations.has(rootId)) return null
-    const other = await this.options.account(source.entry.company === 'claude' ? 'codex' : 'claude')
-    // §1-4 ① — `allowed` 면 띄운다. `unknown`(사용량을 모름)이면 **대상이 Claude** 이고 그 연결이
-    // 첫 턴 안 확인을 선언했을 때만 띄운다 — 넘긴 뒤 첫 턴에서 한도가 드러나면 되돌린다(§1-4 ②).
-    // `limit`·`auth`·`null` 은 단추 없음.
-    const gateAllowed = other?.usage === 'allowed' ||
-      (other?.usage === 'unknown' && other.account.company === 'claude' && this.options.gateInTurn?.('claude') === true)
+    const other = known === undefined
+      ? await this.options.account.propose(source.entry.company === 'claude' ? 'codex' : 'claude')
+      : known
+    const gateAllowed = this.gateAllowed(other)
     if ((this.generations.get(rootId) ?? 0) !== generation || !other?.connected || !gateAllowed) return null
     const entry = continueAfterLimit('design', source.entry, other.account,
       { consented: other.consented, basicUsageAllowed: true }, { [other.account.company]: other.account.models })
@@ -266,10 +294,15 @@ export class ConversationHandoff {
       && (this.generations.get(p.rootConversationId) ?? 0) === generation
     let owner: HandoffOpenResult | undefined, transition: OwnerTransition | undefined, committed = false
     let refresh: HandoffSource | undefined
+    /** 클릭 때 읽은 계정 — 지문이 어긋나 새 제안을 열 때 **이 값**으로 다시 짓는다(I-01). */
+    let clicked: ExecutionAccount | null = null
     try {
-      const account = await this.options.account(p.entry.company)
+      // 클릭 판정은 **누를 때마다 새로** 읽는다 — 제안 시점 값(`once`)을 재사용하면 같은 세대에서
+      // 계정이 바뀐 것을 놓치고 옛 사용량으로 소유를 넘긴다(REVIEW-C4 I-01).
+      const account = await this.options.account.click(p.entry.company)
+      clicked = account
       if (!valid()) return null
-      if (!account?.connected || account.usage !== 'allowed' || sha256(JSON.stringify(account)) !== p.accountFingerprint) {
+      if (!account?.connected || !this.gateAllowed(account) || sha256(JSON.stringify(account)) !== p.accountFingerprint) {
         p.state = 'discarded'; this.persist()
         refresh = JSON.parse(readFileSync(p.archivePath, 'utf8')) as HandoffSource
         return null
@@ -314,7 +347,9 @@ export class ConversationHandoff {
         if (this.reservations.get(p.rootConversationId) === controller) this.reservations.delete(p.rootConversationId)
         await transition?.flush()
       }
-      if (refresh && (this.generations.get(p.rootConversationId) ?? 0) === generation) await this.propose(refresh)
+      // 새 제안은 **클릭 때 읽은 값**으로 짓는다 — `propose` 를 다시 태우면 상한(`once`)이 옛 값을
+      // 되살려 새 단추가 같은 이유로 또 실패한다. 읽기는 늘지 않는다(이미 이 클릭이 한 번 읽었다).
+      if (refresh && (this.generations.get(p.rootConversationId) ?? 0) === generation) await this.propose(refresh, clicked)
     }
   }
   /** §4-1 [나중에] — 제안을 접고 아무것도 넘기지 않는다. 줄은 기존 대화 오류 줄로 돌아간다. */
