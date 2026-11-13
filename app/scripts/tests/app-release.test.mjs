@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { archiveTag, assertNoPendingChannelUpdates, cleanupCommands } from '../check-channel-update-state.mjs'
+import { archiveTag, assertNoPendingChannelUpdates, cleanupCommands, readChannelState, runCommand } from '../check-channel-update-state.mjs'
 import { checkSkillReleaseWorkflow } from './check-skill-workflow.mjs'
 import { verifyPublicAsset } from '../check-app-channel.mjs'
 import { buildSignedChannel, releasePage, signingKeyFromEnvironment, verifyAppChannel, verifyAppEnvelope } from '../sign-app.mjs'
@@ -154,6 +154,49 @@ test('an idle run reports the same conflicts without failing', () => {
 test('only an explicit pendingNewRelease=false downgrades a conflict to a warning', () => {
   assert.throws(() => assertNoPendingChannelUpdates(['skill-channel-update'], [], { pendingNewRelease: undefined }), /Open channel PR/)
   assert.throws(() => assertNoPendingChannelUpdates(['skill-channel-update'], [], { pendingNewRelease: 'false' }), /Open channel PR/)
+})
+
+test('the channel guard survives gh replies far past the default 1 MB buffer', () => {
+  // The compare endpoint returns the entire diff between the channel head and main, and
+  // app-channel-v0.6.1 answered 1,537,674 bytes: execFileSync's default ceiling killed the run
+  // with ENOBUFS before the guard judged anything. Both halves are locked here — the ceiling
+  // itself, and the fact that the guard never asks for that much in the first place.
+  const bytes = 3 * 1024 * 1024
+  const big = ['-e', `process.stdout.write('x'.repeat(${bytes}))`]
+  assert.equal(runCommand(process.execPath, big).length, bytes)
+  assert.throws(() => execFileSync(process.execPath, big, { encoding: 'utf8' }), error => error.code === 'ENOBUFS')
+})
+
+test('the channel guard keeps its verdicts on the narrowed gh replies', () => {
+  const mainSha = 'c'.repeat(40)
+  const sha = 'a'.repeat(40)
+  const state = ({ heads = '', refs = '', status = 'ahead' } = {}) => (command, args) => {
+    const joined = args.join(' ')
+    if (command === 'git' && joined.includes('refs/heads/main')) return `${mainSha}\trefs/heads/main`
+    if (command === 'git') return refs
+    if (joined.includes('/pulls?')) return heads
+    return status
+  }
+
+  // Narrowing is what keeps the reply small: no whole-document parse, so no --slurp.
+  const seen = []
+  readChannelState({ repository: 'o/r', run: (command, args) => {
+    seen.push(args.join(' '))
+    return state({ refs: `${sha}\trefs/heads/app-channel-v0.6.1`, status: 'ahead' })(command, args)
+  } })
+  assert.match(seen.find(args => args.includes('/pulls?')), /--jq/)
+  assert.doesNotMatch(seen.find(args => args.includes('/pulls?')), /--slurp/)
+  assert.match(seen.find(args => args.includes('/compare/')), /--jq \.status \/\/ empty$/)
+
+  assert.deepEqual(readChannelState({ repository: 'o/r', run: state({ refs: `${sha}\trefs/heads/skill-channel-update`, status: 'identical' }) }).conflicts, [])
+  assert.throws(() => readChannelState({ repository: 'o/r', run: state({ refs: `${sha}\trefs/heads/app-channel-v0.6.1`, status: 'behind' }) }), /not on main/)
+  assert.throws(() => readChannelState({ repository: 'o/r', run: state({ refs: `${sha}\trefs/heads/app-channel-v0.6.1`, status: 'diverged' }) }), /not on main/)
+  assert.throws(() => readChannelState({ repository: 'o/r', run: state({ heads: 'app-channel-v0.6.2' }) }), /Open channel PR/)
+  // No status from GitHub must never read as "on main": it stays unknown and blocks the run.
+  assert.throws(() => readChannelState({ repository: 'o/r', run: state({ refs: `${sha}\trefs/heads/app-channel-v0.6.1`, status: '' }) }), /not on main/)
+  assert.throws(() => readChannelState({ repository: 'o/r', run: state({ refs: `${sha}\trefs/heads/app-channel-vnext` }) }), /Unexpected app channel branch name/)
+  assert.throws(() => readChannelState({ repository: 'o/r', run: (command, args) => args.join(' ').includes('refs/heads/main') ? `${mainSha}\trefs/heads/main` : args.join(' ').includes('-*') ? `not-a-sha\trefs/heads/app-channel-v0.6.1` : '' }), /Unexpected channel branch reference/)
+  assert.deepEqual(readChannelState({ repository: 'o/r', run: state({ heads: 'app-channel-v0.6.2' }), pendingNewRelease: false }).conflicts.length, 1)
 })
 
 test('the skill-release workflow keeps the guard between planning and reserving work', () => {
