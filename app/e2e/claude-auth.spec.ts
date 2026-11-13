@@ -13,6 +13,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ClaudeConnection, claudeAuthenticationFailed } from '../src/main/chat/claude'
 import { ChatService } from '../src/main/chat/service'
+import { chatConnectionKey } from '../src/main/chat/jobs/key'
 import { skillSource } from '../src/main/agent'
 import { useChat } from '../src/renderer/src/store/chat'
 import { displayState, useConnect } from '../src/renderer/src/store/connect'
@@ -159,6 +160,37 @@ for (const failure of ['rate_limit', 'network']) test(`W1-4: ${failure}는 연�
   } finally { await r.svc.close() }
 })
 
+test('cancelLogin 은 자식이 끝난 뒤에 돌아온다 — 새 로그인이 옛 프로세스와 겹치지 않는다 (RT2-02 덧붙임)', async () => {
+  // 검토 지적: taskkill 을 비동기로 바꾸면서 윈도우에서는 `cancelLogin()` 이 **던지고 즉시**
+  // 반환했고, `reopenLogin()` 의 `await cancelLogin(); await login()` 이 옛 로그인 프로세스가
+  // 아직 살아 있는 채로 새 로그인을 시작할 수 있었다. 지금은 자식의 exit/close 를 기다린다.
+  const r = rig()
+  const connections: unknown = Reflect.get(r.svc, 'globals')
+  if (!(connections instanceof Map)) throw new Error('Missing globals map')
+  const conn = new ClaudeConnection({ binary: r.binary, root: r.root, skill: '', env: r.env, openExternal: async () => {} })
+  Object.assign(conn, { loginProcess: undefined })
+  try {
+    // 가짜 로그인 자식 — 우리가 종료를 통제한다(실제 계정 없음).
+    const { EventEmitter } = require('node:events') as typeof import('node:events')
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null,
+      kill: () => true, stdout: null, stderr: null
+    })
+    Object.assign(conn, { loginProcess: child })
+    let cancelled = false
+    const stopping = conn.cancelLogin().then(() => { cancelled = true })
+    // 아직 자식이 살아 있으므로 취소 약속은 정착하지 않아야 한다.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(cancelled, '자식이 살아 있는데 cancelLogin 이 먼저 돌아왔다').toBe(false)
+    child.exitCode = 0
+    child.emit('exit', 0, null)
+    await stopping
+    expect(cancelled).toBe(true)
+  } finally {
+    await conn.stop()
+  }
+})
+
 test('W1-4: 재로그인 취소·실패는 옛 loggedIn:true로 복구되지 않는다', async () => {
   const r = rig({ W1_LOGIN_FAIL: '1' })
   try {
@@ -171,7 +203,14 @@ test('W1-4: 재로그인 취소·실패는 옛 loggedIn:true로 복구되지 않
     await r.svc.login(r.root, 'claude')
     await expect.poll(() => r.opened.length).toBe(2)
     writeFileSync(r.complete, 'reject fake login')
-    await expect.poll(() => (r.svc as any).connections.get(`${r.root}\0claude`).loginProcess).toBeUndefined()
+    await expect.poll(() => {
+      const connections: unknown = Reflect.get(r.svc, 'connections')
+      if (!(connections instanceof Map)) throw new Error('Missing connection map')
+      const connection: unknown = connections.get(chatConnectionKey(r.root, 'claude'))
+      if (!(connection instanceof ClaudeConnection)) throw new Error('Missing folder Claude connection')
+      const loginProcess: unknown = Reflect.get(connection, 'loginProcess')
+      return loginProcess
+    }).toBeUndefined()
     expect(existsSync(r.state)).toBe(false)
     expect((await r.svc.globalStatus('claude')).connected).toBe(false)
     // 폴더 로그인 실패 뒤 계정 팝오버에서 성공해도 옛 폴더 연결이 복구를 막으면 안 된다.

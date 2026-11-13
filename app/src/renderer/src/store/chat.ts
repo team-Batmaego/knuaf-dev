@@ -138,7 +138,7 @@ interface ChatState {
   onSnapshot: (snapshot: ChatSnapshot) => void
   /**
    * 이 계정이 쓸 수 있는 모델(`model/list`)과 지금 고른 값. 칩 화면이 이 상태만 그리면 된다.
-   * `models: null` 은 아직 안 불러옴, `modelsSupported: false` 는 그 공급자에 통로가 없음(Claude).
+   * `models: null` 은 아직 안 불러옴, `modelsSupported: false` 는 그 공급자에 통로가 없음.
    */
   models: ChatModelInfo[] | null
   modelsSupported: boolean
