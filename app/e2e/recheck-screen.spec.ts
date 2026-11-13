@@ -29,11 +29,18 @@ function userTexts(root: string): string[] {
  *
  * 단추는 대화가 연결되기 전·턴이 도는 동안 잠긴다(`Chat.tsx`). 그대로 누르면 클릭이 풀리지
  * 않거나 전송이 거절돼 메시지가 가지 않는다(실제로 이 시험들이 그렇게 흔들렸다).
+ *
+ * **턴이 도는 동안 그 자리는 `중단` 단추다**(같은 `.chat-composer button.send`, `Chat.tsx:886`).
+ * 잠김만 보면(`toBeEnabled`) 중단 단추가 그대로 통과해, 앞 턴을 죽이고 메시지는 보내지 않는다 —
+ * 맥 CI 43485916574 에서 두 번째 메시지가 사라진 원인이다(클릭 36~40ms 뒤 `stop:connection`).
+ * 그래서 **이름이 `보내기` 인 단추**가 돌아온 것을 기다린 뒤 누른다(대기 시간을 늘리는 것이 아니라
+ * 옳은 상태를 기다리는 것이다).
  */
 async function sendText(page: Page, text: string): Promise<void> {
   const composer = page.locator(COMPOSER)
   const send = page.locator('.chat-composer button.send')
   await expect(composer).toBeVisible({ timeout: 30_000 })
+  await expect(send).toHaveAttribute('aria-label', CHAT.send, { timeout: 30_000 })
   await composer.fill(text)
   await expect(send).toBeEnabled({ timeout: 30_000 })
   await send.click()
@@ -188,6 +195,12 @@ test('목록의 다시 확인 요청 — 그 건이 확인 전으로 돌아가 �
     await expect.poll(() => userTexts(root), { timeout: 30_000 }).toHaveLength(1)
     expect(userTexts(root)[0]).toContain(RECHECK_MARK)
     await expect(page.locator('.recheck-chip')).toHaveCount(0, { timeout: 15_000 })
+    // **그 턴이 끝난 뒤에** 되돌린다. 턴이 끝날 때 앱은 그 턴에 실렸던 건을 다시 `전달됨`으로
+    // 적으므로(`store/edits.ts` `markTurnDone`), 도는 중에 `다시 확인 요청` 을 누르면 그 완료가
+    // 되돌림을 덮어써 다음 메시지에 메모가 안 붙는다(로컬 실측: 두 번째 메시지에 표지 줄 없음).
+    // 대기 시간을 늘리는 것이 아니라 **턴이 끝났다는 상태**를 기다린다 — 단추 자리가 `보내기` 로
+    // 돌아왔다는 것이 그 상태다(`Chat.tsx`, 턴 중엔 같은 자리가 `중단`).
+    await expect(page.locator('.chat-composer button.send')).toHaveAttribute('aria-label', CHAT.send, { timeout: 30_000 })
 
     // 목록에서 그 건에 `다시 확인 요청` 이 보인다 — 누르면 확인 전으로 돌아간다.
     await page.getByRole('button', { name: /^직접 고친 곳/ }).click()

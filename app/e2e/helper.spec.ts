@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { findExecutable } from '../src/main/agent'
+import { HELPER } from '../src/renderer/src/copy'
 import { launch, navTo, openProject, synthProject } from './helpers'
 import { FAKE_CODEX_CLI, writeCliShim } from './fixtures/fake-codex'
 
@@ -74,9 +75,15 @@ test('Codex 로 열면 성공 안내가 Claude 로그인을 말하지 않는다 
     const sheet = page.locator('dialog.sheet[open]').last()
     await expect(sheet).toBeVisible()
     const done = sheet.locator('text=터미널에 AI 도우미 실행을 요청했어요')
-    const codexBtn = sheet.locator('button:has-text("Codex 열기")')
-    await expect(done.or(codexBtn)).toBeVisible({ timeout: 30_000 })
-    if (await codexBtn.isVisible()) await codexBtn.click()
+    // 열기는 **한쪽만 설치돼 있으면 자동으로** 끝난다(`store/project.ts` 의 `openHelper`) — CI 러너처럼
+    // claude 가 없으면 codex 로 바로 열려 성공 안내가 뜬다. 그때 'Codex 열기' 단추는 잠깐 있다가
+    // 안내로 바뀌므로, 보이면 누른다는 판단과 클릭 사이에 단추가 DOM 에서 떨어진다
+    // (맥 CI 43485916574: 'element is not stable' → 'element was detached').
+    // 그래서 단추가 아니라 **어느 갈래로 확정됐는지**를 먼저 기다린다 — 둘 다 있으면 고르는 화면이
+    // 그대로 남고(자동 열기 없음 → 누를 때까지 안 바뀐다), 한쪽만 있으면 안내가 뜬다.
+    const choose = sheet.getByText(HELPER.chooseBody)
+    await expect(done.or(choose)).toBeVisible({ timeout: 30_000 })
+    if (await choose.isVisible()) await sheet.locator('button:has-text("Codex 열기")').click()
     await expect(done).toBeVisible({ timeout: 30_000 })
     await expect(sheet).toContainText('ChatGPT')
     await expect(sheet).toContainText('터미널에 오류가 보이면')
