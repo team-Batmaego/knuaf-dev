@@ -21,6 +21,8 @@
  *   FAKE_CODEX_APPLIED_LOG  `turn/start` 뒤 그 대화에 **실제로 적용된** model·effort — 생략이
  *                           이전 값을 유지하는 계약(턴 덮어쓰기)을 흉내 내는 상태 기록
  *   FAKE_CODEX_TURN_INPUT_LOG  submitted turn text and thread id, one JSON record per turn
+ *   FAKE_CODEX_TURN_PID_LOG  `turn/start` 를 처리한 프로세스 pid, 한 줄씩 — 앱이 지킴이
+ *                           재기동으로 엔진을 갈아 끼운 경우 시험이 "턴을 맡은 엔진"을 특정한다
  *   FAKE_CODEX_DEFAULT_MODEL / FAKE_CODEX_DEFAULT_EFFORT
  *                           새 대화(과 `ephemeral` 대화)의 서버 기본값. 기본 `gpt-default` / `medium`
  *   FAKE_CODEX_INIT_DELAY_MS
@@ -60,6 +62,11 @@
  *   FAKE_CODEX_REQUEST_LOG          온 요청을 `{method, params}` 한 줄씩 남긴다(㉲·㉮ 대조)
  *   FAKE_CODEX_THREAD_START_LOG  `thread/start`·`thread/resume` 로 온 params 를 한 줄씩 남긴다 —
  *                           메인 대화 요청에 역할 config·sub 요청이 **없는지** 시험이 본다.
+ *   FAKE_CODEX_IGNORE_STDIN_EOF  1이면 부모 파이프가 닫혀도 **스스로 죽지 않는다**.
+ *                           기본값(0)이면 지금까지처럼 stdin EOF 에 프로세스가 끝난다 — 앱이
+ *                           엔진을 버리기만 하고 죽이지 않아도(누수) 부모 종료 뒤에는 사라져,
+ *                           "종료 뒤 전부 죽었는가"로는 그 누수를 볼 수 없다. 자식 회수를
+ *                           단언하는 시험(§RT2-04)은 이 노브로 **신호로만** 죽게 만든다.
  */
 import { appendFileSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -93,6 +100,15 @@ const TURN_LOG = process.env.FAKE_CODEX_TURN_LOG ?? ''
 const APPLIED_LOG = process.env.FAKE_CODEX_APPLIED_LOG ?? ''
 const DECISION_LOG = process.env.FAKE_CODEX_DECISION_LOG ?? ''
 const TURN_INPUT_LOG = process.env.FAKE_CODEX_TURN_INPUT_LOG ?? ''
+/** `turn/start` 를 처리한 프로세스의 pid 를 한 줄씩 남긴다 — 프로세스가 갈리면 줄이 늘어난다. */
+const TURN_PID_LOG = process.env.FAKE_CODEX_TURN_PID_LOG ?? ''
+/**
+ * 부모 파이프가 닫혀도 살아 있는다 — 자식 회수를 **신호**로만 할 수 있게 만든다.
+ *
+ * 이게 없으면 앱이 엔진을 버리기만 하고 안 죽여도(누수) 부모가 죽는 순간 자식도 사라져,
+ * "종료 뒤 전부 죽었는가"라는 단언이 누수를 **가린다**. RT2-04 시험은 이 노브를 켠다.
+ */
+const IGNORE_STDIN_EOF = process.env.FAKE_CODEX_IGNORE_STDIN_EOF === '1'
 /** 새 대화에 서버가 실제로 쓰는 기본값 — 앱은 이것을 '되돌리기' 값으로 쓴다. */
 const DEFAULT_MODEL = process.env.FAKE_CODEX_DEFAULT_MODEL ?? 'gpt-default'
 const DEFAULT_EFFORT = process.env.FAKE_CODEX_DEFAULT_EFFORT ?? 'medium'
@@ -444,6 +460,10 @@ function handle(message) {
       // 쪽 나눔은 흉내 내지 않는다(앱은 nextCursor 가 없으면 멈춘다).
       return out({ id, result: { data: MODELS, nextCursor: null } })
     case 'turn/start': {
+      // 이 턴을 **받은 프로세스**의 pid — 시험이 "턴을 맡은 엔진"을 특정한다. 앱은 지킴이
+      // 재기동으로 프로세스를 갈아 끼우므로(§4.1-C PROCESS DISCARD RULE) 먼저 뜬 pid 가
+      // 턴을 맡았다고 가정할 수 없다. 덧붙이기라 갈아 끼운 흔적이 다 남는다.
+      if (TURN_PID_LOG) appendFileSync(TURN_PID_LOG, `${process.pid}\n`)
       if (TURN_INPUT_LOG) {
         const text = (params.input ?? []).filter((item) => item.type === 'text').map((item) => item.text).join('\n')
         appendFileSync(TURN_INPUT_LOG, `${JSON.stringify({ threadId: params.threadId, text })}\n`)
@@ -544,6 +564,18 @@ function handle(message) {
 
 let buffer = ''
 process.stdin.setEncoding('utf8')
+/**
+ * 부모가 파이프를 닫으면(EOF) 지금까지는 이 프로세스가 스스로 끝났다. 그 기본 동작은 회수
+ * 시험의 판정을 **가린다**: 앱이 자식을 죽이지 않고 버리기만 해도 부모가 죽는 순간 사라져
+ * "종료 뒤 전부 죽었는가"가 통과한다. `FAKE_CODEX_IGNORE_STDIN_EOF=1` 이면 EOF 를 무시하고
+ * 신호(SIGTERM/SIGKILL)로만 죽는다 — 그래야 회수 배선의 유무가 관측된다.
+ */
+process.stdin.on('end', () => { if (!IGNORE_STDIN_EOF) process.exit(0) })
+if (IGNORE_STDIN_EOF) {
+  // stdin 이 닫힌 뒤에도 이벤트 루프를 붙잡아 둔다 — 그래야 신호를 받을 때까지 살아 있다.
+  // (stdin 만으로는 'end' 뒤 루프가 비어 프로세스가 스스로 끝난다.)
+  setInterval(() => {}, 2 ** 30)
+}
 process.stdin.on('data', (chunk) => {
   buffer += chunk
   for (let i = buffer.indexOf('\n'); i >= 0; i = buffer.indexOf('\n')) {

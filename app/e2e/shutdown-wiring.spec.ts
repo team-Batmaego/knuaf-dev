@@ -21,8 +21,13 @@ function mainLog(app: ElectronApplication): { read: () => string } {
 }
 
 /**
- * 가짜 엔진 shim — 자기 pid 를 먼저 남기고 서버를 그대로 띄운다. 그래야 시험이
+ * 가짜 엔진 shim — 자기 pid 를 **덧붙이고** 서버를 그대로 띄운다. 그래야 시험이
  * "끝난 뒤에도 그 pid 가 살아 있는가"를 물을 수 있다(자식 회수 확인).
+ *
+ * 덮어쓰지 않는 이유: 지킴이 갈래는 엔진을 갈아 끼운다(§4.1-C PROCESS DISCARD RULE —
+ * `restart()`/`discardProcess()`). 덮어쓰면 마지막 pid 만 남아 **먼저 뜬 엔진이 회수됐는지**를
+ * 물을 수 없고, 반대로 처음 pid 만 잡으면 이미 버려진 프로세스를 '턴을 맡은 엔진'으로 착각한다
+ * (#125 macos 2 실패가 정확히 이 자리였다). 그래서 뜬 엔진 **전부**를 남긴다.
  */
 function pidWritingShim(bin: string, pidFile: string): void {
   const proxy = join(bin, 'codex-proxy.mjs')
@@ -31,8 +36,8 @@ function pidWritingShim(bin: string, pidFile: string): void {
   // `확인 실패`는 이 proxy 가 pid 를 못 남겨 엔진이 안 뜬 결과다). 맥에서는 통과해 숨는다.
   const serverUrl = pathToFileURL(resolve(__dirname, 'fixtures/fake-codex-server.mjs')).href
   writeFileSync(proxy, [
-    `import { writeFileSync } from 'node:fs'`,
-    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
+    `import { appendFileSync } from 'node:fs'`,
+    `appendFileSync(${JSON.stringify(pidFile)}, process.pid + '\\n')`,
     // 동적 import 가 필요하다: 이 파일은 시험이 만들어 **자식 node 프로세스**가 단독 실행하는
     // 스크립트이고, pid 를 먼저 남긴 **뒤에** 가짜 서버를 시작해야 한다(정적 import 는 먼저 실행된다).
     `await import(${JSON.stringify(serverUrl)})`
@@ -47,21 +52,64 @@ function pidWritingShim(bin: string, pidFile: string): void {
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true } catch { return false } }
 
-async function waitAlive(pidFile: string): Promise<number> {
+/**
+ * pid 파일의 완전한 줄들.
+ *
+ * 덧붙이는 중인 마지막 줄은 **잘린 값**일 수 있다(`41057` 을 쓰는 중에 `4105` 로 읽히면 그건
+ * 없는 프로세스다). 그래서 파일이 개행으로 끝나지 않으면 마지막 조각을 버리고, 남은 줄도
+ * 숫자 전체가 맞는 것만 받는다 — 잘린 pid 로 '살아 있다/죽었다'를 물으면 판정이 거짓이 된다.
+ */
+function readPids(file: string): number[] {
+  if (!existsSync(file)) return []
+  const text = readFileSync(file, 'utf-8')
+  const lines = text.split('\n')
+  if (lines.length > 0 && lines[lines.length - 1] !== '') lines.pop()
+  return lines.map((l) => l.trim()).filter((l) => /^\d+$/.test(l)).map(Number)
+}
+
+/** 지금까지 뜬 엔진 pid 전부(뜬 순서, 중복 없음). */
+function spawnedPids(pidFile: string): number[] {
+  return [...new Set(readPids(pidFile))]
+}
+
+/**
+ * 첫 엔진이 뜰 때까지 기다린다. **하나만** 기다린다 — 이 시점 뒤로는 턴을 맡은 엔진이
+ * 누구인지가 문제이고(지킴이 재기동으로 갈릴 수 있다), 그 판정은 `turnServingPid` 가 한다.
+ */
+async function waitSpawned(pidFile: string): Promise<number[]> {
   for (let i = 0; i < 300; i++) {
-    if (existsSync(pidFile)) {
-      const pid = Number(readFileSync(pidFile, 'utf-8').trim())
-      if (pid > 0) return pid
-    }
+    const pids = spawnedPids(pidFile)
+    if (pids.length > 0) return pids
     await new Promise((r) => setTimeout(r, 100))
   }
   throw new Error('가짜 엔진이 뜨지 않았다 — pid 파일이 없다')
 }
 
+/**
+ * 그 턴을 실제로 받은 엔진 pid. 가짜 서버가 `turn/start` 처리 시점에 자기 pid 를 남긴다
+ * (`FAKE_CODEX_TURN_PID_LOG`) — '먼저 뜬 pid' 를 턴 담당으로 가정하지 않는다.
+ */
+async function turnServingPid(turnPidFile: string): Promise<number> {
+  for (let i = 0; i < 300; i++) {
+    const pids = readPids(turnPidFile)
+    if (pids.length > 0) return pids[pids.length - 1]
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  throw new Error('턴을 맡은 엔진 pid 가 기록되지 않았다')
+}
+
 test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오고, 엔진 자식이 남지 않는다 (RT2-03·RT2-04)', async () => {
   const dir = scratch(), bin = join(dir, 'bin')
+  const turnPidFile = join(dir, 'turn.pid')
   // `FAKE_CODEX_HOLD=1` — turn/start 뒤에 턴을 끝내지 않는다. 그 턴이 종료를 붙잡는다.
-  const env = fakeCodexEnv(bin, { FAKE_CODEX_HOLD: '1', FAKE_CODEX_REPLY: replyFile(dir, '홀드된 답') })
+  // `FAKE_CODEX_IGNORE_STDIN_EOF=1` — 엔진이 부모 파이프가 닫혀도 **스스로 죽지 않는다**. 이게 없으면
+  // 앱이 자식을 죽이지 않고 버리기만 해도(누수) 부모가 죽는 순간 사라져 회수 판정이 가려진다.
+  const env = fakeCodexEnv(bin, {
+    FAKE_CODEX_HOLD: '1',
+    FAKE_CODEX_REPLY: replyFile(dir, '홀드된 답'),
+    FAKE_CODEX_TURN_PID_LOG: turnPidFile,
+    FAKE_CODEX_IGNORE_STDIN_EOF: '1'
+  })
   const pidFile = join(dir, 'engine.pid')
   pidWritingShim(bin, pidFile)
   const root = synthProject()
@@ -70,7 +118,7 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
   const log = mainLog(electronApp)
   const diagLog = captureAppLog(electronApp, appLog)
   let closed = false
-  let enginePid = 0
+  let pids: number[] = []
   try {
     await openProject(page, root)
     const chip = page.getByTitle('이 논문의 도우미')
@@ -79,8 +127,14 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     // 턴이 시작됐다 — 이 상태에서 종료하면 예전에는 run 이 영원히 안 끝나 앱이 안 꺼졌다.
     await expect(page.getByRole('button', { name: '중단', exact: true })).toBeVisible()
-    enginePid = await waitAlive(pidFile)
-    expect(alive(enginePid), '가짜 엔진이 살아 있지 않다').toBe(true)
+    // **턴을 맡은** 엔진이 살아 있어야 한다. 지킴이 갈래는 적재 검증을 위해 엔진을 갈아 끼울 수
+    // 있으므로(`restart()`), '먼저 뜬 pid' 가 아니라 `turn/start` 를 실제로 받은 pid 로 묻는다.
+    const serving = await turnServingPid(turnPidFile)
+    expect(alive(serving), `턴을 맡은 엔진이 살아 있지 않다 pid=${serving}`).toBe(true)
+    pids = await waitSpawned(pidFile)
+    expect(pids, '뜬 엔진이 없다').not.toHaveLength(0)
+    // 갈아 끼운 흔적까지 남긴다 — 아래 '전부 죽었는가'의 대상이다.
+    expect(pids, `턴을 맡은 엔진(${serving})이 뜬 엔진 목록에 없다: ${pids.join(',')}`).toContain(serving)
 
     const started = Date.now()
     diagLog.mark('close:start')
@@ -91,9 +145,23 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
     // 마감 10초 + 자식 회수 관측 1.5초 + 여유. 예전 배선이면 여기서 영원히 매달렸다.
     expect(elapsed, `종료가 마감을 넘겨 ${elapsed}ms 걸렸다`).toBeLessThan(45_000)
 
-    // 엔진 자식이 남지 않았는지 **관측**한다(가정하지 않는다).
-    for (let i = 0; i < 40 && alive(enginePid); i++) await new Promise((r) => setTimeout(r, 50))
-    expect(alive(enginePid), `종료 뒤에도 엔진 자식이 살아 있다 pid=${enginePid}`).toBe(false)
+    // **그 실행에서 뜬 엔진 전부**가 죽었는지 관측한다(가정하지 않는다). 처음 pid 만 보면
+    // 지킴이가 갈아 끼운 엔진이 새는 것을 놓친다. 닫은 **뒤에** pid 파일을 다시 읽는다 —
+    // 턴 중에 찍어 둔 목록만 쓰면 그 뒤에 뜬 엔진(재기동·탐침)을 놓친다.
+    // '전부 죽었다'는 판정은 **안정 상태**에서만 한다: 죽음이 확인되면 한 번 더 읽어 새 pid 가
+    // 없을 때까지 반복하므로, 회수 직후에 뜬 프로세스도 다음 바퀴에서 대상이 된다.
+    for (let i = 0; i < 120; i++) {
+      pids = [...new Set([...readPids(pidFile), serving])].sort((x, y) => x - y)
+      if (pids.some(alive)) { await new Promise((r) => setTimeout(r, 50)); continue }
+      await new Promise((r) => setTimeout(r, 100))
+      const again = [...new Set([...readPids(pidFile), serving])].sort((x, y) => x - y)
+      if (again.join(',') === pids.join(',')) { pids = again; break }   // 새 pid 가 없다 = 안정
+      pids = again
+    }
+    const survivors = pids.filter(alive)
+    expect(survivors, `종료 뒤에도 엔진 자식이 살아 있다 pid=${survivors.join(',')}`).toEqual([])
+    // "죽였는가"를 물을 대상이 실제로 있었는지 — 목록이 비면 위 단언은 공허하게 통과한다.
+    expect(pids, '뜬 엔진이 하나도 관측되지 않았다 — 회수 여부를 물을 수 없다').not.toHaveLength(0)
     // 진단은 실제 배선에서 나온 것이어야 한다 — helper 시험에는 이 줄이 없다.
     // "정상 완료" 실행과 강제 마감 실행을 **구별**한다(검토 RT2-04).
     expect(log.read(), '종료 진단 줄이 없다 — before-quit 배선을 확인할 수 없다').toMatch(/\[shutdown\] 정리 완료 \d+ms/)
@@ -101,7 +169,7 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
     if (!closed) {
       try { await electronApp.close() } catch { /* 이미 끝남 */ }
     }
-    if (enginePid && alive(enginePid)) { try { process.kill(enginePid, 'SIGKILL') } catch { /* gone */ } }
+    for (const pid of pids) if (alive(pid)) { try { process.kill(pid, 'SIGKILL') } catch { /* gone */ } }
   }
 })
 
