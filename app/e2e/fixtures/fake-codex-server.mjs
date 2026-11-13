@@ -28,6 +28,8 @@
  *   FAKE_CODEX_EPHEMERAL_FAIL_TIMES
  *                           기본값 조회용 `thread/start(ephemeral:true)` 를 그 횟수만큼 오류로 거절한다
  *   FAKE_CODEX_MODELS_FAIL_TIMES  모델 목록 조회를 처음 N회 오류로 거절한다(복구 UI 시험).
+ *   FAKE_CODEX_THREAD_START_LOG  `thread/start`·`thread/resume` 로 온 params 를 한 줄씩 남긴다 —
+ *                           메인 대화 요청에 역할 config·sub 요청이 **없는지** 시험이 본다.
  */
 import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -43,6 +45,12 @@ const ASK_COMMAND = process.env.FAKE_CODEX_ASK_COMMAND ?? 'cat /etc/hosts'
 const ASK_REASON = process.env.FAKE_CODEX_ASK_REASON ?? '논문 폴더 밖 파일을 읽으려고 해요'
 const FILE_EVENTS = process.env.FAKE_CODEX_FILE_EVENTS
 const FILE_AFTER = process.env.FAKE_CODEX_FILE_AFTER
+/**
+ * 메인이 스스로 띄운 하위 담당 장면(설계 §3.2 Codex·§5-7). JSON 알림 배열을 그대로 내보낸 뒤
+ * 턴을 정상으로 끝낸다 — 앱이 그 알림을 기록·알림으로만 쓰고 대화(agentMessage)에는 넣지
+ * 않는지 본다. 승인 카드를 만들지 않는 것이 `FAKE_CODEX_FILE_EVENTS` 와 다르다.
+ */
+const SUBAGENT_EVENTS = process.env.FAKE_CODEX_SUBAGENT_EVENTS
 /** 턴이 끝나기 전에 보낼 알림 — 셸 명령 결과(`commandExecution`)의 출력을 시험한다. */
 const COMMAND_EVENTS = process.env.FAKE_CODEX_COMMAND_EVENTS
 /** 응답 지연(ms) — 느린 기계(CI) 조건을 만들기 위한 시험 전용 스위치. 기본 0(동작 불변). */
@@ -173,6 +181,9 @@ function handle(message) {
     }
     case 'thread/start':
     case 'thread/resume': {
+      if (process.env.FAKE_CODEX_THREAD_START_LOG) {
+        appendFileSync(process.env.FAKE_CODEX_THREAD_START_LOG, `${JSON.stringify({ method: message.method, params })}\n`)
+      }
       // `ephemeral` 은 앱이 '서버 기본값'을 물을 때 쓴다 — 디스크에 남지 않는 대화 하나.
       if (params.ephemeral === true) {
         if (ephemeralFailures > 0) {
@@ -240,6 +251,11 @@ function handle(message) {
           threadId, turnId, itemId: 'file-1', startedAtMs: 1, reason: null, grantRoot: null
         } })
         if (FILE_AFTER) setTimeout(() => { for (const event of JSON.parse(FILE_AFTER)) out(event) }, 50)
+        return
+      }
+      if (SUBAGENT_EVENTS !== undefined) {
+        for (const event of JSON.parse(SUBAGENT_EVENTS)) out(event)
+        out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } })
         return
       }
       if (ASK) {
