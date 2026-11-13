@@ -151,7 +151,28 @@ pnpm install
 KNUAF_PYTHON=$(which python3.13) pnpm dev          # stage 호환 게이트 → compose 묶음으로 개발 실행
 pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
+node scripts/e2e-shards.mjs --check                # e2e 샤드 묶음표(e2e/shards.json)가 실제 스펙을 다 덮는지
 ```
+
+CI는 e2e를 OS × 샤드로 나눠 돕니다(윈도 5개, 맥 2개). 한 샤드만 로컬에서 돌려 보려면 `node scripts/e2e-shards.mjs windows 3`
+또는 `node scripts/e2e-shards.mjs macos 1`을 씁니다. `e2e/**/*.spec.ts`(하위 폴더 포함)를 새로 추가하면 `--check`가
+실패하므로 그 파일을 `e2e/shards.json`의 한 샤드에 넣어야 합니다(넣지 않으면 CI에서 조용히 안 도는 대신 검사
+단계가 먼저 막습니다). 표에는 `e2e/` 접두와 `.spec.ts` 확장자를 뺀 이름을 적습니다 — `e2e/docx-zip.spec.ts`는
+`docx-zip`, `e2e/sub/foo.spec.ts`는 `sub/foo`입니다.
+
+Electron 시험은 `await electronApp.close()` 대신 `await closeApp(electronApp, log)`로 앱을 닫습니다.
+Playwright의 `close()`는 앱 종료가 아니라 **런치 래퍼 프로세스의 `close` 이벤트**를 무타임아웃으로
+기다리므로(윈도우 래퍼는 `shell: true`의 `cmd.exe`), 래퍼가 안 죽으면 앱이 정상 종료해도 시험이 매달립니다.
+`closeApp`은 상한(기본 20초)을 두고 넘기면 프로세스 트리를 강제 정리하며, 그 사실을 `close:force`로
+`app-log.txt`에 남깁니다. 강제 정리마저 실패하면 `close:force-failed <이유>`를 남기고 그 시험을
+**실패로 드러냅니다**(잔류 프로세스를 통과로 덮지 않음). `close()` 자체의 거절은 `close:rejected`로만
+남기고 시험을 깨뜨리지 않습니다. `close:end`도 이 함수가 어느 갈래에서나 남기므로 `captureAppLog`의
+5초 헬스비트가 워커 종료까지 돌지 않습니다.
+강제 종료는 `killPlan(pid)`이 만드는 **계획**과 `forceKill` 실행기가 나뉘어 있어, `e2e/close-app.spec.ts`는
+실제 `taskkill`·`kill` 없이 명령·pid·옵션(`/T /F`, timeout)과 실패 갈래를 단언합니다. 회귀 시험에서
+실제 프로세스를 건드리지 마세요 — 사설 pid 로 `taskkill`을 돌리면 러너의 무관한 프로세스가 죽습니다.
+브라우저를 실제로 띄우는 시험은 `stubExternal(electronApp)`을 `try` **안에서** 부릅니다(정리 누락 방지,
+기록을 남기지 않으므로 `shellCalls(log)`를 정확 배열로 단언하는 시험과 충돌하지 않습니다).
 
 `pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
 별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
@@ -187,7 +208,7 @@ Electron E2E는 각 실행의 시험 output에 `doctor-<시각>.jsonl`을 남깁
 개별 현재/프로젝트 import·Kordoc·history·마지막 임시 파일 순회 구간의 소요를 request_id·pid로 구분합니다.
 학생 경로·본문·RPC payload·환경변수는 기록하지 않습니다. 끝이 없는 start가 있으면 그 단계가 미완료인 증거이며,
 이 기록만으로 특정 Windows 하위 원인을 미리 단정하지 않습니다. CI 실패 아티팩트에 JSONL이 함께 보존되며,
-Windows는 성공 여부와 관계없이 `doctor-timings-windows` 아티팩트로도 올립니다.
+Windows는 성공 여부와 관계없이 `doctor-timings-windows-<샤드>` 아티팩트로도 올립니다.
 
 `navTo(page, '자료' | '결과물')`는 종이 머리의 `head-materials` / `head-files` 단추와 그 단추의
 팝오버만 대상으로 삼습니다. 열린 자료 목록 안의 **파일 고르기…**도 `/파일/`에 걸리므로,
@@ -276,7 +297,9 @@ S0는 동봉 묶음의 `skill.json` 판/API를 읽으며 암묵적 1.0.0 추정�
 - 서명 job은 `skill-release` 환경의 기존 `SKILL_SIGNING_PRIVATE_KEY`만 사용합니다. 개인키에서 계산한 공개키의 DER 바이트를 앱의 `current` 공개키와 비교하며, 값은 출력하지 않습니다. 불일치하면 서명 전에 실패합니다.
 - 키 비교 기준에는 시점 차이가 있습니다. 준비 job은 checkout 시점 `origin/main`의 `keys.ts`를 태그와 비교하지만, 서명 job은 실행 시작 시점 `github.sha`의 키를 사용합니다. 실행 시작부터 채널 PR 반영 완료까지 `keys.ts` 변경을 머지하지 마세요. 이 구간에 키 변경이 있었다면 실행 결과를 채널에 반영하지 말고, 키 변경이 반영된 `main`에서 새로 실행하세요. 이는 운영상 동결 규칙이며 시점 차이를 코드로 제거한 것은 아닙니다.
 - 성공 시 워크플로는 `app-channel-v<V>` 갈래만 push합니다. PR은 사람이 열고, 자동 PR·태그·릴리스 생성은 하지 않습니다. 열린 채널 PR 또는 `main`에 아직 포함되지 않은 채널 갈래가 있으면 실행을 멈춥니다.
-- `skill-release`의 정기 실행은 열린 앱·스킬 채널 PR이 있으면 새 작업 없이 정상 종료합니다. 수동 실행은 기존처럼 실패하며, 열린 채널 PR 없이 미병합 갈래만 남은 경우에는 정기 실행도 실패합니다. 상태 검사기는 로컬 `origin/main` 없이 원격 main SHA를 조회하므로 SHA만 받은 깊이 1 checkout에서도 동작합니다.
+- `skill-release`는 먼저 새로 게시할 판이 있는지 계산하고, 그다음 채널 상태를 검사합니다. **게시할 새 판이 있는데** 열린 앱·스킬 채널 PR이 남아 있거나 `main`에 들어가지 않은 채널 갈래가 있으면 실행은 실패합니다. 게시할 새 판이 없으면 같은 상태에서도 정기 실행은 초록으로 끝나며, 채널 충돌은 로그와 실행 요약에 경고로만 남습니다. 따라서 초록만 보고 끝내지 말고 요약의 경고를 확인하세요. 게시할 새 판이 있는 실행은 경고로 빠져나가지 못하고 반드시 실패합니다. 상태 검사기는 로컬 `origin/main` 없이 원격 main SHA를 조회하므로 SHA만 받은 깊이 1 checkout에서도 동작합니다.
+- 채널 PR이 사라졌는데 갈래만 남아 실행이 막히면, 그 갈래는 미머지·닫힌 제안이거나 squash/rebase 뒤 `main`에 포함되지 않은 커밋일 수 있습니다(자동 삭제는 없습니다). 책임자가 필요한 변경의 반영 여부를 확인한 뒤 갈래 머리의 **전체 SHA**(`<FULL>`, 원격에서 조회한 값)를 태그 대상으로 고정해 보관하고, 원격 태그가 같은 전체 SHA를 가리키는 것을 확인한 뒤에만 원격 갈래를 지웁니다. 로컬 `origin/<branch>` 추적 참조는 옛 제안을 가리킬 수 있으므로 쓰지 않고, 태그 이름의 짧은 SHA(`<sha7>`)는 이름 충돌만 막습니다. 가벼운 태그(annotated 금지)여야 `ls-remote`가 그 커밋의 SHA를 그대로 보여 줍니다: `git fetch origin <FULL> && test "$(git rev-parse FETCH_HEAD)" = <FULL> && git tag archive/<branch>-<sha7> <FULL> && git push origin refs/tags/archive/<branch>-<sha7> && test "$(git ls-remote origin refs/tags/archive/<branch>-<sha7> | cut -f1)" = <FULL> && git push origin --delete <branch>`. `--force`·`--force-with-lease`는 쓰지 않습니다. 같은 이름 태그가 이미 다른 커밋을 가리키면 push가 거부되므로 멈추고 사람이 확인합니다. 실패 로그와 실행 요약이 같은 명령을 출력합니다.
+- `publish` 잡은 `skill-release` 환경 승인 뒤에만 시작합니다. 승인 전에는 릴리스도 채널 갈래도 만들어지지 않으므로, 실행이 오래 "대기 중"으로 보이면 승인 화면을 확인합니다. `skill-channel-update` 갈래는 다음 릴리스에도 재사용되므로 이름이 있다는 것만으로 이번 판이 push됐다고 보면 안 됩니다. 자동 PR 생성이 저장소 정책으로 거부되면 실행 요약은 원격 갈래의 `updates/channel.json`·`app/skill-source.json` blob SHA를 이번 제안과 비교해 세 갈래로 알려 줍니다: (a) 같으면 릴리스와 갈래는 이번 판으로 끝났고 PR만 없으므로 요약의 `gh pr create --head skill-channel-update --base main`을 사람이 실행합니다. (b) 다르면 이전 제안이 남은 것이므로 그 갈래에 이번 판이 반영됐는지 먼저 확인하고, 반영되지 않았다면 옛 갈래를 위 절차로 보관·삭제한 뒤 릴리스 자산을 확인하고 새 실행으로 다시 시도합니다. (c) 조회가 실패했거나(403·503·통신 오류) 원격에 갈래가 없음이 확인되면 push 완료를 단정하지 않고, 갈래 부재가 확인된 경우에만 릴리스만 공개된 것으로 보고 새 실행으로 다시 시도합니다.
 - 앱·스킬 채널 PR은 **merge commit**으로 머지합니다(squash/rebase 금지). squash/rebase로 원래 갈래 커밋이 `main`에 포함되지 않으면 다음 채널 실행이 안전상 중단됩니다. 이 경우 책임자가 채널 반영을 확인하고 남은 갈래를 정리한 뒤 재실행합니다.
 - PR 전에는 `updates/channel.json`의 앱 항목 외 내용, 특히 기존 `skill` 항목이 `main`과 같은지 확인합니다. 0.6.0은 채널 변경을 릴리스 공개 전에 머지하고, 공개 직후 아래 검사를 실행해 결과를 기록합니다. 0.6.1부터는 공개 뒤 자산 검사를 통과하고 그 결과를 PR에 첨부한 후 머지합니다.
 

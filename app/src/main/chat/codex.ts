@@ -1,12 +1,13 @@
 import { MODEL_SELECTION_COPY } from '../../shared/copy'
 import { randomUUID } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { JsonRpcProcess } from './transport'
 import { applyRejection, recordRejection } from './rejectLog'
 import { codexTokens, tokenRecord, type TokenCounts } from './jobs/tokens'
 import { appendTokenRecord } from './jobs/token-log'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
+import { writeFileAtomic } from '../safeWrite'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
@@ -103,6 +104,23 @@ export class CodexConnection implements AgentConnection {
   private stopped = false
   /** 이 턴에 **실제로 적용된** model·effort 와 턴 식별자 — 기록의 귀속 기준(검토 CT-02). */
   private turnTokens?: { key: string; model: string; effort: string | null }
+  /**
+   * 메인이 스스로 띄운 하위 담당(설계 §3.2 Codex 열, §5-7). 앱에는 부모의 도구 호출을 막을
+   * 관문이 없으므로 **기록·알림까지만** 한다. 담당 thread id → 띄울 때 요청한 model·effort.
+   * 실제 model·effort 는 `subAgentActivity` 가 알려 준다(F6).
+   */
+  private subagents = new Map<string, { model: string | null; effort: string | null }>()
+  /**
+   * 아직 자식 thread id 를 못 받은 spawn 호출 — 키는 `<부모 thread>:<호출 item id>`.
+   *
+   * 왜 미뤄 두는가: 엔진은 `item/started` 에서 **새 thread id 를 아직 모른다**(`CollabAgentSpawnBeginEvent`
+   * 에는 그 필드가 없고 `CollabAgentSpawnEndEvent` 에만 `new_thread_id` 가 있다). 그래서
+   * 시작 알림의 `receiverThreadIds` 는 비어 있고 완료 알림에서야 채워진다 — 시작에서 곧바로
+   * "처리됨"으로 닫으면 그 id 를 버려 요청값↔실제값 대조가 깨진다(검토 U5b 중요 2).
+   */
+  private pendingSpawns = new Map<string, { model: string | null; effort: string | null }>()
+  /** 실제값을 이미 기록한 담당 thread — `subAgentActivity` 가 started 로 두 번 와도 한 번만. */
+  private recordedActivities = new Set<string>()
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
   }
@@ -134,6 +152,83 @@ export class CodexConnection implements AgentConnection {
       })
     } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
+  /**
+   * 하위 담당 알림 하나를 보고 기록한다. **대화에는 아무것도 넣지 않는다** — 담당의 말·도구
+   * 출력은 학생 화면의 대화로 섞이지 않고(§8), 기록·알림만 남는다.
+   *
+   * 근거(동봉본 스키마): `collabAgentToolCall` 은 부모 thread 의 turn item 이고
+   * `tool: spawnAgent|sendInput|resumeAgent|wait|closeAgent|sendMessage|followupTask|
+   * interruptAgent|listAgents`, `receiverThreadIds`·`model`·`reasoningEffort` 를 든다.
+   * `subAgentActivity` 는 담당 thread 의 item 이고 `kind: started|interacted|interrupted|
+   * completed`, `agentThreadId`·`model`·`reasoningEffort` 를 든다.
+   */
+  private observeSubagent(p: unknown): void {
+    if (!p || typeof p !== 'object') return
+    const threadId = 'threadId' in p && typeof p.threadId === 'string' ? p.threadId : ''
+    const item = 'item' in p && p.item && typeof p.item === 'object' ? p.item : null
+    if (!item) return
+    const type = 'type' in item ? item.type : undefined
+    const id = 'id' in item && typeof item.id === 'string' ? item.id : ''
+    if (type === 'collabAgentToolCall' && 'tool' in item && item.tool === 'spawnAgent') {
+      this.observeSpawn(threadId, id, item)
+    } else if (type === 'subAgentActivity' && 'kind' in item && item.kind === 'started') {
+      this.observeActivity(item)
+    }
+  }
+  /**
+   * spawn 호출 하나. 자식 thread id 가 아직 없으면 **보류**하고, 완료 알림에서 채워진다.
+   * 알림은 spawn 이 처음 확인될 때 한 번, 기록은 id 가 확정될 때 한 번 남긴다.
+   */
+  private observeSpawn(threadId: string, itemId: string, item: object): void {
+    const key = `${threadId}:${itemId}`
+    const model = 'model' in item && typeof item.model === 'string' && item.model ? item.model : null
+    const effort = 'reasoningEffort' in item && typeof item.reasoningEffort === 'string' && item.reasoningEffort ? item.reasoningEffort : null
+    const raw = 'receiverThreadIds' in item && Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []
+    const receivers = raw.filter((v: unknown): v is string => typeof v === 'string' && v !== '')
+    const pending = this.pendingSpawns.get(key)
+    // 학생 화면에는 알리지 않는다(형님 11-13: 한도·요금 문구 빼기) — 아래 기록만 남긴다.
+    // 담당의 중간 말도 대화에 넣지 않는다(§8).
+    if (receivers.length === 0) {
+      // 시작 알림: 아직 id 가 없다. 요청값만 붙들어 둔다.
+      this.pendingSpawns.set(key, { model, effort })
+      return
+    }
+    // 완료 알림 — 붙들어 두었던 요청값을 지우고 id 를 확정한다(없으면 넘어온 값을 쓴다).
+    if (pending) this.pendingSpawns.delete(key)
+    const requested = {
+      model: model ?? pending?.model ?? null,
+      effort: effort ?? pending?.effort ?? null
+    }
+    for (const thread of receivers) this.subagents.set(thread, requested)
+    this.recordSubagent({ event: 'spawned', threadIds: receivers, requestedModel: requested.model, requestedEffort: requested.effort })
+  }
+  /** 담당의 실제 model·effort 확인(`subAgentActivity`). 같은 담당은 한 번만 기록한다. */
+  private observeActivity(item: object): void {
+    const thread = 'agentThreadId' in item && typeof item.agentThreadId === 'string' ? item.agentThreadId : ''
+    const activityId = 'id' in item && typeof item.id === 'string' ? item.id : ''
+    const key = activityId || thread
+    if (!key || this.recordedActivities.has(key)) return
+    this.recordedActivities.add(key)
+    const requested = this.subagents.get(thread) ?? { model: null, effort: null }
+    const model = 'model' in item && typeof item.model === 'string' && item.model ? item.model : null
+    const effort = 'reasoningEffort' in item && typeof item.reasoningEffort === 'string' && item.reasoningEffort ? item.reasoningEffort : null
+    this.recordSubagent({ event: 'resolved', threadIds: [thread], requestedModel: requested.model, requestedEffort: requested.effort, actualModel: model ?? 'unverified', actualEffort: effort })
+  }
+  /**
+   * `audit/model-routing/` 에 한 줄 남긴다 — 스킬의 담당 기록 계약(model-routing.md)과 같은
+   * 자리다. JobRunner 도 같은 폴더에 쓴다. **던지지 않는다** — 기록을 못 남겼다고 대화가
+   * 멈추면 학생은 이유도 모른 채 답을 잃는다.
+   */
+  private recordSubagent(data: { event: 'spawned' | 'resolved' } & Record<string, unknown>): void {
+    try {
+      const dir = join(this.options.root, 'audit', 'model-routing')
+      mkdirSync(dir, { recursive: true })
+      const name = `subagent-${randomUUID()}.json`
+      writeFileAtomic(join(dir, name), JSON.stringify({
+        type: `subagent-${data.event}`, provider: 'codex', at: new Date().toISOString(), ...data
+      }))
+    } catch { /* 기록 자리는 최선 노력 — 대화 흐름을 막지 않는다 */ }
+  }
   private async connect(): Promise<JsonRpcProcess> {
     if (this.stopped) throw new Error('Codex 연결이 중단됐어요.')
     /**
@@ -163,6 +258,9 @@ export class CodexConnection implements AgentConnection {
           this.loginConfirmed = p.success === true
         }
       }
+      // 하위 담당은 **다른 thread** 에서 온다 — 아래 thread 거르기 전에 본다. 이 알림은
+      // 대화에 섞지 않고 기록·알림으로만 남긴다(§3.2 Codex, §5-7, §8).
+      if (method === 'item/started' || method === 'item/completed') this.observeSubagent(p)
       if (p?.threadId && p.threadId !== this.thread) return
       if (method === 'item/started' && p.item?.type === 'fileChange') {
         this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
@@ -217,7 +315,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.2' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.3' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
@@ -495,6 +593,11 @@ export class CodexConnection implements AgentConnection {
     const pending = this.pendingFileApprovals.get(id)
     if (pending) this.fileChanges.delete(pending.key)
     this.pendingFileApprovals.delete(id)
+  }
+  /** 앱이 띄운 엔진 pid — 종료 마감 뒤 회수 대상(검토 RT2-03). 종료 동작은 바꾸지 않는다. */
+  ownedPids(): number[] {
+    const pid = this.rpc?.closed === false ? this.rpc.pid : undefined
+    return typeof pid === 'number' && pid > 0 ? [pid] : []
   }
   async stop() {
     this.stopped = true

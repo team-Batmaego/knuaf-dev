@@ -6,6 +6,7 @@ import type { RpcError, SidecarInfo } from '../shared/types'
 import { choosePython, scriptsDir, sidecarDir } from './python'
 import { skillSwitch } from './update/switch'
 import { agentActivity } from './update/activity'
+import { diag } from './diagLog'
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: RpcError) => void; onEvent?: (event: string, data: unknown) => void }
 type OwnedProcess = {
@@ -67,6 +68,26 @@ export class Sidecar extends EventEmitter {
     return this.enqueue(() => stopped)
   }
 
+  /**
+   * 종료 전용 정지 — **큐를 기다리지 않는다**(검토 RT2-03).
+   *
+   * `stop()` 은 큐에 줄을 서서 반환값이 늦어질 수 있다. 그래서 앱 종료 마감에서 그것을 보면
+   * 실제 종료 실패(`sidecar_stop_failed`·`sidecar_stop_timeout`)가 `pending` 으로 가려졌다.
+   * 여기서는 같은 일(진행 중 시작 취소 + `stopNow`)을 하되 결과 약속을 그대로 돌려준다 —
+   * 실패는 호출자에게 **정착한 실패**로 보인다. 정지의 자체 상한은 `stopNow` 의 6초 그대로다.
+   */
+  stopForExit(): Promise<void> {
+    ++this.stopVersion
+    this.abortStart?.(START_CANCELLED)
+    diag(`sidecar:stopForExit pid=${this.owner?.child.pid ?? '없음'} exited=${this.owner?.exited} closed=${this.owner?.closed}`)
+    return this.stopNow()
+  }
+
+  /** 앱이 소유한 자식 pid — 마감 뒤 마지막 트리 종료 시도와 진단 줄에 쓴다. */
+  ownedPids(): number[] {
+    const pid = this.owner?.child.pid
+    return typeof pid === 'number' && pid > 0 ? [pid] : []
+  }
   private async configureNow(projectRoot: string | null, override: string | null, version: number): Promise<SidecarInfo> {
     if (version !== this.stopVersion) throw START_CANCELLED
     this.projectRoot = projectRoot
@@ -226,6 +247,9 @@ export class Sidecar extends EventEmitter {
     const owner = this.owner
     if (!owner) return
     if (owner.failure && (owner.exited || owner.closed)) throw this.stopFailure(owner)
+    // 진단: 여기서 멈추면 10초 마감이 아니라 이 6초 안에서 결판난다 — 어느 게이트에서 멈췄는지 남긴다.
+    const startedAt = Date.now()
+    diag(`sidecar:stop:start pid=${owner.child.pid ?? '없음'} exited=${owner.exited} closed=${owner.closed}`)
     const proc = owner.child
     owner.stopping = true
     this.info.running = false
@@ -240,6 +264,7 @@ export class Sidecar extends EventEmitter {
       clearTimeout(grace)
       clearTimeout(deadline)
       proc.removeListener('close', onClose)
+      diag(`sidecar:stop:finish error=${error ? error.code : '없음'} tree=${owner.tree} exited=${owner.exited} closed=${owner.closed} elapsed=${Date.now() - startedAt}ms`)
       if (error) {
         owner.failure = error
         reject(this.stopFailure(owner))
@@ -253,6 +278,7 @@ export class Sidecar extends EventEmitter {
       if (owner.closed && owner.tree !== 'pending' && owner.tree !== 'failed') finish()
     }
     const grace = setTimeout(() => {
+      diag(`sidecar:stop:grace-3s tree=${owner.tree} exited=${owner.exited} closed=${owner.closed} elapsed=${Date.now() - startedAt}ms`)
       // An exited launcher PID may be reused; never target it to find lost children.
       if (owner.exited || !proc.pid) return
       if (process.platform !== 'win32') {
@@ -271,6 +297,7 @@ export class Sidecar extends EventEmitter {
         killer = spawn(join(systemRoot, 'System32', 'taskkill.exe'), ['/PID', String(proc.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' })
         killer.once('error', (error) => { if (!finished) failed(String(error)) })
         killer.once('exit', (code) => {
+          diag(`sidecar:stop:taskkill-exit code=${code} elapsed=${Date.now() - startedAt}ms`)
           if (finished) return
           if (code !== 0) { failed(`taskkill exited (${code})`); return }
           owner.tree = 'confirmed'
@@ -280,6 +307,7 @@ export class Sidecar extends EventEmitter {
       } catch (error) { failed(String(error)) }
     }, 3000)
     const deadline = setTimeout(() => {
+      diag(`sidecar:stop:deadline-6s tree=${owner.tree} exited=${owner.exited} closed=${owner.closed} elapsed=${Date.now() - startedAt}ms`)
       if (owner.tree === 'pending') owner.tree = 'failed'
       finish({ code: 'sidecar_stop_timeout', message: 'sidecar shutdown was not confirmed within 6000ms' })
       try { killer?.kill('SIGKILL') } catch { /* original sidecar ownership remains quarantined */ }

@@ -11,6 +11,8 @@ export class JsonRpcProcess {
   private seq = 0
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   closed = false
+  /** 자식 pid — 종료 마감 뒤 회수 대상 목록에 넣기 위한 읽기 전용 값(동작 불변). */
+  get pid(): number | undefined { return this.child.pid }
   /** 자식이 왜 죽었는지는 stderr 에만 남는다. 진단용으로 꼬리만 보관한다(무한 증가 금지). */
   lastStderr = ''
   onNotification: (method: string, params: any) => void = () => {}
