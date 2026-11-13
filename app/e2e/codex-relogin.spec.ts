@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, openProject, synthProject } from './helpers'
+import { closeApp, launch, openProject, stubExternal, synthProject } from './helpers'
 import { captureAppLog } from './diag'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 
@@ -16,6 +16,8 @@ for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'e
     const root = synthProject()
     seedChat(root, [{ id: 'previous', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
     try {
+      // 앱 호출이 실패해도 반드시 정리로 가야 한다 — try 밖에 두면 finally 가 안 돈다(검토 I-02).
+      await stubExternal(electronApp)
       await openProject(page, root)
       const chip = page.getByTitle('이 논문의 도우미')
       await expect(chip).toContainText('연결됨')
@@ -60,8 +62,7 @@ for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'e
       const saved = JSON.parse(readFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), 'utf8'))
       expect(saved.messages.some((m: { id: string }) => m.id === 'previous')).toBe(true)
     } finally {
-      log.mark('close:start')
-      await electronApp.close()
+      await closeApp(electronApp, log)
     }
   })
 }
@@ -73,6 +74,7 @@ test('연결된 두 회사에서 다시 로그인을 시작하고 취소할 수 
   const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
   const log = captureAppLog(electronApp, appLog)
   try {
+    await stubExternal(electronApp)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')
     await chip.click()
@@ -89,8 +91,7 @@ test('연결된 두 회사에서 다시 로그인을 시작하고 취소할 수 
     await codex.getByRole('button', { name: '취소' }).click()
     await expect(codex).toContainText('연결됐어요')
   } finally {
-    log.mark('close:start')
-    await electronApp.close()
+    await closeApp(electronApp, log)
   }
 })
 
@@ -101,14 +102,14 @@ test('로그인 응답 직후 도착한 완료 알림도 새 시도의 id에 맞
   const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
   const log = captureAppLog(electronApp, appLog)
   try {
+    await stubExternal(electronApp)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')
     await chip.click()
     await page.getByRole('button', { name: 'ChatGPT 다시 로그인' }).click()
     await expect(chip).toContainText('연결됨', { timeout: 10000 })
   } finally {
-    log.mark('close:start')
-    await electronApp.close()
+    await closeApp(electronApp, log)
   }
 })
 
@@ -121,6 +122,7 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
   const root = synthProject()
   seedChat(root, [{ id: 'previous', role: 'assistant', text: '이전 대화', at: new Date().toISOString() }])
   try {
+    await stubExternal(electronApp)
     await openProject(page, root)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')
@@ -151,7 +153,6 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('완료 후 응답')).toBeVisible()
   } finally {
-    log.mark('close:start')
-    await electronApp.close()
+    await closeApp(electronApp, log)
   }
 })

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, nativeImage, nativeTheme, screen, systemPreferences } from 'electron'
+import { app, BrowserWindow, nativeImage, nativeTheme, protocol, screen, systemPreferences } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { Sidecar } from './sidecar'
@@ -10,6 +10,7 @@ import { cleanupRuntime } from './runtime'
 import { installMenu, type MenuAction } from './menu'
 import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
+import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
@@ -136,6 +137,16 @@ function createWindow(): void {
   else win.loadFile(join(__dirname, '../renderer/index.html'))
 }
 
+// paper-images (v0.6.4 사진 갈래): 종이 칸 그림은 전용 스킴으로만 읽는다. 렌더러 CSP(`img-src`)와
+// `renderMarkdown`이 이 이름을 공유한다(`shared/paper-image.ts`).
+// `registerSchemesAsPrivileged`는 app ready **전**에 불러야 한다 — 그래서 whenReady 밖(module scope)이다.
+// `standard: true`가 없으면 상대 경로·출처가 없고 CSP `'self'`와도 섞이지 않는다. `supportFetchAPI`는
+// Chromium이 `<img>`를 이 스킴으로 요청할 때 필요한 조건이며, `corsEnabled: false`로 두어 다른 출처에서
+// 이 스킴을 부를 수 없게 한다(앱 안에서만).
+protocol.registerSchemesAsPrivileged([
+  { scheme: IMAGE_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } }
+])
+
 const single = app.requestSingleInstanceLock()
 if (!single) app.quit()
 else {
@@ -154,6 +165,9 @@ else {
     }
     const services = registerIpc(sidecar, () => win, () => installMenu(sendMenu))
     chat = services.chat
+    // 그림 요청 하나가 들어오면 read → 폴더 안 판정 → 응답. 실패는 404로 닫고, 렌더러가
+    // "그림을 찾지 못했어요 · <경로>"로 바꾼다(main.tsx 문서 리스너).
+    protocol.handle(IMAGE_SCHEME, (request) => services.images.handle(request))
     installMenu(sendMenu)
     createWindow()
     nativeTheme.on('updated', () => {
