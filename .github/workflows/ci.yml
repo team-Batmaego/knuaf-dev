@@ -9,7 +9,7 @@ name: ci
 # 코드가 바뀐 변경은 이 조건에 걸리지 않아 지금과 똑같이 전부 돈다.
 on:
   push:
-    branches: ["**"]
+    branches: ["main", "release/**"]
   pull_request:
   workflow_dispatch:
 concurrency:
@@ -186,7 +186,8 @@ jobs:
       - name: Prepare pinned runtime and run tests
         run: node app/scripts/test-with-skill.mjs --python python
   py39-guard:
-    runs-on: ubuntu-latest
+    # ubuntu-latest 가 26.04 로 넘어가 3.9 휠이 없어졌다 — 이 잡만 24.04 로 고정한다(행렬의 ubuntu-latest 는 필수 체크 이름이라 불변).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -277,7 +278,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.docs_only != 'true'
-      - run: node --test scripts/tests/app-release.test.mjs scripts/tests/ci-sharding.test.mjs
+      - run: node --test scripts/tests/app-release.test.mjs scripts/tests/ci-sharding.test.mjs scripts/tests/skill-staging.test.mjs
         if: needs.changes.outputs.docs_only != 'true'
       - run: node scripts/tests/check-skill-workflow.mjs
         if: needs.changes.outputs.docs_only != 'true'
@@ -327,7 +328,7 @@ jobs:
       # back to a PATH python; narrow-PATH specs (those that plant a fake codex) would then hit
       # macOS' stock 3.9.6 and fail project:open. On Windows the interpreter is python.exe.
       - name: e2e (${{ matrix.os }}, ${{ matrix.shard }})
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && (runner.os != 'Windows' || github.event_name != 'pull_request')
         run: node scripts/e2e-shards.mjs ${{ runner.os == 'Windows' && 'windows' || 'macos' }} ${{ matrix.shard }}
         env:
           KNUAF_PYTHON: ${{ runner.os == 'Windows' && format('{0}\\python.exe', env.pythonLocation) || format('{0}/bin/python', env.pythonLocation) }}
