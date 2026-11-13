@@ -114,10 +114,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
               {saving && <p className="model-picker-note" role="status">{MODEL_PICKER.saving}</p>}
               {saveError && <p className="model-picker-note" role="alert">{saveError}</p>}
               <p className="model-picker-note">{MODEL_PICKER.sameConversationFor(PROVIDER_NAME[provider])}</p>
-              {/* ultra 는 "더 깊이 생각"만이 아니다 — 엔진이 스스로 담당을 띄운다(설계 §1). 막지 않고 알린다. */}
-              {choice?.effort === 'ultra' && <p className="model-picker-note">{MODEL_PICKER.ultraNotice}</p>}
               {provider === 'codex' && recommendations.lanes.some((l) => l.lane === 'review') && <p className="model-picker-note">{MODEL_PICKER.reviewNotice}</p>}
-              {provider === 'codex' && recommendations.tier === 'high' && <p className="model-picker-note">{MODEL_PICKER.limitNotice}</p>}
             </>}
           </>
           <PopSep />

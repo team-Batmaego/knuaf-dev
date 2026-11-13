@@ -10,13 +10,6 @@ import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
 
-/**
- * 메인이 스스로 하위 담당을 띄웠을 때 학생에게 하는 말(§5-7). 앱은 Codex 의 그 호출을 막을
- * 관문이 없다 — 실제로 띄웠다는 사실과 그 사용량이 한도·요금에 들어간다는 것만 알린다.
- * 담당의 중간 말은 대화에 넣지 않는다(§8).
- */
-export const SUBAGENT_SPAWNED_NOTE = '본대화의 ChatGPT가 하위 담당을 스스로 띄웠어요. 앱은 그 호출을 막지 못하고 기록만 해요 — 그 사용량도 같은 한도와 요금에 들어가요. 넘길 일은 "다른 모델에게 넘겨 주세요"라고 한 번만 말해 주세요.'
-
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
 
@@ -122,8 +115,6 @@ export class CodexConnection implements AgentConnection {
    * "처리됨"으로 닫으면 그 id 를 버려 요청값↔실제값 대조가 깨진다(검토 U5b 중요 2).
    */
   private pendingSpawns = new Map<string, { model: string | null; effort: string | null }>()
-  /** 학생에게 알린 spawn 호출 — 시작·완료 두 알림에 같은 호출이 와도 한 번만. */
-  private announcedSubagents = new Set<string>()
   /** 실제값을 이미 기록한 담당 thread — `subAgentActivity` 가 started 로 두 번 와도 한 번만. */
   private recordedActivities = new Set<string>()
   constructor(private options: AgentOptions) {
@@ -163,11 +154,8 @@ export class CodexConnection implements AgentConnection {
     const raw = 'receiverThreadIds' in item && Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : []
     const receivers = raw.filter((v: unknown): v is string => typeof v === 'string' && v !== '')
     const pending = this.pendingSpawns.get(key)
-    // 알림은 띄웠다는 사실만 말한다 — id 가 늦게 와도 학생에게 두 번 말하지 않는다.
-    if (!this.announcedSubagents.has(key)) {
-      this.announcedSubagents.add(key)
-      this.events?.note(SUBAGENT_SPAWNED_NOTE)
-    }
+    // 학생 화면에는 알리지 않는다(형님 11-13: 한도·요금 문구 빼기) — 아래 기록만 남긴다.
+    // 담당의 중간 말도 대화에 넣지 않는다(§8).
     if (receivers.length === 0) {
       // 시작 알림: 아직 id 가 없다. 요청값만 붙들어 둔다.
       this.pendingSpawns.set(key, { model, effort })
@@ -559,6 +547,11 @@ export class CodexConnection implements AgentConnection {
     const pending = this.pendingFileApprovals.get(id)
     if (pending) this.fileChanges.delete(pending.key)
     this.pendingFileApprovals.delete(id)
+  }
+  /** 앱이 띄운 엔진 pid — 종료 마감 뒤 회수 대상(검토 RT2-03). 종료 동작은 바꾸지 않는다. */
+  ownedPids(): number[] {
+    const pid = this.rpc?.closed === false ? this.rpc.pid : undefined
+    return typeof pid === 'number' && pid > 0 ? [pid] : []
   }
   async stop() {
     this.stopped = true

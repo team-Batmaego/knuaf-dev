@@ -52,9 +52,47 @@ type Reply<T> = { result: T } | { error: { code: string; message: string } }
 /** 로그인 왕복은 브라우저에서 오래 걸린다 — 3초마다, 3분까지. */
 const POLL_MS = 3_000
 const POLL_LIMIT_MS = 180_000
+/**
+ * 한 tick 이 매달릴 수 있는 시간 = **겹침을 허용하기 시작하는 시점**.
+ *
+ * 이 상한이 지나면 그 요청을 **버렸다**고 보고 잠금을 만료시켜 다음 간격에 새로 묻는다.
+ * 이미 나간 요청은 취소할 수 없으므로, 그때부터는 같은 공급자의 조회가 잠시 겹칠 수 있다.
+ * 이 절충은 책임자 결정(2026-11-11)이다 — 아래 '조건부 불변' 주석 참조.
+ */
+const POLL_TICK_LIMIT_MS = 15_000
 
 /** 로그인 감시 타이머 핸들 — 런타임(DOM/Node)에 따라 모양이 달라 이름을 한 번만 붙인다. */
-type PollTimer = { interval: ReturnType<typeof setInterval>; deadline: ReturnType<typeof setTimeout> }
+type PollTimer = {
+  interval?: ReturnType<typeof setInterval>
+  deadline?: ReturnType<typeof setTimeout>
+}
+
+/**
+ * 공급자별 **진행 중 조회** 표 — 감시 세대(교체 포함)를 넘어 공유한다.
+ *
+ * 예전에는 이 표가 Map 에 귀속돼 한 번 매달린 요청이 취소 뒤 새 로그인까지 영영 막았다(검토
+ * RT2-01). 그 고침에서 표를 감시 세대 **안**으로 옮겼더니, 이번에는 반대 불변이 깨졌다:
+ * 교체된 감시의 진행 중 요청과 새 감시의 tick 이 **겹쳐** 같은 공급자의 상태 조회가 동시에
+ * 두 번 나간다(CI `update-poll.spec.ts:62`, `overlap` 2).
+ *
+ * **조건부 불변(책임자 결정, 2026-11-11)** — 두 요구가 무조건 함께 성립할 수는 없다:
+ *  - (가) 같은 공급자의 조회는 **잠금 15초 안에서는** 겹치지 않는다.
+ *  - (나) 15초가 지나도 정착하지 않은 요청은 **버린 것**으로 보고 새 조회를 허용한다.
+ * 요청을 취소할 수 없으므로 (나)를 지키면 (가)를 예외 없이 지킬 수 없다 — 그 절충을 명시적으로
+ * 채택했다. 감시 자체의 180초 마감이 **버린 요청 수의 상한**이다. 버려진 요청의 늦은 응답이
+ * 화면 상태를 덮는 경합은 이 계층의 일이 아니고 '알려진 한계'(RT2-01 늦은 상태 응답)에 속한다.
+ *
+ * 잠금 소유권은 **객체 동일성**으로 본다(번호 비교가 아니다). 만료된 옛 항목이 늦게 끝나도
+ * 지금 항목이 아니면 아무것도 건드리지 않고, **그 tick 의 결과(완료 여부)도 감시가 쓰지 않는다**.
+ */
+type InflightRead = { timer: ReturnType<typeof setTimeout> }
+const pendingReads = new WeakMap<Map<Provider, PollTimer>, Map<Provider, InflightRead>>()
+
+function inflightOf(map: Map<Provider, PollTimer>): Map<Provider, InflightRead> {
+  let pending = pendingReads.get(map)
+  if (!pending) { pending = new Map(); pendingReads.set(map, pending) }
+  return pending
+}
 
 /**
  * 폴더 대화의 감시와 전역 계정 감시는 수명이 다르다. 폴더를 바꿀 때 `useChat.load`
@@ -62,8 +100,6 @@ type PollTimer = { interval: ReturnType<typeof setInterval>; deadline: ReturnTyp
  */
 const polls = new Map<Provider, PollTimer>()
 const globalPolls = new Map<Provider, PollTimer>()
-// A replaced poll cannot cancel an IPC already in flight; do not overlap it with the next poll.
-const pendingPolls = new WeakMap<Map<Provider, PollTimer>, Set<Provider>>()
 
 function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
   if (provider) {
@@ -75,28 +111,59 @@ function clearPoll(map: Map<Provider, PollTimer>, provider?: Provider): void {
   map.clear()
 }
 
-function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>): void {
+/**
+ * 감시 하나를 건다. `onExpire` 는 감시가 끝까지(3분) 확인하지 못했을 때 **표시를 내리는**
+ * 몫이다 — 예전에는 타이머만 지워서 화면이 "로그인 중"에 영원히 머물렀다(검토 RT2-01).
+ *
+ * 진행 중 조회 잠금은 **감시 세대 공용**(`pendingReads`)이다. 조건부 불변은 위 표 주석 참조:
+ * 교체·취소해도 **15초 안에서는** 진행 중 요청과 겹치지 않고, 15초가 지나면 그 요청을 버린 것으로
+ * 보고 다음 tick 이 다시 묻는다(영영 잠기지 않음). 만료된 옛 tick 은 잠금도, 완료 판정도,
+ * 감시 종료도 건드리지 않는다 — 그래야 '버렸다'는 말이 시험으로 잠긴다.
+ *
+ * **180초 마감의 정확한 계약**(검토 CI1-FIXCHECK 차단 잔여):
+ *  - 마감 시각(180초)에 감시의 interval·deadline 타이머는 **0**, 새 tick 도 **0**(마감을 지난 뒤에는
+ *    어떤 tick 도 시작되지 않는다).
+ *  - 진행 중 조회의 **잠금 만료 타이머는 최대 15초 더 남는다** — 마감은 감시만 끝내고 이미 나간
+ *    요청은 취소할 수 없기 때문이다. 그 타이머를 마감에서 지우면 '15초 안 겹침 0'이 깨진다.
+ *  - 그래서 **195초(= 180 + 15)에는 타이머가 전부 0** 이다.
+ * 마감 시각에 interval 과 deadline 이 **동시에** 도래하면 둘 중 무엇이 먼저 도는지는 런타임에
+ * 달렸다 — 그래서 계약은 '마감을 지난 뒤'를 말하고, 시험도 그 경계(180초 + 1ms)에서 단언한다.
+ */
+function poll(map: Map<Provider, PollTimer>, provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void {
   clearPoll(map, provider)
-  let pending = pendingPolls.get(map)
-  if (!pending) { pending = new Set<Provider>(); pendingPolls.set(map, pending) }
-  const inFlight = pending
-  const timer: PollTimer = {
-    interval: setInterval(() => {
-      if (inFlight.has(provider) || map.get(provider) !== timer) return
-      inFlight.add(provider)
-      void tick().then(done => {
-        if (done && map.get(provider) === timer) clearPoll(map, provider)
-      }).finally(() => { inFlight.delete(provider) })
-    }, POLL_MS),
-    deadline: setTimeout(() => {
-      if (map.get(provider) === timer) clearPoll(map, provider)
-    }, POLL_LIMIT_MS)
+  const pending = inflightOf(map)
+  const timer: PollTimer = {}
+  const stop = (expired: boolean): void => {
+    if (map.get(provider) !== timer) return
+    clearPoll(map, provider)
+    if (expired) onExpire?.()
   }
+  timer.interval = setInterval(() => {
+    if (map.get(provider) !== timer) return
+    // 진행 중 조회가 있으면 이번 간격은 건너뛴다(교체된 감시의 요청 포함).
+    if (pending.has(provider)) return
+    const entry: InflightRead = { timer: setTimeout(() => {
+      // 상한: 매달린 요청은 잠금만 만료시킨다(그 요청 자체는 취소할 수 없다).
+      if (pending.get(provider) === entry) pending.delete(provider)
+    }, POLL_TICK_LIMIT_MS) }
+    pending.set(provider, entry)
+    void tick()
+      // 만료된(버린) 요청의 결과는 **쓰지 않는다** — 완료라고 감시를 끝내면 그 tick 이 늦게
+      // 돌아온 것만으로 감시가 사라져, 새 tick 이 물은 결과가 다시 낡은 값이 된다.
+      .then(done => { if (done && pending.get(provider) === entry) stop(false) })
+      .catch(() => { /* tick 실패는 상태(`failed`·`unknown`)로만 드러난다 — 감시는 계속한다 */ })
+      .finally(() => {
+        if (pending.get(provider) !== entry) return
+        clearTimeout(entry.timer)
+        pending.delete(provider)
+      })
+  }, POLL_MS)
+  timer.deadline = setTimeout(() => stop(true), POLL_LIMIT_MS)
   map.set(provider, timer)
 }
 
 export function stopPoll(provider?: Provider): void { clearPoll(polls, provider) }
-export function startPoll(provider: Provider, tick: () => Promise<boolean>): void { poll(polls, provider, tick) }
+export function startPoll(provider: Provider, tick: () => Promise<boolean>, onExpire?: () => void): void { poll(polls, provider, tick, onExpire) }
 
 /**
  * 로그인 시도 번호 — **공급자마다**. 취소·새 시도가 그 공급자의 번호를 올리면, **이미 진행
@@ -230,6 +297,15 @@ export const useConnect = create<ConnectState>((set, get) => ({
       const done = get()[provider].state === 'connected'
       if (done) set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: false } }))
       return done
+    }, () => {
+      /**
+       * 3분 동안 확인하지 못했다. 예전에는 타이머만 지워서 **화면은 영원히 '로그인 중'** 이었다
+       * (검토 RT2-01). 표시를 내리고 '확인 실패'로 말한다 — 그 행에는 기존 '다시 확인' 단추가
+       * 붙어 학생이 스스로 다시 시도할 수 있다(새 문구를 만들지 않는다).
+       */
+      if (!loginAttemptLive(provider, mine)) return
+      set((s) => ({ loggingIn: { ...s.loggingIn, [provider]: false } }))
+      if (get()[provider].state !== 'connected') set(one(provider, { state: 'failed', detail: '', version: null }))
     })
     let r: Reply<true>
     try { r = await window.knuaf.connect.login(provider) as Reply<true> }
