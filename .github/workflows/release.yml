@@ -25,8 +25,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ci.yml 은 `branches: ["**"]` 라서 태그 푸시에는 돌지 않는다.
-  # 검증되지 않은 커밋이 설치본이 되지 않도록 여기서 다시 돈다.
+  # ci.yml 은 push 트리거가 브랜치 한정(`branches: ["main", "release/**"]`)이라 태그 푸시에는 돌지 않는다.
+  # 검증되지 않은 커밋이 설치본이 되지 않도록 여기서 다시 돈다. 맥 e2e 는 여기서 돌지만
+  # 윈도 e2e 는 PR 에서 빠졌으므로(ci.yml) 아래 `e2e-windows` 가 그 자리를 채운다.
   verify:
     runs-on: macos-latest
     steps:
@@ -72,8 +73,67 @@ jobs:
           # 스펙에서 macOS 기본 3.9 를 집어 project:open 이 실패한다(ci.yml 과 같은 수정).
           KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
 
-  macos:
+  # 태그 배포에서도 윈도 e2e 를 실제로 돌린다. ci.yml 이 PR 에서 윈도 e2e 를 건너뛰므로
+  # (perf/ci-light), 공개 전 관문은 여기다 — 초안을 만드는 `macos` 와 설치본을 올리는 `windows` 가
+  # 이 작업의 성공을 `needs` 로 기다린다. 즉 윈도 e2e 가 빨개지면 초안 자체가 생기지 않는다.
+  # 대가: 태그 1회당 러너 ~36분(5샤드 병렬) + 설치본 작업 대기. 배포는 드물어 감수한다.
+  e2e-windows:
     needs: verify
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v4
+        with:
+          path: app/resources/skill-upstreams
+          key: ${{ runner.os }}-skill-${{ hashFiles('app/skill-source.json') }}
+      - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('app/pnpm-lock.yaml') }}
+      - run: pnpm exec playwright install chromium --only-shell
+      # 묶음표를 태그 경로에서도 대조한다 — PR 경로와 같은 두 검사(--check, --verify-discovery).
+      - run: node scripts/e2e-shards.mjs --check
+      - run: node scripts/e2e-shards.mjs --verify-discovery windows
+        if: matrix.shard == 1
+      - name: e2e (Windows, ${{ matrix.shard }})
+        run: node scripts/e2e-shards.mjs windows ${{ matrix.shard }}
+        env:
+          # ci.yml 과 같은 이유로 절대 경로여야 한다(맨이름은 앱이 existsSync 로 걸러 폴백한다).
+          KNUAF_PYTHON: ${{ env.pythonLocation }}\python.exe
+          KNUAF_SHOT_DIR: test-results/ui-shots
+      - name: e2e failure traces (Windows)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-e2e-artifacts-windows-${{ matrix.shard }}
+          path: app/test-results/e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 7
+
+  macos:
+    needs: [verify, e2e-windows]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,7 +247,7 @@ jobs:
   # electron-builder --win. fetch:python 은 PBS_TARGET 기본값이 x86_64-pc-windows-msvc 이고,
   # build:wheelhouse 는 번들 python.exe 로 win_amd64 휠을 받는다(pywin32 포함).
   windows:
-    needs: verify
+    needs: [verify, e2e-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
