@@ -16,7 +16,9 @@ import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { createRequire } from 'node:module'
+import { basename, dirname, join, resolve } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import {
   buildLaunchScript, installSkill, setTreeAccess, skillBackupDir, skillSource, skillState, skillTargets, skillVersion,
   VERSION_FILE
@@ -25,6 +27,7 @@ import {
   autoAllow, claudeIsolationOptions, hostWriteDecision, SKILL_PROMPT
 } from '../src/main/chat/claude'
 import { isSkillHostPath, skillHostDir, skillHostRoot } from '../src/main/guard/scope'
+import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 
 const appRoot = resolve(__dirname, '..')
 /** 동봉 원본(`resources/skill`) — `pnpm stage:skill` 이 만든다. */
@@ -145,6 +148,195 @@ test('자동 실행은 설치본 내용이 동봉본과 같을 때만 — 변조
   expect(skillState(target, version, source)).toBe('installed')
   expect(installSkill(source, target, version, source).action).toBe('unchanged')
   expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
+  setTreeAccess(target, true)
+})
+
+// ------------------------------------------------------ canUseTool 최종 판정 (C-01ⓒ)
+
+/**
+ * `canUseTool` 이 실제로 내놓는 **최종 `PermissionResult`** 를 본다.
+ *
+ * `autoAllow` 의 반환값만 보던 시험(위)은 그 뒤의 `trusted()` 분기가 불일치를 덮는 것을 못
+ * 잡았다(검토 Roh R2). 그래서 `claude.ts` 를 CJS 로 옮겨 vm 에서 돌리고 SDK `query` 만 가짜로
+ * 꽂아, 실제 `run()` 이 만든 `options.canUseTool` 을 그대로 부른다 — 판정 순서·분기·카드까지
+ * 실물 코드가 돈다(선례: `scripts/tests/kordoc-mcp-wiring.test.mjs`).
+ */
+const nodeRequire = createRequire(__filename)
+
+/** vm 안 값은 프로토타입이 달라 `toEqual` 이 실패한다 — JSON 으로 옮겨 비교한다. */
+const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+function claudeModule(): Record<string, any> {
+  const captured: any[] = []
+  const sdk = {
+    query: (args: any) => {
+      captured.push(args)
+      return {
+        supportedCommands: async () => [{ name: 'knuaf-dev' }],
+        accountInfo: async () => ({}),
+        close() {},
+        async *[Symbol.asyncIterator]() { /* 한 턴에 메시지 없음 */ }
+      }
+    }
+  }
+  const cache = new Map<string, { exports: Record<string, any> }>()
+  const load = (file: string): Record<string, any> => {
+    const target = resolve(file)
+    const hit = cache.get(target)
+    if (hit) return hit.exports
+    const module = { exports: {} as Record<string, any> }
+    cache.set(target, module)
+    const code = transpileModule(readFileSync(target, 'utf-8'), {
+      compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+    }).outputText
+    runInNewContext(code, {
+      module, exports: module.exports, require: (name: string) => {
+        if (name === '@anthropic-ai/claude-agent-sdk') return sdk
+        if (!name.startsWith('.')) return nodeRequire(name)
+        const base = resolve(dirname(target), name)
+        return load(existsSync(base + '.ts') ? base + '.ts' : base)
+      },
+      process, Buffer, console, crypto: globalThis.crypto, Promise, URL,
+      AbortController, AbortSignal, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate
+    })
+    return module.exports
+  }
+  const mod = load(join(__dirname, '../src/main/chat/claude.ts'))
+  return { ...mod, captured }
+}
+
+interface Rig { ask: (name: string, input: unknown) => Promise<any>; cards: any[]; answer: (allow: boolean) => void }
+
+/**
+ * 한 턴을 실제로 돌려 `canUseTool` 을 얻는다. `trusted` 는 학생 설정('묻지 않기'·'이 폴더는
+ * 계속 허용')을 흉내 내는 값이다. `bundle: false` 는 동봉본을 모르는 옛 호출자다.
+ */
+async function rig(
+  boxed: { root: string; userData: string }, opts: { trusted: boolean; bundle?: boolean }
+): Promise<Rig> {
+  const claude = claudeModule()
+  const cards: any[] = []
+  const events = {
+    message: () => {}, permission: (request: any) => cards.push(request),
+    note: () => {}, session: () => {}, skill: () => {}
+  }
+  const connection = new claude.ClaudeConnection({
+    binary: 'claude', root: boxed.root, skill: join(boxed.root, 'skill'), env: {},
+    openExternal: async () => {}, trusted: () => opts.trusted,
+    guard: { userData: boxed.userData, folderHash: 'test', key: null },
+    ...(opts.bundle === false ? {} : { skillBundleSource: () => source })
+  })
+  // `auth status` 는 자식 프로세스를 띄운다 — 이 시험은 판정 배선만 본다.
+  connection.status = async () => ({ installed: true, connected: true, version: null, probe: 'ok', detail: '' })
+  await connection.run('안녕하세요', 'session-1', events)
+  const canUseTool = claude.captured[0].options.canUseTool
+  return {
+    cards,
+    ask: (name, input) => canUseTool(name, input, { signal: new AbortController().signal }),
+    answer: (allow) => connection.respond(cards[cards.length - 1].id, allow)
+  }
+}
+
+/** 카드는 microtask 뒤에 뜬다 — 매달리지 않게 잠깐씩 양보하며 기다린다. */
+async function settle(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5))
+}
+
+/** 설치본 하나를 만들고, 스크립트를 한 줄 고쳐 '내용이 다른 사본'을 만든다. */
+function installedBox(): { root: string; userData: string; target: string } {
+  const { root, userData } = box()
+  const target = skillTargets(root, userData).claude
+  installSkill(source, target, version)
+  return { root, userData, target }
+}
+function tamper(target: string): void {
+  setTreeAccess(target, true)
+  const script = join(target, 'scripts', 'gg.py')
+  writeFileSync(script, readFileSync(script, 'utf-8') + '\n# student edit\n')
+}
+
+test('최종 판정(Bash): 사본이 다르면 trusted() 참이어도 카드 — 일치하면 종전대로 통과(C-01ⓒ)', async () => {
+  const { root, userData, target } = installedBox()
+  const script = join(skillHostDir(userData), 'scripts', 'gg.py').replace(/\\/g, '/')
+  const call = { command: `python3 "${script}" status` }
+
+  // 대조군 ①·② — 사본이 동봉본과 같으면 오늘과 같다(카드 없음).
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    expect(plain(await r.ask('Bash', call)), `intact/trusted=${trusted}`).toEqual({ behavior: 'allow', updatedInput: call })
+    expect(r.cards, `intact/trusted=${trusted}`).toHaveLength(0)
+  }
+
+  tamper(target)
+
+  // 불일치 ③ — '묻지 않기'(trusted 참)여도 자동 허용되지 않고 카드가 뜬다. 이 칸이 Roh R2 다.
+  const strict = await rig({ root, userData }, { trusted: true })
+  const pending = strict.ask('Bash', call)
+  await settle(() => strict.cards.length > 0)
+  expect(strict.cards, 'mismatch/trusted=true').toHaveLength(1)
+  expect(strict.cards[0].title).toContain('규칙 사본')
+  strict.answer(false)
+  expect(plain(await pending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+
+  // 불일치 ④ — '매번 묻기'에서도 카드다. 학생이 허용하면 그때 실행된다(거절이 아니다).
+  const ask = await rig({ root, userData }, { trusted: false })
+  const allowed = ask.ask('Bash', call)
+  await settle(() => ask.cards.length > 0)
+  expect(ask.cards, 'mismatch/trusted=false').toHaveLength(1)
+  ask.answer(true)
+  expect(plain(await allowed)).toEqual({ behavior: 'allow', updatedInput: call })
+
+  // 이 판정은 스킬 스크립트를 여는 호출에만 붙는다 — 같은 사본 상태에서도 평범한 명령은 그대로.
+  const plainRun = await rig({ root, userData }, { trusted: true })
+  expect(plain(await plainRun.ask('Bash', { command: 'ls' }))).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } })
+  expect(plainRun.cards).toHaveLength(0)
+
+  // 동봉본을 모르는 옛 호출자(시험·옛 배선)는 대조할 것이 없다 — 종전 판정 그대로 통과.
+  const legacy = await rig({ root, userData }, { trusted: true, bundle: false })
+  expect(plain(await legacy.ask('Bash', call))).toEqual({ behavior: 'allow', updatedInput: call })
+  expect(legacy.cards).toHaveLength(0)
+  setTreeAccess(target, true)
+})
+
+test('최종 판정(PowerShell): 사본이 다르면 trusted() 참이어도 카드(C-01ⓒ)', async () => {
+  const { root, userData, target } = installedBox()
+  const script = join(skillHostDir(userData), 'scripts', 'gg.py').replace(/\\/g, '/')
+  const call = { command: `python.exe "${script}" status` }
+
+  // 대조군 — 내용이 같으면 오늘과 한 글자도 다르지 않다.
+  //
+  // '묻지 않기'(trusted 참)는 자동 허용이다. '매번 묻기'는 **평범한 카드**다 —
+  // `autoAllow` 의 PowerShell 갈래는 폴더 안 `.claude/skills/` 만 인정하므로(위 시험
+  // 'PowerShell 스킬 호출은 맥 Bash 와 같은 기준으로'), 옮겨 간 앱 자리 스크립트는
+  // 원래부터 카드였다. 이 시험이 잠그는 것은 그 카드가 **불일치 카드로 바뀌었는가**다.
+  const intact = await rig({ root, userData }, { trusted: true })
+  expect(plain(await intact.ask('PowerShell', call))).toEqual({ behavior: 'allow', updatedInput: call })
+  expect(intact.cards).toHaveLength(0)
+
+  const intactAsk = await rig({ root, userData }, { trusted: false })
+  const intactPending = intactAsk.ask('PowerShell', call)
+  await settle(() => intactAsk.cards.length > 0)
+  expect(intactAsk.cards, 'intact/trusted=false').toHaveLength(1)
+  expect(intactAsk.cards[0].title, 'intact/trusted=false').not.toContain('규칙 사본')
+  intactAsk.answer(false)
+  expect(plain(await intactPending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+
+  tamper(target)
+
+  const strict = await rig({ root, userData }, { trusted: true })
+  const pending = strict.ask('PowerShell', call)
+  await settle(() => strict.cards.length > 0)
+  expect(strict.cards, 'mismatch/trusted=true').toHaveLength(1)
+  expect(strict.cards[0].title).toContain('규칙 사본')
+  strict.answer(false)
+  expect(plain(await pending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+
+  const ask = await rig({ root, userData }, { trusted: false })
+  const allowed = ask.ask('pwsh', call)
+  await settle(() => ask.cards.length > 0)
+  expect(ask.cards, 'mismatch/trusted=false').toHaveLength(1)
+  ask.answer(true)
+  expect(plain(await allowed)).toEqual({ behavior: 'allow', updatedInput: call })
   setTreeAccess(target, true)
 })
 

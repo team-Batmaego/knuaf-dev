@@ -1120,13 +1120,13 @@ function argOf(input: unknown, key: string): unknown {
  * 카드 없이 실행하는 통로가 남는다. 대조는 이 판정 한 번에 한 번만 한다(명령마다 파일 전체를
  * 해시하면 도구 호출마다 스킬 사본을 다시 읽는다).
  */
-export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = [], userData?: string, bundleSource?: string): boolean {
+export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = [], userData?: string, bundleSource?: string, hostIntact?: () => boolean): boolean {
   // 이번 판정에서 앱 스킬 자리 사본이 동봉본과 같은지 — 처음 필요할 때 한 번만 계산한다.
-  let hostIntact: boolean | undefined
-  const hostContentIntact = (): boolean => {
-    if (hostIntact === undefined) hostIntact = !!userData && !!bundleSource && sameTreeContent(skillHostDir(userData), bundleSource)
-    return hostIntact
-  }
+  // 호출자(`canUseTool`)가 같은 계산을 먼저 했으면 그 값을 받아 쓴다 — 도구 호출 하나에
+  // 24 MB 사본을 두 번 해시하지 않는다.
+  let memo: boolean | undefined
+  const hostContentIntact = (): boolean => hostIntact ? hostIntact()
+    : (memo ??= !!userData && !!bundleSource && sameTreeContent(skillHostDir(userData), bundleSource))
   const ok = (v: unknown) => outsideRoot(root, v) === null
     || (typeof v === 'string' && (allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')) || isSkillHostPath(v, userData)))
   const keys = PATH_TOOLS[name]
@@ -1161,6 +1161,51 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   // 그 밖 모르는 도구는 계속 카드로 둔다.
   if (name === 'WebSearch' || name === 'WebFetch') return true
   return false
+}
+
+/**
+ * 앱 스킬 자리의 스크립트를 여는 호출인가 — Bash·PowerShell 공통(C-01ⓒ).
+ *
+ * `hostSkillCall` 은 낱말 배열을 받는 판정기다. Bash 는 그대로 쓰고, PowerShell 은 같은 꼴
+ * (인터프리터 + 앱 자리 스크립트 + 그 밖 인자)을 낱말 배열로 만들어 **같은 판정기**에 넣는다.
+ * 갈래마다 판정기를 따로 두면 한쪽만 지문 대조를 거치는 구멍이 생긴다 — 실제로
+ * `powerShellSkillCall` 은 폴더 안 사본만 인정해, 앱 자리(폴더 밖) 스크립트를 여는 호출은
+ * 판정 자체를 못 받고 있었다.
+ *
+ * 윈도우 PowerShell 은 `\` 를 구분자로 쓴다(`hostSkillCall` 의 `SKILL_PATH` 는 `/` 만 받는다).
+ * 판정 전에 이 조각들만 `/` 로 맞춘다 — 접는 것은 '이게 앱 자리 스크립트인가'를 알아보는
+ * 자리뿐이고, 실제 실행에 넘어가는 인자는 손대지 않는다.
+ *
+ * 해석하지 못한 명령(`safe` 꺼짐)은 여기서 닫지 않는다 — 그건 `hostWriteDecision` 이 맡는다.
+ */
+function hostScriptCall(name: string, input: unknown, userData?: string): boolean {
+  if (!userData) return false
+  const raw = argOf(input, 'command')
+  if (typeof raw !== 'string' || !raw.trim()) return false
+  if (name === 'Bash') {
+    const segs = parseShell(raw)
+    return !!segs?.some((t) => hostSkillCall(t, userData))
+  }
+  if (!POWERSHELL_TOOLS[name]) return false
+  const parsed = powerShellWords(raw)
+  if (!parsed?.safe || parsed.words.length < 2) return false
+  const [exe, script, ...args] = parsed.words
+  return hostSkillCall([exe, script.replace(/\\/g, '/'), ...args], userData)
+}
+
+/**
+ * 앱 스킬 사본이 동봉본과 다를 때의 카드 — 걸린 이유가 '경로'가 아니라 '내용'임을 말한다.
+ *
+ * `describeTool` 은 경로·프로그램으로 이유를 고르므로, 정상 모양의 스킬 호출에는 "폴더 안
+ * 일이라고 확인하지 못한 명령"이라는 **사실과 다른** 문장이 붙는다. 앱 자리 이름도 흘리지 않는다.
+ */
+function describeHostMismatch(input: unknown): { title: string; detail: string } {
+  const raw = argOf(input, 'command')
+  const shown = typeof raw === 'string' ? redactForCard(raw) : ''
+  return {
+    title: '앱이 깔아 둔 규칙 사본이 원본과 달라요',
+    detail: `${shown}\n\n이 명령은 앱이 관리하는 규칙 사본의 스크립트를 여는 호출이라, 사본 내용이 원본과 같은 동안에만 묻지 않고 통과시켜요. 지금은 내용이 달라서 확인을 받아요. 앱을 다시 시작하면 원본으로 되돌아가요.\n\n무슨 일인지 모르겠으면 거절해 주세요.`
+  }
 }
 
 /**
@@ -1307,9 +1352,47 @@ export class ClaudeConnection implements AgentConnection {
       })
     } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
-  private autoAllowed(name: string, input: unknown): boolean {
+  private autoAllowed(name: string, input: unknown, hostIntact?: () => boolean): boolean {
     return autoAllow(this.options.root, name, input, registeredSources(this.options.root),
-      this.options.guard?.userData, this.options.skillBundleSource?.())
+      this.options.guard?.userData, this.options.skillBundleSource?.(), hostIntact)
+  }
+  /**
+   * 앱 스킬 자리 사본이 동봉본과 같은지 — 한 도구 호출 안에서 **한 번만** 계산한다.
+   *
+   * 사본은 24 MB(참조 자료 21 MB)라 호출마다 해시하면 턴이 눈에 띄게 느려진다. 동봉본을
+   * 모르면(옛 호출자·시험) `undefined` 를 돌려주고, 부르는 쪽이 종전 판정을 그대로 쓴다.
+   */
+  private hostIntactCheck(): (() => boolean) | undefined {
+    const userData = this.options.guard?.userData
+    const bundle = this.options.skillBundleSource?.()
+    if (!userData || !bundle) return undefined
+    let memo: boolean | undefined
+    return () => (memo ??= sameTreeContent(skillHostDir(userData), bundle))
+  }
+  /**
+   * 이 호출이 앱 스킬 자리의 스크립트를 여는데 사본 내용이 동봉본과 다른가(C-01ⓒ).
+   *
+   * `autoAllow` 가 같은 조건에서 `false` 를 돌려주지만, 그 값은 호출자에서 `trusted()` 로 덮일
+   * 수 있다. 그래서 **최종 판정에서** 한 번 더 묻는다 — 신뢰 폴더·'묻지 않기'에서도 불일치가
+   * 유지되게 하는 자리가 여기다(검토 Roh R2). 동봉본을 모르면(옛 호출자) 대조할 것이 없으므로
+   * 종전대로 통과시킨다 — 이 판정이 새로 막는 것은 '대조했더니 달랐다'뿐이다.
+   */
+  private hostScriptMismatch(name: string, input: unknown, hostIntact?: () => boolean): boolean {
+    if (!hostIntact) return false
+    if (!hostScriptCall(name, input, this.options.guard?.userData)) return false
+    return !hostIntact()
+  }
+  /** 권한 카드를 띄우고 학생의 답을 기다린다. 취소(abort)·턴 종료는 거절로 닫는다. */
+  private askPermission(
+    id: string, signal: AbortSignal, events: AgentEvents, request: { title: string; detail: string }
+  ): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+      const done = (v: boolean) => { signal.removeEventListener('abort', aborted); this.approvals.delete(id); resolve(v) }
+      const aborted = () => done(false)
+      this.approvals.set(id, done)
+      signal.addEventListener('abort', aborted, { once: true })
+      events.permission({ id, ...request })
+    })
   }
   /**
    * 폴더에 이미 있는 '권한을 바꾸는 설정'을 학생에게 한 번 알린다.
@@ -1450,7 +1533,25 @@ export class ClaudeConnection implements AgentConnection {
         //
         // 매번 묻는 것은 동의를 구하는 게 아니라 읽지도 못할 것을 클릭하게 만드는 일이고,
         // 그러면 정작 폴더 밖을 건드리는 순간에도 습관적으로 허용을 누르게 된다.
-        if (this.autoAllowed(name, input)) return { behavior: 'allow', updatedInput: input }
+        // 앱 스킬 자리 사본 대조는 도구 호출 하나에 **한 번**만 — 두 판정이 같은 값을 쓴다.
+        const hostIntact = this.hostIntactCheck()
+        if (this.autoAllowed(name, input, hostIntact)) return { behavior: 'allow', updatedInput: input }
+        // 앱 스킬 자리의 스크립트를 여는 호출은 **사본 내용이 동봉본과 같은 동안에만** 카드 없이
+        // 통과한다(C-01ⓒ, 설계 §4.2 "다르면 카드 + 알림"). 이 판정을 `trusted()` **앞**에 두는
+        // 것이 핵심이다 — 뒤에 두면 기본값 '묻지 않기'·'이 폴더는 계속 허용'이 불일치를 덮어
+        // 고쳐진 사본이 조용히 돌아간다(검토 Roh R2 차단). 사본은 앱이 매 전송마다 다시 까는
+        // 학생의 폴더가 아니므로, 신뢰 폴더라도 내용이 다르면 한 번은 묻는다.
+        //
+        // 카드로 보낸다(거절이 아니다). 사본은 다음 전송에서 원본으로 되돌아가므로 학생이 스스로
+        // 고칠 것이 없고, 도우미가 그 스크립트로 논문 작업을 하려던 참일 수 있다 — 설계 §4.2 가
+        // 적은 그대로 "다르면 카드 + 알림"이다.
+        if (this.hostScriptMismatch(name, input, hostIntact)) {
+          const id = randomUUID()
+          const allowed = await this.askPermission(id, options.signal, events, describeHostMismatch(input))
+          return allowed
+            ? { behavior: 'allow', updatedInput: input }
+            : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
+        }
         // 여기서 통과하는 두 경우가 있다. (1) 설정의 "도우미가 도구를 쓸 때 물어볼까요?"
         // 가 기본값 '묻지 않기'다 — 그러면 폴더를 가리지 않고 통과한다. (2) 학생이 권한
         // 카드에서 "이 폴더에서는 계속 허용"을 직접 눌렀다.
@@ -1461,13 +1562,7 @@ export class ClaudeConnection implements AgentConnection {
         // 일을 걸러 주므로, 그때 남는 질문은 폴더 밖·읽을 수 없는 명령뿐이다.
         if (this.options.trusted?.()) return { behavior: 'allow', updatedInput: input }
         const id = randomUUID()
-        const allowed = await new Promise<boolean>(resolve => {
-          const done = (v: boolean) => { options.signal.removeEventListener('abort', aborted); this.approvals.delete(id); resolve(v) }
-          const aborted = () => done(false)
-          this.approvals.set(id, done)
-          options.signal.addEventListener('abort', aborted, { once: true })
-          events.permission({ id, ...describeTool(name, input, this.options.root) })
-        })
+        const allowed = await this.askPermission(id, options.signal, events, describeTool(name, input, this.options.root))
         return allowed ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
       }
     } })
