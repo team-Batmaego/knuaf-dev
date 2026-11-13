@@ -186,7 +186,8 @@ jobs:
       - name: Prepare pinned runtime and run tests
         run: node app/scripts/test-with-skill.mjs --python python
   py39-guard:
-    runs-on: ubuntu-latest
+    # ubuntu-latest 가 26.04 로 넘어가 3.9 휠이 없어졌다 — 이 잡만 24.04 로 고정한다(행렬의 ubuntu-latest 는 필수 체크 이름이라 불변).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/setup-node@v4
         with:
