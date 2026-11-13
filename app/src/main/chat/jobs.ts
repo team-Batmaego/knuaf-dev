@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { continueAfterLimit, subscriptionCheck } from '../../shared/lanes'
 import { resolveCodexAlias } from '../../shared/chat'
 import { readRecoverable, writeFileAtomic } from '../safeWrite'
+import { shutdownWithin, type ShutdownTask } from '../shutdown'
 import { canonical, createOutput, inside, outputName, relayIsolation, sha256, thesisHashes } from './jobs/isolation'
 import { chatConnectionKey } from './jobs/key'
 import { tokenRecord } from './jobs/tokens'
@@ -34,6 +35,14 @@ const now = () => new Date().toISOString()
 const fingerprint = (account: ExecutionAccount) =>
   sha256(JSON.stringify([account.accountId, account.connected, account.usage, account.account]))
 
+/**
+ * 담당 연결(`JobConnection.stop`) 정리의 상한 — 학생 중단이 쓴다.
+ *
+ * `ChatService.CLOSE_CONNECTION_DEADLINE_MS` 와 같은 3초이며, 종료·인계 경로는 **남은 예산**을
+ * 넘겨 두 마감이 겹쳐 바깥 종료 마감(10초)을 갉아먹지 않게 한다(REVIEW-C4 I-03).
+ */
+const STOP_DEADLINE_MS = 3_000
+
 /** A single app-owned runner; no engine imports, polling, automatic retries, or hidden model changes. */
 export class JobRunner {
   private state: State
@@ -45,6 +54,11 @@ export class JobRunner {
   private ownerTransitions = new Map<string, object>()
   private pendingDeliveries = new Set<JobRecord>()
   private delivering = new Map<string, Set<Promise<void>>>()
+  /**
+   * 아직 정리가 끝나지 않은 담당 연결 — root 별로 둔다.
+   * 종료·인계가 마감을 넘긴 연결은 여기 남아 `unsettledConnections()` 로 pid 회수 대상이 된다.
+   */
+  private relays = new Map<JobConnection, string>()
   private file: string
   constructor(private options: JobRunnerOptions) {
     mkdirSync(options.stateDir, { recursive: true, mode: 0o700 })
@@ -212,6 +226,7 @@ export class JobRunner {
         isolation: relayIsolation(cwd, spec.outputs, this.options.shellSandboxAvailable) }
       const connection = this.options.connectionFactory(request)
       current.connection = connection
+      this.relays.set(connection, record.root)
       if (connection.relayProtocol !== 1) throw new Error('Engine relay isolation is not wired')
       const status = await connection.status()
       if (current.stopped) return
@@ -275,7 +290,15 @@ export class JobRunner {
     } catch (error) {
       if (!current.stopped) this.update(record, current.failure ?? (error instanceof JobFailure ? error.status : 'error'))
     } finally {
-      try { await current.connection?.stop() } finally {
+      try {
+        const connection = current.connection
+        if (connection) {
+          await connection.stop()
+          // 정리가 끝난 담당 연결은 회수 대상에서 뺀다 — 남기면 `ownedPids()` 가 이미 죽은 pid 를
+          // 계속 돌려주고 종료 판정이 거짓 미완료가 된다. 마감을 넘긴 연결만 `settleStopped` 가 남긴다.
+          this.relays.delete(connection)
+        }
+      } finally {
         this.active = null
         this.approvals.delete(record.spec.id)
       }
@@ -490,22 +513,90 @@ export class JobRunner {
     if (!this.state.delivered.includes(record.rootJobId)) await this.deliver(record)
     return structuredClone(record)
   }
-  async stop(root: string): Promise<void> {
+  /**
+   * 아직 정리가 끝나지 않은 담당 연결의 자식 pid — 종료 회수 대상(검토 C4 I-03).
+   * 마감을 넘긴 담당 연결은 `this.active` 가 비면 다른 경로로 pid 를 알 길이 없다.
+   */
+  ownedPids(): number[] {
+    const pids: number[] = []
+    for (const connection of this.relays.keys()) pids.push(...(connection.ownedPids?.() ?? []))
+    return [...new Set(pids)]
+  }
+  /** 종료·인계가 마감을 넘겨 회수도 못 한 담당 연결들 — 서비스가 `pending.pids` 에 합친다. */
+  unsettledConnections(): JobConnection[] { return [...this.relays.keys()] }
+
+  /**
+   * §3.5 [멈추기]의 **동기 절반** — 세대를 올리고, 제안을 버리고, 주문을 `stopped` 로 닫는다.
+   * 기다림(담당 연결·본대화 `stop()`)은 `settleStopped` 가 **마감 안에서** 맡는다.
+   *
+   * 예전에는 `stop()` 하나가 세대 올리기와 무한 대기를 함께 했다. 그래서 담당 `stop()` 이
+   * 끝나지 않으면 인계·종료 마감이 그것을 기다렸다(REVIEW-C4 I-03: `closeForUpdate` 4,209ms 미완료).
+   * 두 절반을 나누면 부르는 쪽이 **이미 아는 사실**(주문은 멈췄다)을 먼저 확정하고, 남은 정리는
+   * 자기 예산 안에서만 기다린다.
+   */
+  markStopped(root: string): void {
     root = canonical(root)
     this.generations.set(root, (this.generations.get(root) ?? 0) + 1)
     const records = this.state.jobs.filter(j => j.root === root)
     for (const p of this.state.proposals) if (this.job(p.parentJobId).root === root && p.state === 'open') p.state = 'discarded'
     for (const job of records) {
-      this.state.delivered.push(job.rootJobId)
+      // 두 번 불러도 원장이 자라지 않게 한다(`stop()` 재호출·`stop` 뒤 `close`).
+      if (!this.state.delivered.includes(job.rootJobId)) this.state.delivered.push(job.rootJobId)
       if (['queued', 'running', 'limit'].includes(job.status)) this.update(job, 'stopped')
     }
     if (this.active?.record.root === root) this.active.stopped = true
     this.persist()
-    const owners = new Map(records.map(j => [j.owner.id, j.owner]))
-    await Promise.all([
-      this.active?.record.root === root ? this.active.connection?.stop() : undefined,
-      ...[...owners.values()].map(owner => this.options.stopMain(owner))
-    ])
-    await this.draining
+  }
+  /**
+   * `markStopped` 가 남긴 정리를 **한 예산 안에서** 기다린다.
+   *
+   * - 진행 담당 연결의 `stop()` — `relay:<i>`
+   * - 그 폴더 주문들의 본대화 `stopMain` — `main:<i>`
+   *
+   * 마감을 넘긴 연결은 `relays` 에 남겨 `unsettledConnections()`/`ownedPids()` 로 소유권을
+   * 유지한다(재사용은 하지 않는다). `this.active` 는 건드리지 않는다 — 실행 루프의 `finally` 가
+   * 정리한다. 던지지 않고 결과를 돌려준다: 부르는 쪽이 분류를 정한다.
+   */
+  async settleStopped(roots: readonly string[], deadlineMs: number): Promise<{ pending: JobConnection[]; failed: unknown[] }> {
+    const scope = new Set(roots.map(root => canonical(root)))
+    const tasks: ShutdownTask[] = []
+    const relays: JobConnection[] = []
+    const active = this.active
+    // 같은 연결을 두 번 멈추지 않는다(fake 계수 시험이 `stops === 1` 을 잠근다). 이름도 한 번만.
+    if (active?.connection && scope.has(active.record.root) && !relays.includes(active.connection)
+      && this.relays.has(active.connection)) {
+      relays.push(active.connection)
+      tasks.push({ name: `relay:${relays.length - 1}`, start: () => active.connection!.stop() })
+    }
+    const owners = new Map<string, ConversationOwner>()
+    for (const record of this.state.jobs) if (scope.has(record.root)) owners.set(record.owner.id, record.owner)
+    let mainIndex = 0
+    for (const owner of owners.values()) {
+      const name = `main:${mainIndex++}`
+      tasks.push({ name, start: () => this.options.stopMain(owner) })
+    }
+    if (!tasks.length) return { pending: [], failed: [] }
+    const outcome = await shutdownWithin(tasks, Math.max(0, deadlineMs))
+    const pending = relays.filter((_, i) => outcome.pending.includes(`relay:${i}`))
+    // 정착한 담당 연결은 회수 목록에서 뺀다 — 남겨 두면 다음 `close()` 가 거짓 미완료를 본다.
+    for (const connection of relays) if (!pending.includes(connection)) this.relays.delete(connection)
+    return { pending, failed: outcome.failed.map(f => f.reason) }
+  }
+
+  /**
+   * §3.5 [멈추기] — 진행 담당·열린 제안·본대화를 함께 멈춘다.
+   *
+   * 기다림에는 **상한**이 있다(REVIEW-C4 I-03). 예전에는 `await this.draining` 이 마감 없이
+   * 실행 루프 전체를 기다렸고, 그 위에 담당·본대화 `stop()` 이 겹겹이 쌓여 인계·종료의 10초
+   * 예산을 갉아먹었다. 지금은 `markStopped` 로 상태를 먼저 확정하고 `settleStopped` 만 기다린다 —
+   * 실행 루프는 자기 `stopped` 표시를 보고 스스로 빠져나온다.
+   */
+  async stop(root: string): Promise<void> {
+    this.markStopped(root)
+    const settled = await this.settleStopped([root], STOP_DEADLINE_MS)
+    if (settled.pending.length) {
+      this.options.diagnostic({ type: 'stop-pending', pending: settled.pending.length })
+    }
+    if (settled.failed.length) throw settled.failed[0]
   }
 }

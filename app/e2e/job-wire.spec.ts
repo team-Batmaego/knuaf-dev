@@ -19,6 +19,13 @@ async function until(check: () => boolean, timeout = 20_000): Promise<void> {
   }
 }
 
+/** 시험 자체의 상한 — 고침이 없으면 여기서 90초 시험 상한까지 매달린다(I-03). */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  const { promise: expired, resolve } = Promise.withResolvers<'timeout'>()
+  const timer = setTimeout(() => resolve('timeout'), ms)
+  try { return await Promise.race([promise, expired]) } finally { clearTimeout(timer) }
+}
+
 function fakeSkill(): string {
   const dir = mkdtempSync(join(tmpdir(), 'kd-wire-skill-'))
   writeFileSync(join(dir, 'SKILL.md'), '# fake skill\n')
@@ -55,7 +62,7 @@ interface WireOptions {
   /** 본대화 차례가 끝나기 전에 학생 폴더에 떨어지는 주문 파일. */
   orders?: (root: string, text: string) => Order[]
   jobBehavior?: (request: RelayRequest, events: JobEvents) => Promise<void>
-  jobStop?: () => void
+  jobStop?: () => void | Promise<void>
   /** 본대화 차례를 붙잡아 두는 시험용 동작 — 기본은 즉시 끝난다. */
   mainBehavior?: (text: string, events: Parameters<AgentConnection['run']>[2]) => Promise<void>
   /** 본대화 연결의 stop 이 불릴 때 — 붙잡아 둔 차례를 풀어 준다. */
@@ -118,7 +125,9 @@ function wire(opts: WireOptions = {}) {
       jobRuns.push(request.jobId)
       await (opts.jobBehavior ?? defaultBehavior)(request, events)
     },
-    stop: async () => { counters.jobStops++; opts.jobStop?.() }
+    stop: async () => { counters.jobStops++; await opts.jobStop?.() },
+    // 담당 연결이 띄운 자식 — 종료 판정이 마감 초과 뒤에도 이 pid 를 회수 대상으로 봐야 한다(I-03).
+    ownedPids: () => [4242]
   })
   const svc = new ChatService({
     skillSource: () => skill, userData, emit: () => {}, openExternal: async () => {},
@@ -290,6 +299,44 @@ test('update teardown discards open continuation proposals and stops jobs', asyn
 
   await w.svc.close()
   expect(w.invalidated.length).toBeGreaterThanOrEqual(2)
+})
+
+// ③-3 인계·종료 정리는 **마감 안**에서 끝난다 — 담당 `stop()` 이 안 끝나도 주문은 먼저 닫히고,
+// 확인 콜백이 불리며, 넘긴 연결의 pid 는 회수 목록에 남는다(REVIEW-C4 I-03).
+test('closeForUpdate and close settle a hung relay inside the deadline and keep its pid', async () => {
+  const held = Promise.withResolvers<void>()
+  let started = false
+  const w = wire({
+    orders: once('job-one'),
+    jobStop: () => held.promise,
+    jobBehavior: async (request, events) => {
+      started = true
+      events.session(`job-${request.jobId}`)
+      await held.promise
+    }
+  })
+  w.svc.approvePlan(w.root, planFromRow('both-high'))
+  w.svc.setConsent('codex', 'codex-account', true)
+  await w.svc.send(w.root, 'codex', '오래 걸리는 부탁', 'req-1')
+  await until(() => started)
+
+  let confirms = 0
+  const startedAt = Date.now()
+  const update = await within(w.svc.closeForUpdate(async () => { confirms++ }), 20_000)
+  const elapsed = Date.now() - startedAt
+  expect(update).toBe('pending')
+  // 담당 정리 몫은 인계 마감(3초) 안이다 — 예전에는 4,209ms 를 넘겨 미완료로 끝났다.
+  expect(elapsed).toBeLessThan(4_500)
+  // 확인 콜백은 건너뛰지 않는다(예전 실측: confirmStopped 0회).
+  expect(confirms).toBe(1)
+  // 마감을 넘긴 담당 연결의 자식은 회수 대상으로 남는다.
+  expect(w.svc.ownedPids()).toContain(4242)
+  expect(w.counters.jobStops).toBeGreaterThanOrEqual(1)
+
+  const closed = await within(w.svc.close(), 20_000)
+  expect(closed).not.toBe('timeout')
+  expect(closed).toMatchObject({ outcome: 'pending', pids: expect.arrayContaining([4242]) })
+  held.resolve()
 })
 
 // ④ 항목 7 — 전환으로 검토 세션이 새 본대화 세션과 같아지면 결과를 버린다.
@@ -616,8 +663,10 @@ test('a stop during prepare does not start the delivery run', async () => {
     if (++prepares === 2) { prepareEntered = true; await new Promise<void>((resolve) => { releasePrepare = resolve }); return }
     return origPrepare?.(...args)
   }
-  // 학생 중단은 러너 `stop` → `draining` 을 기다린다. 그 드레인이 이 `prepare` 에 걸려 있으므로
-  // 중단 쪽에서 풀어 줘야 교착이 아니다(실제 연결도 stop 이 대기 중 호출을 정리한다).
+  // 학생 중단은 러너 `stop` 이 **먼저 상태를 확정**(`markStopped`)하고, 기다림은 `settleStopped` 가
+  // `STOP_DEADLINE_MS` 안에서만 진다(REVIEW-C4 I-03 — 예전에는 `draining` 을 마감 없이 기다렸다).
+  // 이 `prepare` 를 붙잡아 둬도 교착이 아니다: 마감이 지나면 중단은 `pending` 으로 돌아오고
+  // 실행 루프는 자기 `stopped` 표시를 보고 빠져나온다. 여기서 풀어 주는 것은 그 정리를 빨리 끝내기 위함이다.
   // 이 시험이 잠그는 것은 **풀린 뒤에 `run()` 이 불리지 않는가** 하나다 — 실제 정지가
   // `prepare` 를 어떻게 정리하는지는 연결 구현 몫이고 이 단위의 계약이 아니다(부분 지적 11).
   conn.stop = async () => { releasePrepare(); return origStop() }
