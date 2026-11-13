@@ -12,7 +12,9 @@
  */
 import { expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import {
@@ -102,6 +104,50 @@ test('지문이 어긋나면 백업하고 다시 깔며, 잠긴 자리에서도 
   expect(third.backup!.startsWith(join(userData, 'skill-host', '.knuaf-gui', 'skill-backups'))).toBe(true)
 })
 
+test('설치본 내용이 바뀌면 판 표시가 같아도 다시 깐다 — 내용 지문 대조(C-01ⓒ)', () => {
+  const { root, userData, host } = box()
+  const target = skillTargets(root, userData).claude
+  installSkill(source, target, version)
+  expect(skillState(target, version, source)).toBe('installed')
+
+  // 잠금을 풀고 스크립트 한 줄만 바꾼다. `VERSION_FILE` 은 그대로라 판 표시만 보면 '설치됨'이다.
+  setTreeAccess(target, true)
+  const script = join(target, 'scripts', 'gg.py')
+  writeFileSync(script, readFileSync(script, 'utf-8') + '\n# student edit\n')
+  expect(readFileSync(join(target, VERSION_FILE), 'utf-8').trim()).toBe(version)
+
+  // 판 표시만 보는 옛 판정은 'installed' 라고 답한다 — 내용 지문을 주면 'outdated' 여야 한다.
+  expect(skillState(target, version)).toBe('installed')
+  expect(skillState(target, version, source)).toBe('outdated')
+  expect(installSkill(source, target, version, source).action).toBe('updated')
+  expect(skillState(target, version, source)).toBe('installed')
+})
+
+test('자동 실행은 설치본 내용이 동봉본과 같을 때만 — 변조된 스크립트는 카드로 간다(C-01ⓒ)', () => {
+  const { root, userData, host } = box()
+  const target = skillTargets(root, userData).claude
+  installSkill(source, target, version)
+  const script = join(target, 'scripts', 'gg.py').replace(/\\/g, '/')
+  const call = { command: `python3 "${script}" status` }
+
+  expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
+
+  setTreeAccess(target, true)
+  writeFileSync(join(target, 'scripts', 'gg.py'), readFileSync(join(target, 'scripts', 'gg.py'), 'utf-8') + '\n# student edit\n')
+  // 변조된 스크립트를 스스로 실행하는 호출은 더 이상 카드 없이 지나가지 않는다.
+  expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(false)
+
+  installSkill(source, target, version, source)
+  expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
+  // 동봉본에 없는 뿌리 파일은 지문 대상이 아니다 — 스킬 밖에 둔 학생 파일은 재설치를 부르지 않는다.
+  setTreeAccess(target, true)
+  writeFileSync(join(target, 'student-note.txt'), 'preserve me')
+  expect(skillState(target, version, source)).toBe('installed')
+  expect(installSkill(source, target, version, source).action).toBe('unchanged')
+  expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
+  setTreeAccess(target, true)
+})
+
 test('설치 뒤 앱 자리는 읽기 전용이고 다시 깐 뒤에도 다시 잠긴다', () => {
   const { root, userData, host } = box()
   const target = skillTargets(root, userData).claude
@@ -144,7 +190,6 @@ test('자동 허용: 앱 자리 읽기·스킬 실행은 통과, 쓰기와 자�
   expect(autoAllow(root, 'Bash', { command: `python3 "${script}" --out "${hostFile}"` }, [], userData)).toBe(false)
   // `..` 로 자리를 벗어나는 호출도 아니다.
   expect(autoAllow(root, 'Bash', { command: `python3 "${host}/../skills/knuaf-dev/scripts/gg.py" status` }, [], userData)).toBe(false)
-
 })
 
 test('쓰기 판정: 앱 자리에 쓰는 도구·명령만 카드 없이 거절하고 읽기·실행은 통과시킨다', () => {
@@ -156,8 +201,8 @@ test('쓰기 판정: 앱 자리에 쓰는 도구·명령만 카드 없이 거절
   expect(hostWriteDecision(root, 'Edit', { file_path: hostFile }, userData)).toMatchObject({ behavior: 'deny' })
   expect(hostWriteDecision(root, 'Bash', { command: `cp "${root}/x.md" "${hostFile}"` }, userData)).toMatchObject({ behavior: 'deny' })
   expect(hostWriteDecision(root, 'Bash', { command: `cp x.md "${join(host, 'references', 'a.md')}"` }, userData)).toMatchObject({ behavior: 'deny' })
-  // 판정 불가(치환·리다이렉트·인라인 코드)인 명령은 종전과 같은 한계다 — 앱이 뜻을 못 따라가면
-  // 경로도 못 짚는다. 그 자리에서 실제로 쓰기를 막는 것은 읽기 전용 잠금이다(아래 시험).
+  // 판정 불가능한 명령은 **닫는다**(C-01ⓐ) — 예전에는 null 로 흘려 trusted() 가 통과시켰다.
+  // 리다이렉트·치환·백틱·서브셸은 앱이 뜻을 못 따라가므로 경로도 못 짚는다. 닫는 편이 안전하다.
 
   // 읽기·실행은 거절 대상이 아니다(그 판정은 autoAllow 가 한다).
   expect(hostWriteDecision(root, 'Read', { file_path: hostFile }, userData)).toBeNull()
@@ -170,6 +215,88 @@ test('쓰기 판정: 앱 자리에 쓰는 도구·명령만 카드 없이 거절
   // 경로 판정은 정규화된 절대경로로 한다 — 자리 이름 조각만 흉내낸 폴더는 아니다.
   expect(isSkillHostPath(hostFile, userData)).toBe(true)
   expect(isSkillHostPath(join(root, 'skill-host', '.claude', 'skills', 'knuaf-dev', 'x.md'), userData)).toBe(false)
+})
+
+test('해석 못 하는 셸 명령은 카드 없이 거절한다 — 리다이렉트·치환·서브셸(C-01ⓐ)', () => {
+  const { root, userData, host } = box()
+  const hostFile = join(host, 'SKILL.md').replace(/\\/g, '/')
+  // 해석에 실패해 닫는 경우 — 경로를 짚을 수 없으므로 문구에 내부 자리 이름도 흘리지 않는다.
+  const denyUnparseable = (command: string) => {
+    const out = hostWriteDecision(root, 'Bash', { command }, userData)
+    expect(out, command).toMatchObject({ behavior: 'deny' })
+    expect(out!.message, command).not.toContain('skill-host')
+    expect(out!.message, command).not.toContain(userData)
+  }
+
+  denyUnparseable(`echo pwn > "${hostFile}"`)
+  denyUnparseable(`echo pwn >"${join(host, 'x.md')}"`)
+  denyUnparseable(`cp "$(echo "${hostFile}")" y.md`)
+  denyUnparseable(`sh -c 'echo pwn > ${hostFile}'`)
+  denyUnparseable('echo ${HOME}')
+  denyUnparseable('echo `id`')
+  denyUnparseable('(cd /tmp && touch x)')
+  denyUnparseable('{ echo a; } > /tmp/x')
+
+  // 해석은 되지만 자리를 짚는 명령 — 이쪽은 **어느 경로인지** 보여 주며 거절한다.
+  const shown = hostWriteDecision(root, 'Bash', { command: `cat ${hostFile} | tee out.md` }, userData)
+  expect(shown).toMatchObject({ behavior: 'deny' })
+  expect(shown!.message).toContain(hostFile)
+
+  // 지킴이 상태와 무관한 평범한 폴더 안 명령은 그대로 통과한다 — 카드를 만들지 않는다.
+  expect(hostWriteDecision(root, 'Bash', { command: 'echo hi' }, userData)).toBeNull()
+  expect(hostWriteDecision(root, 'Bash', { command: `python3 "${join(host, 'scripts', 'gg.py')}" status` }, userData)).toBeNull()
+  // 빈 명령은 판정할 것이 없다.
+  expect(hostWriteDecision(root, 'Bash', { command: '   ' }, userData)).toBeNull()
+  // 지킴이가 꺼져 있으면(열쇠 없음) 이 판정도 하지 않는다.
+  expect(hostWriteDecision(root, 'Bash', { command: `echo pwn > "${hostFile}"` }, undefined)).toBeNull()
+})
+
+test('PowerShell 도 해석 못 하면 거절한다 — 변수·세미콜론·파이프(C-01ⓐ)', () => {
+  const { root, userData, host } = box()
+  const hostFile = join(host, 'SKILL.md').replace(/\\/g, '/')
+  const deny = (command: string) => {
+    const out = hostWriteDecision(root, 'PowerShell', { command }, userData)
+    expect(out, command).toMatchObject({ behavior: 'deny' })
+    expect(out!.message, command).not.toContain(userData)
+    expect(out!.message, command).not.toContain('skill-host')
+  }
+
+  deny('Write-Output $env:HOME')
+  deny(`Write-Output $env:HOME; Remove-Item "${hostFile}"`)
+  deny('Get-ChildItem | Where-Object Name')
+
+  // 해석은 되지만 자리를 짚는 명령은 그 자리를 보여 주며 거절한다.
+  expect(hostWriteDecision(root, 'PowerShell', { command: `Copy-Item x.md "${hostFile}"` }, userData)).toMatchObject({ behavior: 'deny' })
+
+  // 해석 가능하고 폴더 밖 경로도 없는 명령은 통과한다.
+  expect(hostWriteDecision(root, 'PowerShell', { command: 'Write-Output hello' }, userData)).toBeNull()
+})
+
+test('폴더 안 링크가 앱 자리를 가리켜도 보호한다 — 실제 대상 기준(C-01ⓑ)', () => {
+  const { root, userData, host } = box()
+  const target = skillTargets(root, userData).claude
+  installSkill(source, target, version)
+  const link = join(root, 'app-link')
+  symlinkSync(host, link, 'dir')
+  const viaLink = join(link, 'SKILL.md').replace(/\\/g, '/')
+  const hostFile = join(host, 'SKILL.md').replace(/\\/g, '/')
+
+  // 문자열만 보면 폴더 안이다 — 실제 자리로 보면 앱 자리다.
+  expect(isSkillHostPath(viaLink, userData)).toBe(true)
+  expect(hostWriteDecision(root, 'Write', { file_path: viaLink }, userData)).toMatchObject({ behavior: 'deny' })
+  expect(hostWriteDecision(root, 'Bash', { command: `cp x.md "${viaLink}"` }, userData)).toMatchObject({ behavior: 'deny' })
+  expect(autoAllow(root, 'Bash', { command: `cp x.md "${viaLink}"` }, [], userData)).toBe(false)
+  expect(autoAllow(root, 'Write', { file_path: viaLink }, [], userData)).toBe(false)
+
+  // 링크가 앱 자리 **뿌리**(`.claude`)를 가리키는 경우도 같다.
+  const rawRoot = join(root, 'claude-link')
+  symlinkSync(skillHostRoot(userData), rawRoot, 'dir')
+  expect(isSkillHostPath(join(rawRoot, 'skills', 'knuaf-dev', 'SKILL.md'), userData)).toBe(true)
+  expect(hostWriteDecision(root, 'Write', { file_path: join(rawRoot, 'settings.json') }, userData)).toMatchObject({ behavior: 'deny' })
+
+  // 링크 아닌 폴더 안 경로는 그대로 통과한다.
+  expect(hostWriteDecision(root, 'Write', { file_path: join(root, 'draft.md') }, userData)).toBeNull()
+  expect(hostWriteDecision(root, 'Read', { file_path: hostFile }, userData)).toBeNull()
 })
 
 test('첫 프롬프트는 플러그인 이름 고정값이다', () => {

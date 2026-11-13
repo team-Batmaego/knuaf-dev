@@ -11,11 +11,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CodexConnection } from '../src/main/chat/codex'
+import { ChatService } from '../src/main/chat/service'
 import { findExecutable } from '../src/main/agent'
+import { folderHash } from '../src/main/guard/scope'
 import { codexThreadRow, loadCodexThreads, saveCodexThreads } from '../src/main/guard/store'
 import { KORDOC_COLLISION_NOTE, lockFingerprint, type LockConfig } from '../src/main/chat/codexToolLock'
 import { newChatNotice, OTHER_WINDOW_COPY } from '../src/main/chat/codexThreadLock'
-import type { AgentEvents } from '../src/main/chat/contracts'
+import type { AgentConnection, AgentEvents, AgentOptions } from '../src/main/chat/contracts'
 import type { KordocMcpSpec } from '../src/main/chat/kordocMcp'
 import { fakeCodexEnv } from './fixtures/fake-codex'
 
@@ -100,12 +102,13 @@ function scene(tag: string, knobs: Record<string, string> = {}): Scene {
  * 읽혀(옵션을 모르는 옛 호출자 보존) 재개할 때마다 ephemeral 탐침이 나가고 그 탐침이 0.8초짜리
  * 상태 읽기를 두 번 더 부른다. 여기서 보려는 것은 잠금 순서이지 모델 기본값 복귀가 아니다.
  */
-function connection(s: Scene, withGuard = true): CodexConnection {
+function connection(s: Scene, extra: Partial<AgentOptions> = {}): CodexConnection {
   return new CodexConnection({
     binary: s.binary, root: s.root, skill: s.skill, env: s.env,
     openExternal: async () => {},
     modelChosen: () => false,
-    ...(withGuard ? { guard: s.guard } : {})
+    guard: s.guard,
+    ...extra
   })
 }
 
@@ -233,21 +236,89 @@ test('§10-23 ⓔ 학생 설정에 같은 이름의 kordoc 이 있으면 앱 것
   expect(start.params.config).toMatchObject({ mcp_servers: { kordoc: { enabled: false } } })
 })
 
-test('§10-23 ⓕ 지킴이 없이 만든 연결은 잠금 요청도, 스레드 config 도 보내지 않는다', async () => {
-  const s = scene('legacy', { FAKE_CODEX_TURN_ID_MODE: 'unique' })
-  const conn = connection(s, false)
+test('§10-23 ⓕ 열쇠가 없어도 잠금은 켜지고, 장부는 디스크에 남기지 않는다(C-02)', async () => {
+  const s = scene('keyless', {
+    FAKE_CODEX_CONFIG_READ: FOREIGN_CONFIG,
+    FAKE_CODEX_MCP_STATUS: FOREIGN_STATUS,
+    FAKE_CODEX_TURN_ID_MODE: 'unique'
+  })
+  // 열쇠를 못 얻은 실행: 디스크 장부는 못 믿지만 **잠금·격리는 그대로** 돌아야 한다.
+  const keyless = { ...s.guard, key: null }
+  const conn = connection(s, { guard: keyless, modelChosen: () => true })
   try {
     await conn.run('첫 메시지', undefined, s.events)
+    // 열쇠 없는 경로는 탐침(`serverDefaults`)을 돌지 않는다 — 프로세스는 하나다.
+    expect(s.requests().filter((r) => r.method === 'initialize')).toHaveLength(1)
+    const methods = s.requests().map((r) => r.method)
+    expect(methods).toContain('config/read')
+    expect(methods).toContain('plugin/installed')
   } finally {
     await conn.stop()
   }
-  const methods = s.requests().map((r) => r.method)
-  for (const method of ['config/read', 'plugin/installed', 'mcpServerStatus/list', 'app/list']) {
-    expect(methods, `${method} 는 지킴이를 탈 때만 나간다`).not.toContain(method)
-  }
   const start = liveLoads(s.requests(), 'thread/start')[0]
-  expect('config' in start.params).toBe(false)
-  expect(loadCodexThreads(s.guard)).toEqual({})
+  expect(start.params.config, '설정에 있던 외부 MCP 를 끈 그 config 가 실린다').toEqual(FOREIGN_LOCK)
+  expect(existsSync(join(s.guard.userData, 'guard')), '열쇠가 없으면 디스크 장부 자리를 만들지 않는다').toBe(false)
+})
+
+test('§10-23 ⓗ 기본값 탐침이 실패하거나 대화 id 를 못 주면 그 프로세스를 버리고 다음에 새로 연다(I-02)', async () => {
+  // 셈과 "한 번만" 표식을 파일에 둔다 — 앱이 프로세스를 버리면 새 프로세스가 다시 읽는데,
+  // 프로세스 안 셈이면 같은 실패가 무한히 반복돼 재시도 경로를 볼 수 없다.
+  const knobs = realpathSync(mkdtempSync(join(tmpdir(), 'kd-eph-')))
+  scratch.push(knobs)
+  const s = scene('probe-discard', {
+    FAKE_CODEX_EPHEMERAL_FAIL_FILE: join(knobs, 'fail'),
+    FAKE_CODEX_EPHEMERAL_THREAD_ID_MODE: 'missing',
+    FAKE_CODEX_EPHEMERAL_THREAD_ID_FILE: join(knobs, 'missing'),
+    FAKE_CODEX_TURN_ID_MODE: 'unique'
+  })
+  writeFileSync(join(knobs, 'fail'), '1')
+  writeFileSync(join(knobs, 'missing'), '')
+  const conn = connection(s, { modelChosen: () => true })
+  try {
+    // 1) 서버 오류 — 응답이 없으니 그 프로세스가 무엇을 남겼는지 앱은 모른다. 버린다.
+    await expect(conn.prepare('t-fake')).rejects.toThrow('temporary failure')
+    // 2) 새 프로세스가 다시 묻고, 이번엔 대화 id 가 없는 응답 — 남은 model 을 기본값으로 삼지 않는다.
+    await expect(conn.prepare('t-fake')).rejects.toThrow('Codex가 기본 대화를 만들지 못했어요.')
+    // 3) 세 번째 프로세스에서 정상 응답 — 기본값이 확정된다.
+    await expect(conn.prepare('t-fake')).resolves.toBeUndefined()
+    // 확정된 뒤에는 다시 묻지 않는다(네 번째 프로세스가 생기지 않는다).
+    await expect(conn.prepare('t-fake')).resolves.toBeUndefined()
+    expect(s.requests().filter((r) => r.method === 'initialize')).toHaveLength(3)
+    expect(liveLoads(s.requests(), 'thread/start'), '탐침은 실제 적재가 아니다').toHaveLength(0)
+  } finally {
+    await conn.stop()
+  }
+})
+
+test('§10-23 ⓘ 앱이 만드는 연결은 열쇠가 없어도 지킴이 문맥을 받는다(C-02)', async () => {
+  const s = scene('service-guard')
+  // 동봉본(설치 원본)은 설치 대상과 **다른** 자리다 — 같은 폴더면 설치는 자기 자신을 지우고 복사한다.
+  const bundle = join(s.base, 'bundle')
+  mkdirSync(bundle, { recursive: true })
+  writeFileSync(join(bundle, 'SKILL.md'), '# bundled skill\n')
+  let captured: AgentOptions | undefined
+  const stub: AgentConnection = {
+    status: async () => ({ installed: true, connected: false, version: null, detail: '연결 안 됨' }),
+    login: async () => { throw new Error('Login is forbidden in this test') },
+    run: async () => { throw new Error('Run is forbidden in this test') },
+    respond: () => {}, stop: async () => {}
+  }
+  const service = new ChatService({
+    skillSource: () => bundle, userData: s.guard.userData,
+    emit: () => {}, openExternal: async () => {},
+    connectionFactory: (_provider, options) => { captured = options; return stub },
+    guardKey: null
+  })
+  try {
+    await expect(service.send(s.root, 'codex', '첫 메시지', 'r1')).rejects.toThrow()
+  } finally {
+    await service.close()
+  }
+  expect(captured?.guard, '열쇠가 없어도 문맥은 늘 넘어간다').toBeDefined()
+  expect(captured!.guard!.key).toBeNull()
+  expect(captured!.guard!.userData).toBe(s.guard.userData)
+  expect(captured!.guard!.folderHash).toBe(folderHash(s.root))
+  expect(existsSync(join(s.guard.userData, 'guard')), '열쇠가 없으면 디스크 장부 자리를 만들지 않는다').toBe(false)
 })
 
 test('§10-23 ⓖ 이어 하기는 같은 잠금 config 를 다시 싣고, 원장에 이번 턴을 더한다', async () => {

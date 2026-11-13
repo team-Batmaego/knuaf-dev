@@ -105,8 +105,9 @@ export class ChatService {
     /** Test seam: build connections without spawning real agent processes (e2e/chat.spec.ts). */
     connectionFactory?: (provider: Provider, options: AgentOptions) => AgentConnection
     /**
-     * 지킴이 무결성 열쇠(§4.3). 없으면(`undefined`) 디스크 장부를 못 믿는 것과 같다 —
-     * Codex 연결은 종전 경로 그대로 돌고 지킴이는 꺼진다.
+     * 지킴이 무결성 열쇠(§4.3). `null`/`undefined` 는 **디스크 장부를 못 믿는다**는 뜻이지
+     * 지킴이가 꺼진다는 뜻이 아니다 — 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돈다.
+     * 열쇠가 없으면 원장은 메모리에만 남고(다음 실행에서 사라진다) 디스크에는 쓰지 않는다(C-02).
      */
     guardKey?: GuardKey
     /** True while the app itself holds a sidecar write transaction; send() must not interleave. */
@@ -262,12 +263,12 @@ export class ChatService {
   }
   private skillDir(root: string, provider: Provider) { return skillTargets(root, this.opts.userData)[provider] }
   /**
-   * 지킴이 보관본 자리(§4.3). 열쇠를 못 얻었으면 `undefined` — 디스크 장부를 믿지 않는 것과 같고,
-   * Codex 연결은 종전 경로로 돈다(지킴이 꺼짐이 기본).
+   * 지킴이 보관본 자리(§4.3). 열쇠를 못 얻었으면 `key: null` — 디스크 장부를 믿지 않는 것이지
+   * 지킴이를 끄는 것이 아니다(C-02). 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돌아야 하므로
+   * 문맥 자체는 언제나 넘긴다.
    */
-  private guardFor(root: string): GuardContext | undefined {
-    if (!this.opts.guardKey) return undefined
-    return { userData: this.opts.userData, folderHash: folderHash(root), key: this.opts.guardKey }
+  private guardFor(root: string): GuardContext {
+    return { userData: this.opts.userData, folderHash: folderHash(root), key: this.opts.guardKey ?? null }
   }
   /** 폴더의 kordoc 레지스트리 — 성공 캐시·실패 재시도·안내 1회는 이 객체가 지킨다(§3.2). */
   private kordocRegistry(root: string): KordocMcpRegistry {
@@ -393,7 +394,10 @@ export class ChatService {
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
-        ...(guard ? { guard } : {}),
+        guard,
+        // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
+        // 같은 함수를 쓴다(`skillSource`).
+        skillBundleSource: () => this.opts.skillSource(),
         // 연결은 폴더·공급자마다 한 번만 만들어진다 — 선택은 전송할 때마다 다시 읽는다.
         modelChoice: () => this.effectiveChoice(provider),
         modelChosen: () => this.opts.modelChosen?.(provider) ?? false
@@ -517,12 +521,14 @@ export class ChatService {
       const root = this.connectRoot()
       // 이 연결은 상태 확인·로그인만 한다(턴 없음). 그래도 받는 자리를 똑같이 채운다 —
       // 공급자 코드가 guard 유무로 갈리므로 전역 연결만 종전 모양으로 남기지 않는다.
+      // 열쇠가 없어도(`key: null`) 문맥은 넘긴다(C-02) — 격리·열거는 열쇠와 무관하다.
       const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
         env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
         openExternal: this.opts.openExternal, trusted: () => false,
-        ...(guard ? { guard } : {})
+        guard,
+        skillBundleSource: () => this.opts.skillSource()
       }
       if (this.opts.connectionFactory) {
         c = this.opts.connectionFactory(provider, options)
@@ -587,15 +593,16 @@ export class ChatService {
       const skill = this.skillDir(root, provider)
       const source = this.opts.skillSource()
       const version = skillVersion(source)
-      const state = skillState(skill, version)
-      if (state === 'missing') installSkill(source, skill, version)
+      // 대조본을 넘겨 판 표시뿐 아니라 **내용**까지 본다(C-01ⓒ) — 표시만 같은 변조본은 다시 깐다.
+      const state = skillState(skill, version, source)
+      if (state === 'missing') installSkill(source, skill, version, source)
       else if (state === 'outdated' || (s.skillHash && s.skillHash !== version)) {
         // A changed skill is never a send-blocker: reinstall (with backup) and note it in the transcript.
         const marker = join(skill, VERSION_FILE)
         const old = s.skillHash && s.skillHash !== version ? s.skillHash : existsSync(marker) ? readFileSync(marker, 'utf-8').trim() : '이전 버전'
-        installSkill(source, skill, version)
+        installSkill(source, skill, version, source)
         s.messages.push({ id: randomUUID(), role: 'system', text: `규칙집이 갱신됐어요 (이전 ${old} → 현재 ${version})`, at: new Date().toISOString() })
-      } else installSkill(source, skill, version) // Refresh GUI ownership even for an unchanged copy.
+      } else installSkill(source, skill, version, source) // Refresh GUI ownership even for an unchanged copy.
       const connection = this.connection(root, provider)
       if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로

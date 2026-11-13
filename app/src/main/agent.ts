@@ -300,6 +300,11 @@ function skillFingerprint(abs: string, rel: string, out: string[]): void {
  * reported 'unchanged' and a project kept a stale copy of the rules.
  */
 export function skillVersion(source: string): string {
+  return skillDigest(source).slice(0, 12)
+}
+
+/** `skillVersion` 의 전체 값 — 두 사본을 대조할 때 12자 절단 전에 비교한다. */
+function skillDigest(source: string): string {
   const h = createHash('sha256')
   const skillMd = join(source, 'SKILL.md')
   h.update(existsSync(skillMd) ? readFileSync(skillMd) : Buffer.alloc(0))
@@ -311,7 +316,19 @@ export function skillVersion(source: string): string {
   }
   entries.sort()
   for (const e of entries) h.update('\n' + e)
-  return h.digest('hex').slice(0, 12)
+  return h.digest('hex')
+}
+
+/**
+ * 두 사본이 **같은 내용**인가(C-01ⓒ). 판 표시(`VERSION_FILE`)는 학생이 풀고 고칠 수 있으므로
+ * 설치본 무결성의 근거가 못 된다 — 동봉본과 파일 내용을 그대로 대조한다.
+ *
+ * 대상은 스킬이 실제로 싣는 것과 같은 집합이다(`SKILL.md` + `references`/`scripts`/`assets` +
+ * 판 metadata). 뿌리에 학생이 둔 다른 파일(`student-note.txt` 등)은 양쪽 모두에서 빠지므로
+ * 재설치를 부르지 않는다. 읽기 실패(권한·사라짐)는 불일치로 닫는다.
+ */
+export function sameTreeContent(a: string, b: string): boolean {
+  try { return skillDigest(a) === skillDigest(b) } catch { return false }
 }
 
 // ---------------------------------------------------------------- 4. targets + state
@@ -359,14 +376,21 @@ export function setTreeAccess(target: string, writable: boolean): void {
   for (const name of names) setTreeAccess(join(target, name), writable)
 }
 
-export function skillState(target: string, version: string): SkillState {
+/**
+ * 설치본 판정. `source` 를 주면 판 표시가 같아도 **내용 지문**까지 대조한다(C-01ⓒ) —
+ * 표시는 학생이 풀고 고칠 수 있으므로, 내용이 어긋나면 'outdated' 로 다시 깐다.
+ */
+export function skillState(target: string, version: string, source?: string): SkillState {
   if (!existsSync(target)) return 'missing'
+  let have: string
   try {
-    const have = readFileSync(join(target, VERSION_FILE), 'utf-8').trim()
-    return have === version ? 'installed' : 'outdated'
+    have = readFileSync(join(target, VERSION_FILE), 'utf-8').trim()
   } catch {
     return 'outdated'
   }
+  if (have !== version) return 'outdated'
+  if (source !== undefined && !sameTreeContent(target, source)) return 'outdated'
+  return 'installed'
 }
 
 // ---------------------------------------------------------------- 5. install
@@ -417,8 +441,13 @@ export function retireSupersededSkills(target: string): string[] {
   return moved
 }
 
-/** Copy the bundle payload and root metadata; GUI ownership lives outside it. */
-export function installSkill(source: string, target: string, version: string): InstallResult {
+/**
+ * Copy the bundle payload and root metadata; GUI ownership lives outside it.
+ *
+ * `compareTo` 는 대조용 동봉본이다 — 주면 판 표시가 같아도 내용이 다를 때 다시 깐다(C-01ⓒ).
+ * 생략하면 판 표시만 본다(옛 호출자·시험).
+ */
+export function installSkill(source: string, target: string, version: string, compareTo?: string): InstallResult {
   // A missing build bundle must never retire a student's working installed copy.
   const skillMd = join(source, 'SKILL.md')
   if (!existsSync(skillMd)) throw new Error('스킬 원본에 SKILL.md가 없음: ' + source)
@@ -431,7 +460,8 @@ export function installSkill(source: string, target: string, version: string): I
     installs: [{ path: '.claude/skills/knuaf-dev' }, { path: '.agents/skills/knuaf-dev' }]
   }), { mode: 0o600 })
   if (!marker.ok) throw marker.error
-  const state = skillState(target, version)
+  // 대조본을 주면 내용 지문까지 본다 — 표시만 같고 내용이 어긋난 사본은 'updated' 로 다시 깐다.
+  const state = skillState(target, version, compareTo)
   if (state === 'installed') return { action: 'unchanged' }
 
   // 앱 스킬 자리(논문 폴더 밖)만 읽기 전용으로 잠근다(§4.2). Codex 의 폴더 사본은 잠그지 않는다 —
@@ -730,14 +760,15 @@ export async function getStatus(ctx: AgentCtx, root: string | null): Promise<Age
     return { found: !!path, path, version: path ? await probeVersion(path) : null }
   }
   const [claude, codex] = await Promise.all([probe('claude'), probe('codex')])
-  const version = skillVersion(skillSource(ctx.appRoot, ctx.isPackaged, ctx.resourcesPath))
+  const bundle = skillSource(ctx.appRoot, ctx.isPackaged, ctx.resourcesPath)
+  const version = skillVersion(bundle)
   // Claude 사본은 폴더 밖(앱 자리)이라 폴더가 없어도 판정할 수 있다(§4.2). Codex 는 폴더 사본.
   return {
     claude,
     codex,
     skill: {
-      claude: skillState(skillHostDir(ctx.userData), version),
-      codex: root ? skillState(skillTargets(root, ctx.userData).codex, version) : 'missing'
+      claude: skillState(skillHostDir(ctx.userData), version, bundle),
+      codex: root ? skillState(skillTargets(root, ctx.userData).codex, version, bundle) : 'missing'
     },
     skillVersion: version
   }
@@ -752,7 +783,7 @@ export const agentApi = {
     // Claude 사본은 폴더 밖(앱 자리)이라 연 폴더가 필요 없다(§4.2). Codex 는 폴더 사본이라 필요하다.
     if (kind === 'codex' && !root) throw new Error('먼저 작업 폴더를 열어 주세요.')
     const source = skillSource(ctx.appRoot, ctx.isPackaged, ctx.resourcesPath)
-    return installSkill(source, skillTargets(root ?? ctx.userData, ctx.userData)[kind], skillVersion(source))
+    return installSkill(source, skillTargets(root ?? ctx.userData, ctx.userData)[kind], skillVersion(source), source)
   },
 
   launch: (ctx: AgentCtx, o: { root: string; kind: AgentKind; revision: number | null }): Promise<LaunchResult> => {

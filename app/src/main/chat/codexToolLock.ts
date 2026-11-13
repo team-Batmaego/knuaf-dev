@@ -235,6 +235,13 @@ function layerKindOf(name: unknown): LayerKind | undefined {
   return type === 'user' || type === 'project' || type === 'system' ? type : undefined
 }
 
+/** 표 칸 읽기 — 키가 없으면 빈 표, 있는데 표가 아니면 거부(I-01). */
+function tableAt(rec: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  if (!(key in rec)) return {}
+  const value = asRecord(rec[key])
+  return value ?? undefined
+}
+
 /** 열거 — 두 호출 모두 MCP 를 기동하지 않는다(설계 §4.1-C 1번). 실패는 이유와 함께 돌려준다. */
 async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enumeration } | { ok: false; reason: ReadReason }> {
   let read: unknown
@@ -246,8 +253,11 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
   }
   const merged = asRecord(asRecord(read)?.config)
   if (!merged) return { ok: false, reason: 'list-shape' }
-  const servers = asRecord(merged.mcp_servers) ?? {}
-  const plugins = asRecord(merged.plugins) ?? {}
+  // **없는 것과 모양이 깨진 것은 다르다**(I-01). `null`·배열은 "그 칸을 읽지 못했다"이지
+  // "잠글 것이 없다"가 아니다 — 빈 표로 삼키면 잠금 없이 스레드를 연다.
+  const servers = tableAt(merged, 'mcp_servers')
+  const plugins = tableAt(merged, 'plugins')
+  if (!servers || !plugins) return { ok: false, reason: 'list-shape' }
   const layers: Record<LayerKind, Record<string, unknown>> = { user: {}, project: {}, system: {} }
   const rawLayers = asRecord(read)?.layers
   if (rawLayers !== undefined) {
@@ -267,7 +277,10 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
     if (typeof item === 'string' && item) { ids.push(item); continue }
     const rec = asRecord(item)
     const id = typeof rec?.id === 'string' ? rec.id : typeof rec?.pluginId === 'string' ? rec.pluginId : ''
-    if (id) ids.push(id)
+    // 설치 행이 문자열도 표도 아니거나 id 가 없으면(`null`·`{}`) 건너뛰지 않고 닫는다(I-01).
+    // 건너뛰면 그 플러그인의 이름을 모른 채 잠금 목록을 만든다 — 모르는 것은 통과가 아니다.
+    if (!rec || !id) return { ok: false, reason: 'list-shape' }
+    ids.push(id)
   }
   return { ok: true, value: { servers, plugins, layers, installed: ids } }
 }

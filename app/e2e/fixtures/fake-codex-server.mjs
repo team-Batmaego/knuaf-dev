@@ -27,6 +27,13 @@
  *                           initialize 응답을 늦추고, 그 전에 온 요청을 `Not initialized` 로 거절한다
  *   FAKE_CODEX_EPHEMERAL_FAIL_TIMES
  *                           기본값 조회용 `thread/start(ephemeral:true)` 를 그 횟수만큼 오류로 거절한다
+ *   FAKE_CODEX_EPHEMERAL_THREAD_ID_MODE  `missing` 이면 기본값 탐침(ephemeral) 응답에서
+ *                           `thread.id` 를 뺀다 — 탐침이 대화 id 를 못 얻은 경우(§4.1-C 폐기 규칙)
+ *   FAKE_CODEX_EPHEMERAL_FAIL_FILE   `FAKE_CODEX_EPHEMERAL_FAIL_TIMES` 의 셈을 파일에 둔다 —
+ *                           앱이 프로세스를 갈아 끼워도 "한 번만 실패"가 실제로 한 번이다.
+ *                           안 주면 `FAKE_CODEX_THREAD_STATE` 옆 `.ephemeral-fail` 을 쓴다
+ *   FAKE_CODEX_EPHEMERAL_THREAD_ID_FILE  `FAKE_CODEX_EPHEMERAL_THREAD_ID_MODE` 를 **한 번만**
+ *                           적용한다(읽고 지운다) — 버려진 프로세스 뒤의 재탐침이 정상 응답을 받는다
  *   FAKE_CODEX_MODELS_FAIL_TIMES  모델 목록 조회를 처음 N회 오류로 거절한다(복구 UI 시험).
  *
  * 1층 잠금(§4.1-C)·턴 원장(⑨) 시험용 노브 — **설정하지 않으면 기존 동작 그대로**다.
@@ -52,8 +59,8 @@
  *                           목록 RPC 판정 금지(ⓞ) 시험용 가짜 응답
  *   FAKE_CODEX_REQUEST_LOG          온 요청을 `{method, params}` 한 줄씩 남긴다(㉲·㉮ 대조)
  */
-import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 const MODE = process.env.FAKE_CODEX_MODE ?? 'logged-in'
 if (MODE === 'dead') process.exit(1)
@@ -85,6 +92,44 @@ const DEFAULT_EFFORT = process.env.FAKE_CODEX_DEFAULT_EFFORT ?? 'medium'
 const INIT_DELAY_MS = Math.max(0, Number(process.env.FAKE_CODEX_INIT_DELAY_MS ?? 0) || 0)
 /** 기본값 조회(ephemeral thread)만 실패시키는 횟수 — 실패 뒤 재조회 경로를 시험한다. */
 let ephemeralFailures = Math.max(0, Number(process.env.FAKE_CODEX_EPHEMERAL_FAIL_TIMES ?? 0) || 0)
+/**
+ * 그 셈을 **파일**에 두는 갈래. 앱은 탐침이 실패하면 프로세스를 버리므로, 프로세스 안에서만
+ * 세면 새 프로세스가 같은 셈을 처음부터 다시 읽어 영원히 실패한다 — "한 번만 실패"를
+ * 재현하려면 셈이 프로세스 밖에 있어야 한다(`FAKE_CODEX_TURN_SEQ_FILE` 과 같은 방식).
+ * 값이 0 이 되면 `0` 을 적어 둔다 — 파일이 없으면 새 프로세스가 시작할 때 다시 채워 넣는다.
+ */
+const EPHEMERAL_FAIL_FILE = process.env.FAKE_CODEX_EPHEMERAL_FAIL_FILE
+  // 파일 자리를 안 줬으면 스레드 상태 파일 옆에 둔다 — 시험 하나가 쓰는 폴더라 저절로 격리되고,
+  // `FAKE_CODEX_EPHEMERAL_FAIL_TIMES` 를 쓰는 기존 시험이 프로세스 교체 뒤에도 "한 번만"을 본다.
+  ?? (ephemeralFailures > 0 && process.env.FAKE_CODEX_THREAD_STATE
+    ? join(dirname(process.env.FAKE_CODEX_THREAD_STATE), '.ephemeral-fail')
+    : '')
+if (EPHEMERAL_FAIL_FILE && !existsSync(EPHEMERAL_FAIL_FILE) && ephemeralFailures > 0) {
+  try { writeFileSync(EPHEMERAL_FAIL_FILE, String(ephemeralFailures)) } catch { /* 이 프로세스 안에서만 센다 */ }
+}
+const readFailCount = () => {
+  if (!EPHEMERAL_FAIL_FILE) return ephemeralFailures
+  try { return Math.max(0, Number(readFileSync(EPHEMERAL_FAIL_FILE, 'utf8')) || 0) } catch { return 0 }
+}
+const writeFailCount = (n) => {
+  if (!EPHEMERAL_FAIL_FILE) { ephemeralFailures = n; return }
+  // 0 을 지우지 않고 적는다 — 파일이 없으면 새 프로세스가 시작할 때 다시 채워 넣어
+  // "한 번만 실패"가 영원히 되살아난다.
+  try { writeFileSync(EPHEMERAL_FAIL_FILE, String(n)) } catch { /* 셈을 못 남기면 이 프로세스 안에서만 센다 */ }
+}
+/** 탐침 응답에서 대화 id 를 빼는 노브 — `FAKE_CODEX_THREAD_ID_MODE` 는 실제 적재에만 쓰인다. */
+const EPHEMERAL_THREAD_ID_MODE = process.env.FAKE_CODEX_EPHEMERAL_THREAD_ID_MODE ?? ''
+/**
+ * 위 노브를 **한 번만** 적용하는 갈래. 파일이 있으면 이 프로세스의 첫 탐침에만 적용하고 지운다.
+ * 프로세스가 갈린 뒤의 재탐침은 정상 응답을 받아야 "폐기하고 다시 열었다"를 볼 수 있다.
+ */
+const EPHEMERAL_THREAD_ID_FILE = process.env.FAKE_CODEX_EPHEMERAL_THREAD_ID_FILE ?? ''
+const takeEphemeralThreadIdMode = () => {
+  if (!EPHEMERAL_THREAD_ID_FILE) return EPHEMERAL_THREAD_ID_MODE
+  if (!existsSync(EPHEMERAL_THREAD_ID_FILE)) return ''
+  try { rmSync(EPHEMERAL_THREAD_ID_FILE, { force: true }) } catch { /* 못 지우면 이번만 적용한다 */ }
+  return EPHEMERAL_THREAD_ID_MODE
+}
 let modelListFailures = Math.max(0, Number(process.env.FAKE_CODEX_MODELS_FAIL_TIMES ?? 0) || 0)
 const TURN_FAILURE = process.env.FAKE_CODEX_TURN_FAILURE ?? ''
 const LOGIN_COMPLETE = process.env.FAKE_CODEX_LOGIN_COMPLETE ?? ''
@@ -348,13 +393,16 @@ function handle(message) {
     case 'thread/resume': {
       // `ephemeral` 은 앱이 '서버 기본값'을 물을 때 쓴다 — 디스크에 남지 않는 대화 하나.
       if (params.ephemeral === true) {
-        if (ephemeralFailures > 0) {
-          ephemeralFailures -= 1
+        const failures = readFailCount()
+        if (failures > 0) {
+          writeFailCount(failures - 1)
           return out({ id, error: { code: -32603, message: 'temporary failure' } })
         }
         const ephId = `t-ephemeral-${++ephemeralSeq}`
         threads.set(ephId, { model: DEFAULT_MODEL, effort: DEFAULT_EFFORT })
-        return out({ id, result: threadResult(ephId) })
+        const eph = threadResult(ephId)
+        if (takeEphemeralThreadIdMode() === 'missing') delete eph.thread.id
+        return out({ id, result: eph })
       }
       threadId = params.threadId ?? 't-fake'
       const isResume = message.method === 'thread/resume'

@@ -510,6 +510,77 @@ test('§10-22 ⓔ config/read 형식 이상(null config)이면 거부한다', as
   expectFail(await appThread(f), 'list-shape')
 })
 
+// ── I-01: '없는 것'과 '모양이 깨진 것'을 가른다 ────────────────────────────────
+//
+// 종전 열거는 `asRecord(x) ?? {}` 로 읽어 **null·배열·문자열을 빈 표로 삼켰다**. 서버가
+// `mcp_servers: null` 이라고 답한 것은 "학생 설정에 MCP 가 없다"가 아니라 "그 칸을 읽지
+// 못했다"는 뜻이다 — 빈 표로 읽으면 잠글 것이 없다고 믿고 그대로 스레드를 연다. 키가 아예
+// 없는 응답(구버전 서버)만 빈 표로 읽는다.
+
+test('I-01 mcp_servers 가 null 이면 빈 표가 아니라 거부다', async () => {
+  const f = fakeRpc({
+    'config/read': () => ({ config: { mcp_servers: null, plugins: {} }, layers: [] }),
+    'plugin/installed': () => installed([])
+  })
+  expectFail(await appThread(f), 'list-shape')
+  expect(f.methods()).not.toContain('thread/start')
+  expect(f.methods()).not.toContain('thread/resume')
+})
+
+test('I-01 plugins 가 배열이면 거부다', async () => {
+  const f = fakeRpc({
+    'config/read': () => ({ config: { mcp_servers: {}, plugins: [{ id: 'p' }] }, layers: [] }),
+    'plugin/installed': () => installed([])
+  })
+  expectFail(await appThread(f), 'list-shape')
+})
+
+test('I-01 plugin/installed 행이 null·빈 객체면 건너뛰지 않고 거부한다', async () => {
+  const f = fakeRpc({
+    'config/read': () => ({ config: { mcp_servers: {}, plugins: {} }, layers: [] }),
+    'plugin/installed': () => ({ data: [null, {}], nextCursor: null })
+  })
+  expectFail(await appThread(f), 'list-shape')
+})
+
+test('I-01 앱 스레드 경로에서도 plugins 가 null 이면 거부한다', async () => {
+  const f = fakeRpc({
+    'config/read': () => ({ config: { mcp_servers: {}, plugins: null }, layers: [] }),
+    'plugin/installed': () => installed([])
+  })
+  expectFail(await appThread(f), 'list-shape')
+  expect(f.methods()).not.toContain('thread/start')
+})
+
+test('I-01 앱 스레드 경로에서 설치 행이 모양을 갖추지 못하면 거부한다', async () => {
+  const f = fakeRpc({
+    'config/read': () => configRead({ servers: {}, plugins: {} }),
+    'plugin/installed': () => ({ data: [{}], nextCursor: null })
+  })
+  expectFail(await appThread(f), 'list-shape')
+})
+
+test('I-01 대조군: 키가 없는 병합 설정과 문자열 설치 id 는 종전대로 통과한다', async () => {
+  const f = fakeRpc({
+    'config/read': () => ({ config: {}, layers: [] }),
+    'plugin/installed': () => installed(['p1'])
+  })
+  const out = expectOk(await appThread(f))
+  expect(out.form).toBe('app-thread')
+  if (out.form !== 'app-thread') return
+  expect(out.config.mcp_servers).toEqual({})
+  expect(out.config.plugins).toEqual({ p1: { enabled: false } })
+})
+
+test('I-01 대조군: 문자열 설치 id 목록은 그대로 읽는다', async () => {
+  const f = fakeRpc({
+    'config/read': () => configRead({ servers: {}, plugins: {} }),
+    'plugin/installed': () => installed(['p1', 'p2'])
+  })
+  expectOk(await appThread(f))
+  expect(f.methods()).toContain('plugin/installed')
+})
+
 test('§10-22 ⓕ mcp_servers 이름이 있는데 5회 재시도 뒤에도 data:[] 면 거부한다', async () => {
   const f = resultRpc(() => status([]))
   const out = expectFail(await appThread(f), 'result-check')

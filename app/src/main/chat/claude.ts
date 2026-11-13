@@ -6,7 +6,7 @@ import type { Dirent } from 'node:fs'
 import { join, posix, resolve, sep, win32 } from 'node:path'
 import { query, type Query, type PermissionResult, type SettingSource, type SdkPluginConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
-import { workFolderInstructions } from '../agent'
+import { sameTreeContent, workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import type { ConnectionStatus } from '../../shared/chat'
@@ -14,7 +14,7 @@ import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 import { tokenRecord, claudeTokens } from './jobs/tokens'
 import { appendTokenRecord } from './jobs/token-log'
 import { claudeMcpOptions, mcpPolicy, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, type KordocMcpSpec } from './kordocMcp'
-import { isSkillHostPath, skillHostRoot } from '../guard/scope'
+import { isSkillHostPath, skillHostDir, skillHostRoot } from '../guard/scope'
 
 export class ClaudeAuthenticationError extends Error {
   constructor() { super(CLAUDE_AUTH_COPY.required) }
@@ -765,7 +765,21 @@ function isSkillCommand(root: string, input: unknown, userData?: string): boolea
   if (typeof raw !== 'string' || !raw.trim()) return false
   const segs = parseShell(raw)
   return !!segs?.length && segs.every((t) => segmentReason(t) === null
-    && (argsInRoot(root, t.slice(1)) || hostSkillCall(t, userData)))
+    && (hostSkillCall(t, userData)
+      || (argsInRoot(root, t.slice(1)) && !argsHitHost(t.slice(1), userData))))
+}
+
+/**
+ * 인자 어딘가가 앱 스킬 자리를 가리키는가(C-01ⓑ).
+ *
+ * `argsInRoot` 는 문자열 기준으로만 "폴더 안"을 본다. 그래서 폴더 안 링크가 앱 자리를
+ * 가리키면 `cp x.md app-link/SKILL.md` 가 폴더 안 일로 읽혀 카드 없이 통과했다 — 실제
+ * 대상은 앱이 매 전송마다 다시 까는 사본이다. 링크를 풀어 실제 자리로 판정한다.
+ * 실행 예외(`hostSkillCall`)는 호출 **모양**이 인정될 때만 서므로 여기서 먼저 닫는다.
+ */
+function argsHitHost(args: string[], userData?: string): boolean {
+  if (!userData) return false
+  return args.some((a) => argPathPieces(a).some((p) => isSkillHostPath(p, userData)))
 }
 
 /**
@@ -1098,8 +1112,21 @@ function argOf(input: unknown, key: string): unknown {
   return (input as Record<string, unknown>)[key]
 }
 
-/** 자동 허용 판정 — 클래스 밖 순수 함수로 두어 테스트가 직접 고정한다(권한 경계). */
-export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = [], userData?: string): boolean {
+/**
+ * 자동 허용 판정 — 클래스 밖 순수 함수로 두어 테스트가 직접 고정한다(권한 경계).
+ *
+ * `bundleSource`(동봉본)를 주면 앱 스킬 자리의 사본을 **내용까지** 대조한다(C-01ⓒ). 판 표시
+ * (`VERSION_FILE`)만 보면 학생이 잠금을 풀고 스크립트를 고친 사본도 '설치됨'이라, 그 사본을
+ * 카드 없이 실행하는 통로가 남는다. 대조는 이 판정 한 번에 한 번만 한다(명령마다 파일 전체를
+ * 해시하면 도구 호출마다 스킬 사본을 다시 읽는다).
+ */
+export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = [], userData?: string, bundleSource?: string): boolean {
+  // 이번 판정에서 앱 스킬 자리 사본이 동봉본과 같은지 — 처음 필요할 때 한 번만 계산한다.
+  let hostIntact: boolean | undefined
+  const hostContentIntact = (): boolean => {
+    if (hostIntact === undefined) hostIntact = !!userData && !!bundleSource && sameTreeContent(skillHostDir(userData), bundleSource)
+    return hostIntact
+  }
   const ok = (v: unknown) => outsideRoot(root, v) === null
     || (typeof v === 'string' && (allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')) || isSkillHostPath(v, userData)))
   const keys = PATH_TOOLS[name]
@@ -1124,7 +1151,11 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
     const segs = typeof raw === 'string' ? parseShell(raw) : null
     // 셸로 보호 경로를 쓰는 길(`tee .claude/settings.local.json`)도 카드로 돌린다.
     if (segs?.some((t) => touchesProtected(root, t, userData))) return false
-    return isSkillCommand(root, input, userData)
+    if (!isSkillCommand(root, input, userData)) return false
+    // 앱 스킬 자리의 스크립트를 여는 호출만 내용 대조를 건다 — 폴더 안 일만 하는 명령은
+    // 스킬 사본 상태와 무관하다(사본이 낡았다고 학생의 평범한 명령을 카드로 만들지 않는다).
+    if (bundleSource !== undefined && segs?.some((t) => hostSkillCall(t, userData)) && !hostContentIntact()) return false
+    return true
   }
   // 형님 결정(2026-11-09): 앱 AI의 웹 조회는 학생 허락 없이 허용한다.
   // 그 밖 모르는 도구는 계속 카드로 둔다.
@@ -1149,6 +1180,17 @@ export function registeredSources(root: string): string[] {
 function realOrSelf(p: string): string {
   try { return realpathSync(p) } catch { return p }
 }
+
+/**
+ * 해석에 실패한 셸 명령에 대한 거절 문구(C-01ⓐ).
+ *
+ * 짚은 경로가 없으므로 경로를 보여 주지 않고, 앱 내부 자리 이름도 흘리지 않는다.
+ * 판정을 못 한 명령을 "보호 경로를 안 건드렸다"로 읽으면 리다이렉트 한 줄로 앱 자리를
+ * 덮어쓸 수 있다(검토 Roh C-01ⓐ) — 모르면 닫는다.
+ */
+const UNPARSEABLE_SHELL_COPY =
+  '앱이 이 명령의 뜻을 확인하지 못했어요. 리다이렉트(>)·변수($)·백틱·서브셸이 들어간 명령은 '
+  + '앱이 관리하는 자리를 건드릴 수 있어 실행하지 않았어요. 파일을 고치려면 앱의 편집 도구를 써 주세요.'
 
 /**
  * 앱 스킬 자리(플러그인 뿌리)에 **쓰려는** 시도인가(설계 §4.2-1). 있으면 카드 없이 거절한다.
@@ -1181,7 +1223,7 @@ export function hostWriteDecision(
     const parsed = powerShellWords(raw)
     segs = parsed?.safe ? parsed.words.length ? [parsed.words] : null : null
   }
-  if (!segs) return null
+  if (!segs) return { behavior: 'deny' as const, message: UNPARSEABLE_SHELL_COPY }
   for (const t of segs) {
     // 스크립트 호출 자체가 인정되는 모양이면 그 조각은 통과(읽기·실행 예외).
     if (hostSkillCall(t, userData)) continue
@@ -1266,7 +1308,8 @@ export class ClaudeConnection implements AgentConnection {
     } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
   private autoAllowed(name: string, input: unknown): boolean {
-    return autoAllow(this.options.root, name, input, registeredSources(this.options.root), this.options.guard?.userData)
+    return autoAllow(this.options.root, name, input, registeredSources(this.options.root),
+      this.options.guard?.userData, this.options.skillBundleSource?.())
   }
   /**
    * 폴더에 이미 있는 '권한을 바꾸는 설정'을 학생에게 한 번 알린다.

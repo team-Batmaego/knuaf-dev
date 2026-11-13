@@ -121,8 +121,10 @@ export class CodexConnection implements AgentConnection {
    */
   private turnActive = false
   /**
-   * 지킴이 적재 표·턴 원장(설계 §4.1-C). `options.guard` 가 없으면(지킴이 없이 뜬 연결) 이
-   * 필드는 비어 있고 아래 경로는 종전 그대로다 — 기존 호출부를 건드리지 않는다.
+   * 지킴이 적재 표·턴 원장(설계 §4.1-C). `options.guard` 가 아예 없을 때만(지킴이 없이 뜬 옛
+   * 호출부·시험) 이 필드가 비고 아래 경로가 종전 그대로다. 앱이 만드는 연결은 열쇠가 없어도
+   * 문맥을 늘 받는다(`key: null`) — 그때는 디스크 원장을 믿지 않고 메모리 원장만 쓰며,
+   * **격리·잠금·플러그인 열거는 그대로 돈다**(C-02).
    */
   private guard?: CodexThreadGuard
   /** 이번 턴의 잠금 계획 — `verify` 가 같은 `config` 를 기준으로 대조한다. */
@@ -162,6 +164,22 @@ export class CodexConnection implements AgentConnection {
   private async ensurePlan(rpc: JsonRpcProcess): Promise<AppThreadPlan> {
     if (this.plan) return this.plan
     return (this.plan = await this.lockPlan(rpc))
+  }
+  /**
+   * 지금 프로세스를 버린다 — 다음 호출은 새 프로세스를 띄운다(설계 §4.1-C PROCESS DISCARD RULE).
+   *
+   * 표·적재 응답은 **그 프로세스의 것**이라 함께 버린다. 계획(`this.plan`)은 **이 턴**의 것이라
+   * 그대로 둔다 — `acquire` 가 쥔 지문과 `verify` 가 대조하는 `config` 가 같은 것이어야 한다.
+   * 탐침(`serverDefaults`)이 쓸 수 없는 응답(대화 id·모델 없음, 요청 실패)을 받은 프로세스도
+   * 여기로 버린다. 그 프로세스는 잠금을 확인하지 않은 채 시작 표식만 남아 있어, 다음 적재가
+   * "잠긴 프로세스"로 믿으면 안 된다(I-02).
+   */
+  private async discardProcess(): Promise<void> {
+    await this.rpc?.stop().catch(() => {})
+    this.rpc = undefined
+    this.verifiedOn = undefined
+    this.guard?.discard()
+    this.loaded = undefined
   }
   /**
    * 재기동을 거친 뒤 `turnBody` 의 `rpc` 는 죽은 프로세스다. 전송은 매 호출에서 **지금**
@@ -214,15 +232,7 @@ export class CodexConnection implements AgentConnection {
           return { ok: false, detail: text(e) }
         }
       },
-      restart: async () => {
-        await this.rpc?.stop().catch(() => {})
-        this.rpc = undefined
-        this.verifiedOn = undefined
-        // 표·적재 응답은 그 프로세스의 것이다. 계획은 **이 턴**의 것이라 그대로 둔다 —
-        // `acquire` 가 쥔 지문과 `verify` 가 대조하는 `config` 가 같은 것이어야 한다.
-        this.guard?.discard()
-        this.loaded = undefined
-      }
+      restart: async () => { await this.discardProcess() }
     }
   }
   /** 적재 응답 옮기기 — 보호 경로에는 응답 객체가 남지 않으므로 model·effort·turns 만 담는다. */
@@ -773,14 +783,27 @@ export class CodexConnection implements AgentConnection {
     let r: unknown
     try {
       r = await rpc.request('thread/start', { ephemeral: true, cwd: this.options.root, ...(plan ? { config: plan.config } : {}) })
+    } catch (e) {
+      // 요청이 실패하면 그 프로세스가 무엇을 남겼는지 앱은 모른다 — 버리고 다음에 새로 연다.
+      await this.discardProcess()
+      throw e
     } finally {
       if (plan) this.guard?.table.clearPending()
     }
     const threadId = r && typeof r === 'object' && 'thread' in r && r.thread && typeof r.thread === 'object' && 'id' in r.thread ? r.thread.id : undefined
-    if (plan && typeof threadId === 'string' && threadId) this.guard?.noteProbe(threadId)
     const reply = r && typeof r === 'object' ? (r as { model?: unknown; reasoningEffort?: unknown }) : undefined
     const model = typeof reply?.model === 'string' && reply.model ? reply.model : ''
-    if (!model) throw new Error('Codex가 기본 모델을 알려 주지 않았어요.')
+    if (!(typeof threadId === 'string' && threadId)) {
+      // 대화 id 가 없는 응답은 서버가 스레드를 만들었는지 알 수 없다 — 그 프로세스를 다시 쓰지
+      // 않는다(적재 경로 `loadReply` 의 `no-id` 와 같은 선). 남은 model 을 기본값으로 삼지도 않는다.
+      await this.discardProcess()
+      throw new Error('Codex가 기본 대화를 만들지 못했어요.')
+    }
+    if (plan && typeof threadId === 'string' && threadId) this.guard?.noteProbe(threadId)
+    if (!model) {
+      await this.discardProcess()
+      throw new Error('Codex가 기본 모델을 알려 주지 않았어요.')
+    }
     this.defaults = { model, effort: typeof reply?.reasoningEffort === 'string' && reply.reasoningEffort ? reply.reasoningEffort : null }
     return this.defaults
   }
