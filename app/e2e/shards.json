@@ -30,7 +30,9 @@
       "update-vector",
       "userdata",
       "win-feedback",
-      "win-reqa-layout"
+      "win-reqa-layout",
+      "guard-codex-connection",
+      "kordoc-mcp-lifecycle"
     ],
     [
       "agent-busy",
@@ -62,7 +64,9 @@
       "progress-list",
       "token-usage",
       "edits-store",
-      "sameword"
+      "sameword",
+      "guard-codex-thread-lock",
+      "kordoc-mcp-policy"
     ],
     [
       "artifacts-states",
@@ -94,7 +98,9 @@
       "progress-titlebar",
       "edit",
       "recheck",
-      "viewer-edit"
+      "viewer-edit",
+      "guard-codex-tool-lock",
+      "kordoc-mcp-real"
     ],
     [
       "app-update-install-mode",
@@ -125,7 +131,10 @@
       "ui-polish",
       "update-ui",
       "workflows",
-      "recheck-screen"
+      "recheck-screen",
+      "guard-claude-skill-host",
+      "guard-key",
+      "kordoc-mcp-registry"
     ],
     [
       "agent",
@@ -157,7 +166,9 @@
       "u1-claude-chip-ui",
       "u5c-student-slash",
       "update",
-      "update-poll"
+      "update-poll",
+      "kordoc-mcp-codex",
+      "kordoc-mcp-wiring"
     ]
   ],
   "macos": [
@@ -236,7 +247,12 @@
       "token-usage",
       "edits-store",
       "recheck-screen",
-      "viewer-edit"
+      "viewer-edit",
+      "guard-codex-connection",
+      "guard-codex-tool-lock",
+      "kordoc-mcp-codex",
+      "kordoc-mcp-policy",
+      "kordoc-mcp-registry"
     ],
     [
       "agent-busy",
@@ -312,7 +328,13 @@
       "progress-titlebar",
       "edit",
       "recheck",
-      "sameword"
+      "sameword",
+      "guard-claude-skill-host",
+      "guard-codex-thread-lock",
+      "guard-key",
+      "kordoc-mcp-lifecycle",
+      "kordoc-mcp-real",
+      "kordoc-mcp-wiring"
     ]
   ]
 }
