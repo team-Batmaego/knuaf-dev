@@ -1,7 +1,9 @@
 import { agentActivity, type AgentActivity } from './activity'
 import { skillSwitch, type SkillSwitch } from './switch'
 import type { ProcessSnapshot } from './processes'
-export interface HandoffChat { hasPendingLogin(): boolean; flushDrafts(): void; closeForUpdate(confirmStopped: () => Promise<void>): Promise<void> }
+// `closeForUpdate` 는 `'settled' | 'pending'` 를 돌려준다 — 인계는 그 분류를 쓰지 않지만(정착한
+// 거절만 던지는 계약은 그대로), 마감을 넘긴 연결은 서비스가 소유권을 남긴다. 넓게 받아 둔다.
+export interface HandoffChat { hasPendingLogin(): boolean; flushDrafts(): void; closeForUpdate(confirmStopped: () => Promise<void>): Promise<unknown> }
 export interface HandoffWindows { captureOwned(): Promise<ProcessSnapshot>; confirmStopped(before: ProcessSnapshot): Promise<void>; assertResourcesIdle(): Promise<void> }
 export class AppHandoff {
   private recoveryPending = false

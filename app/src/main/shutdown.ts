@@ -1,0 +1,164 @@
+/**
+ * 종료 정리에 **마감**을 둔다.
+ *
+ * `before-quit` 은 지금까지 정리 약속(`sidecar.stop()`·`chat.close()`)이 저절로 끝나기를
+ * 기다렸다. 그 약속들 중 하나라도 끝나지 않으면 Electron main 은 영영 종료되지 않고,
+ * 창을 닫은 학생은 앱이 안 꺼지는 것을 본다(윈도우 e2e: `electronApp.close()` 44초 미완료).
+ *
+ * 두 가지를 지킨다(검토 RT2-02):
+ * 1. **마감 타이머를 정리 시작보다 먼저** 건다. 그래서 부르는 쪽은 이미 시작된 약속이 아니라
+ *    "시작하는 함수"를 넘긴다 — 인자 평가(그 안의 동기 작업)가 타이머보다 앞서지 않는다.
+ * 2. **경과 시간을 재서 돌려준다.** 타이머는 이벤트 루프가 돌아야 발화하므로, 같은 루프를
+ *    막는 동기 호출이 있으면 실제 경과는 마감보다 길다. 그 사실을 숫자로 남긴다 —
+ *    "마감이 지켜졌다"고 코드만 보고 말하지 않게.
+ */
+import { killTree } from './win'
+
+export interface ShutdownTask {
+  /** 로그에 남길 짧은 이름 — `sidecar.stop`·`chat.close` 처럼 어느 정리가 남았는지. */
+  name: string
+  /** 정리를 **시작하는** 함수. 마감 타이머가 걸린 뒤에 불린다. */
+  start: () => Promise<unknown>
+}
+
+export interface ShutdownOutcome {
+  /** 마감 안에 끝난 정리 이름. */
+  done: string[]
+  /** 마감까지 끝나지 않은 정리 이름 — 부른 쪽이 기록하고 강제 종료로 넘어간다. */
+  pending: string[]
+  /** 정리 약속이 거절한 이름과 이유(정리 실패는 종료를 막지 않는다). */
+  failed: { name: string; reason: unknown }[]
+  /** 정리 시작부터 이 함수가 돌아오기까지의 실제 시간(ms). 마감보다 크면 동기 블록이 있었다. */
+  elapsedMs: number
+}
+
+/**
+ * 남은 핸들 1줄 — 마감에 걸렸을 때 **무엇이 main을 붙잡는지** 다음 재발 때 바로 보이게 한다.
+ * Electron/Node 의 비공개 API(`process._getActiveHandles`)라 없으면 빈 문자열이다(진단 실패가
+ * 종료를 막지 않는다). 자식 프로세스는 pid 만 적고 인자는 적지 않는다(경로·토큰 노출 방지).
+ */
+export function openHandles(): string {
+  const read = (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles
+  if (typeof read !== 'function') return ''
+  let handles: unknown[]
+  try { handles = read.call(process) } catch { return '' }
+  const seen = new Map<string, number>()
+  for (const handle of handles) {
+    const ctor = (handle as { constructor?: { name?: string } } | null)?.constructor?.name ?? 'unknown'
+    const pid = (handle as { pid?: unknown } | null)?.pid
+    const name = typeof pid === 'number' ? `${ctor}(pid=${pid})` : ctor
+    seen.set(name, (seen.get(name) ?? 0) + 1)
+  }
+  return [...seen].map(([name, n]) => (n > 1 ? `${name}×${n}` : name)).join(', ')
+}
+
+/**
+ * 마감 뒤 남은 자식 회수 — **시도와 관측**까지만 한다(검토 RT2-03).
+ *
+ * `app.exit(0)` 는 Electron main 을 끝낼 뿐, 그 자식(사이드카·엔진·taskkill 이 놓친 손자)을
+ * 회수한다는 보장이 없다. OS 가 정리해 줄 것이라고 가정하지 않고, 우리가 아는 pid 를 한 번 더
+ * 트리째 끝내고 **살아 있는지 관측한 결과**를 돌려준다. 관측이 실패하면 그 사실을 남긴다 —
+ * "회수 보장"이 아니라 "회수 시도 + 관측"이다.
+ */
+export interface ReclaimOutcome {
+  /** 트리 종료를 시도한 pid. */
+  pids: number[]
+  /** 관측 시점에 아직 살아 있던 pid. 비어 있지 않으면 고아가 남았다는 뜻이다. */
+  alive: number[]
+  /** 관측 자체를 못 한 pid(권한 등). */
+  unknown: number[]
+}
+
+/** pid 가 살아 있는가 — 신호 0 은 죽이지 않고 존재만 본다. */
+function alive(pid: number): boolean | null {
+  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' ? null : false }
+}
+
+const delay = (ms: number): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
+}
+
+/**
+ * pid 들을 트리째 끝내고 `deadlineMs` 동안 회수를 관측한다. 던지지 않는다.
+ *
+ * 종료 시도는 **플랫폼별 실제 경로**로 간다(검토 RT2-03): 윈도우는 `killTree` 가 `taskkill /T /F`
+ * (절대 경로·비동기)를 쓰고, 맥·리눅스는 `process.kill(SIGKILL)` 이다. 예전처럼
+ * `kill: () => false` 같은 **아무 신호도 보내지 않는 콜백**을 넘기면 회수 시도가 무동작인 채
+ * "살아 있음"만 남는다 — 그건 OS 한계가 아니라 배선 결함이었다.
+ *
+ * 시그널은 프로세스에 직접 간다(트리 단위는 윈도우 `taskkill /T` 만). 손자는 이 목록에 없으므로
+ * 관측 범위는 **우리가 아는 pid** 까지다 — 그 사실을 호출자가 로그에 남긴다.
+ */
+export async function reclaimChildren(
+  pids: readonly number[],
+  deadlineMs = 1_500
+): Promise<ReclaimOutcome> {
+  const unique = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))]
+  const outcome: ReclaimOutcome = { pids: unique, alive: [], unknown: [] }
+  if (!unique.length) return outcome
+  for (const pid of unique) {
+    try { killTree({ pid, kill: (signal) => { try { process.kill(pid, signal ?? 'SIGKILL'); return true } catch { return false } } }, 'SIGKILL') } catch { /* 아래 관측이 사실을 말한다 */ }
+  }
+  const end = Date.now() + Math.max(0, deadlineMs)
+  let remaining = unique
+  for (;;) {
+    remaining = remaining.filter((pid) => alive(pid) !== false)
+    if (!remaining.length || Date.now() >= end) break
+    await delay(50)
+  }
+  for (const pid of remaining) {
+    const state = alive(pid)
+    if (state === null) outcome.unknown.push(pid)
+    else if (state) outcome.alive.push(pid)
+  }
+  return outcome
+}
+
+/**
+ * 모든 정리를 시작하고 `deadlineMs` 까지 기다린다. **던지지 않는다** — 거절은 `failed` 로 돌려준다.
+ * 마감이 지나면 끝나지 않은 것을 기다리지 않고 `pending` 으로 알린다.
+ */
+export async function shutdownWithin(tasks: readonly ShutdownTask[], deadlineMs: number): Promise<ShutdownOutcome> {
+  const outcome: ShutdownOutcome = { done: [], pending: [], failed: [], elapsedMs: 0 }
+  const startedAt = Date.now()
+  const expired = Promise.withResolvers<'deadline'>()
+  // 타이머가 먼저다 — 아래 `start()` 안의 동기 작업이 마감을 앞지르지 않게.
+  const timer = setTimeout(() => expired.resolve('deadline'), Math.max(0, deadlineMs))
+  const settled = tasks.map((task) => {
+    let started: Promise<unknown>
+    try { started = task.start() } catch (error) { started = Promise.reject(error) }
+    return started.then(
+      () => { outcome.done.push(task.name) },
+      (reason: unknown) => { outcome.failed.push({ name: task.name, reason }) }
+    )
+  })
+  try {
+    if (await Promise.race([Promise.all(settled).then(() => 'done' as const), expired.promise]) === 'deadline') {
+      outcome.pending = tasks
+        .filter((task) => !outcome.done.includes(task.name) && !outcome.failed.some((f) => f.name === task.name))
+        .map((task) => task.name)
+    }
+  } finally {
+    clearTimeout(timer)
+    outcome.elapsedMs = Date.now() - startedAt
+  }
+  return outcome
+}
+
+/**
+ * 마감 결과가 **강제 종료 경로**를 타야 하는가.
+ *
+ * 검토 RT2-03 재현: 예전 index 는 `pending` 이 비었는지만 보고 "정리 완료 → app.quit" 으로 갔다.
+ * 그래서 sidecar stop 이 **실패로 정착**하면(=`failed`, `pending` 없음) 회수 시도를 건너뛰었다 —
+ * 실패를 잘 드러낼수록 그 실패가 정상 완료 분기로 들어가는 모순이었다.
+ *
+ * 강제 경로는 둘 중 하나면 탄다:
+ *  - 끝나지 않은 정리가 있다(`pending`) — 마감을 넘겼다.
+ *  - 거절한 정리가 있다(`failed`) — 정리는 끝났지만 **성공하지 않았다**. 자식이 남았을 수 있다.
+ * 순수 함수라 시험이 분기를 직접 고정한다.
+ */
+export function needsReclaim(outcome: Pick<ShutdownOutcome, 'pending' | 'failed'>): boolean {
+  return outcome.pending.length > 0 || outcome.failed.length > 0
+}
