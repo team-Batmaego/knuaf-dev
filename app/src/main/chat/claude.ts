@@ -4,15 +4,19 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { join, posix, resolve, sep, win32 } from 'node:path'
-import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
+import {
+  query, type ModelInfo, type Query, type PermissionResult, type SettingSource, type SdkPluginConfig, type SyncHookJSONOutput
+} from '@anthropic-ai/claude-agent-sdk'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
-import { workFolderInstructions } from '../agent'
+import { sameTreeContent, workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
 import type { ChatModelInfo, ConnectionStatus } from '../../shared/chat'
 import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 import { tokenRecord, claudeTokens } from './jobs/tokens'
 import { appendTokenRecord } from './jobs/token-log'
+import { claudeMcpOptions, mcpPolicy, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, type KordocMcpSpec } from './kordocMcp'
+import { isSkillHostPath, skillHostDir, skillHostRoot } from '../guard/scope'
 
 export class ClaudeAuthenticationError extends Error {
   constructor() { super(CLAUDE_AUTH_COPY.required) }
@@ -74,6 +78,13 @@ const PROTECTED_NAMES = ['claude.md', 'claude.local.md']
 const PROTECTED_ROOT_FILES = ['.mcp.json', '.claude.json']
 /** 앱이 매 전송마다 다시 설치하는 스킬 사본 자리. 실행은 예외, 쓰기는 아니다(자기 규칙을 못 고친다). */
 const APP_SKILL_PREFIX = '.claude/skills/'
+/**
+ * 첫 턴에서 부르는 스킬 이름(설계 §4.1). 앱 스킬 자리는 **플러그인 뿌리**로 넘어가므로
+ * CLI 가 플러그인 이름표(`.claude`)를 앞에 붙인 꼴로 등록한다 — 실측 `supportedCommands()`
+ * 가 `{.claude:knuaf-dev, aliases:[knuaf-dev]}` 였다. 뿌리를 한 단계 위(`skill-host`)로 주면
+ * 스킬이 아예 안 뜬다(48개 조회, 검출 0).
+ */
+export const SKILL_PROMPT = '/.claude:knuaf-dev'
 /** 쓰기가 아니라 읽기만 하는 도구. 권한을 바꾸지 않으므로 보호 경로도 그대로 통과한다. */
 const READ_ONLY_TOOLS: Record<string, true> = { Read: true, Glob: true, Grep: true, LS: true }
 
@@ -165,8 +176,11 @@ export function protectedHits(root: string, t: string[]): string[] {
  * 예외는 하나뿐이다 — 앱이 설치한 스킬 스크립트를 인터프리터로 여는 모양. 스킬은 매 턴
  * `.claude/skills/…/gg_*.py` 로 도구를 돌리므로 그것까지 물으면 카드가 매번 뜬다.
  * 그 밖에 `tee`·`touch`·`sed -i` 처럼 보호 경로에 닿는 조각은 전부 묻는다.
+ *
+ * `userData`를 주면 앱 스킬 자리(플러그인 뿌리)도 같은 예외로 본다 — 스킬이 폴더 밖
+ * `<userData>/skill-host/…` 로 옮겨 갔으므로 그 자리의 `gg*.py` 실행도 카드가 아니어야 한다.
  */
-export function touchesProtected(root: string, t: string[]): boolean {
+export function touchesProtected(root: string, t: string[], userData?: string): boolean {
   const hits = protectedHits(root, t)
   if (!hits.length) return false
   const [exe, ...args] = t
@@ -174,7 +188,7 @@ export function touchesProtected(root: string, t: string[]): boolean {
   const ownSkill = !!script && !script.startsWith('-') && !script.includes('..')
     && SKILL_PATH.test(script) && SKILL_SCRIPT.test(script)
     && INTERPRETERS.test(exeName(exe))
-    && (protectedRel(root, script) ?? '').startsWith(APP_SKILL_PREFIX)
+    && ((protectedRel(root, script) ?? '').startsWith(APP_SKILL_PREFIX) || isSkillHostPath(script, userData))
   return !(ownSkill && hits.length === 1 && hits[0] === script)
 }
 
@@ -753,11 +767,48 @@ function powerShellSkillCall(root: string, raw: string): boolean {
  * **경로가 전부 논문 폴더 안이면 묻지 않는다.** 폴더 밖으로 나가는 도구와 앱이 읽을 수
  * 없는 프로그램만 계속 묻는다.
  */
-function isSkillCommand(root: string, input: unknown): boolean {
+function isSkillCommand(root: string, input: unknown, userData?: string): boolean {
   const raw = (input as { command?: unknown })?.command
   if (typeof raw !== 'string' || !raw.trim()) return false
   const segs = parseShell(raw)
-  return !!segs?.length && segs.every((t) => segmentReason(t) === null && argsInRoot(root, t.slice(1)))
+  return !!segs?.length && segs.every((t) => segmentReason(t) === null
+    && (hostSkillCall(t, userData)
+      || (argsInRoot(root, t.slice(1)) && !argsHitHost(t.slice(1), userData))))
+}
+
+/**
+ * 인자 어딘가가 앱 스킬 자리를 가리키는가(C-01ⓑ).
+ *
+ * `argsInRoot` 는 문자열 기준으로만 "폴더 안"을 본다. 그래서 폴더 안 링크가 앱 자리를
+ * 가리키면 `cp x.md app-link/SKILL.md` 가 폴더 안 일로 읽혀 카드 없이 통과했다 — 실제
+ * 대상은 앱이 매 전송마다 다시 까는 사본이다. 링크를 풀어 실제 자리로 판정한다.
+ * 실행 예외(`hostSkillCall`)는 호출 **모양**이 인정될 때만 서므로 여기서 먼저 닫는다.
+ */
+function argsHitHost(args: string[], userData?: string): boolean {
+  if (!userData) return false
+  return args.some((a) => argPathPieces(a).some((p) => isSkillHostPath(p, userData)))
+}
+
+/**
+ * 앱 스킬 자리(논문 폴더 밖)의 스크립트를 인터프리터로 여는 호출인가(설계 §4.2-1).
+ *
+ * 스킬이 폴더 밖으로 나갔으므로 `argsInRoot` 만으로는 모든 스킬 실행이 카드가 된다.
+ * 인정 범위는 **스크립트 하나 + 그 스크립트의 인자**까지다. 인자 어딘가에 앱 스킬 자리
+ * 경로가 또 나오면(예: 스크립트에게 자기 사본을 쓰라고 넘기는 경우) 인정하지 않는다 —
+ * 읽기·실행만 예외이고 쓰기는 아니다(`hostWriteDecision` 이 한 번 더 막는다).
+ */
+function hostSkillCall(t: string[], userData?: string): boolean {
+  const [exe, script, ...args] = t
+  if (!exe || !script) return false
+  if (!INTERPRETERS.test(exeName(exe))) return false
+  if (script.startsWith('-') || script.includes('..')) return false
+  if (!SKILL_PATH.test(script) || !SKILL_SCRIPT.test(script)) return false
+  if (!isSkillHostPath(script, userData)) return false
+  for (const a of args) {
+    if (a.includes('..')) return false
+    for (const piece of argPathPieces(a)) if (isSkillHostPath(piece, userData)) return false
+  }
+  return true
 }
 
 /**
@@ -925,8 +976,19 @@ export function studentTurnText(text: string): string {
   return text.startsWith('/') ? ` ${text}` : text
 }
 
-/** 모든 턴에 붙는 앱 지침 — 세션 경계·스킬 규칙·셸 표기·하위 담당 금지. */
-const CLAUDE_SYSTEM_APPEND = '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요. 하위 담당(Agent·Task) 도구는 앱이 거절하니 부르지 마세요 — 넘길 일은 `gg.py delegate` 주문서로 넘기고, 그 명령이 아직 없으면 그 일은 직접 하거나 학생에게 한 줄로 알리세요. 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.'
+/**
+ * 모든 턴에 붙는 앱 지침 — 세션 경계·스킬 규칙·셸 표기·하위 담당 금지.
+ *
+ * 문서 읽기 안내만 kordoc MCP 부착 여부에 따라 갈린다(§3.3). 그래서 통짜 문자열이 아니라
+ * 앞·뒤 조각으로 나눠 두고 `systemAppend()` 가 가운데를 고른다.
+ */
+const SYSTEM_APPEND_HEAD = '이 세션은 개인용 knuaf-dev GUI입니다. knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 질문과 답변은 채팅 텍스트로 유지하고 인터뷰 원문과 해석을 스킬의 로그 계약대로 기록하세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). '
+const SYSTEM_APPEND_TAIL = ' 하위 담당(Agent·Task) 도구는 앱이 거절하니 부르지 마세요 — 넘길 일은 `gg.py delegate` 주문서로 넘기고, 그 명령이 아직 없으면 그 일은 직접 하거나 학생에게 한 줄로 알리세요. 서브에이전트를 백그라운드로 띄우지 마세요(run_in_background 금지). 턴이 끝난 뒤에 도구를 쓰면 승인 통로가 이미 닫혀 있어 그 작업은 반드시 실패합니다.'
+
+/** 이 턴에 붙일 시스템 지침. `mcp` 는 kordoc MCP 가 붙었는지다. */
+function systemAppend(mcp: boolean): string {
+  return SYSTEM_APPEND_HEAD + (mcp ? MCP_DOC_READ_INSTRUCTION : LEGACY_DOC_READ_INSTRUCTION) + SYSTEM_APPEND_TAIL
+}
 
 export function lostToolCalls(message: unknown): number {
   const content = (message as { message?: { content?: unknown } })?.message?.content
@@ -1197,15 +1259,33 @@ function argOf(input: unknown, key: string): unknown {
   return (input as Record<string, unknown>)[key]
 }
 
-/** 자동 허용 판정 — 클래스 밖 순수 함수로 두어 테스트가 직접 고정한다(권한 경계). */
-export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = []): boolean {
-  const ok = (v: unknown) => outsideRoot(root, v) === null || (typeof v === 'string' && allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')))
+/**
+ * 자동 허용 판정 — 클래스 밖 순수 함수로 두어 테스트가 직접 고정한다(권한 경계).
+ *
+ * `bundleSource`(동봉본)를 주면 앱 스킬 자리의 사본을 **내용까지** 대조한다(C-01ⓒ). 판 표시
+ * (`VERSION_FILE`)만 보면 학생이 잠금을 풀고 스크립트를 고친 사본도 '설치됨'이라, 그 사본을
+ * 카드 없이 실행하는 통로가 남는다. 대조는 이 판정 한 번에 한 번만 한다(명령마다 파일 전체를
+ * 해시하면 도구 호출마다 스킬 사본을 다시 읽는다).
+ */
+export function autoAllow(root: string, name: string, input: unknown, allowed: string[] = [], userData?: string, bundleSource?: string, hostIntact?: () => boolean): boolean {
+  // 이번 판정에서 앱 스킬 자리 사본이 동봉본과 같은지 — 처음 필요할 때 한 번만 계산한다.
+  // 호출자(`canUseTool`)가 같은 계산을 먼저 했으면 그 값을 받아 쓴다 — 도구 호출 하나에
+  // 24 MB 사본을 두 번 해시하지 않는다.
+  let memo: boolean | undefined
+  const hostContentIntact = (): boolean => hostIntact ? hostIntact()
+    : (memo ??= !!userData && !!bundleSource && sameTreeContent(skillHostDir(userData), bundleSource))
+  const ok = (v: unknown) => outsideRoot(root, v) === null
+    || (typeof v === 'string' && (allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')) || isSkillHostPath(v, userData)))
   const keys = PATH_TOOLS[name]
   if (keys) {
     const values = keys.map((k) => argOf(input, k))
     if (!values.every(ok)) return false
     // 폴더 안이어도 권한 파일은 묻는다 — 도우미가 자기 권한을 스스로 넓히는 통로를 막는다.
-    if (!READ_ONLY_TOOLS[name] && values.some((v) => protectedRel(root, v) !== null)) return false
+    if (!READ_ONLY_TOOLS[name]) {
+      // 앱 스킬 자리는 실행·읽기만 예외다(§4.2-1). 쓰기는 이 자리에서 먼저 닫는다.
+      if (values.some((v) => typeof v === 'string' && isSkillHostPath(v, userData))) return false
+      if (values.some((v) => protectedRel(root, v) !== null)) return false
+    }
     return true
   }
   if (POWERSHELL_TOOLS[name]) {
@@ -1217,13 +1297,62 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
     const raw = argOf(input, 'command')
     const segs = typeof raw === 'string' ? parseShell(raw) : null
     // 셸로 보호 경로를 쓰는 길(`tee .claude/settings.local.json`)도 카드로 돌린다.
-    if (segs?.some((t) => touchesProtected(root, t))) return false
-    return isSkillCommand(root, input)
+    if (segs?.some((t) => touchesProtected(root, t, userData))) return false
+    if (!isSkillCommand(root, input, userData)) return false
+    // 앱 스킬 자리의 스크립트를 여는 호출만 내용 대조를 건다 — 폴더 안 일만 하는 명령은
+    // 스킬 사본 상태와 무관하다(사본이 낡았다고 학생의 평범한 명령을 카드로 만들지 않는다).
+    if (bundleSource !== undefined && segs?.some((t) => hostSkillCall(t, userData)) && !hostContentIntact()) return false
+    return true
   }
   // 형님 결정(2026-11-09): 앱 AI의 웹 조회는 학생 허락 없이 허용한다.
   // 그 밖 모르는 도구는 계속 카드로 둔다.
   if (name === 'WebSearch' || name === 'WebFetch') return true
   return false
+}
+
+/**
+ * 앱 스킬 자리의 스크립트를 여는 호출인가 — Bash·PowerShell 공통(C-01ⓒ).
+ *
+ * `hostSkillCall` 은 낱말 배열을 받는 판정기다. Bash 는 그대로 쓰고, PowerShell 은 같은 꼴
+ * (인터프리터 + 앱 자리 스크립트 + 그 밖 인자)을 낱말 배열로 만들어 **같은 판정기**에 넣는다.
+ * 갈래마다 판정기를 따로 두면 한쪽만 지문 대조를 거치는 구멍이 생긴다 — 실제로
+ * `powerShellSkillCall` 은 폴더 안 사본만 인정해, 앱 자리(폴더 밖) 스크립트를 여는 호출은
+ * 판정 자체를 못 받고 있었다.
+ *
+ * 윈도우 PowerShell 은 `\` 를 구분자로 쓴다(`hostSkillCall` 의 `SKILL_PATH` 는 `/` 만 받는다).
+ * 판정 전에 이 조각들만 `/` 로 맞춘다 — 접는 것은 '이게 앱 자리 스크립트인가'를 알아보는
+ * 자리뿐이고, 실제 실행에 넘어가는 인자는 손대지 않는다.
+ *
+ * 해석하지 못한 명령(`safe` 꺼짐)은 여기서 닫지 않는다 — 그건 `hostWriteDecision` 이 맡는다.
+ */
+function hostScriptCall(name: string, input: unknown, userData?: string): boolean {
+  if (!userData) return false
+  const raw = argOf(input, 'command')
+  if (typeof raw !== 'string' || !raw.trim()) return false
+  if (name === 'Bash') {
+    const segs = parseShell(raw)
+    return !!segs?.some((t) => hostSkillCall(t, userData))
+  }
+  if (!POWERSHELL_TOOLS[name]) return false
+  const parsed = powerShellWords(raw)
+  if (!parsed?.safe || parsed.words.length < 2) return false
+  const [exe, script, ...args] = parsed.words
+  return hostSkillCall([exe, script.replace(/\\/g, '/'), ...args], userData)
+}
+
+/**
+ * 앱 스킬 사본이 동봉본과 다를 때의 카드 — 걸린 이유가 '경로'가 아니라 '내용'임을 말한다.
+ *
+ * `describeTool` 은 경로·프로그램으로 이유를 고르므로, 정상 모양의 스킬 호출에는 "폴더 안
+ * 일이라고 확인하지 못한 명령"이라는 **사실과 다른** 문장이 붙는다. 앱 자리 이름도 흘리지 않는다.
+ */
+function describeHostMismatch(input: unknown): { title: string; detail: string } {
+  const raw = argOf(input, 'command')
+  const shown = typeof raw === 'string' ? redactForCard(raw) : ''
+  return {
+    title: '앱이 깔아 둔 규칙 사본이 원본과 달라요',
+    detail: `${shown}\n\n이 명령은 앱이 관리하는 규칙 사본의 스크립트를 여는 호출이라, 사본 내용이 원본과 같은 동안에만 묻지 않고 통과시켜요. 지금은 내용이 달라서 확인을 받아요. 앱을 다시 시작하면 원본으로 되돌아가요.\n\n무슨 일인지 모르겠으면 거절해 주세요.`
+  }
 }
 
 /**
@@ -1242,6 +1371,82 @@ export function registeredSources(root: string): string[] {
 
 function realOrSelf(p: string): string {
   try { return realpathSync(p) } catch { return p }
+}
+
+/**
+ * 해석에 실패한 셸 명령에 대한 거절 문구(C-01ⓐ).
+ *
+ * 짚은 경로가 없으므로 경로를 보여 주지 않고, 앱 내부 자리 이름도 흘리지 않는다.
+ * 판정을 못 한 명령을 "보호 경로를 안 건드렸다"로 읽으면 리다이렉트 한 줄로 앱 자리를
+ * 덮어쓸 수 있다(검토 Roh C-01ⓐ) — 모르면 닫는다.
+ */
+const UNPARSEABLE_SHELL_COPY =
+  '앱이 이 명령의 뜻을 확인하지 못했어요. 리다이렉트(>)·변수($)·백틱·서브셸이 들어간 명령은 '
+  + '앱이 관리하는 자리를 건드릴 수 있어 실행하지 않았어요. 파일을 고치려면 앱의 편집 도구를 써 주세요.'
+
+/**
+ * 앱 스킬 자리(플러그인 뿌리)에 **쓰려는** 시도인가(설계 §4.2-1). 있으면 카드 없이 거절한다.
+ *
+ * 스킬 자리는 앱이 매 전송마다 다시 설치하는 자리다. 도우미가 거기 쓰면 (1) 자기 규칙을
+ * 고쳐 다음 턴의 권한 경계를 바꾸고 (2) 앱이 다음 설치에서 덮어써 작업이 조용히 사라진다.
+ * 학생에게 물을 것도 없다 — 이 자리는 학생의 폴더가 아니다. `trusted()`·`autoAllowed` 보다
+ * **앞**에서 판정하므로 "이 폴더에서는 계속 허용"으로도 열리지 않는다.
+ */
+export function hostWriteDecision(
+  root: string, name: string, input: unknown, userData?: string
+): { behavior: 'deny'; message: string } | null {
+  if (!userData) return null
+  const deny = (shown: string) => ({ behavior: 'deny' as const, message: `앱이 관리하는 자리라 저장할 수 없어요: ${shown}` })
+  const keys = PATH_TOOLS[name]
+  if (keys) {
+    if (READ_ONLY_TOOLS[name]) return null
+    for (const k of keys) {
+      const v = argOf(input, k)
+      if (typeof v === 'string' && isSkillHostPath(v, userData)) return deny(v)
+    }
+    return null
+  }
+  if (name !== 'Bash' && !POWERSHELL_TOOLS[name]) return null
+  const raw = argOf(input, 'command')
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  let segs: string[][] | null
+  if (name === 'Bash') segs = parseShell(raw)
+  else {
+    const parsed = powerShellWords(raw)
+    segs = parsed?.safe ? parsed.words.length ? [parsed.words] : null : null
+  }
+  if (!segs) return { behavior: 'deny' as const, message: UNPARSEABLE_SHELL_COPY }
+  for (const t of segs) {
+    // 스크립트 호출 자체가 인정되는 모양이면 그 조각은 통과(읽기·실행 예외).
+    if (hostSkillCall(t, userData)) continue
+    for (const a of t.slice(1)) {
+      for (const piece of argPathPieces(a)) {
+        if (isSkillHostPath(piece, userData)) return deny(piece)
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 도우미가 폴더의 설정을 **읽지 않게** 하는 SDK 옵션 묶음(설계 §4.1 표).
+ *
+ * `settingSources: []` 는 SDK 격리 모드다 — `user`·`project`·`local` 어느 것도 로드하지 않는다.
+ * `strictMcpConfig` 는 폴더 `.mcp.json` 을 끈다(v0.6.3 부터 이미 켜져 있었다 — 유지).
+ * 스킬은 폴더가 아니라 **앱 자리**에서 플러그인으로 공급한다. 옵션·프로브를 따로 만들지 않고
+ * 이 함수 하나를 쓰는 이유는, 목록 조회와 실행이 다른 격리 수준으로 도는 것을 막기 위해서다.
+ * 지킴이 열쇠가 없으면(`userData` 없음) 앱 스킬 자리도 없다 — 플러그인 없이 격리만 건다.
+ */
+export function claudeIsolationOptions(userData?: string): {
+  settingSources: SettingSource[]
+  strictMcpConfig: true
+  plugins: SdkPluginConfig[]
+} {
+  return {
+    settingSources: [],
+    strictMcpConfig: true,
+    plugins: userData ? [{ type: 'local', path: skillHostRoot(userData), skipMcpDiscovery: true }] : []
+  }
 }
 
 export { describeTool }
@@ -1265,7 +1470,11 @@ export class ClaudeConnection implements AgentConnection {
   get loginConfirmed(): boolean { return !this.loginUnconfirmed }
   private controller?: AbortController
   private approvals = new Map<string, (allow: boolean) => void>()
+  /** 이 턴에 붙일 kordoc MCP 사양(§3.3). 미부착이면 undefined/null — Claude 는 턴마다 새로 뜬다. */
+  private mcpSpec?: KordocMcpSpec | null
   constructor(private options: AgentOptions) {}
+  /** 다음 `run()` 부터 반영된다. Claude CLI 는 턴마다 새 프로세스라 재기동 절차가 없다. */
+  async setMcpSpec(spec: KordocMcpSpec | null): Promise<void> { this.mcpSpec = spec }
   /**
    * 한 턴(`result`)의 토큰 사용량을 대화별 JSONL 한 줄로 남긴다. 숫자와 식별자만 담고
    * 학생 글은 담지 않는다. 기록은 비동기·best-effort 라 대화를 막지 않는다(token-log.ts).
@@ -1301,8 +1510,47 @@ export class ClaudeConnection implements AgentConnection {
       })
     } catch { /* 기록 실패는 대화를 막지 않는다 */ }
   }
-  private autoAllowed(name: string, input: unknown): boolean {
-    return autoAllow(this.options.root, name, input, registeredSources(this.options.root))
+  private autoAllowed(name: string, input: unknown, hostIntact?: () => boolean): boolean {
+    return autoAllow(this.options.root, name, input, registeredSources(this.options.root),
+      this.options.guard?.userData, this.options.skillBundleSource?.(), hostIntact)
+  }
+  /**
+   * 앱 스킬 자리 사본이 동봉본과 같은지 — 한 도구 호출 안에서 **한 번만** 계산한다.
+   *
+   * 사본은 24 MB(참조 자료 21 MB)라 호출마다 해시하면 턴이 눈에 띄게 느려진다. 동봉본을
+   * 모르면(옛 호출자·시험) `undefined` 를 돌려주고, 부르는 쪽이 종전 판정을 그대로 쓴다.
+   */
+  private hostIntactCheck(): (() => boolean) | undefined {
+    const userData = this.options.guard?.userData
+    const bundle = this.options.skillBundleSource?.()
+    if (!userData || !bundle) return undefined
+    let memo: boolean | undefined
+    return () => (memo ??= sameTreeContent(skillHostDir(userData), bundle))
+  }
+  /**
+   * 이 호출이 앱 스킬 자리의 스크립트를 여는데 사본 내용이 동봉본과 다른가(C-01ⓒ).
+   *
+   * `autoAllow` 가 같은 조건에서 `false` 를 돌려주지만, 그 값은 호출자에서 `trusted()` 로 덮일
+   * 수 있다. 그래서 **최종 판정에서** 한 번 더 묻는다 — 신뢰 폴더·'묻지 않기'에서도 불일치가
+   * 유지되게 하는 자리가 여기다(검토 Roh R2). 동봉본을 모르면(옛 호출자) 대조할 것이 없으므로
+   * 종전대로 통과시킨다 — 이 판정이 새로 막는 것은 '대조했더니 달랐다'뿐이다.
+   */
+  private hostScriptMismatch(name: string, input: unknown, hostIntact?: () => boolean): boolean {
+    if (!hostIntact) return false
+    if (!hostScriptCall(name, input, this.options.guard?.userData)) return false
+    return !hostIntact()
+  }
+  /** 권한 카드를 띄우고 학생의 답을 기다린다. 취소(abort)·턴 종료는 거절로 닫는다. */
+  private askPermission(
+    id: string, signal: AbortSignal, events: AgentEvents, request: { title: string; detail: string }
+  ): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+      const done = (v: boolean) => { signal.removeEventListener('abort', aborted); this.approvals.delete(id); resolve(v) }
+      const aborted = () => done(false)
+      this.approvals.set(id, done)
+      signal.addEventListener('abort', aborted, { once: true })
+      events.permission({ id, ...request })
+    })
   }
   /**
    * 이 계정이 쓸 수 있는 모델 목록. 초기화 응답(`initialize`)이 이미 들고 오므로 턴을
@@ -1354,25 +1602,29 @@ export class ClaudeConnection implements AgentConnection {
    * 그래서 깊이는 매 턴 고른 값만 보내고, "안 고름"은 지금까지처럼 생략한다 — 되돌릴 것이 없다.
    */
   private queryOptions(sessionId: string | undefined, params: { model?: string; effort?: string }, controller = this.controller) {
+    // kordoc MCP(§3.3): spec 이 있을 때만 서버 3키를 얹는다. `mcpServers`·`strictMcpConfig` 는
+    // 그대로 펼치고 `disallowedTools` 만 아래에서 **두 목록의 합집합**으로 적는다 — 통째로
+    // 펼치면 하위 담당 금지가, 반대로 두면 MCP 쓰기 금지가 사라진다(둘 다 권한 경계다).
+    const mcp = this.mcpSpec ? claudeMcpOptions(this.mcpSpec) : null
     return {
       cwd: this.options.root, pathToClaudeCodeExecutable: this.options.binary,
       ...claudeSpawnOptions(this.options.binary),
-      // The project's own skill copy stays authoritative — a stale ~/.claude/skills
-      // cannot shadow or mix with it. The external .command launcher pins the same
-      // scope (buildLaunchScript in ../agent.ts).
-      // `local` 은 뺀다. `.claude/settings.local.json` 의 permissions.allow 가 CLI 에서
+      // 폴더의 설정을 하나도 읽지 않는다(설계 §4.1). 예전에는 `['project']` 였고, 그 소스가
+      // 스킬·CLAUDE.md 발견을 맡았다. v0.6.4 부터 스킬은 **앱 자리**의 플러그인으로 공급하고
+      // (`skillHostRoot`), 폴더 쪽은 `.claude/settings.json`·`.mcp.json`·하위 `CLAUDE.md`·
+      // 다중 폴더 스킬까지 전부 닫는다. `local` 은 그 전에도 뺐다 — `permissions.allow` 가
       // canUseTool **앞에** 적용돼 카드·폴더 경계를 통째로 끄는 통로였다(REPRO-SEC P2·P6·P15).
-      // `project` 는 남긴다 — 스킬·CLAUDE.md 발견이 이 소스에 걸려 있다. 그 대신 쓰기는
-      // autoAllow 가 막고, 이미 있는 project 설정은 inspectAgentSettings 가 학생에게 알린다.
-      env: this.options.env, settingSources: ['project'] as ('project' | 'local')[], strictMcpConfig: true,
+      env: { ...this.options.env, PYTHONDONTWRITEBYTECODE: '1' },
+      ...claudeIsolationOptions(this.options.guard?.userData),
+      ...(mcp ? { mcpServers: mcp.mcpServers } : {}),
       resume: sessionId, abortController: controller, permissionMode: 'default' as const,
       ...(params.model ? { model: params.model } : {}),
       ...(params.effort ? { effort: params.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
-      // 매 턴 같은 문구 — 세션 경계·스킬 규칙 안내.
-      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: CLAUDE_SYSTEM_APPEND },
+      // 매 턴 같은 문구 — 세션 경계·스킬 규칙·읽기 통로. kordoc 이 붙었는지에 따라 달라진다.
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemAppend(!!mcp) },
       // 하위 담당 금지의 **본체**(§3.2 [r11]) — 엔진이 도구를 주지 않는다. 훅·canUseTool 보다
       // 먼저 듣고, 훅이 못 듣는 판(콜백 예외·`disableAllHooks`)에서도 같은 효과다.
-      disallowedTools: DISALLOWED_SUBAGENT_TOOLS,
+      disallowedTools: [...DISALLOWED_SUBAGENT_TOOLS, ...(mcp ? mcp.disallowedTools : [])],
       // 2차 그물 — 이름으로 거르는 훅. 엔진 옵션이 판마다 달라지는 경우를 대비한 겹이다.
       // 매처 없이 걸어 별칭 해석 차이(정본 `Agent` vs 옛 별칭 `Task`)를 여기서 흡수한다.
       // `probe()` 도 같은 옵션을 쓰지만 목록 조회는 턴을 보내지 않으므로 훅은 불리지 않는다.
@@ -1457,8 +1709,10 @@ export class ClaudeConnection implements AgentConnection {
   /**
    * 폴더에 이미 있는 '권한을 바꾸는 설정'을 학생에게 한 번 알린다.
    *
+   * v0.6.4 부터 도우미는 폴더 설정을 **읽지 않는다**(`settingSources: []`, §4.1). 그래도
+   * 알리는 이유는 학생이 그 파일을 보고 "내 설정이 적용됐다"고 오해하지 않게 하기 위해서다.
    * 판정하지 않고 사실만 적는다 — 앱은 남의 파일을 지우지 않는다. 문구는 "무엇이 있는지"와
-   * "무엇을 하면 되는지" 두 가지만 담는다. 도구 이름·키 이름은 학생에게 의미가 없으므로
+   * "그것이 무시된다"는 사실 두 가지만 담는다. 도구 이름·키 이름은 학생에게 의미가 없으므로
    * 쓰지 않는다(실제 키는 `what` 문장 안에서 이미 풀어 썼다).
    */
   private noteExistingSettings(events: AgentEvents): void {
@@ -1466,7 +1720,7 @@ export class ClaudeConnection implements AgentConnection {
     if (!findings.length) return
     const shown = findings.slice(0, 4).map((f) => `· ${f.file} — ${f.what}`)
     if (findings.length > shown.length) shown.push(`· 그 밖에 ${findings.length - shown.length}건`)
-    events.note(`이 폴더에 도우미의 권한을 바꾸는 설정이 이미 들어 있어요. 앱이 만든 것이 아닙니다.\n${shown.join('\n')}\n\n모르는 것이면 지우거나, 다른 폴더에서 작업해 주세요.`)
+    events.note(`이 앱의 도우미는 폴더의 설정 파일을 읽지 않아요. 아래 파일들은 무시됩니다.\n${shown.join('\n')}\n\n지워도 도우미의 동작은 달라지지 않아요.`)
   }
   /**
    * `auth status` 의 JSON 만이 로그인 여부의 근거다. 실행 실패·시간 초과·깨진 JSON 은
@@ -1570,63 +1824,76 @@ export class ClaudeConnection implements AgentConnection {
     const markOverride = plan.marksOverride && sessionId !== undefined
     if (markOverride) this.overriddenFor = sessionId
     this.controller = new AbortController()
-    // '매번 묻기'인데 폴더에 권한을 바꾸는 설정이 이미 있으면 첫 턴에 한 번 말한다.
-    // 앱이 그 파일을 읽지 않게 했어도(위 settingSources) CLI 는 읽으므로, 학생이 그 사실을
-    // 모른 채 대화를 시작하면 안 된다. 매 턴 반복하지 않는다 — 알림이 소음이 되면 안 읽는다.
+    // 폴더에 권한을 바꾸는 설정이 이미 있으면 첫 턴에 한 번 말한다.
+    // v0.6.4 부터 앱은 그 파일을 읽지 않지만(settingSources: []), 파일이 남아 있는 사실은
+    // 학생이 알아야 한다 — 지워도 되는지 판단할 수 있어야 한다. 매 턴 반복하지 않는다 —
+    // 알림이 소음이 되면 안 읽는다.
     if (!sessionId && !this.options.trusted?.()) this.noteExistingSettings(events)
-    // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
-    // 이어지는 턴은 학생 글을 그대로 보내되, 슬래시로 시작하면 CLI 가 명령으로 읽지 않게
-    // 맨 앞에 한 칸을 붙인다(U5c — `studentTurnText`).
-    const q = this.active = query({
-      prompt: sessionId ? studentTurnText(text) : `/knuaf-dev ${text}\n\n${workFolderInstructions(this.options.root)}`,
-      options: {
-        ...this.queryOptions(sessionId, plan),
-        // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
-        // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
-        // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
-        // "AbortError: Stream closed" 로 죽고, canUseTool 은 호출조차 되지 않는다 —
-        // 앱은 승인 창을 띄울 기회조차 없고 도우미는 그것을 "쓰기 권한 차단"으로 읽는다
-        // (시험주행 발견 11, 재현으로 확인). 제대로 된 해법은 세션 동안 stdin 을 열어 두는
-        // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
-        canUseTool: async (name, input, options): Promise<PermissionResult> => {
-          if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
-          /**
-           * **하위 담당은 여기서 막지 않는다 — 막을 수 없기 때문이다.** 실CLI 두 판 실측:
-           * `Agent` 에는 이 콜백이 **한 번도 불리지 않는다**(허용 규칙을 지워도, 훅을 떼도).
-           * 엔진이 승인 질문 없이 도는 도구라 이 자리에 오지 않는다. 반면 훅 콜백이 예외를
-           * 던지면 엔진은 **열린 채 통과**시킨다(fail-open) — 실측에서 그대로 하위 담당이 떴다.
-           * 그래서 실제 관문은 `disallowedTools`(엔진이 도구를 주지 않음)이고, 훅은 이름으로
-           * 거르는 2차 겹이다. 여기에 같은 판정을 또 적으면 "막았다"는 착각만 남는다.
-           */
-          // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
-          // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
-          // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재
-          // 논문 폴더/insideRoot 를 확인하며, 사이드카도 _confine() 으로 같은 선을 긋는다.
-          //
-          // 매번 묻는 것은 동의를 구하는 게 아니라 읽지도 못할 것을 클릭하게 만드는 일이고,
-          // 그러면 정작 폴더 밖을 건드리는 순간에도 습관적으로 허용을 누르게 된다.
-          if (this.autoAllowed(name, input)) return { behavior: 'allow', updatedInput: input }
-          // 여기서 통과하는 두 경우가 있다. (1) 설정의 "도우미가 도구를 쓸 때 물어볼까요?"
-          // 가 기본값 '묻지 않기'다 — 그러면 폴더를 가리지 않고 통과한다. (2) 학생이 권한
-          // 카드에서 "이 폴더에서는 계속 허용"을 직접 눌렀다.
-          //
-          // 기본을 묻지 않기로 둔 것은 편의를 위한 결정이고, 무엇을 포기하는지는 설정
-          // 화면에 그대로 적혀 있다(도우미는 폴더 밖 PDF·웹 문서도 읽고, 그 안에 섞인
-          // 지시를 앱이 걸러 주지 않는다). 물어보기로 되돌리면 위의 autoAllow 가 폴더 안
-          // 일을 걸러 주므로, 그때 남는 질문은 폴더 밖·읽을 수 없는 명령뿐이다.
-          if (this.options.trusted?.()) return { behavior: 'allow', updatedInput: input }
+    // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다. 이어지는 턴은 학생
+    // 글을 그대로 보내되, 슬래시로 시작하면 CLI 가 명령으로 읽지 않게 맨 앞에 한 칸을 붙인다
+    // (U5c — `studentTurnText`). 첫 턴의 스킬 이름은 플러그인 이름표가 붙은 고정값이다(§4.1).
+    const q = this.active = query({ prompt: sessionId ? studentTurnText(text) : `${SKILL_PROMPT} ${text}\n\n${workFolderInstructions(this.options.root)}`, options: {
+      // 옵션은 한 곳에서만 조립한다 — 목록 조회(`probe()`)도 같은 함수를 쓴다. 격리(§4.1)·
+      // kordoc MCP(§3.3)·모델 핀·시스템 지침·하위 담당 금지(§3.2 [r11])가 전부 그 안에 있다.
+      ...this.queryOptions(sessionId, plan),
+      // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
+      // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
+      // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
+      // "AbortError: Stream closed" 로 죽고, canUseTool 은 호출조차 되지 않는다 —
+      // 앱은 승인 창을 띄울 기회조차 없고 도우미는 그것을 "쓰기 권한 차단"으로 읽는다
+      // (시험주행 발견 11, 재현으로 확인). 제대로 된 해법은 세션 동안 stdin 을 열어 두는
+      // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
+      canUseTool: async (name, input, options): Promise<PermissionResult> => {
+        if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
+        // kordoc MCP 는 앱의 허용 목록이 먼저다(§3.4) — 폴더 밖·쓰기·모르는 도구는 trust 여부와
+        // 무관하게 거절. `autoAllowed`·`trusted()` 뒤에 두면 아래 기본 '묻지 않기' 통로로 새어 나간다.
+        const mcp = mcpPolicy(this.options.root, name, input)
+        if (mcp) return mcp.behavior === 'allow' ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: mcp.message }
+        // 앱 스킬 자리 쓰기는 카드 없이 거절한다(설계 §4.2-1). `trusted()`·`autoAllowed` 보다
+        // 앞이라 '묻지 않기'나 '이 폴더는 계속 허용'으로도 열리지 않는다. 학생에게 물을 것도
+        // 없다 — 그 자리는 학생의 폴더가 아니라 앱이 매 전송마다 다시 까는 사본이다.
+        const host = hostWriteDecision(this.options.root, name, input, this.options.guard?.userData)
+        if (host) return host
+        // 작업폴더 안에서 하는 일은 학생이 이미 요청한 일이다 — 그 폴더를 직접 골라
+        // "여기에 논문을 써 달라"고 한 것이 동의다. Codex 는 sandbox: 'workspace-write'
+        // 로 같은 선을 이미 긋고 있고(codex.ts), 앱의 미리보기·저장은 메인 프로세스가 현재
+        // 논문 폴더/insideRoot 를 확인하며, 사이드카도 _confine() 으로 같은 선을 긋는다.
+        //
+        // 매번 묻는 것은 동의를 구하는 게 아니라 읽지도 못할 것을 클릭하게 만드는 일이고,
+        // 그러면 정작 폴더 밖을 건드리는 순간에도 습관적으로 허용을 누르게 된다.
+        // 앱 스킬 자리 사본 대조는 도구 호출 하나에 **한 번**만 — 두 판정이 같은 값을 쓴다.
+        const hostIntact = this.hostIntactCheck()
+        if (this.autoAllowed(name, input, hostIntact)) return { behavior: 'allow', updatedInput: input }
+        // 앱 스킬 자리의 스크립트를 여는 호출은 **사본 내용이 동봉본과 같은 동안에만** 카드 없이
+        // 통과한다(C-01ⓒ, 설계 §4.2 "다르면 카드 + 알림"). 이 판정을 `trusted()` **앞**에 두는
+        // 것이 핵심이다 — 뒤에 두면 기본값 '묻지 않기'·'이 폴더는 계속 허용'이 불일치를 덮어
+        // 고쳐진 사본이 조용히 돌아간다(검토 Roh R2 차단). 사본은 앱이 매 전송마다 다시 까는
+        // 학생의 폴더가 아니므로, 신뢰 폴더라도 내용이 다르면 한 번은 묻는다.
+        //
+        // 카드로 보낸다(거절이 아니다). 사본은 다음 전송에서 원본으로 되돌아가므로 학생이 스스로
+        // 고칠 것이 없고, 도우미가 그 스크립트로 논문 작업을 하려던 참일 수 있다 — 설계 §4.2 가
+        // 적은 그대로 "다르면 카드 + 알림"이다.
+        if (this.hostScriptMismatch(name, input, hostIntact)) {
           const id = randomUUID()
-          const allowed = await new Promise<boolean>(resolve => {
-            const done = (v: boolean) => { options.signal.removeEventListener('abort', aborted); this.approvals.delete(id); resolve(v) }
-            const aborted = () => done(false)
-            this.approvals.set(id, done)
-            options.signal.addEventListener('abort', aborted, { once: true })
-            events.permission({ id, ...describeTool(name, input, this.options.root) })
-          })
-          return allowed ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
+          const allowed = await this.askPermission(id, options.signal, events, describeHostMismatch(input))
+          return allowed
+            ? { behavior: 'allow', updatedInput: input }
+            : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
         }
+        // 여기서 통과하는 두 경우가 있다. (1) 설정의 "도우미가 도구를 쓸 때 물어볼까요?"
+        // 가 기본값 '묻지 않기'다 — 그러면 폴더를 가리지 않고 통과한다. (2) 학생이 권한
+        // 카드에서 "이 폴더에서는 계속 허용"을 직접 눌렀다.
+        //
+        // 기본을 묻지 않기로 둔 것은 편의를 위한 결정이고, 무엇을 포기하는지는 설정
+        // 화면에 그대로 적혀 있다(도우미는 폴더 밖 PDF·웹 문서도 읽고, 그 안에 섞인
+        // 지시를 앱이 걸러 주지 않는다). 물어보기로 되돌리면 위의 autoAllow 가 폴더 안
+        // 일을 걸러 주므로, 그때 남는 질문은 폴더 밖·읽을 수 없는 명령뿐이다.
+        if (this.options.trusted?.()) return { behavior: 'allow', updatedInput: input }
+        const id = randomUUID()
+        const allowed = await this.askPermission(id, options.signal, events, describeTool(name, input, this.options.root))
+        return allowed ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
       }
-    })
+    } })
     try {
       const commands = await q.supportedCommands()
       if (!commands.some(c => c.name === 'knuaf-dev' || c.name.endsWith(':knuaf-dev'))) throw new Error('Claude가 knuaf-dev 스킬을 찾지 못했어요.')

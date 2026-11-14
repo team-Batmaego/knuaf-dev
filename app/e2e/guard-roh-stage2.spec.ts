@@ -752,3 +752,51 @@ test('전이표 ⑦: 보류 알림은 앱 실행마다 한 번만 난다', () =>
   // 두 번째도 되돌리기 재시도는 한다(시도 횟수 +1).
   expect(second.state.held[leaf].tries).toBe(3)
 })
+
+// ── 상태 파일 판 올리기(v1 → v2, §4.3) ───────────────────────────────────────
+// v2에서 상태 파일에 `codexThreads`가 들어왔고 표식이 그 칸까지 덮는다.
+// 옛 파일은 그 칸 없이 서명됐으므로, 표식을 그대로 대조하면 **모든 옛 보관본이 '불일치'**가 되어
+// 지킴이가 조용히 꺼진다. 그래서 없는 칸만 빼고 다시 대조하는 길을 두되, 칸을 얹은 파일은 거절한다.
+
+/** v1 파일 그대로 — `codexThreads` 칸이 없고 표식도 그 칸을 모른 채 계산됐다. */
+function writeV1State(e: Env, graftThreads: boolean): void {
+  const body: Record<string, unknown> = {
+    version: 1, leaves: {}, injected: null, rules: [], queryOpen: false, held: {}
+  }
+  const hmac = S.computeIntegrity(body as Omit<S.GuardState, 'integrity'>, e.key)
+  // 칸을 얹는 판은 표식을 **v1 방식으로** 계산한다 — 즉 얹은 칸은 서명 밖이다.
+  if (graftThreads) body.codexThreads = { sneaked: { fingerprint: 'forged', turns: [] } }
+  body.integrity = hmac
+  mkdirSync(S.guardDir(e.userData, e.folderHash), { recursive: true })
+  writeFileSync(S.statePath(e.userData, e.folderHash), JSON.stringify(body, null, 2))
+}
+
+test('상태 판 올림: 옛 v1 파일은 표식이 맞으면 지금 판으로 읽고, 장부는 빈 채로 시작한다', () => {
+  const e = env('state-v1')
+  writeV1State(e, false)
+  const loaded = S.loadState(e.userData, e.folderHash, e.key)
+  // 표식이 살아 있어야 지킴이가 켜진 채로 올라온다(불일치면 주입이 꺼진다).
+  expect(loaded.integrity).toBe('ok')
+  expect(loaded.state.version).toBe(S.STATE_VERSION)
+  expect(loaded.state.codexThreads).toEqual({})
+  expect(S.injectionsEnabled(loaded.integrity, true)).toBe(true)
+})
+
+test('상태 판 올림: 옛 파일을 올린 뒤 저장한 장부 줄은 다시 읽힌다', () => {
+  const e = env('state-v1-roundtrip')
+  writeV1State(e, false)
+  const store: S.ThreadStore = { userData: e.userData, folderHash: e.folderHash, key: e.key }
+  expect(S.saveCodexThreads(store, () => ({ 'th-1': S.codexThreadRow('fp-1', ['t-2', 't-1', 't-2']) }))).toBe(true)
+  // 파일 자체도 지금 판이 됐다 — 다음 실행은 옛 판 길을 다시 탈 필요가 없다.
+  const onDisk = JSON.parse(readFileSync(S.statePath(e.userData, e.folderHash), 'utf-8')) as { version: number }
+  expect(onDisk.version).toBe(S.STATE_VERSION)
+  expect(S.loadCodexThreads(store)).toEqual({ 'th-1': { fingerprint: 'fp-1', turns: ['t-1', 't-2'] } })
+})
+
+test('상태 판 올림: 판만 1로 적고 장부 칸을 얹은 파일은 서명 밖이므로 불일치로 읽는다', () => {
+  const e = env('state-v1-grafted')
+  writeV1State(e, true)
+  const loaded = S.loadState(e.userData, e.folderHash, e.key)
+  expect(loaded.integrity).toBe('mismatch')
+  expect(S.loadCodexThreads({ userData: e.userData, folderHash: e.folderHash, key: e.key })).toEqual({})
+})

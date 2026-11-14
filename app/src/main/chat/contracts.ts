@@ -1,5 +1,7 @@
 import { delimiter } from 'node:path'
 import type { ChatModelInfo, ConnectionStatus, ModelChoice, PermissionRequest } from '../../shared/chat'
+import type { GuardKey } from '../guard/store'
+import type { KordocMcpSpec } from './kordocMcp'
 export interface AgentEvents {
   message: (id: string, text: string) => void
   permission: (request: PermissionRequest) => void
@@ -31,16 +33,41 @@ export interface AgentConnection {
    * 대신 학생이 알 수 있는 오류로 막는다(검토 MC1-01).
    */
   prepare?(sessionId: string | undefined): Promise<void>
+  /**
+   * 이 세션에만 적용할 kordoc MCP 실행 사양(설계 §3.2). `null` = 붙이지 않음.
+   *
+   * 앱이 서버를 직접 띄우지 않는다 — 각 공급자가 자기 자식으로 띄울 설정만 받는다.
+   * 사양은 폴더당 한 번 확인되고(레지스트리), 실패하면 `null` 로 불린다. `ChatService` 가
+   * **첫 `send()`** 에서 한 번 부르며, 같은 사양이면 다시 부르지 않는다. 구현이 없으면
+   * (M1 이전 공급자) 그냥 MCP 없이 도는 것이고 `send()` 는 막히지 않는다.
+   */
+  setMcpSpec?(spec: KordocMcpSpec | null): void | Promise<void>
   respond(id: string, allow: boolean): void
   stop(): Promise<void>
   /** 앱이 띄운 자식 pid — 종료 마감 뒤 회수 대상(검토 RT2-03). 모르면 생략한다. */
   ownedPids?(): number[]
+}
+export interface GuardContext {
+  userData: string
+  folderHash: string
+  key: GuardKey
 }
 export interface AgentOptions {
   binary: string; root: string; skill: string; env: NodeJS.ProcessEnv
   openExternal: (url: string) => Promise<void>
   /** 학생이 이 폴더를 신뢰하기로 했는가 — 판정 불가한 명령을 묻지 않고 통과시킨다. */
   trusted?: () => boolean
+  /**
+   * 지킴이 보관본 자리(§4.3). 없으면 지킴이 단계는 통째로 빠진다 — 시험·옛 호출자는 이 값을
+   * 넘기지 않는다. `service.send()` 는 **항상** 넘기며, 열쇠가 없을 때(`key: null`)는 디스크
+   * 원장을 믿지 않고 메모리 원장만 쓴다(격리·잠금·플러그인 열거는 그대로 돈다).
+   */
+  guard?: GuardContext
+  /**
+   * 동봉 스킬 사본의 자리 — 앱이 깐 사본이 아직 동봉본과 **같은 내용**인지 대조할 때 쓴다
+   * (C-01ⓒ). 없으면 판 표시만 본다(옛 호출자·시험). `ChatService` 는 언제나 넘긴다.
+   */
+  skillBundleSource?: () => string
   /**
    * 지금 학생이 고른 모델·생각 깊이(없으면 null). **전송할 때마다** 읽는다 — 앱이 켜진 채로
    * 칩에서 바꾼 값이 다음 메시지부터 적용되어야 하고, 연결은 폴더·공급자마다 한 번만 만들어진다.
@@ -86,6 +113,9 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   // authoritative, and a user's ~/.claude/CLAUDE.md @import would otherwise surface an
   // English "Allow external CLAUDE.md file imports?" security prompt to the student.
   env.CLAUDE_CODE_DISABLE_CLAUDE_MDS = '1'
+  // 스킬 스크립트가 논문 폴더에 `__pycache__` 를 남기지 않게 한다(설계 §4.1). 같은 값이
+  // 터미널 스크립트(`agent.ts`)와 `query()` 옵션(`claude.ts`)에도 있다 — 세 경로가 같은 선.
+  env.PYTHONDONTWRITEBYTECODE = '1'
   // Finder 로 띄운 앱은 셸의 PATH 를 물려받지 않는다 — /usr/bin:/bin:/usr/sbin:/sbin 뿐이다.
   // codex 는 `#!/usr/bin/env node` 스크립트라 그 PATH 로는 셔뱅이 죽고
   // "env: node: No such file or directory" 만 남는다(claude 는 네이티브라 멀쩡했다).

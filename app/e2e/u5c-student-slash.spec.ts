@@ -12,7 +12,7 @@ import { expect, test } from '@playwright/test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { ClaudeConnection, studentTurnText } from '../src/main/chat/claude'
+import { ClaudeConnection, SKILL_PROMPT, studentTurnText } from '../src/main/chat/claude'
 import type { AgentEvents } from '../src/main/chat/contracts'
 
 const noopEvents: AgentEvents = { message: () => {}, permission: () => {}, note: () => {}, session: () => {}, skill: () => {} }
@@ -74,10 +74,11 @@ function rig() {
 test('U5c: resume 턴에 학생 글이 슬래시로 시작해도 CLI 에는 일반 글로 간다', async () => {
   const r = rig()
   try {
-    // ① 새 대화 — 앱이 `/knuaf-dev` 를 앞에 붙인다(앱의 길, 그대로 둔다).
+    // ① 새 대화 — 앱이 스킬 슬래시 명령을 앞에 붙인다(앱의 길, 그대로 둔다). 이름은 앱 상수
+    // (`SKILL_PROMPT`)에서 가져온다 — 글자를 복붙하면 CLI 가 플러그인 이름표를 붙이는 순간 어긋난다.
     await r.conn.run('첫 요청', undefined, noopEvents)
     const first = r.prompts().at(-1)!
-    expect(first.startsWith('/knuaf-dev ')).toBe(true)
+    expect(first.startsWith(`${SKILL_PROMPT} `)).toBe(true)
 
     // ② 이어지는 턴에 학생이 `/code-review …` 를 그대로 쳤다.
     await r.conn.run('/code-review 이 논문 봐 줘', 'fake-session-1', noopEvents)
@@ -88,13 +89,14 @@ test('U5c: resume 턴에 학생 글이 슬래시로 시작해도 CLI 에는 일�
   } finally { await r.conn.stop() }
 })
 
-test('U5c: 첫 턴 — `/knuaf-dev` 뒤에 학생 글이 붙으므로 앱 스킬이 이긴다(그대로 둔다)', async () => {
+test('U5c: 첫 턴 — 스킬 슬래시 뒤에 학생 글이 붙으므로 앱 스킬이 이긴다(그대로 둔다)', async () => {
   const r = rig()
   try {
-    // 첫 턴은 앱이 `/knuaf-dev <학생글>` 로 보낸다 — 슬래시 명령 자리는 `/knuaf-dev` 하나뿐이고,
-    // 그 뒤의 슬래시는 명령 자리가 아니다(실CLI 두 판 실측: /knuaf-dev 뒤 `/code-review` 는 안 먹었다).
+    // 첫 턴은 앱이 `<스킬 슬래시> <학생글>` 로 보낸다 — 슬래시 명령 자리는 그 하나뿐이고,
+    // 그 뒤의 슬래시는 명령 자리가 아니다(실CLI 두 판 실측: 옛 `/knuaf-dev` 뒤 `/code-review` 는
+    // 안 먹었다. `/.claude:knuaf-dev` 로 바꾼 뒤 재실측은 없다 — REPORT-U5.md 참고).
     await r.conn.run('/code-review 이 논문 봐 줘', undefined, noopEvents)
     const first = r.prompts().at(-1)!
-    expect(first.startsWith('/knuaf-dev /code-review 이 논문 봐 줘')).toBe(true)
+    expect(first.startsWith(`${SKILL_PROMPT} /code-review 이 논문 봐 줘`)).toBe(true)
   } finally { await r.conn.stop() }
 })

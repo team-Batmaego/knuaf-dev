@@ -258,6 +258,13 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '답변이 끝난 뒤 다시 시도해 주세요.',
     kind: 'warning'
   },
+  // agentApi.launch 1층 잠금 거부(설계 §4.1-C) — 제목만 여기서, 학생에게 보일 전문은
+  // 메시지 그대로 HelperSheet 의 '자세히'가 줄바꿈을 살려 보여 준다.
+  agent_tool_lock: {
+    title: '터미널 도우미(Codex)를 열지 않았어요.',
+    action: null,
+    kind: 'error'
+  },
   default: {
     title: '문제가 생겼어요.',
     action: '아래 내용을 확인해 주세요. 반복되면 내 논문에서 도우미에게 알려 주세요.',

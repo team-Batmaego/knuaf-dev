@@ -39,7 +39,7 @@ async function api(page: Page, request: ApiRequest) {
 
 async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, failList = false) {
   const dir = scratch(), root = synthProject({ withContent: false })
-  const turns = join(dir, 'turns.jsonl'), thread = join(dir, 'thread.json')
+  const turns = join(dir, 'turns.jsonl'), applied = join(dir, 'applied.jsonl'), thread = join(dir, 'thread.json')
   writeFileSync(turns, '')
   if (resumed) {
     seedChat(root, [{ id: 'old', role: 'assistant', text: '이전 답변', at: new Date().toISOString() }])
@@ -51,13 +51,13 @@ async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice
   const app = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin'), {
     FAKE_CODEX_MODELS: JSON.stringify(models), FAKE_CODEX_DEFAULT_MODEL: defaultModel,
     FAKE_CODEX_MODELS_FAIL_TIMES: failList ? '1' : '0', FAKE_CODEX_THREAD_STATE: thread,
-    FAKE_CODEX_TURN_LOG: turns, FAKE_CODEX_REPLY: replyFile(dir, 'MF1 응답')
+    FAKE_CODEX_TURN_LOG: turns, FAKE_CODEX_APPLIED_LOG: applied, FAKE_CODEX_REPLY: replyFile(dir, 'MF1 응답')
   }) })
   await openProject(app.page, root)
   await expect(app.page.getByTitle('이 논문의 도우미')).toContainText(
     stored?.model.includes('/') ? MODEL_PICKER.reselectionTitle : stored?.model ?? '연결됨'
   )
-  return { ...app, root, turns, userData }
+  return { ...app, root, turns, applied, userData }
 }
 
 async function send(page: Page, root: string, id: string) {
@@ -103,7 +103,7 @@ for (const scenario of [
 }
 
 test('MF1-02: 목록 실패에도 외부 선택은 재선택 표시·전송 차단을 유지하며 명시적 기본 선택 뒤 복구한다', async () => {
-  const { electronApp, page, root, turns } = await scene(true, 'GPT-6-Astra', rejected, true)
+  const { electronApp, page, root, turns, applied } = await scene(true, 'GPT-6-Astra', rejected, true)
   try {
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
@@ -117,7 +117,15 @@ test('MF1-02: 목록 실패에도 외부 선택은 재선택 표시·전송 차�
     await popup.getByRole('button', { name: /안 고름/ }).click()
     await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
     expect((await send(page, root, 'explicit-default')).error).toBeUndefined()
-    await expect.poll(() => records(turns)).toEqual([{ model: 'GPT-6-Astra', effort: 'medium' }])
+    // 지킴이 장부(§4.1-C)가 이 대화를 잠금 전에 시작한 대화로 보고 **새 대화로 갈아탄다** —
+    // `tmp/design-4.1-CE.md` L68ⓐ. 새 스레드는 서버 기본값으로 열리므로 되돌릴 것이 없고,
+    // 앱은 model·effort 키를 **싣지 않는다**(생략 = 지금 값 유지). 학생이 고른 것이 없는 한
+    // 요청은 종전과 똑같아야 하므로 키가 없는 쪽이 계약이고, 그 턴에 실제로 적용된 값이
+    // 계정 기본값이어야 복구다.
+    await expect.poll(() => records(turns)).toEqual([{}])
+    expect(records(applied)).toEqual([{ model: 'GPT-6-Astra', effort: 'medium' }])
+    // 학생이 본 것: 지난 대화는 그대로 두고, 왜 새 대화인지 한 줄이 남는다.
+    await expect(page.getByText(/Codex 도우미가 새 대화로 이어 갈게요/)).toBeVisible()
   } finally { await electronApp.close() }
 })
 

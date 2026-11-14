@@ -11,6 +11,10 @@ import { writeFileAtomic } from '../safeWrite'
 import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
 import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId } from '../../shared/chat'
+import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
+import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
+import { appThreadLockPlan, appThreadLockVerify, KORDOC_COLLISION_NOTE, type AppThreadPlan } from './codexToolLock'
+import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
 
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
@@ -33,6 +37,9 @@ export function serverArgsFor(env: NodeJS.ProcessEnv): string[] {
   // 않고 CLI 기본값(학생의 config.toml)을 그대로 쓴다.
   if (env.KNUAF_CODEX_MODEL) args.push('-c', `model=${env.KNUAF_CODEX_MODEL}`)
   if (env.KNUAF_CODEX_EFFORT) args.push('-c', `model_reasoning_effort=${env.KNUAF_CODEX_EFFORT}`)
+  // 논문 폴더의 `AGENTS.md` 는 도우미에게 새어 들어가면 안 된다(설계 §4.1-E). 스칼라라 `-c` 가
+  // 안전하고, 프로세스 전체(모든 스레드)에 걸린다 — 기동 뒤 `instructionSources` 로 한 번 더 본다.
+  args.push('-c', 'project_doc_max_bytes=0')
   return [...args, 'app-server']
 }
 const FILE_CHANGE_UNAVAILABLE = '변경 내용을 확인하지 못했어요. 거절한 뒤 도우미에게 어떤 파일을 어떻게 바꾸는지 물어봐 주세요.'
@@ -92,6 +99,10 @@ export class CodexConnection implements AgentConnection {
   private messages = new Map<string, string>()
   private fileChanges = new Map<string, PermissionFileChange[]>()
   private pendingFileApprovals = new Map<string, { key: string; reason: unknown }>()
+  /** 이 프로세스에 붙일 kordoc MCP 사양(§3.3). 미부착이면 undefined/null. */
+  private mcpSpec?: KordocMcpSpec | null
+  /** MCP 기동 검증(§3.3 4단계)을 이미 통과한 프로세스 — 프로세스당 1회만 부른다. */
+  private verifiedOn?: JsonRpcProcess
   /**
    * 최신 CLI 는 평문 `app-server`; 실패하면 옛 `--listen stdio://` 로 한 번 재시도한다.
    * 앞의 `-c` 는 전역 knuaf-dev 스킬 사본을 끄는 config 오버라이드 — ~/.codex/skills 등에
@@ -104,6 +115,23 @@ export class CodexConnection implements AgentConnection {
   private stopped = false
   /** 이 턴에 **실제로 적용된** model·effort 와 턴 식별자 — 기록의 귀속 기준(검토 CT-02). */
   private turnTokens?: { key: string; model: string; effort: string | null }
+  /**
+   * 응답 대기 구간까지 포함한 "턴이 도는 중" 표식(검토 M2-R1-02). `this.turn` 은 서버가 턴 id 를
+   * 준 뒤에야 채워지므로, 그 전에 `setMcpSpec` 이 들어오면 RPC 를 닫아 **진행 중인 턴을 끊었다**.
+   * 계약("턴 중에는 바꾸지 않는다")은 id 를 받기 전 구간도 포함해야 한다.
+   */
+  private turnActive = false
+  /**
+   * 지킴이 적재 표·턴 원장(설계 §4.1-C). `options.guard` 가 아예 없을 때만(지킴이 없이 뜬 옛
+   * 호출부·시험) 이 필드가 비고 아래 경로가 종전 그대로다. 앱이 만드는 연결은 열쇠가 없어도
+   * 문맥을 늘 받는다(`key: null`) — 그때는 디스크 원장을 믿지 않고 메모리 원장만 쓰며,
+   * **격리·잠금·플러그인 열거는 그대로 돈다**(C-02).
+   */
+  private guard?: CodexThreadGuard
+  /** 이번 턴의 잠금 계획 — `verify` 가 같은 `config` 를 기준으로 대조한다. */
+  private plan?: AppThreadPlan
+  /** 마지막 적재 응답이 알려 준 값 — 보호 경로에는 `r` 이 남지 않으므로 여기에 담는다. */
+  private loaded?: { model: string | null; effort: string | null; turns: unknown }
   /**
    * 메인이 스스로 띄운 하위 담당(설계 §3.2 Codex 열, §5-7). 앱에는 부모의 도구 호출을 막을
    * 관문이 없으므로 **기록·알림까지만** 한다. 담당 thread id → 띄울 때 요청한 model·effort.
@@ -123,6 +151,169 @@ export class CodexConnection implements AgentConnection {
   private recordedActivities = new Set<string>()
   constructor(private options: AgentOptions) {
     this.serverArgs = serverArgsFor(options.env)
+    const guard = options.guard
+    if (guard) this.guard = new CodexThreadGuard({ userData: guard.userData, folderHash: guard.folderHash, key: guard.key })
+  }
+  /**
+   * 프로세스가 바뀌었다 — 적재 표·잠금 계획·적재 응답은 **그 프로세스의 것**이다(설계 §4.1-C
+   * PROCESS DISCARD RULE). 지킴이가 없으면 만질 것이 없다.
+   */
+  private dropGuard(): void {
+    this.guard?.discard()
+    this.plan = undefined
+    this.loaded = undefined
+  }
+  /** `instructionSources` 의 전역 예외(CODEX_HOME 바로 아래 `AGENTS.md`) 판정 기준. */
+  private codexHome(): string | undefined {
+    const env = this.options.env
+    if (env.CODEX_HOME) return env.CODEX_HOME
+    return env.HOME ? join(env.HOME, '.codex') : undefined
+  }
+  /** 열거·계획 한 번(§4.1-C 1번) — `thread/start|resume` **앞**에 부른다. */
+  private async lockPlan(rpc: JsonRpcProcess): Promise<AppThreadPlan> {
+    const injected = this.mcpSpec ? [{ name: MCP_SERVER_NAME, spec: this.mcpSpec }] : []
+    const plan = await appThreadLockPlan({
+      root: this.options.root, form: 'app-thread', injected, rpc, codexHome: this.codexHome()
+    })
+    if (!plan.ok) throw new Error(plan.studentCopy)
+    return plan.plan
+  }
+  /** 이 턴의 계획을 재사용한다 — `verify` 가 **같은** `config` 를 기준으로 대조해야 한다. */
+  private async ensurePlan(rpc: JsonRpcProcess): Promise<AppThreadPlan> {
+    if (this.plan) return this.plan
+    return (this.plan = await this.lockPlan(rpc))
+  }
+  /**
+   * 지금 프로세스를 버린다 — 다음 호출은 새 프로세스를 띄운다(설계 §4.1-C PROCESS DISCARD RULE).
+   *
+   * 표·적재 응답은 **그 프로세스의 것**이라 함께 버린다. 계획(`this.plan`)은 **이 턴**의 것이라
+   * 그대로 둔다 — `acquire` 가 쥔 지문과 `verify` 가 대조하는 `config` 가 같은 것이어야 한다.
+   * 탐침(`serverDefaults`)이 쓸 수 없는 응답(대화 id·모델 없음, 요청 실패)을 받은 프로세스도
+   * 여기로 버린다. 그 프로세스는 잠금을 확인하지 않은 채 시작 표식만 남아 있어, 다음 적재가
+   * "잠긴 프로세스"로 믿으면 안 된다(I-02).
+   */
+  private async discardProcess(): Promise<void> {
+    await this.rpc?.stop().catch(() => {})
+    this.rpc = undefined
+    this.verifiedOn = undefined
+    this.guard?.discard()
+    this.loaded = undefined
+  }
+  /**
+   * 재기동을 거친 뒤 `turnBody` 의 `rpc` 는 죽은 프로세스다. 전송은 매 호출에서 **지금**
+   * 연결을 다시 잡는다 — 적재가 끝난 시점의 연결이 곧 이어 쓸 연결이다.
+   */
+  private loadTransport(args: Record<string, unknown>): LoadTransport {
+    const injected = this.mcpSpec ? [{ name: MCP_SERVER_NAME, spec: this.mcpSpec }] : []
+    const text = (e: unknown): string => (e instanceof Error && e.message ? e.message : String(e))
+    return {
+      start: async () => {
+        try {
+          const rpc = await this.connect()
+          const plan = await this.ensurePlan(rpc)
+          return this.loadReply(await rpc.request('thread/start', { ...args, config: plan.config }))
+        } catch (e) {
+          return { ok: false, kind: 'error', message: text(e) }
+        }
+      },
+      resume: async (threadId) => {
+        try {
+          const rpc = await this.connect()
+          const plan = await this.ensurePlan(rpc)
+          return this.loadReply(await rpc.request('thread/resume', { ...args, threadId, config: plan.config }))
+        } catch (e) {
+          const message = text(e)
+          const kind = message.includes('already has an active writer')
+            ? 'active-writer'
+            : message.includes('no rollout found for thread id')
+              ? 'no-rollout'
+              : message.includes('AI 응답 시간이 초과됐어요')
+                ? 'timeout'
+                : 'error'
+          return { ok: false, kind, message }
+        }
+      },
+      verify: async (threadId, instructionSources) => {
+        try {
+          const rpc = await this.connect()
+          const plan = await this.ensurePlan(rpc)
+          const out = await appThreadLockVerify({
+            root: this.options.root,
+            form: 'app-thread',
+            injected,
+            rpc,
+            codexHome: this.codexHome(),
+            check: { threadId, instructionSources }
+          }, plan)
+          return out.ok ? { ok: true } : { ok: false, detail: out.studentCopy }
+        } catch (e) {
+          return { ok: false, detail: text(e) }
+        }
+      },
+      restart: async () => { await this.discardProcess() }
+    }
+  }
+  /** 적재 응답 옮기기 — 보호 경로에는 응답 객체가 남지 않으므로 model·effort·turns 만 담는다. */
+  private loadReply(raw: unknown): LoadReply {
+    const reply = raw && typeof raw === 'object'
+      ? (raw as { thread?: unknown; model?: unknown; reasoningEffort?: unknown; instructionSources?: unknown })
+      : undefined
+    const thread = reply?.thread && typeof reply.thread === 'object'
+      ? (reply.thread as { id?: unknown; turns?: unknown })
+      : undefined
+    const threadId = typeof thread?.id === 'string' ? thread.id : ''
+    // id 가 없으면 서버가 스레드를 만들었는지 알 수 없다 — 그 프로세스를 다시 쓰지 않는다.
+    if (!threadId) return { ok: false, kind: 'no-id' }
+    this.loaded = {
+      model: typeof reply?.model === 'string' && reply.model ? reply.model : null,
+      effort: typeof reply?.reasoningEffort === 'string' && reply.reasoningEffort ? reply.reasoningEffort : null,
+      turns: thread?.turns
+    }
+    return { ok: true, threadId, turns: thread?.turns, instructionSources: reply?.instructionSources }
+  }
+  /** 적재 응답의 `thread.turns` 에서 되살릴 대화만 골라 낸다(모양이 다르면 빈 배열). */
+  private loadedMessages(): { id: string; text: string }[] {
+    const out: { id: string; text: string }[] = []
+    const turns = this.loaded?.turns
+    if (!Array.isArray(turns)) return out
+    for (const turn of turns) {
+      const items = turn && typeof turn === 'object' && 'items' in turn ? turn.items : undefined
+      if (!Array.isArray(items)) continue
+      for (const item of items) {
+        if (!item || typeof item !== 'object' || !('type' in item) || item.type !== 'agentMessage') continue
+        if (!('id' in item) || typeof item.id !== 'string' || !('text' in item) || typeof item.text !== 'string') continue
+        out.push({ id: item.id, text: item.text })
+      }
+    }
+    return out
+  }
+  /**
+   * 이 프로세스에 실제로 넘길 argv. kordoc 사양이 있으면 `-c` 6쌍을 subcommand(`app-server`)
+   * **앞에** 끼운다 — 옛 CLI 재시도(`--listen`)가 뒤에 붙어도 자리는 그대로다(§3.3).
+   */
+  private spawnArgs(): string[] {
+    if (!this.mcpSpec) return this.serverArgs
+    const at = this.serverArgs.lastIndexOf('app-server')
+    if (at < 0) return [...this.serverArgs, ...codexMcpArgs(this.mcpSpec)]
+    return [...this.serverArgs.slice(0, at), ...codexMcpArgs(this.mcpSpec), ...this.serverArgs.slice(at)]
+  }
+  /**
+   * `setMcpSpec` — 다음 프로세스부터 새 인자로 뜨게 한다. **턴이 도는 중에는 바꾸지 않고**
+   * 던진다(service 가 MCP 를 포기하고 대화는 계속한다). `stopped` 는 건드리지 않는다 —
+   * 그 플래그는 앱 종료 뜻이고, 여기서는 rpc 만 닫아 다음 `run()` 이 재기동하게 한다(§3.3).
+   */
+  async setMcpSpec(spec: KordocMcpSpec | null): Promise<void> {
+    if (this.turn || this.turnActive) throw new Error('턴이 진행 중이라 한글 문서 도구를 지금 붙일 수 없어요.')
+    this.mcpSpec = spec
+    this.verifiedOn = undefined
+    this.retriedWithoutMcp = false
+    this.mcpLocked = false
+    if (this.rpc && !this.rpc.closed) {
+      await this.rpc.stop().catch(() => {})
+      this.rpc = undefined
+    }
+    // 인자(주입 서버)가 바뀌면 잠금 지문도 바뀐다 — 옛 계획·표를 들고 가면 안 된다.
+    this.dropGuard()
   }
   /**
    * `thread/tokenUsage/updated` 알림 하나를 대화별 JSONL 한 줄로 남긴다. `last`(이번 턴)와
@@ -249,7 +440,8 @@ export class CodexConnection implements AgentConnection {
     // 인자는 Codex CLI 쪽 사정이라 고정할 수 없다. 최신 CLI 의 `app-server` 에는
     // --listen 이 없어서(0.155 에서 확인) 그 인자로 띄우면 아무 말 없이 즉시 끝난다.
     // 구버전에는 필요했으므로 평문을 먼저 쓰고 실패하면 옛 인자로 한 번 더 시도한다.
-    const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.serverArgs, this.options.root, this.options.env)
+    const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.spawnArgs(), this.options.root,
+      { ...this.options.env, ...(this.mcpSpec ? codexMcpEnv(this.mcpSpec) : {}) })
     rpc.onNotification = (method, p) => {
       if (method === 'account/login/completed' && this.loginPending && typeof p?.loginId === 'string') {
         if (!this.loginInfo) this.earlyLogin = { id: p.loginId, success: p.success === true }
@@ -323,6 +515,7 @@ export class CodexConnection implements AgentConnection {
       if (!this.serverArgs.includes('--listen')) {
         // 평문이 안 되면 옛 인자로 한 번 더. 다음 connect() 부터는 그 인자를 쓴다.
         this.serverArgs = [...this.serverArgs, '--listen', 'stdio://']
+        this.dropGuard()
         return this.open()
       }
       // 원인을 지어내지 않는다. 전에는 버전이 낮다고 단정했는데, 실제로는 CLI 가 새로워
@@ -444,8 +637,76 @@ export class CodexConnection implements AgentConnection {
     await this.stop()
   }
   private loginInfo?: { id: string; url: string }
+  /** MCP 검증 실패 뒤 같은 텍스트로 한 번만 다시 돌기 위한 표식 — 재귀를 막는다(E8). */
+  private retriedWithoutMcp = false
+  /**
+   * 재시도 턴에서 kordoc MCP 를 **끈 채로** 돌린다는 표식(검토 M2-R1-01).
+   * 실패한 프로세스를 닫고 인자 없이 새로 띄우면, 학생 사용자 층(`~/.codex/config.toml`)에
+   * 같은 이름의 서버가 있으면 그것이 **검증 없이 되살아난다**(Roh 실측). 그래서 재시도부터는
+   * 스레드 `config` 로 그 이름을 끄고, 끈 사실을 턴 앞에서 확인한다.
+   */
+  private mcpLocked = false
+  /**
+   * 한 턴. kordoc 기동 검증(§3.3)이 실패하면 `McpSafetyError` 가 올라오므로 여기서 받아
+   * **MCP만 끄고** 같은 텍스트로 한 번 더 돈다. `service.ts` 는 이 예외를 모르고(일반 오류로
+   * 처리해 대화를 error 로 남긴다) 연결 객체를 버리는 처분도 하지 않으므로, 같은 처분을
+   * 연결 안에서 한다 — 실패한 rpc 를 닫고 spec 을 비우면 다음 `runTurn` 이 MCP 없이 뜬다.
+   * 인자를 빼는 것만으로는 부족하므로 잠금 표식을 함께 세운다(아래 `mcpLocked`).
+   */
   async run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
-    const rpc = await this.connect()
+    try {
+      return await this.runTurn(text, sessionId, events, replayHistory)
+    } catch (e) {
+      if (!(e instanceof McpSafetyError)) throw e
+      this.mcpSpec = null
+      this.verifiedOn = undefined
+      this.mcpLocked = true
+      await this.rpc?.stop().catch(() => {})
+      this.rpc = undefined
+      // 프로세스가 바뀐다 — 표·계획·적재 응답은 다시 세운다. 재시도는 잠금 없이(=학생 층
+      // 이름 전부를 끈 계획으로) 새 프로세스에서 다시 열린다.
+      this.dropGuard()
+      // 재시도가 없으면 안내도 없다 — 대화는 error 로 남고 그 문장이 오해를 부른다.
+      if (this.retriedWithoutMcp) throw e
+      events.note('안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요')
+      this.retriedWithoutMcp = true
+      // 검증 실패는 `turn/start` 앞이라 그 대화에는 아무 턴도 없다 — 같은 입력으로 새 프로세스에서
+      // 다시 시작한다(새 대화면 빈 thread 하나가 남지만 학생 기록에는 아무것도 안 남는다).
+      return this.runTurn(text, sessionId, events, replayHistory)
+    }
+  }
+  /**
+   * 재시도 턴의 스레드 `config` — kordoc 을 끈다. **설정에 그 이름이 실제로 보일 때만** 싣는다:
+   * `-c`/config 의 부분 표기는 그 이름의 표를 통째로 갈아 끼우므로, 어느 층에도 없는 이름을
+   * 부르면 기동이 `invalid transport` 로 죽는다(실측 j-names `t-ghost-partial`). 빈 `{}` 도
+   * 아무것도 지우지 않으므로(실측 `t-empty-servers`) 이름이 없으면 키 자체를 넣지 않는다.
+   * 다른 이름의 MCP(foreign)는 설계 §3.3대로 건드리지 않는다 — 이 잠금은 kordoc 하나다.
+   */
+  private async mcpLockParams(rpc: JsonRpcProcess): Promise<{ config?: { mcp_servers: Record<string, { enabled: false }> }; locked: string[] }> {
+    if (!this.mcpLocked) return { locked: [] }
+    let merged: unknown
+    try {
+      // `cwd` 를 줘야 프로젝트 층까지 병합된, 스레드가 실제로 받는 그 설정이 온다.
+      merged = await rpc.request('config/read', { cwd: this.options.root })
+    } catch (e) {
+      throw new McpSafetyError(`재시도 턴에서 한글 문서 도구 설정을 읽지 못했어요: ${(e as Error)?.message ?? String(e)}`, 'retry-config-read')
+    }
+    const servers = (merged as { config?: { mcp_servers?: unknown } } | undefined)?.config?.mcp_servers
+    const present = servers && typeof servers === 'object' && !Array.isArray(servers) ? Object.keys(servers) : []
+    if (!present.includes(MCP_SERVER_NAME)) {
+      // 설정 어디에도 kordoc 이 없다 = 새 프로세스가 그 서버를 띄울 수 없다. 잠글 것도, 확인할 것도 없다.
+      return { locked: [] }
+    }
+    return { config: { mcp_servers: { [MCP_SERVER_NAME]: { enabled: false } } }, locked: [MCP_SERVER_NAME] }
+  }
+  /** 한 턴 전체(기동 검증·턴 시작·완료 대기)를 "진행 중"으로 표시하고 본문을 돈다(M2-R1-02). */
+  private async runTurn(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+    this.turnActive = true
+    try { return await this.turnBody(text, sessionId, events, replayHistory) }
+    finally { this.turnActive = false }
+  }
+  private async turnBody(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+    let rpc = await this.connect()
     if (!(await this.status()).connected) throw new Error('Codex에서 ChatGPT 계정 로그인을 먼저 완료해 주세요.')
     this.events = events
     const skillPath = join(this.options.skill, 'SKILL.md')
@@ -457,16 +718,53 @@ export class CodexConnection implements AgentConnection {
     const skills = await rpc.request('skills/list', { cwds: [this.options.root], forceReload: true })
     if (!skills.data?.some((entry: any) => entry.skills?.some((s: any) => realOrSelf(s.path) === want && s.enabled))) throw new Error('Codex가 프로젝트의 knuaf-dev 스킬을 찾지 못했어요.')
     events.skill()
-    const args = { cwd: this.options.root, approvalPolicy: 'on-request', sandbox: 'workspace-write', developerInstructions: '이 세션은 knuaf-dev 개인용 GUI입니다. 제공된 knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 같은 이름의 사용자·전역 스킬 사본이 보여도 무시하고 이 프로젝트의 스킬만 따르세요. 질문은 채팅 텍스트로 제시하세요. 인터뷰 원문과 해석은 스킬의 로그 계약대로 기록하세요. GUI의 첨부는 사용자 답변의 일부이며 현재 작성물 채택은 스킬의 확인 절차를 따르세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). 엑셀·문서 읽기는 스킬의 스크립트에 이미 있으니 그것을 쓰세요.' }
-    const r = sessionId ? await rpc.request('thread/resume', { ...args, threadId: sessionId }) : await rpc.request('thread/start', args)
-    this.thread = r.thread.id; events.session(r.thread.id)
-    this.threadModel = typeof r.model === 'string' && r.model ? r.model : null
-    this.threadEffort = typeof r.reasoningEffort === 'string' && r.reasoningEffort ? r.reasoningEffort : null
-    if (!sessionId) { this.overridden = false; this.resumeChecked = false }
-    // Replayed turns use a different id space (item-N) than the live stream (msg_*), so
-    // id-dedup cannot catch them — replay only when the app snapshot has no assistant
-    // history at all (e.g. snapshot file lost while the server thread survived).
-    if (replayHistory) for (const turn of r.thread.turns ?? []) for (const item of turn.items ?? []) if (item.type === 'agentMessage') events.message(item.id, item.text)
+    const args = { cwd: this.options.root, approvalPolicy: 'on-request', sandbox: 'workspace-write', developerInstructions: '이 세션은 knuaf-dev 개인용 GUI입니다. 제공된 knuaf-dev 스킬과 참조 지침을 그대로 따르세요. 같은 이름의 사용자·전역 스킬 사본이 보여도 무시하고 이 프로젝트의 스킬만 따르세요. 질문은 채팅 텍스트로 제시하세요. 인터뷰 원문과 해석은 스킬의 로그 계약대로 기록하세요. GUI의 첨부는 사용자 답변의 일부이며 현재 작성물 채택은 스킬의 확인 절차를 따르세요. 셸 명령은 앱이 그대로 읽고 판단할 수 있어야 자동으로 통과합니다. 변수 대입($PY=… 같은)·$PWD 같은 변수 참조·`…`·$(…)·서브셸·리다이렉트를 쓰지 말고, 경로는 따옴표로 감싼 절대경로를 그대로 적으세요. 그러지 않으면 학생에게 읽을 수 없는 승인 창이 뜹니다. 셸에 프로그램을 밀어 넣지 마세요(heredoc·python -c 등). ' + (this.mcpSpec ? MCP_DOC_READ_INSTRUCTION : LEGACY_DOC_READ_INSTRUCTION) }
+    const guard = this.guard
+    if (guard) {
+      // 열거는 **스레드 앞**(§4.1-C 1번) — 계획의 `config` 가 이 턴의 잠금 전부다.
+      const plan = await this.lockPlan(rpc)
+      this.plan = plan
+      const acquired = await guard.acquire({ sessionId, fingerprint: plan.fingerprint, transport: this.loadTransport(args) })
+      if (!acquired.ok) throw new Error(acquired.studentCopy)
+      // 재기동을 거쳤으면 위 `rpc` 는 죽은 프로세스다 — 이어 쓸 연결을 다시 잡는다.
+      rpc = await this.connect()
+      if (acquired.switched) events.note(acquired.switched.notice)
+      this.thread = acquired.threadId; events.session(acquired.threadId)
+      // 앱이 붙인 kordoc 은 잠금 대상이 아니라 **검증 대상**이다(§4.1-D ②). 실패하면
+      // `McpSafetyError` 로 올라가 MCP 를 끄고 같은 텍스트를 다시 돈다 — 종전 경로 그대로.
+      if (this.mcpSpec && plan.kordocAttached) {
+        await verifyCodexKordoc(rpc, { threadId: acquired.threadId, root: this.options.root, spec: this.mcpSpec })
+        this.verifiedOn = rpc
+      }
+      if (plan.kordocCollision) events.note(KORDOC_COLLISION_NOTE)
+      if (this.mcpLocked) await verifyKordocAbsent(rpc, { threadId: acquired.threadId, names: plan.lockedNames })
+      this.threadModel = this.loaded?.model ?? null
+      this.threadEffort = this.loaded?.effort ?? null
+      if (!sessionId) { this.overridden = false; this.resumeChecked = false }
+      if (replayHistory) for (const m of this.loadedMessages()) events.message(m.id, m.text)
+    } else {
+      const { config: lockConfig, locked } = await this.mcpLockParams(rpc)
+      const r = sessionId ? await rpc.request('thread/resume', { ...args, ...(lockConfig ? { config: lockConfig } : {}), threadId: sessionId }) : await rpc.request('thread/start', { ...args, ...(lockConfig ? { config: lockConfig } : {}) })
+      const threadId: string = r.thread.id
+      this.thread = threadId; events.session(threadId)
+      // Codex 쪽 승인 정책의 전부는 이 검증이다(§3.3) — 프로세스당 1회, `turn/start` 앞.
+      // 하나라도 못 채우면 `McpSafetyError` 로 올려 보내 MCP 를 끄고 같은 텍스트를 다시 돈다.
+      if (this.mcpSpec && this.verifiedOn !== rpc) {
+        await verifyCodexKordoc(rpc, { threadId, root: this.options.root, spec: this.mcpSpec })
+        this.verifiedOn = rpc
+      }
+      // 재시도 폴백의 관문(M2-R1-01): 스레드 config 로 끈 kordoc 이 **실제로 꺼졌는지** 턴 앞에서
+      // 확인한다. 스레드 config 는 서버가 스레드를 처음 적재할 때만 먹으므로(f 실측) 요청의 성공은
+      // 증거가 아니다 — 상태 목록이 유일한 판정 근거다. 확인 못 하면 턴을 열지 않는다(재시도 없음).
+      if (this.mcpLocked) await verifyKordocAbsent(rpc, { threadId, names: locked })
+      this.threadModel = typeof r.model === 'string' && r.model ? r.model : null
+      this.threadEffort = typeof r.reasoningEffort === 'string' && r.reasoningEffort ? r.reasoningEffort : null
+      if (!sessionId) { this.overridden = false; this.resumeChecked = false }
+      // Replayed turns use a different id space (item-N) than the live stream (msg_*), so
+      // id-dedup cannot catch them — replay only when the app snapshot has no assistant
+      // history at all (e.g. snapshot file lost while the server thread survived).
+      if (replayHistory) for (const turn of r.thread.turns ?? []) for (const item of turn.items ?? []) if (item.type === 'agentMessage') events.message(item.id, item.text)
+    }
     this.messages.clear()
     // 첫 턴에는 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다.
     const prompt = sessionId ? text : `${text}\n\n${workFolderInstructions(this.options.root)}`
@@ -495,6 +793,8 @@ export class CodexConnection implements AgentConnection {
         input: [{ type: 'text', text: prompt, text_elements: [] }, { type: 'skill', name: 'knuaf-dev', path: skillPath }],
         ...turnModel.params
       }).then(r => {
+        // 원장 기록은 첫 알림보다 **먼저** — 턴 id 를 받은 즉시(§4.1-C ⑨).
+        if (this.guard && this.plan) this.guard.noteTurn(this.thread ?? '', r.turn.id, this.plan.fingerprint)
         this.turn = r.turn.id
         // 되돌리기를 실제로 보낸 턴이 시작됐을 때만 "더 되돌릴 것이 없다"로 바꾼다.
         // 턴이 실패했는데 false 로 두면 다음 턴이 생략되어 예전 덮어쓰기가 남는다.
@@ -573,10 +873,36 @@ export class CodexConnection implements AgentConnection {
   private async serverDefaults(): Promise<{ model: string; effort: string | null }> {
     if (this.defaults) return this.defaults
     const rpc = await this.connect()
-    const r = await rpc.request('thread/start', { ephemeral: true, cwd: this.options.root })
-    const model = typeof r?.model === 'string' && r.model ? r.model : ''
-    if (!model) throw new Error('Codex가 기본 모델을 알려 주지 않았어요.')
-    this.defaults = { model, effort: typeof r?.reasoningEffort === 'string' && r.reasoningEffort ? r.reasoningEffort : null }
+    // 탐침도 적재 호출이다(§4.1-C PROCESS DISCARD RULE). 표를 거치지 않은 채 나가면 그 프로세스는
+    // 잠금을 확인하지 않은 것이므로, 시작 표식을 세우고 끝나면 불명으로 남긴다 — 다음 적재가
+    // 이 프로세스를 잠긴 것으로 믿지 않는다.
+    const plan = this.guard ? await this.ensurePlan(rpc) : undefined
+    if (plan) this.guard?.table.beginStart(plan.fingerprint)
+    let r: unknown
+    try {
+      r = await rpc.request('thread/start', { ephemeral: true, cwd: this.options.root, ...(plan ? { config: plan.config } : {}) })
+    } catch (e) {
+      // 요청이 실패하면 그 프로세스가 무엇을 남겼는지 앱은 모른다 — 버리고 다음에 새로 연다.
+      await this.discardProcess()
+      throw e
+    } finally {
+      if (plan) this.guard?.table.clearPending()
+    }
+    const threadId = r && typeof r === 'object' && 'thread' in r && r.thread && typeof r.thread === 'object' && 'id' in r.thread ? r.thread.id : undefined
+    const reply = r && typeof r === 'object' ? (r as { model?: unknown; reasoningEffort?: unknown }) : undefined
+    const model = typeof reply?.model === 'string' && reply.model ? reply.model : ''
+    if (!(typeof threadId === 'string' && threadId)) {
+      // 대화 id 가 없는 응답은 서버가 스레드를 만들었는지 알 수 없다 — 그 프로세스를 다시 쓰지
+      // 않는다(적재 경로 `loadReply` 의 `no-id` 와 같은 선). 남은 model 을 기본값으로 삼지도 않는다.
+      await this.discardProcess()
+      throw new Error('Codex가 기본 대화를 만들지 못했어요.')
+    }
+    if (plan && typeof threadId === 'string' && threadId) this.guard?.noteProbe(threadId)
+    if (!model) {
+      await this.discardProcess()
+      throw new Error('Codex가 기본 모델을 알려 주지 않았어요.')
+    }
+    this.defaults = { model, effort: typeof reply?.reasoningEffort === 'string' && reply.reasoningEffort ? reply.reasoningEffort : null }
     return this.defaults
   }
   /** 그 모델의 기본 생각 깊이(`model/list`). 목록에 없으면 null — 깊이는 생략한다. */
@@ -609,5 +935,6 @@ export class CodexConnection implements AgentConnection {
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
     this.fileChanges.clear(); this.pendingFileApprovals.clear()
+    this.dropGuard()
   }
 }

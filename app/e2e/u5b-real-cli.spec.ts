@@ -157,8 +157,9 @@ async function runCli(cli: string, reply: Reply, opts: { disallowed?: string[]; 
       ANTHROPIC_BASE_URL: api.url, ANTHROPIC_API_KEY: 'sk-ant-api03-FAKE-for-local-mock-only',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_AUTOUPDATER: '1'
     }
-    // `studentText` 가 있으면 **앱이 만드는 그 글 그대로** 보낸다(첫 턴: `/knuaf-dev <학생글>`,
-    // resume 턴: `studentTurnText(학생글)`). 없으면 대조용 표지 글.
+    // `studentText` 가 있으면 **앱이 만드는 그 글 그대로** 보낸다(첫 턴: `<스킬 슬래시> <학생글>`
+    // — 이름은 앱 상수 `SKILL_PROMPT`, resume 턴: `studentTurnText(학생글)`). 없으면 대조용 표지 글.
+    // 이 파일은 첫 턴 글자를 **만들어 보내지 않는다**(첫 턴 경로는 U5c 스펙이 본다).
     const q = query({
       prompt: opts.studentText ?? `${MAIN_MARKER} do the task`,
       options: {

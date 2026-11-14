@@ -12,7 +12,7 @@ import { SkillStore } from '../src/main/update/store'
 import { SkillSwitch, skillSwitch } from '../src/main/update/switch'
 import { SkillUpdates } from '../src/main/update/service'
 import { ChatService } from '../src/main/chat/service'
-import { installSkill, skillVersion } from '../src/main/agent'
+import { installSkill, setTreeAccess, skillTargets, skillVersion } from '../src/main/agent'
 
 // Ephemeral test-only keys remain in this test process; no private key file is emitted.
 const pair = generateKeyPairSync('ed25519')
@@ -20,7 +20,7 @@ const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' }).toStrin
 const keys = [publicKey]
 const roots: string[] = []
 function temporary(): string { const root = mkdtempSync(join(tmpdir(), 'knuaf-update-test-')); roots.push(root); return root }
-test.afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+test.afterEach(() => { for (const root of roots.splice(0)) { setTreeAccess(root, true); rmSync(root, { recursive: true, force: true }) } })
 type Entry = { name: string; data: Buffer; mode?: number; method?: number; claimedSize?: number }
 function zipEntries(entries: Entry[]): Buffer {
   const locals: Buffer[] = [], central: Buffer[] = []
@@ -333,6 +333,10 @@ test('sidecar restart failure restores previous active while keeping newly verif
 test('chat pins one source per send and holds switch admission until the whole turn finishes', async () => {
   const { root, bundled, store } = setup(), f = fixture()
   const project = join(root, 'project'); mkdirSync(project)
+  const userData = join(root, 'chat')
+  // Claude 사본은 논문 폴더 밖 앱 자리(§4.2), Codex 사본만 폴더 안이다.
+  const hostSkill = skillTargets(project, userData).claude
+  const hostMarker = join(userData, 'skill-host', '.knuaf-gui/skill-install.json')
   const done = Promise.withResolvers<void>(), started = Promise.withResolvers<void>()
   let sourceReads = 0, source = bundled
   const chat = new ChatService({ skillSource: () => { ++sourceReads; return source }, userData: join(root, 'chat'), emit: () => {}, openExternal: async () => {}, connectionFactory: () => ({
@@ -343,17 +347,19 @@ test('chat pins one source per send and holds switch admission until the whole t
   const switchDone = skillSwitch.switch(async () => { store.publish(f.verified(), f.zip); store.select('1.0.1'); source = store.resolveSkillSource() })
   expect(() => skillSwitch.enter()).toThrow(/규칙집/)
   expect(sourceReads).toBe(1)
-  expect(readFileSync(join(project, '.claude/skills/knuaf-dev/SKILL.md'), 'utf8')).toContain('bundle')
+  expect(readFileSync(join(hostSkill, 'SKILL.md'), 'utf8')).toContain('bundle')
   done.resolve(); await switchDone
   await chat.send(project, 'claude', 'next', 'request-2')
   await chat.stop(project, 'claude')
   expect(sourceReads).toBe(2)
-  expect(readFileSync(join(project, '.claude/skills/knuaf-dev/SKILL.md'), 'utf8')).toBe('# skill 1.0.1')
+  expect(readFileSync(join(hostSkill, 'SKILL.md'), 'utf8')).toBe('# skill 1.0.1')
   expect(chat.snapshot(project, 'claude').messages.some(m => m.role === 'system' && m.text.includes('규칙집이 갱신'))).toBe(true)
-  const marker = JSON.parse(readFileSync(join(project, '.knuaf-gui/skill-install.json'), 'utf8'))
+  const marker = JSON.parse(readFileSync(hostMarker, 'utf8'))
   expect(marker).toEqual({ schema: 'knuaf-gui/skill-install@1', installs: [{ path: '.claude/skills/knuaf-dev' }, { path: '.agents/skills/knuaf-dev' }] })
   installSkill(bundled, join(project, '.agents/skills/knuaf-dev'), skillVersion(bundled))
-  expect(JSON.parse(readFileSync(join(project, '.knuaf-gui/skill-install.json'), 'utf8'))).toEqual(marker)
+  expect(JSON.parse(readFileSync(hostMarker, 'utf8'))).toEqual(marker)
+  // 이 배선의 목적: 논문 폴더에는 `.claude` 가 생기지 않는다(그 폴더를 CLI 가 설정으로 읽지 않게).
+  expect(existsSync(join(project, '.claude'))).toBe(false)
   await chat.close()
 })
 

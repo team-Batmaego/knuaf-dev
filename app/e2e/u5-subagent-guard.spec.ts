@@ -13,7 +13,7 @@ import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { ClaudeConnection, isSubagentTool, subagentGuardHook } from '../src/main/chat/claude'
+import { ClaudeConnection, isSubagentTool, SKILL_PROMPT, subagentGuardHook } from '../src/main/chat/claude'
 import { CodexConnection } from '../src/main/chat/codex'
 
 /** 하위 담당 알림은 학생 화면에 띄우지 않는다(형님 11-13: 한도·요금 문구 빼기) — 기록만 남는다. */
@@ -136,14 +136,16 @@ test('U5b(차단 2): fork 스킬도 입구다 — Skill 도구째로 주지 않�
   } finally { await r.conn.stop() }
 })
 
-test('U5b: 앱은 /knuaf-dev 슬래시로 스킬을 싣는다 — Skill 도구를 빼도 앱 스킬 본문은 간다', async () => {
+test('U5b: 앱은 첫 턴 스킬 슬래시로 스킬을 싣는다 — Skill 도구를 빼도 앱 스킬 본문은 간다', async () => {
   // Skill 도구를 끄면 모델이 스스로 부르는 스킬은 닫힌다. 앱이 쓰는 길은 슬래시 명령이고,
-  // 그것은 CLI 가 직접 확장하므로 Skill 도구와 무관하다(두 판 실측).
+  // 그것은 CLI 가 직접 확장하므로 Skill 도구와 무관하다(두 판 실측). 명령 이름은 앱 상수
+  // (`SKILL_PROMPT`)에서 가져온다 — CLI 가 플러그인 이름표를 붙이는 자리라 글자를 복붙하면
+  // 조용히 어긋난다(PR #125 맥 e2e 실패).
   const r = claudeRig()
   try {
     await r.conn.run('첫 요청', undefined, noopEvents)
     const prompts = r.rows().filter((x) => x.type === 'user').map((x) => JSON.stringify(x.message))
-    expect(prompts.join('\n')).toContain('/knuaf-dev')
+    expect(prompts.join('\n')).toContain(SKILL_PROMPT)
   } finally { await r.conn.stop() }
 })
 

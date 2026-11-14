@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, safeStorage, shell, systemPreferences } from 'electron'
 import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
 import { probeProjectWritable } from './project-write'
@@ -16,8 +16,10 @@ import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult
 import type { ModelChoice, Provider } from '../shared/chat'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
-import { agentApi, skillSource, type AgentCtx, type AgentKind } from './agent'
+import { AgentToolLockError, agentApi, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService } from './chat/service'
+import { loadGuardKey } from './guard/key'
+import { runtimeFromEnsureEnvelope } from './chat/kordocMcp'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
 import { APP_NAME } from '../shared/name'
@@ -556,7 +558,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
-    supportDir: join(app.getPath('userData'), 'launch'), dryRun: process.env.KNUAF_DRY_LAUNCH === '1',
+    supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
+    dryRun: process.env.KNUAF_DRY_LAUNCH === '1',
     open: (p) => shell.openPath(p), venvPython, bundledPython
   })
   ipcMain.handle('agent:status', async (_e, root: string | null) => { try { return { result: await agentApi.status(agentCtx(), root ?? currentRoot) } } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } } })
@@ -575,12 +578,20 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
         return { install, launched }
       })
       return { result: { ...launched, install } }
-    } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } }
+    } catch (error) {
+      // 거부 글은 학생에게 그대로 보이는 문장이다 — `Error: ` 접두사를 붙이지 않는다.
+      if (error instanceof AgentToolLockError) return { error: { code: error.code, message: error.message } }
+      const code = error instanceof UpdateSuspendedError ? error.code : 'internal'
+      return { error: { code, message: String(error) } }
+    }
   })
 
   const chat = new ChatService({
     skillSource: () => skillSource(APP_ROOT, app.isPackaged, process.resourcesPath),
     userData: app.getPath('userData'),
+    // 지킴이 무결성 열쇠(§4.3). OS 보관소(`safeStorage`)를 못 쓰면 `null` — 지킴이는 꺼지고
+    // Codex 연결은 종전 경로 그대로 돈다. 열쇠를 꺼내는 일은 앱 시작 때 한 번뿐이다.
+    guardKey: loadGuardKey(app.getPath('userData'), safeStorage),
     emit: (s) => win()?.webContents.send('chat:snapshot', s),
     openExternal: (url) => shell.openExternal(url),
     // The reverse gate: while the app holds a write transaction, agent sends must wait.
@@ -589,6 +600,17 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       for (const diagnosis of dependencyDiagnoses.values()) if (diagnosis.gate === dependencyGate) return true
       for (const entry of inflight.values()) if (sidecar.isWrite(entry.method)) return true
       return false
+    },
+    // 폴더의 첫 전송에서만 kordoc 런타임을 확인한다(설계 §3.2). 앱은 이 값을 **입력으로만** 받는다 —
+    // 실행 파일 선택은 v0.6.0 ③(런타임 실측)의 몫이다. 여기서는 그 ③이 `kordoc.ensure`를 거칠 때의
+    // 잠정 경로를 봉투에서 그대로 읽는다(`node_path`·`cli.js`·`actual_version`). ③이 Electron 을
+    // Node 로 쓰기로 하면 이 호출에 `node`(그 실행 파일)를 넘기고 `extraEnv` 에
+    // `ELECTRON_RUN_AS_NODE=1` 을 넣는 것으로 바뀐다 — 그때까지 `node_path` 가 없으면 추측하지 않고
+    // 미부착(null)이고, 대화는 MCP 없이 그대로 간다.
+    ensureKordoc: async (root) => {
+      const envelope = await sidecar.call<Envelope>('kordoc.ensure', { root })
+      const node = (envelope.data as { node_path?: unknown } | null | undefined)?.node_path
+      return typeof node === 'string' && node ? runtimeFromEnsureEnvelope(envelope, node) : null
     },
     // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
