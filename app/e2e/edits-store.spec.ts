@@ -377,6 +377,148 @@ test('B — 저장이 끝나며 뜬 늦은 목록 읽기가 방금 닫은 건을
   })
 })
 
+// ── 저장 경합: 화면의 개정이 아직 앞 저장을 못 따라왔을 때 ───────────────────
+
+/** `section.edit`·`section.edit_batch` 응답 한 건 — 실제 `EditResult` 모양. */
+function editResult(revision: number) {
+  return {
+    revision, draft_hash: 'h', draft_hashes: {}, needs_check: false, new_issues: [],
+    reviews_staled: 0, recheck_before_submit: false, edit_id: `edit-${revision}`
+  }
+}
+
+test('연속 저장 — 화면이 옛 개정을 들고 있어도 다음 저장은 앞 저장이 알려 준 개정으로 나간다', async () => {
+  // 실제로 깨지던 꼴(#125 맥 e2e viewer-edit.spec.ts:279): 앞 저장(`kind:'one'`)의 응답은 이미
+  // 왔는데 그 뒤의 조용한 `refresh()` 가 아직 안 돌아와 `status.revision` 이 옛 값이다. 그 40ms
+  // 사이에 누른 `같이 고치기`(`kind:'batch'`)가 옛 개정으로 나가 sidecar 가 `stale_view` 로
+  // 거절했다 — 원고는 안 바뀌고 "그사이 글이 바뀌었어요"만 떴다.
+  const sent: number[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit' && method !== 'section.edit_batch') return { result: null }
+    sent.push(p.expected_revision as number)
+    return { result: editResult((p.expected_revision as number) + 1) }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    // 화면이 아는 개정은 3 — 정본은 아직 3 이다.
+    const one = await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'h', before_block: '가', after_block: '나'
+    })
+    expect(one.ok).toBe(true)
+    // 조용한 갱신이 끝나기 전에 누른 두 번째 저장 — 호출자가 넘긴 값은 여전히 옛 3 이다.
+    const batch = await useEdits.getState().save('/A', {
+      kind: 'batch', expected_revision: 3, edits: [{ section_id: 'sec-02', before_block: '다', after_block: '라' }]
+    })
+    expect(batch.ok).toBe(true)
+    // 두 번째는 옛 3 이 아니라 앞 저장이 만든 4 로 나간다.
+    expect(sent).toEqual([3, 4])
+  })
+})
+
+test('그사이 정말 바뀐 글이면 거절되고, 거절은 개정 기억을 앞세우지 않는다', async () => {
+  // 저장이 알려 준 개정을 기억하는 것은 **우리가 방금 만든 개정**뿐이다. 그사이 도우미가 정말
+  // 고쳤으면 정본이 더 앞서 있어 sidecar 의 `!=` 대조가 그대로 거절해야 한다 — 이 시험은 그
+  // 보호가 약해지지 않았음을 잠근다(`methods_edit.py` `_commit`).
+  let server = 3
+  const sent: number[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit' && method !== 'section.edit_batch') return { result: null }
+    const expected = p.expected_revision as number
+    sent.push(expected)
+    if (expected !== server) return { error: { code: 'stale_view', message: '그사이 글이 바뀌었어요. 다시 골라 주세요.' } }
+    server += 1
+    return { result: editResult(server) }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    const one = await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, before_block: '가', after_block: '나'
+    })
+    expect(one.ok).toBe(true)   // 3 -> 4
+
+    // 그사이 도우미가 두 번 고쳤다 — 정본은 6, 화면은 아직 3 이다.
+    server = 6
+    const refused = await useEdits.getState().save('/A', {
+      kind: 'batch', expected_revision: 3, edits: [{ section_id: 'sec-02', before_block: '다', after_block: '라' }]
+    })
+    expect(refused).toMatchObject({ ok: false, code: 'stale_view' })
+    // 기억은 4 그대로다 — 거절이 기억을 7 같은 값으로 올려 다음 저장을 통과시키지 않는다.
+    await useEdits.getState().save('/A', {
+      kind: 'batch', expected_revision: 3, edits: [{ section_id: 'sec-02', before_block: '다', after_block: '라' }]
+    })
+    expect(sent).toEqual([3, 4, 4])
+  })
+})
+
+test('다른 논문으로 바꾸면 앞 논문의 개정 기억을 들고 가지 않는다', async () => {
+  // 개정 번호는 논문마다 따로 센다. 앞 논문에서 기억한 4 를 새 논문에 쓰면 그 저장은 이유 없이
+  // `stale_view` 로 거절된다 — 그 화면에는 "그사이 글이 바뀌었어요"만 뜬다.
+  const sent: { root: string; revision: number }[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit') return { result: null }
+    sent.push({ root: String(p.root), revision: p.expected_revision as number })
+    return { result: editResult((p.expected_revision as number) + 1) }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    await useEdits.getState().save('/A', { kind: 'one', id: 'sec-01', expected_revision: 3, before_block: '가', after_block: '나' })
+    await useEdits.getState().save('/B', { kind: 'one', id: 'sec-01', expected_revision: 3, before_block: '가', after_block: '나' })
+    expect(sent).toEqual([{ root: '/A', revision: 3 }, { root: '/B', revision: 3 }])
+  })
+})
+
+test('같은 장을 연달아 고치면 옛 지문이 아니라 앞 저장이 알려 준 지문으로 나간다', async () => {
+  // 개정 대조를 통과해도 지문 대조가 따로 있다(`methods_edit.py:356` `_Manuscript`). 절 목록의
+  // `draft_hash` 도 읽기 응답이 돌아와야 오르므로, 방금 저장한 장을 그 사이 또 고치면 옛 지문으로
+  // 나가 똑같이 `stale_view` 가 된다. 지문은 **우리 저장이 만든 개정**의 것이므로 그대로 쓴다.
+  const sent: { revision: number; hash: unknown }[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit') return { result: null }
+    sent.push({ revision: p.expected_revision as number, hash: p.expected_draft_hash })
+    return { result: { ...editResult((p.expected_revision as number) + 1), draft_hash: `h${sent.length}` } }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    // 화면: 개정 3, 이 장의 지문 `h0`.
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'h0', before_block: '가', after_block: '나'
+    })
+    // 새로 읽지 않은 채 같은 장을 또 고친다 — 화면은 여전히 개정 3, 지문 `h0`.
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'h0', before_block: '나', after_block: '다'
+    })
+    expect(sent).toEqual([{ revision: 3, hash: 'h0' }, { revision: 4, hash: 'h1' }])
+  })
+})
+
+test('그사이 남이 그 장을 다시 썼으면 우리 지문을 쓰지 않는다', async () => {
+  // 화면이 든 개정이 우리가 기억한 개정보다 **앞서면** 그 장은 그사이 다시 쓰인 것이다 — 그때
+  // 기억한 지문을 계속 쓰면 남의 글을 우리 지문으로 덮으려 든다. 화면 것을 그대로 넘겨 sidecar
+  // 가 지문 대조로 거절하게 둔다.
+  const sent: { revision: number; hash: unknown }[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit') return { result: null }
+    sent.push({ revision: p.expected_revision as number, hash: p.expected_draft_hash })
+    return { result: { ...editResult((p.expected_revision as number) + 1), draft_hash: 'h1' } }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'h0', before_block: '가', after_block: '나'
+    })
+    // 화면이 다시 읽어 왔다 — 개정 9, 그 장의 지문 `hX`(남이 쓴 글).
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 9, expected_draft_hash: 'hX', before_block: '마', after_block: '바'
+    })
+    expect(sent[1]).toEqual({ revision: 9, hash: 'hX' })
+  })
+})
+
 // ── 고침1: 턴 단위 answered · uncertain → pending · 유실 행은 화면에서만 닫기 ─────
 
 test('고침1 — 메모 실린 턴이 실패하면 그 건은 pending 으로 돌아오고 다음 턴이 정상 끝나도 answered 가 아니다', async () => {
