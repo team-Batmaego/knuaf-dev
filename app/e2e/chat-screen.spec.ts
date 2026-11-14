@@ -50,12 +50,9 @@ test('한글 마무리 항목은 인터뷰 질문으로 세지 않는다 (GUI-10
     // ① 질문 카드가 뜨지 않는다(도우미가 기다리는 질문이 0건이므로).
     await expect(page.locator('.qcard'), '기다리는 질문이 없는데 카드가 떴다').toHaveCount(0)
 
-    // ② 전체 과정의 2단계 사실은 "질문 N개"를 말하지 않는다 — 한글 마무리를 질문으로 세면
-    //    이 줄이 바뀐다(질문 0 이면 대신 무엇을 하고 있는지 말한다).
-    await page.locator('.titlebar .tbtn.now').click()
-    const stage2 = page.locator('.titlebar .popover .pop-row').nth(1)
-    await expect(stage2).toContainText('장을 쓰는 중')
-    await expect(stage2, '한글 마무리를 질문으로 세고 있다').not.toContainText('질문')
+    // ② 제목줄 진행은 대화 없음이면 "시작 전"이다 — 한글 마무리 항목을 진행 단계로 세지 않는다.
+    //    (이전 5단계 팝오버 단언은 T1로 대체됨 — IMPL-T1 §3-1, §3-4 U7.)
+    await expect(page.locator('.titlebar .tbtn.stg')).toContainText('시작 전')
     await page.keyboard.press('Escape')
 
     // ③ 점검 한 장은 그 일을 자기 자리에서 정확히 센다.

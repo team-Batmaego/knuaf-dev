@@ -3,11 +3,16 @@ import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
+import { folderHash } from '../guard/scope'
+import type { GuardKey } from '../guard/store'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
-import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
+import { subscriptionEnv, type AgentConnection, type AgentOptions, type GuardContext } from './contracts'
 import { chatConnectionKey } from './jobs/key'
+import { KordocMcpRegistry } from './kordocMcpRegistry'
+import type { KordocMcpSpec, KordocRuntime } from './kordocMcp'
+import { rootKey } from './kordocMcp'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
@@ -48,6 +53,9 @@ export const QUIT_FLUSH_DELAYS_MS = [20, 30]
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
 
+/** 사양 적용 결과. `unsafe` = 공급자가 사양도 해제도 받지 못해 MCP 상태를 확인할 수 없다. */
+type KordocApplyOutcome = 'attached' | 'rejected' | 'unsafe'
+
 export class ChatService {
   private snapshots = new Map<string, ChatSnapshot>()
   private connections = new Map<string, AgentConnection>()
@@ -59,6 +67,12 @@ export class ChatService {
   private reauthenticating = new Map<Provider, AgentConnection>()
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
+  /** 폴더별 kordoc MCP 수명 — 성공 캐시·실패 재시도·안내 1회는 레지스트리가 지킨다(§3.2). */
+  private kordocRegistries = new Map<string, KordocMcpRegistry>()
+  /** acquire 가 도는 동안만 열리는 안내 통로 — 폴더 키로 그 대화 스냅샷에 묶는다. */
+  private kordocNoteSinks = new Map<string, (text: string) => void>()
+  /** 연결별 kordoc 부착 상태. 항목 없음 = 아직 확인 안 함. `key` 는 부착 당시의 폴더 식별(realpath). */
+  private kordocAttach = new WeakMap<AgentConnection, { state: 'attached' | 'notified'; key: string }>()
   /**
    * 마감을 넘겼거나 실패로 정착한 연결 — **재사용 금지**는 그대로지만, 앱이 띄운 자식 pid 는
    * 계속 우리 소유로 남겨 회수(reclaim) 대상에 들어가야 한다(검토 RT3 차단).
@@ -132,8 +146,20 @@ export class ChatService {
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
     /** Test seam: build connections without spawning real agent processes (e2e/chat.spec.ts). */
     connectionFactory?: (provider: Provider, options: AgentOptions) => AgentConnection
+    /**
+     * 지킴이 무결성 열쇠(§4.3). `null`/`undefined` 는 **디스크 장부를 못 믿는다**는 뜻이지
+     * 지킴이가 꺼진다는 뜻이 아니다 — 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돈다.
+     * 열쇠가 없으면 원장은 메모리에만 남고(다음 실행에서 사라진다) 디스크에는 쓰지 않는다(C-02).
+     */
+    guardKey?: GuardKey
     /** True while the app itself holds a sidecar write transaction; send() must not interleave. */
     sidecarBusy?: (root: string) => boolean
+    /**
+     * 폴더의 kordoc 실행 런타임(설계 §3.2). 값은 v0.6.0 ③이 정하고, 여기서는 **입력으로만** 받는다 —
+     * 없으면 MCP 를 붙이지 않고(기존 동작 그대로) `setMcpSpec` 도 부르지 않는다.
+     * 실패는 `null` 또는 예외(둘 다 "이번엔 못 붙었다")이고, 그때도 대화는 그대로 간다.
+     */
+    ensureKordoc?: (root: string) => Promise<KordocRuntime | null>
     /** 도우미가 쓸 Python — 프로젝트 .venv 와 번들 CPython. */
     venvPython?: (root: string) => string | null
     bundledPython?: () => string | null
@@ -290,15 +316,143 @@ export class ChatService {
     this.owners.add(root)
     return () => { this.owners.delete(root); releaseSwitch(); releaseActivity() }
   }
-  private skillDir(root: string, provider: Provider) { return skillTargets(root)[provider] }
+  private skillDir(root: string, provider: Provider) { return skillTargets(root, this.opts.userData)[provider] }
+  /**
+   * 지킴이 보관본 자리(§4.3). 열쇠를 못 얻었으면 `key: null` — 디스크 장부를 믿지 않는 것이지
+   * 지킴이를 끄는 것이 아니다(C-02). 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돌아야 하므로
+   * 문맥 자체는 언제나 넘긴다.
+   */
+  private guardFor(root: string): GuardContext {
+    return { userData: this.opts.userData, folderHash: folderHash(root), key: this.opts.guardKey ?? null }
+  }
+  /** 폴더의 kordoc 레지스트리 — 성공 캐시·실패 재시도·안내 1회는 이 객체가 지킨다(§3.2). */
+  private kordocRegistry(root: string): KordocMcpRegistry {
+    const key = rootKey(root)
+    let registry = this.kordocRegistries.get(key)
+    if (!registry) {
+      const ensureKordoc = this.opts.ensureKordoc
+      if (!ensureKordoc) throw new Error('kordoc 런타임 공급자가 없어요.')
+      registry = new KordocMcpRegistry({
+        ensureKordoc,
+        // 안내 줄은 **그 순간 그 폴더의 대화**에만 남는다 — acquire 는 폴더별 잠금 안에서만 돈다.
+        note: (text) => this.kordocNoteSinks.get(key)?.(text)
+      })
+      this.kordocRegistries.set(key, registry)
+    }
+    return registry
+  }
+  /**
+   * 이 턴에 붙일 kordoc MCP 사양을 연결에 넘긴다(설계 §3.2 '언제'·'실패 시').
+   *
+   * - **`send()` 에서만** 부른다(`status()`·`login()`·전역 연결은 타지 않는다).
+   * - 공급자가 `setMcpSpec` 을 구현하지 않았거나 런타임 공급자가 없으면 아무 것도 하지 않는다 —
+   *   확인 자체가 kordoc 설치(수백 MB)를 일으킬 수 있으므로 받을 곳이 없으면 시도하지 않는다.
+   * - 확인에 실패하면 `null` 을 넘기고 대화는 그대로 간다. 안내 줄은 레지스트리가 폴더당 1회 넣는다.
+   * - 같은 연결·같은 폴더에 이미 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다.
+   *   폴더 식별(realpath)이 달라졌으면 **옛 사양을 먼저 뗀다** — A 의 울타리로 B 턴을 돌리지 않는다(M1-01).
+   * - 부착·해제가 모두 실패해 상태를 확인할 수 없으면 그 연결로는 턴을 열지 않고, 새 연결로 한 번만
+   *   다시 연다. 그것도 안 되면 전송을 막고 알린다(M1-02). 반환된 연결을 `execute()` 에 넘긴다.
+   */
+  private async attachKordoc(s: ChatSnapshot, connection: AgentConnection): Promise<{ notes: string[]; connection: AgentConnection }> {
+    if (!connection.setMcpSpec || !this.opts.ensureKordoc) return { notes: [], connection }
+    const key = rootKey(s.root)
+    const state = this.kordocAttach.get(connection)
+    if (state?.state === 'attached' && state.key === key) return { notes: [], connection }
+
+    const notes: string[] = []
+    this.kordocNoteSinks.set(key, (text) => { notes.push(text) })
+    try {
+      const registry = this.kordocRegistry(s.root)
+      const spec = await registry.acquire(s.root)
+      let target = connection
+      let outcome: KordocApplyOutcome = 'rejected'
+      // 남아 있는 상태가 **다른 폴더의 부착**이면 옛 울타리를 먼저 뗀다 — A 의 사양으로 B 턴을
+      // 돌리지 않는다(M1-01). 이 해제는 필수다: 못 떼면 그 연결의 MCP 범위를 확인할 수 없다.
+      if (state?.state === 'attached' && state.key !== key) {
+        outcome = (await this.releaseKordocSpec(target, registry, s.root, true)) ? 'rejected' : 'unsafe'
+      }
+      if (outcome !== 'unsafe') {
+        if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
+        // 처음 보는 연결에는 "붙일 것이 없다"를 알린다. 실패해도 안전 문제는 아니다 — 아직 아무것도
+        // 넘기지 않은 연결이므로 남은 구성이 없다(M1-02 는 이미 사양이 올라간 연결의 경우다).
+        else if (!state) this.releaseKordocSpec(target, registry, s.root, false)
+      }
+      if (outcome === 'unsafe') {
+        target = await this.reopenConnection(s.root, s.provider, connection, s.sessionId)
+        // 새 연결은 처음 보는 연결이다 — 같은 사양을 한 번 더 적용한다.
+        if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
+        else { this.releaseKordocSpec(target, registry, s.root, false); outcome = 'rejected' }
+        if (outcome === 'unsafe') {
+          throw new Error('한글 문서 읽기 도구를 붙이지 못했어요. 이 대화 도구가 문서 읽기 설정을 받아들이지 못해 안전하게 보낼 수 없어요. 잠시 뒤 다시 시도해 주세요.')
+        }
+      }
+      this.kordocAttach.set(target, { state: outcome === 'attached' ? 'attached' : 'notified', key })
+      return { notes, connection: target }
+    } finally {
+      this.kordocNoteSinks.delete(key)
+    }
+  }
+  /** 논문 폴더 밖 접근을 막는 사양을 하나 적용한다. 공급자가 거절하면 `null` 로 내리는 것까지가 몫이다. */
+  private async applyKordocSpec(
+    connection: AgentConnection,
+    spec: KordocMcpSpec,
+    registry: KordocMcpRegistry,
+    root: string
+  ): Promise<KordocApplyOutcome> {
+    const setSpec = connection.setMcpSpec!
+    try { await setSpec.call(connection, spec); return 'attached' }
+    catch {
+      // 공급자가 사양을 받아들이지 못하면 MCP 없이 간다 — 붙이지 못한 것이 전송을 막지는 않는다.
+      // 다음 send 는 레지스트리의 성공 캐시에서 같은 사양을 다시 받아 재시도한다.
+      registry.reportProviderFailure(root)
+      return (await this.releaseKordocSpec(connection, registry, root, false)) ? 'rejected' : 'unsafe'
+    }
+  }
+  /**
+   * 사양을 내린다. `required` 면 이것이 옛 울타리를 떼는 일이라 실패가 곧 "MCP 범위를 확인할 수
+   * 없음"이다(M1-02). 아니면 아직 아무것도 안 올라간 연결을 정리하는 것이라 실패해도 안전하다.
+   * 반환값 `true` = MCP 없는 상태로 확인됨.
+   */
+  private async releaseKordocSpec(
+    connection: AgentConnection,
+    registry: KordocMcpRegistry,
+    root: string,
+    required: boolean
+  ): Promise<boolean> {
+    try { await connection.setMcpSpec!.call(connection, null); return true }
+    catch {
+      if (!required) return false
+      registry.reportProviderFailure(root)
+      return false
+    }
+  }
+  /** 안전을 확인하지 못한 연결을 버리고 같은 폴더·공급자의 새 연결을 연다(M1-02). */
+  private async reopenConnection(root: string, provider: Provider, dead: AgentConnection, sessionId: string | undefined): Promise<AgentConnection> {
+    const key = this.key(root, provider)
+    if (this.connections.get(key) === dead) this.connections.delete(key)
+    this.kordocAttach.delete(dead)
+    try { await dead.stop() } catch { /* 이미 죽은 연결 — 버리는 것이 목적이다 */ }
+    const fresh = this.connection(root, provider)
+    if (!(await this.checkedStatus(provider, fresh)).connected) {
+      throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
+    }
+    // 새 연결도 첫 전송과 같은 준비를 거친다 — 모델 기본값 확인을 건너뛰면 다른 모델로 조용히 보낸다.
+    await fresh.prepare?.(sessionId)
+    return fresh
+  }
   private connection(root: string, provider: Provider): AgentConnection {
     this.ensureActive()
     const key = this.key(root, provider)
     let c = this.connections.get(key)
     if (!c) {
+      const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
+        guard,
+        // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
+        // 같은 함수를 쓴다(`skillSource`).
+        skillBundleSource: () => this.opts.skillSource(),
         // 연결은 폴더·공급자마다 한 번만 만들어진다 — 선택은 전송할 때마다 다시 읽는다.
         modelChoice: () => this.effectiveChoice(provider),
         modelChosen: () => this.opts.modelChosen?.(provider) ?? false
@@ -421,10 +575,16 @@ export class ChatService {
     let c = this.globals.get(provider)
     if (!c) {
       const root = this.connectRoot()
+      // 이 연결은 상태 확인·로그인만 한다(턴 없음). 그래도 받는 자리를 똑같이 채운다 —
+      // 공급자 코드가 guard 유무로 갈리므로 전역 연결만 종전 모양으로 남기지 않는다.
+      // 열쇠가 없어도(`key: null`) 문맥은 넘긴다(C-02) — 격리·열거는 열쇠와 무관하다.
+      const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
         env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
-        openExternal: this.opts.openExternal, trusted: () => false
+        openExternal: this.opts.openExternal, trusted: () => false,
+        guard,
+        skillBundleSource: () => this.opts.skillSource()
       }
       if (this.opts.connectionFactory) {
         c = this.opts.connectionFactory(provider, options)
@@ -489,25 +649,33 @@ export class ChatService {
       const skill = this.skillDir(root, provider)
       const source = this.opts.skillSource()
       const version = skillVersion(source)
-      const state = skillState(skill, version)
-      if (state === 'missing') installSkill(source, skill, version)
+      // 대조본을 넘겨 판 표시뿐 아니라 **내용**까지 본다(C-01ⓒ) — 표시만 같은 변조본은 다시 깐다.
+      const state = skillState(skill, version, source)
+      if (state === 'missing') installSkill(source, skill, version, source)
       else if (state === 'outdated' || (s.skillHash && s.skillHash !== version)) {
         // A changed skill is never a send-blocker: reinstall (with backup) and note it in the transcript.
         const marker = join(skill, VERSION_FILE)
         const old = s.skillHash && s.skillHash !== version ? s.skillHash : existsSync(marker) ? readFileSync(marker, 'utf-8').trim() : '이전 버전'
-        installSkill(source, skill, version)
+        installSkill(source, skill, version, source)
         s.messages.push({ id: randomUUID(), role: 'system', text: `규칙집이 갱신됐어요 (이전 ${old} → 현재 ${version})`, at: new Date().toISOString() })
-      } else installSkill(source, skill, version) // Refresh GUI ownership even for an unchanged copy.
+      } else installSkill(source, skill, version, source) // Refresh GUI ownership even for an unchanged copy.
       const connection = this.connection(root, provider)
       if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로
       // 조용히 보내는 대신 학생에게 오류로 알린다(검토 MC1-01).
       await connection.prepare?.(s.sessionId)
+      // 폴더의 첫 전송에서만 kordoc 런타임을 확인해 이 연결에 넘긴다(§3.2). 실패해도 대화는 간다.
+      // 상태를 확인하지 못한 연결은 버리고 새 연결을 받을 수 있다(M1-02) — 그 연결로 실행한다.
+      const attach = await this.attachKordoc(s, connection)
+      for (const note of attach.notes) {
+        s.messages.push({ id: randomUUID(), role: 'system', text: note, at: new Date().toISOString() })
+      }
+      const live = attach.connection
       s.skillHash = version; s.skillLoaded = false; s.state = 'running'; s.error = undefined
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
       this.publish(s)
-      const run = this.execute(s, connection, text, requestId).finally(release)
+      const run = this.execute(s, live, text, requestId).finally(release)
       this.runs.set(this.key(root, provider), run)
       void run.finally(() => this.runs.delete(this.key(root, provider)))
       return structuredClone(s)

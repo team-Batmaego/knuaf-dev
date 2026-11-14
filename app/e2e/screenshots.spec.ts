@@ -5,9 +5,10 @@ import { launch, navTo, openProject, synthProject } from './helpers'
 import { DEFAULT_WINDOW } from '../src/shared/window'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 
-// 화면 캡처가 쓰는 자리. CI(맥·윈도우)에서는 `KNUAF_SHOT_DIR` 를 주어 아티팩트로 올릴 곳에
-// 쓰고, 로컬 기본값은 지금처럼 `docs/images`(학생 안내서 사진 갱신)다 — 로컬 동작 불변.
-const OUT = process.env.KNUAF_SHOT_DIR ?? resolve(__dirname, '..', '..', 'docs', 'images')
+// 화면 캡처가 쓰는 자리. 기본값은 `test-results` 아래다 — git 에 안 들어가는 자리라 시험 실행이
+// 추적되는 파일을 덮어쓰지 않는다. 안내서 사진(`docs/images` 의 14장, 이 시험이 쓰는 몫)을 갱신할
+// 때만 `KNUAF_SHOT_DIR=../docs/images` 로 명시해 돌린다(루트 README 「개발」 절의 명령).
+const OUT = process.env.KNUAF_SHOT_DIR ?? resolve(__dirname, '..', 'test-results', 'ui-shots')
 // [file name, destination, surface: sheet, expanded list, or null for the unobstructed workspace]
 const SCREENS: [string, string, 'checkup' | 'settings' | 'materials' | 'files' | null][] = [
   ['02-checkup', '점검', 'checkup'],
@@ -65,7 +66,7 @@ for (const scheme of ['light', 'dark'] as const) {
   test(`screenshots (${scheme})`, async () => {
     // deps.ensure (venv + pip install) can take minutes on a cold project.
     test.setTimeout(300_000)
-    mkdirSync(OUT, { recursive: true })   // CI 에서는 test-results 아래 새 폴더일 수 있다
+    mkdirSync(OUT, { recursive: true })   // 기본은 app/test-results/ui-shots(추적 안 됨)
     const root = synthProject()
     // Pre-stage the docx input so '논문 파일(워드) 만들기' skips paper.generate and goes straight to docx.build.
     mkdirSync(join(root, 'build'), { recursive: true })

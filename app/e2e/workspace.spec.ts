@@ -100,9 +100,9 @@ test('제출 전 점검 한 장이 논문 칸을 덮고, 확인 행이 네 개�
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-  // 정식 진입점: 제목줄 "지금 ▾" → 전체 과정 → 제출 점검·마무리 줄(설계자 답 Q6).
-  await page.locator('.titlebar .tbtn.now').click()
-  await page.locator('.titlebar .popover').getByRole('button', { name: /제출 점검·마무리/ }).click()
+  // 정식 진입점: 제목줄 진행 ▾ → [제출 전 점검](IMPL-T1 T1 자리).
+  await page.locator('.titlebar .tbtn.stg').click()
+  await page.locator('.titlebar .popover').getByRole('button', { name: '제출 전 점검' }).click()
 
   const over = page.locator('.paperpane .sheetover')
   await expect(over).toBeVisible()
@@ -121,30 +121,28 @@ test('제출 전 점검 한 장이 논문 칸을 덮고, 확인 행이 네 개�
   await electronApp.close()
 })
 
-test('"지금"은 닫혀 있을 때도 열려 있을 때도 한 곳뿐이다 (3-A 완료 기준)', async () => {
+test('제목줄 진행은 닫혀 있을 때도 열려 있을 때도 한 곳뿐이다 (T1)', async () => {
   const root = synthProject()
   const { electronApp, page } = await launch()
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-  const now = page.locator('.titlebar .tbtn.now')
-  // 닫힘: 단추가 "지금 · ○○" 한 줄로 말한다.
-  await expect(now).toContainText('지금')
+  const now = page.locator('.titlebar .tbtn.stg')
+  // 닫힘: 단추가 "시작 전" 한 줄로 말한다(대화 없음).
+  await expect(now).toContainText('시작 전')
   await expect(page.locator('.titlebar .popover')).toHaveCount(0)
   await now.click()
-  // 열림: 단추 글자는 "전체 과정"으로 바뀌고(검토 R1-02), "지금" 표시는 목록 한 줄에만 있다.
-  await expect(now).toContainText('전체 과정')
-  await expect(now).not.toContainText('지금')
+  // 열림: 단추는 같은 진행 표시를 유지한다 — 다른 곳에 진행 표시가 생기지 않는다.
+  await expect(now).toContainText('시작 전')
   const pop = page.locator('.titlebar .popover')
   await expect(pop).toBeVisible()
-  await expect(pop.locator('.pop-row')).toHaveCount(5)
-  await expect(pop.locator('.now-w')).toHaveCount(1)
+  await expect(pop.locator('.pop-row')).toHaveCount(1)
+  await expect(pop).toContainText('제출 전 점검')
   await electronApp.close()
 })
 
-test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하나 (3-A 합류)', async () => {
-  // "지금"이 1단계(준비)로 떨어지지 않으려면 연결이 확인돼야 한다 — 가짜 codex(logged-in)로
-  // 고정한다. 개발 기계에 진짜 CLI 가 있든 없든 같은 장면이 되게 하려는 것이다(fixtures).
+test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하나 (내부 5단계 판정, 화면은 T1)', async () => {
+  // 내부 판정이 3단계여야 종이 머리에 권하는 단추가 선다 — 장을 다 쓴 상태로 올린다.
   const dir = scratch()
   const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
   const root = synthProject()
@@ -152,18 +150,19 @@ test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
 
-  // 처음에는 인터뷰 단계(2)라 권하는 단추가 없다 — 대화가 이끈다(DESIGN §2).
-  await expect(page.locator('.titlebar .tbtn.now')).toContainText('인터뷰')
+  // 처음에는 대화 없음이라 제목줄은 "시작 전"이다(T1 — 앱 5단계 이름은 화면에 나오지 않는다).
+  await expect(page.locator('.titlebar .tbtn.stg')).toContainText('시작 전')
   await expect(page.locator('.paper-head button.primary')).toHaveCount(0)
 
-  // 장을 다 쓴 상태로 올린다(기록 +1) → 2초 감시가 다시 읽고 3단계가 된다.
+  // 장을 다 쓴 상태로 올린다(기록 +1) → 2초 감시가 다시 읽고 내부 3단계가 된다.
   markSectionReady(root)
   await expect(page.locator('.paper-head button.primary')).toHaveText('검토본 만들기', { timeout: 20_000 })
-  await expect(page.locator('.titlebar .tbtn.now')).toContainText('검토본')
+  // 제목줄은 대화 진행 표시라 그대로 "시작 전"이다 — 내부 단계는 종이 머리 단추로만 보인다.
+  await expect(page.locator('.titlebar .tbtn.stg')).toContainText('시작 전')
   await electronApp.close()
 })
 
-test('재무 게이트 기록이 없으면 본문이 있어도 2단계에 머물고 대기 질문 1로 센다', async () => {
+test('재무 게이트 기록이 없으면 본문이 있어도 내부 2단계에 머물고 권하는 단추가 생기지 않는다', async () => {
   // 원본 계약: 재무 지원 전공에 본문 절이 있는데 finance.gate.state 기록이 없으면
   // `project.status`가 finance_gate를 needs_user로 내고 점검은 error다. 그래서 본문이
   // review_ready여도 검토본 단계로 넘어가지 않는다(서버 판정, 앱 규칙 아님).
@@ -175,13 +174,9 @@ test('재무 게이트 기록이 없으면 본문이 있어도 2단계에 머물
     await openProject(page, root)
     await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
     markSectionReady(root)
-    // 감시 한 주기(2초)가 지나도 단계는 2다 — 권하는 단추가 생기지 않는다.
+    // 감시 한 주기(2초)가 지나도 내부 단계는 2다 — 권하는 단추가 생기지 않는다.
     await page.waitForTimeout(3_500)
-    await expect(page.locator('.titlebar .tbtn.now')).toContainText('인터뷰')
     await expect(page.locator('.paper-head button.primary')).toHaveCount(0)
-    await page.locator('.titlebar .tbtn.now').click()
-    await expect(page.locator('.titlebar .popover .pop-row').nth(1)).toContainText('질문 1개')
-    await page.keyboard.press('Escape')
   } finally {
     await electronApp.close()
   }

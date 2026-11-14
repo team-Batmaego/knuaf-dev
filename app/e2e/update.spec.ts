@@ -1,18 +1,22 @@
 import { expect, test } from '@playwright/test'
-import { generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
+import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import { ASSET_PREFIX, CHANNEL_URL, compare, MAX_BYTES, sha256, verifySkill, type SkillManifest } from '../src/main/update/manifest'
 import { extractSkill } from '../src/main/update/archive'
 import { UPDATE_KEYS, updateConfig } from '../src/main/update/keys'
-import { boundedFetch } from '../src/main/update/network'
+import { boundedFetch, type Transport } from '../src/main/update/network'
 import { SkillStore } from '../src/main/update/store'
 import { SkillSwitch, skillSwitch } from '../src/main/update/switch'
 import { SkillUpdates } from '../src/main/update/service'
 import { ChatService } from '../src/main/chat/service'
-import { installSkill, skillVersion } from '../src/main/agent'
+import { installSkill, setTreeAccess, skillTargets, skillVersion } from '../src/main/agent'
+import { launch } from './helpers'
 
 // Ephemeral test-only keys remain in this test process; no private key file is emitted.
 const pair = generateKeyPairSync('ed25519')
@@ -20,7 +24,7 @@ const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' }).toStrin
 const keys = [publicKey]
 const roots: string[] = []
 function temporary(): string { const root = mkdtempSync(join(tmpdir(), 'knuaf-update-test-')); roots.push(root); return root }
-test.afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+test.afterEach(() => { for (const root of roots.splice(0)) { setTreeAccess(root, true); rmSync(root, { recursive: true, force: true }) } })
 type Entry = { name: string; data: Buffer; mode?: number; method?: number; claimedSize?: number }
 function zipEntries(entries: Entry[]): Buffer {
   const locals: Buffer[] = [], central: Buffer[] = []
@@ -300,6 +304,24 @@ test('redirects to an arbitrary host stop before second request, allowed CDN wor
   await expect(large.arrayBuffer()).rejects.toThrow(/상한/)
 })
 
+test('redirect chain stops at five hops and channel addresses never follow a redirect', async () => {
+  const f = fixture(), signal = new AbortController().signal, requests: string[] = []
+  // 끝없는 허용 목록 이동 — 5회를 넘기면 멈춰야 한다(루프가 요청을 무한히 내지 않는다는 증거).
+  const chain: Transport = async url => {
+    requests.push(url)
+    return new Response(null, { status: 302, headers: { location: `https://release-assets.githubusercontent.com/r${requests.length}` } })
+  }
+  await expect(boundedFetch(f.manifest.url, signal, chain, f.zip.length, config())).rejects.toThrow(/이동 주소/)
+  expect(requests).toHaveLength(6)
+  const channelRequests: string[] = []
+  const c = config()
+  await expect(boundedFetch(c.channel, signal, async url => {
+    channelRequests.push(url)
+    return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/r1' } })
+  }, 1024, c, true)).rejects.toThrow(/이동 주소/)
+  expect(channelRequests).toEqual([c.channel])
+})
+
 test('same-process update downloads and publishes before switch; timeout keeps verified storage and highest', async () => {
   const { store, bundled } = setup(), lock = new SkillSwitch(), release = lock.enter(), { updates } = updater(store, fixture(), async () => {}, lock)
   await updates.check()
@@ -333,6 +355,10 @@ test('sidecar restart failure restores previous active while keeping newly verif
 test('chat pins one source per send and holds switch admission until the whole turn finishes', async () => {
   const { root, bundled, store } = setup(), f = fixture()
   const project = join(root, 'project'); mkdirSync(project)
+  const userData = join(root, 'chat')
+  // Claude 사본은 논문 폴더 밖 앱 자리(§4.2), Codex 사본만 폴더 안이다.
+  const hostSkill = skillTargets(project, userData).claude
+  const hostMarker = join(userData, 'skill-host', '.knuaf-gui/skill-install.json')
   const done = Promise.withResolvers<void>(), started = Promise.withResolvers<void>()
   let sourceReads = 0, source = bundled
   const chat = new ChatService({ skillSource: () => { ++sourceReads; return source }, userData: join(root, 'chat'), emit: () => {}, openExternal: async () => {}, connectionFactory: () => ({
@@ -343,17 +369,19 @@ test('chat pins one source per send and holds switch admission until the whole t
   const switchDone = skillSwitch.switch(async () => { store.publish(f.verified(), f.zip); store.select('1.0.1'); source = store.resolveSkillSource() })
   expect(() => skillSwitch.enter()).toThrow(/규칙집/)
   expect(sourceReads).toBe(1)
-  expect(readFileSync(join(project, '.claude/skills/knuaf-dev/SKILL.md'), 'utf8')).toContain('bundle')
+  expect(readFileSync(join(hostSkill, 'SKILL.md'), 'utf8')).toContain('bundle')
   done.resolve(); await switchDone
   await chat.send(project, 'claude', 'next', 'request-2')
   await chat.stop(project, 'claude')
   expect(sourceReads).toBe(2)
-  expect(readFileSync(join(project, '.claude/skills/knuaf-dev/SKILL.md'), 'utf8')).toBe('# skill 1.0.1')
+  expect(readFileSync(join(hostSkill, 'SKILL.md'), 'utf8')).toBe('# skill 1.0.1')
   expect(chat.snapshot(project, 'claude').messages.some(m => m.role === 'system' && m.text.includes('규칙집이 갱신'))).toBe(true)
-  const marker = JSON.parse(readFileSync(join(project, '.knuaf-gui/skill-install.json'), 'utf8'))
+  const marker = JSON.parse(readFileSync(hostMarker, 'utf8'))
   expect(marker).toEqual({ schema: 'knuaf-gui/skill-install@1', installs: [{ path: '.claude/skills/knuaf-dev' }, { path: '.agents/skills/knuaf-dev' }] })
   installSkill(bundled, join(project, '.agents/skills/knuaf-dev'), skillVersion(bundled))
-  expect(JSON.parse(readFileSync(join(project, '.knuaf-gui/skill-install.json'), 'utf8'))).toEqual(marker)
+  expect(JSON.parse(readFileSync(hostMarker, 'utf8'))).toEqual(marker)
+  // 이 배선의 목적: 논문 폴더에는 `.claude` 가 생기지 않는다(그 폴더를 CLI 가 설정으로 읽지 않게).
+  expect(existsSync(join(project, '.claude'))).toBe(false)
   await chat.close()
 })
 
@@ -462,4 +490,298 @@ test('select accepts a stored version and null; rollback keeps highest', async (
   expect(restarts).toBe(3)
   expect(lock.attempts).toBe(3)
   expect(phases).toEqual(['switching', 'ready', 'switching', 'ready', 'switching', 'ready'])
+})
+
+/**
+ * 실제 전송 계층(`netRequestTransport`)은 Electron 메인에만 있으므로 **앱을 띄워** 태운다.
+ * 결함(0.6.1~0.6.3): `net.fetch(…, {redirect:'manual'})` 이 3xx 를 돌려주지 않고 스스로 취소해
+ * `Redirect was cancelled` 로 끝났다 — 허용 목록 검사가 한 번도 실행되지 않았다.
+ *
+ * 이 시험이 잠그는 것 셋:
+ *   1. Electron 이 manual 모드에서 `redirect` 이벤트로 3xx 를 준다(고침이 기대는 계약).
+ *   2. 그 3xx 가 **응답으로** 올라와 허용 목록 검사에 닿는다(오류 문구가 '이동 주소').
+ *   3. 가리킨 호스트로 요청이 **한 건도** 나가지 않는다(서버 로그가 증거).
+ * 양성 대조(같은 서버가 200 서명 채널을 주면 정상)가 없으면 위 실패가 '설정이 틀려서'와 구별되지 않는다.
+ */
+test('channel 302 surfaces as a response, the allowlist rejects it, and the pointed host is never contacted', async () => {
+  const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const hitsA: string[] = [], hitsB: string[] = []
+  let mode: 'redirect' | 'ok' = 'redirect'
+  const upstream = createServer((req, res) => { hitsB.push(req.url ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"schema":1}') })
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  const upstreamPort = (upstream.address() as AddressInfo).port
+  const channel = createServer((req, res) => {
+    hitsA.push(req.url ?? '')
+    if (mode === 'redirect') { res.writeHead(302, { location: `http://127.0.0.1:${upstreamPort}/evil.json` }); res.end(); return }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ schema: 1, app: { latest: '0.0.1', page: 'https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.0.1' } }))
+  })
+  await new Promise<void>(resolve => channel.listen(0, '127.0.0.1', resolve))
+  const channelUrl = `http://127.0.0.1:${(channel.address() as AddressInfo).port}/channel.json`
+  const { electronApp, page, appLog } = await launch({ env: {
+    KNUAF_AGENT_PATH_ONLY: '1', KNUAF_UPDATE_PUBLIC_KEY: publicKey, KNUAF_UPDATE_CHANNEL_URL: channelUrl
+  } })
+  try {
+    // 1. Electron 계약: manual 모드에서 3xx 는 `redirect` 이벤트로 온다(따라가지 않는다).
+    const observed = await electronApp.evaluate(({ net }, url) => new Promise<string>(resolve => {
+      const request = net.request({ url, method: 'GET', redirect: 'manual' })
+      // 따라가지 않으면 Chromium 이 스스로 요청을 취소한다 — 그 'error' 는 정상이고, 우리는 이벤트만 본다.
+      request.on('redirect', (status, _method, location) => resolve(`${status} ${location}`))
+      request.on('error', (error: Error) => resolve(`error ${error.message}`))
+      request.end()
+    }), channelUrl)
+    expect(observed).toBe(`302 http://127.0.0.1:${upstreamPort}/evil.json`)
+
+    // 2. 두 갈래(규칙집·앱)가 같은 채널 읽기를 쓴다 — 둘 다 허용 목록 오류로 끝나야 한다.
+    type Reply = { result?: { phase: string; message?: string }; error?: { code: string; message: string } }
+    const ask = (): Promise<[Reply, Reply]> => page.evaluate(() => Promise.all([window.knuaf.update.check(), window.knuaf.appUpdate.check()])) as Promise<[Reply, Reply]>
+    const [skill, appUpdate] = await ask()
+    expect(skill.result?.phase).toBe('error')
+    expect(skill.result?.message).toContain('허용되지 않은 업데이트 이동 주소')
+    expect(appUpdate.result?.phase).toBe('error')
+    expect(appUpdate.result?.message).toContain('허용되지 않은 업데이트 이동 주소')
+
+    // 3. 증거: 가리킨 호스트는 요청을 한 건도 받지 않았다(응답 문구만으로는 부족하다).
+    expect(hitsA.length).toBeGreaterThanOrEqual(1)
+    expect(hitsB).toHaveLength(0)
+
+    // 4. main 로그 한 줄 — 맥 실측에서 실패 원인이 로그에 0줄이었다(ORDER 추가 3). 남기는 것은
+    //    단계·호스트·상태 코드·오류 이름뿐이고 쿼리 문자열·주소 전체는 싣지 않는다.
+    const appLogText = (): string => existsSync(appLog) ? readFileSync(appLog, 'utf-8') : ''
+    await expect.poll(appLogText).toMatch(/update:failed stage=channel host=127\.0\.0\.1 status=302 error=Error/)
+    // 두 갈래(규칙집·앱)가 같은 채널을 각각 읽으므로 줄이 둘 이상일 수 있다 - 전부 같은 모양이어야 한다.
+    const failureLines = appLogText().split('\n').filter(line => line.includes('update:failed'))
+    expect(failureLines.length).toBeGreaterThanOrEqual(2)
+    for (const line of failureLines) {
+      // 주소·쿼리 문자열은 싣지 않는다 - 이 줄은 CI 산출물로 올라간다.
+      expect(line).not.toContain('channel.json')
+      expect(line).not.toContain('http')
+    }
+
+    // 양성 대조: 같은 서버가 200 으로 채널을 주면 두 갈래 모두 오류 없이 '할 일 없음'으로 끝난다.
+    // 시작 시 자동 확인(ipc.ts 의 `void …check()`)의 결과가 섞일 수 있어 최종 상태가 바뀔 때까지 다시 묻는다.
+    mode = 'ok'
+    await expect.poll(async () => (await ask()).map(reply => `${reply.error?.code ?? '-'}/${reply.result?.phase ?? '-'}`).join(' '), { timeout: 20_000 })
+      .toBe('-/idle -/idle')
+    expect(hitsB).toHaveLength(0)
+  } finally {
+    await electronApp.close()
+    await new Promise<void>((resolve, reject) => channel.close(error => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()))
+  }
+})
+
+/** 사건이 창 안에 서지 않으면 실패로 닫는 상한 — 판정 값이 아니라 실패 처리용이다. */
+async function within<T>(milliseconds: number, work: Promise<T>, what: string): Promise<T> {
+  const { promise, resolve, reject } = Promise.withResolvers<T>()
+  const timer = setTimeout(() => reject(new Error(`${what} — ${milliseconds}ms 안에 사건이 서지 않았다(실패 상한)`)), milliseconds)
+  void work.then(resolve, reject)
+  try { return await promise } finally { clearTimeout(timer) }
+}
+
+/**
+ * Roh R-01 회귀 시험 — 받은 본문을 **큐에 쌓지 않고** 소비자 속도로 당긴다(수신 배압).
+ *
+ * 판정은 **사건**으로 한다. 고정 대기·표본·전송률 비율로 하지 않는다(Roh BP1-R-01):
+ *   1. 소비자는 응답을 연 뒤 **한 번도 읽지 않는다**. 있으면 안 되는 것은 '읽지 않는데 본문이
+ *      끝까지 들어오는 것'이다.
+ *   2. 서버는 16MiB 를 64KiB 씩 밀고, `res.write()` 가 false 를 돌려주면 `drain` 을 기다린다.
+ *      16MiB 는 루프백 소켓·Chromium 버퍼 어느 것으로도 다 들어가지 않는다 — 흘려 받는 구현은
+ *      소비자가 없어도 끝까지 밀어 넣고 `finished` 가 선다.
+ *   3. 테스트는 `finished`(끝까지 밀었다 = 배압 없음)와 '막혀 멈춤'(배압 있음)을 사건으로 가른다.
+ *      판정의 뼈대는 **`blocked`(`res.write()` 가 false)가 섰고, 읽기를 재개하기 전까지 `finished`
+ *      가 서지 않았다**는 두 사건이다. 그 사이에 오는 `drain` 은 소켓·Chromium 버퍼가 흡수한 몫이라
+ *      멈춤이 아니므로 창을 다시 세고, 창이 잇달아 두 번 조용해야 '더 못 밀었다'로 닫는다. 창의
+ *      길이는 판정 값이 아니라 '더 올 사건이 없다'를 닫는 장치다(진행 사건이 서면 즉시 끝난다).
+ *   4. 그 다음에야 **읽기를 재개한다**(명시 신호, 표본 경계와 분리). 재개하면 `finished` 가 서고
+ *      본문은 16,777,216바이트 + SHA-256 일치로 끝까지 온다 — 막고 있던 것이 소비자였음의 증거다.
+ *      배압 없는 옛 구현은 1에서 이미 `finished` 가 서므로 이 단계에 오지 못하고 결정적으로 실패한다.
+ *   5. 마지막으로 멈춘 상태에서 '취소' → `AbortError`, 서버 소켓 `close` 사건.
+ *
+ * 전송 계층은 Electron 메인에만 있으므로 앱을 띄워 `netTransport.ts` 를 그 자리에서 심는다.
+ */
+test('a stalled consumer stops the transfer instead of buffering the whole body, and cancel still tears it down', async () => {
+  const payload = Buffer.alloc(16 * 1024 * 1024)
+  for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) & 0xff
+  const digest = createHash('sha256').update(payload).digest('hex')
+
+  /**
+   * 사건 하나. 값은 사건이 설 때 서버 쪽에서 **직접** 오르고, 기다리는 쪽은 그 수가 달라지기를
+   * 기다린다 — 표본을 되짚어 추정하지 않는다. `drain` 처럼 여러 번 서는 사건도 같은 방식으로 센다.
+   */
+  type Signal = { readonly count: number; bump(): void; waitFor(from: number): Promise<void> }
+  const signal = (): Signal => {
+    const waiters: (() => void)[] = []
+    let total = 0
+    return {
+      get count() { return total },
+      bump() { total += 1; for (const wake of waiters.splice(0)) wake() },
+      waitFor(from: number) {
+        if (total !== from) return Promise.resolve()
+        const { promise, resolve } = Promise.withResolvers<void>()
+        waiters.push(resolve)
+        return promise
+      }
+    }
+  }
+  /** 연결 하나의 관측점. 서버 쓰기 루프가 사건을 세운다. */
+  type Conn = { sent: number; blocked: Signal; drained: Signal; finished: Signal; closed: Signal }
+  const conns: Conn[] = []
+  const server = createServer((req, res) => {
+    const conn: Conn = { sent: 0, blocked: signal(), drained: signal(), finished: signal(), closed: signal() }
+    conns.push(conn)
+    req.socket.on('close', () => conn.closed.bump())
+    void (async () => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(payload.length) })
+      for (let offset = 0; offset < payload.length; offset += 64 * 1024) {
+        const chunk = payload.subarray(offset, offset + 64 * 1024)
+        const accepted = res.write(chunk)
+        conn.sent += chunk.length
+        if (accepted) continue
+        conn.blocked.bump()
+        // 소비자가 당겨 소켓이 빌 때까지 여기서 선다 — 이동이 이 사건으로만 일어난다.
+        const drained = Promise.withResolvers<void>()
+        res.once('drain', () => { conn.drained.bump(); drained.resolve() })
+        await drained.promise
+      }
+      res.end()
+      conn.finished.bump()
+    })().catch(() => {})
+  })
+  const listening = Promise.withResolvers<void>()
+  server.listen(0, '127.0.0.1', listening.resolve)
+  await listening.promise
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/asset.bin`
+
+  const source = transpileModule(readFileSync(join(__dirname, '../src/main/update/netTransport.ts'), 'utf8'), {
+    compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+  }).outputText
+
+  const { electronApp } = await launch({ env: { KNUAF_AGENT_PATH_ONLY: '1' } })
+  type Body = { bytes: number; digest: string; error: string }
+  /** 응답을 열고 **거기서 멈춘다** — 읽기는 테스트가 `consume` 으로 따로 지시한다. */
+  const open = async (): Promise<void> => {
+    await electronApp.evaluate(async (electron, args: { source: string; url: string }) => {
+      type Transport = (url: string, init: { signal: AbortSignal; redirect: 'manual' }) => Promise<Response>
+      const loaded = { exports: {} as { netRequestTransport: Transport } }
+      // 실물 모듈을 그대로 심는다 — `electron` 말고는 의존하지 않는다(계약 import 는 타입뿐이라 사라진다).
+      new Function('require', 'module', 'exports', args.source)((name: string) => {
+        if (name === 'electron') return electron
+        throw new Error(`unexpected dependency ${name}`)
+      }, loaded, loaded.exports)
+      const controller = new AbortController()
+      const response = await loaded.exports.netRequestTransport(args.url, { signal: controller.signal, redirect: 'manual' })
+      const reader = response.body!.getReader()
+      Reflect.set(globalThis, 'stallProbe', {
+        consume: async (mode: 'stall' | 'cancel'): Promise<{ bytes: number; digest: string; error: string }> => {
+          const { createHash } = process.getBuiltinModule('node:crypto')
+          const hash = createHash('sha256')
+          let bytes = 0
+          let error = ''
+          if (mode === 'cancel') {
+            controller.abort()
+            // 취소는 **다음 당김**에서 드러난다(이미 당겨 둔 조각 하나는 정상 반환). 그래서 끝까지 당긴다.
+            for (;;) {
+              try {
+                const { done } = await reader.read()
+                if (done) break
+              } catch (thrown) {
+                const failure = thrown as Error
+                error = `${failure.name}:${failure.message}`
+                break
+              }
+            }
+            return { bytes, digest: '', error }
+          }
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            bytes += value.byteLength
+            hash.update(value)
+          }
+          return { bytes, digest: hash.digest('hex'), error }
+        }
+      })
+    }, { source, url })
+  }
+  const consume = (mode: 'stall' | 'cancel'): Promise<Body> =>
+    electronApp.evaluate(async (_electron, how: 'stall' | 'cancel') => {
+      const probe = Reflect.get(globalThis, 'stallProbe') as { consume: (mode: 'stall' | 'cancel') => Promise<{ bytes: number; digest: string; error: string }> }
+      return await probe.consume(how)
+    }, mode)
+
+  const QUIET = 500
+  const OBSERVE = 30_000
+  const CONFIRM = 2
+  /**
+   * 읽기를 재개하지 않은 채로 서버가 '더 못 밀고 멈췄는지'(`quiet`) '끝까지 밀었는지'(`finished`)를
+   * 사건으로 가른다. 두 단계다:
+   *   1. `blocked`(`res.write()` 가 false)가 서기를 기다린다 — 밀려 막힌 증거다. 흘려 받는 구현은
+   *      소비자가 없어도 소켓이 계속 비어 `blocked` 가 서지 않고 `finished` 가 먼저 선다.
+   *   2. 막힌 뒤 `drain` 이 QUIET 동안 하나도 안 서는 창이 **잇달아 CONFIRM 번** 서면 멈춤이다.
+   *      소켓·Chromium 버퍼가 흡수하는 몫은 `drain` 으로 오므로 창은 매번 새로 선다. 창 하나로
+   *      끊지 않는 이유는 같은 이유다 — 늦게 도착하는 `drain` 한 번이 판정을 뒤집지 않게 한다.
+   * QUIET·OBSERVE 는 판정 값이 아니라 '더 올 사건이 없다'를 닫는 실패 상한이다(사건이 서면 즉시 끝난다).
+   */
+  const settle = async (conn: Conn): Promise<'finished' | 'quiet'> => {
+    let confirmed = 0
+    for (;;) {
+      if (conn.finished.count > 0) return 'finished'
+      // `blocked` 와 `drained` 는 번갈아 선다(서버 쓰기 루프가 순차적이다) — 수가 같으면 지금 막혀 있다.
+      const blocked = conn.blocked.count > conn.drained.count
+      const quiet = Promise.withResolvers<'quiet'>()
+      const timer = setTimeout(() => quiet.resolve('quiet'), blocked ? QUIET : OBSERVE)
+      const step = await Promise.race([
+        conn.finished.waitFor(0).then(() => 'finished' as const),
+        (blocked ? conn.drained.waitFor(conn.drained.count) : conn.blocked.waitFor(conn.blocked.count))
+          .then(() => 'progress' as const),
+        quiet.promise
+      ]).finally(() => clearTimeout(timer))
+      if (step === 'finished') return 'finished'
+      if (step === 'quiet' && blocked) {
+        confirmed += 1
+        if (confirmed >= CONFIRM) return 'quiet'
+        continue
+      }
+      confirmed = 0
+      // 막히지도 끝나지도 않은 채 조용해졌다 — 배압 판정이 아니라 계측이 성립하지 않은 것이다.
+      if (step === 'quiet') throw new Error(`서버가 ${OBSERVE}ms 안에 막히지도 끝나지도 않았다(sent=${conn.sent}) — 판정 불가`)
+    }
+  }
+
+  try {
+    // 1) 소비자는 읽지 않는다. 서버는 16MiB 를 밀려고 한다.
+    await open()
+    expect(conns, '요청이 한 번만 나가야 한다').toHaveLength(1)
+    const conn = conns[0]
+    // 2) 끝까지 밀었는가(배압 없음), 더 못 밀고 멈췄는가(배압 있음) — 사건으로 가른다.
+    const stalled = await settle(conn)
+    expect(conn.sent, '서버가 한 바이트도 못 밀었다 — 배압이 아니라 연결 문제다').toBeGreaterThan(0)
+    expect(
+      stalled,
+      `읽지 않는데 서버가 16MiB 를 끝까지 밀어 넣었다(sent=${conn.sent}, blocked=${conn.blocked.count}, drain=${conn.drained.count}) — 수신 배압이 없다`
+    ).toBe('quiet')
+
+    // 3) 이제 읽기를 재개한다 — 잘리지 않고 전부 와야 한다(배압이 본문을 훼손하지 않는다).
+    const body = await within(30_000, consume('stall'), '이어 읽기')
+    expect(body.bytes).toBe(payload.length)
+    expect(body.digest).toBe(digest)
+    // 재개가 풀어 준 것이 맞다 — 소비가 시작된 뒤에야 서버 쓰기가 끝까지 갔다.
+    await within(20_000, conn.finished.waitFor(0), '이어 읽은 뒤 서버 쓰기 완료')
+
+    // 4) 멈춘 상태에서의 '취소' — 남은 본문을 흘려보내지 않고 연결을 끊는다.
+    await open()
+    expect(conns, '취소 시험은 새 연결에서 시작한다').toHaveLength(2)
+    const fresh = conns[1]
+    expect(await settle(fresh), "'취소' 전에 서버가 이미 끝까지 밀었다 — 이 시험은 멈춘 상태를 전제한다").toBe('quiet')
+    const cancelled = await within(20_000, consume('cancel'), "'취소' 뒤 읽기 정착")
+    expect(cancelled.error).toMatch(/^AbortError:/)
+    await within(20_000, fresh.closed.waitFor(0), "'취소' 뒤 서버 소켓 close")
+  } finally {
+    await electronApp.close()
+    server.closeAllConnections()
+    const closed = Promise.withResolvers<void>()
+    server.close(error => error ? closed.reject(error) : closed.resolve())
+    await closed.promise
+  }
 })

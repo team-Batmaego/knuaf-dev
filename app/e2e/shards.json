@@ -30,7 +30,9 @@
       "update-vector",
       "userdata",
       "win-feedback",
-      "win-reqa-layout"
+      "win-reqa-layout",
+      "guard-codex-connection",
+      "kordoc-mcp-lifecycle"
     ],
     [
       "agent-busy",
@@ -52,7 +54,19 @@
       "u5-subagent-guard",
       "update-blocked-ui",
       "win-kill",
-      "workspace"
+      "workspace",
+      "guard-instructions",
+      "guard-roh-stage1",
+      "guard-rules",
+      "guard-scope",
+      "notice-bubble",
+      "notice-real-screen",
+      "progress-list",
+      "token-usage",
+      "edits-store",
+      "sameword",
+      "guard-codex-thread-lock",
+      "kordoc-mcp-policy"
     ],
     [
       "artifacts-states",
@@ -73,7 +87,20 @@
       "shutdown-wiring",
       "u1b-web-findings",
       "win-feedback-app",
-      "xlsx-preview"
+      "xlsx-preview",
+      "chat-powershell",
+      "guard-reconcile",
+      "guard-roh-stage2",
+      "guard-scan-store",
+      "link-open",
+      "notice-choose-main",
+      "progress-file",
+      "progress-titlebar",
+      "edit",
+      "recheck",
+      "viewer-edit",
+      "guard-codex-tool-lock",
+      "kordoc-mcp-real"
     ],
     [
       "app-update-install-mode",
@@ -103,7 +130,11 @@
       "u1c-astra-findings",
       "ui-polish",
       "update-ui",
-      "workflows"
+      "workflows",
+      "recheck-screen",
+      "guard-claude-skill-host",
+      "guard-key",
+      "kordoc-mcp-registry"
     ],
     [
       "agent",
@@ -135,7 +166,9 @@
       "u1-claude-chip-ui",
       "u5c-student-slash",
       "update",
-      "update-poll"
+      "update-poll",
+      "kordoc-mcp-codex",
+      "kordoc-mcp-wiring"
     ]
   ],
   "macos": [
@@ -203,7 +236,23 @@
       "userdata",
       "win-feedback",
       "win-kill",
-      "workspace"
+      "workspace",
+      "guard-instructions",
+      "guard-roh-stage1",
+      "guard-rules",
+      "guard-scope",
+      "notice-bubble",
+      "notice-real-screen",
+      "progress-list",
+      "token-usage",
+      "edits-store",
+      "recheck-screen",
+      "viewer-edit",
+      "guard-codex-connection",
+      "guard-codex-tool-lock",
+      "kordoc-mcp-codex",
+      "kordoc-mcp-policy",
+      "kordoc-mcp-registry"
     ],
     [
       "agent-busy",
@@ -268,7 +317,24 @@
       "win-feedback-app",
       "win-reqa-layout",
       "workflows",
-      "xlsx-preview"
+      "xlsx-preview",
+      "chat-powershell",
+      "guard-reconcile",
+      "guard-roh-stage2",
+      "guard-scan-store",
+      "link-open",
+      "notice-choose-main",
+      "progress-file",
+      "progress-titlebar",
+      "edit",
+      "recheck",
+      "sameword",
+      "guard-claude-skill-host",
+      "guard-codex-thread-lock",
+      "guard-key",
+      "kordoc-mcp-lifecycle",
+      "kordoc-mcp-real",
+      "kordoc-mcp-wiring"
     ]
   ]
 }

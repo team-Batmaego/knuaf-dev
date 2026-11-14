@@ -100,7 +100,9 @@ def python39():
 def write_section(root, rel, title, body):
     path = Path(root) / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"# {title}\n\n{START}\n{body}\n{END}\n", encoding="utf-8")
+    # `newline="\n"` — 텍스트 모드 기본값은 윈도에서 `\r\n` 로 바꿔 쓴다. 원고는 플랫폼과
+    # 무관하게 같은 바이트여야 한다(바이트를 통째로 세우는 시험이 있다).
+    path.write_text(f"# {title}\n\n{START}\n{body}\n{END}\n", encoding="utf-8", newline="\n")
     return path
 
 

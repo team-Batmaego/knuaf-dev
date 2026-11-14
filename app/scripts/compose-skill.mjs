@@ -51,17 +51,29 @@ export function overlayHash(overlay) {
   return sha256(jsonBytes(fileHashes(readTree(overlay))))
 }
 
+/** Porcelain lines are `XY path`; the path is what the reader has to clean, so drop the status prefix. */
+export function dirtyVerdict(status, limit = 5) {
+  // `XY path` — X and Y are each a space or a letter, so a clean file shows ` M path`. The status
+  // prefix is exactly three characters and the path starts right after it; trimming the line first
+  // would eat the leading space and turn `tracked.txt` into `racked.txt`.
+  const lines = status.split('\n').filter(Boolean)
+  const shown = lines.slice(0, limit).map(line => line.slice(3))
+  const more = lines.length > shown.length ? ` (+${lines.length - shown.length} more)` : ''
+  return `Source checkout is dirty (including ignored files): ${shown.join(', ')}${more}`
+}
+
 export function checkSource(source, upstream) {
   if (source.repo !== 'starceas/knuaf-doc' || !/^v\d+\.\d+\.\d+$/.test(source.tag) ||
       !/^[a-f0-9]{40}$/.test(source.commit)) throw new Error('Invalid pinned source')
-  const git = (...args) => execFileSync('git', ['--no-replace-objects', '-C', upstream, ...args], { encoding: 'utf8' }).trim()
-  if (git('rev-parse', 'HEAD') !== source.commit || git('rev-parse', `${source.tag}^{commit}`) !== source.commit) {
+  const git = (...args) => execFileSync('git', ['--no-replace-objects', '-C', upstream, ...args], { encoding: 'utf8' })
+  const trimmed = (...args) => git(...args).trim()
+  if (trimmed('rev-parse', 'HEAD') !== source.commit || trimmed('rev-parse', `${source.tag}^{commit}`) !== source.commit) {
     throw new Error('Source HEAD/tag does not match pinned commit')
   }
   // Compatibility also executes root tests/docs. Cached ignored files must not change either input.
-  if (git('status', '--porcelain', '--untracked-files=all', '--ignored=matching')) {
-    throw new Error('Source checkout is dirty (including ignored files)')
-  }
+  // Read this one raw: porcelain's leading space is part of the line, not padding around it.
+  const status = git('status', '--porcelain', '--untracked-files=all', '--ignored=matching')
+  if (status) throw new Error(dirtyVerdict(status))
   // Read the pinned tree's blob identities, never the cache index/stat cache.
   // Return the verified buffers so composition and compatibility can share a frozen input.
   const files = new Map(), executable = []

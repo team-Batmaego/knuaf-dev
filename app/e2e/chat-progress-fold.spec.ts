@@ -10,9 +10,10 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
-import { launch, openProject, splitReady } from './helpers'
+import { launch, openProject, rewriteSection, splitReady } from './helpers'
 import { CHAT, QUESTION_FORM } from '../src/renderer/src/copy'
 import { fakeCodexEnv, questionProject, scratch, seedChat } from './fixtures/fake-codex'
+import { synthProject } from './helpers'
 
 const SHOTS = process.env.KNUAF_FOLD_SHOTS_DIR
 const shot = async (page: Page, name: string): Promise<void> => {
@@ -68,6 +69,49 @@ test('한 턴의 중간말을 접고, 펼치면 원문이 전부 보인다', asy
     await expect(fold).toContainText('지원 범위와 질문 계획을 읽겠습니다.')
     await expect(fold).toContainText('공식 자료 조사로 넘어갑니다.')
     await shot(page, 'fold-open')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+/**
+ * Roh v0.6.2 권고1 — 시스템 알림이 낀 턴에서 묶음이 하나면 B 가 알림보다 먼저 보인다.
+ * 묶음을 알림에서 끊으면 대화 줄 순서가 A → 알림 → B → 최종 답 그대로 선다.
+ */
+test('시스템 알림 앞뒤의 중간말은 각자의 자리에서 접혀 알림을 사이에 둔다', async () => {
+  const dir = scratch()
+  const root = questionProject()
+  seedChat(root, [
+    { id: 'u1', role: 'user', text: '전공은 원예환경시스템전공이에요', at: at(1), delivery: 'sent' },
+    { id: 'a1', role: 'assistant', text: '전공 바인딩을 등록했습니다.', at: at(2) },
+    { id: 's1', role: 'system', text: '규칙집이 갱신됐어요.', at: at(3) },
+    { id: 'a2', role: 'assistant', text: '지원 범위를 다시 읽겠습니다.', at: at(4) },
+    { id: 'a3', role: 'assistant', text: '조사 결과입니다. 작목을 골라 주세요.', at: at(5) }
+  ])
+  const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
+  try {
+    await openProject(page, root, splitReady)
+    await expect(page.locator('.progress-fold'), '묶음이 둘로 갈리지 않았다').toHaveCount(2, { timeout: 30_000 })
+    const rows = await page.locator('.chat-thread > .progress-fold, .chat-thread > .chat-msg').evaluateAll((els) =>
+      els.map((e) => ({
+        kind: e.classList.contains('progress-fold') ? 'fold'
+          : e.classList.contains('assistant') ? 'assistant'
+            : e.classList.contains('system') ? 'system' : 'user',
+        text: (e.textContent ?? '').replace(/\s+/g, ' ').trim()
+      })))
+    // 예전에는 A·B 가 한 묶음으로 A 자리에 서서 B 가 알림보다 먼저 보였다.
+    expect(rows.map((r) => r.kind)).toEqual(['user', 'fold', 'system', 'fold', 'assistant'])
+    expect(rows[2].text).toContain('규칙집이 갱신됐어요.')
+    await shot(page, 'system-boundary-closed')
+
+    const heads = page.locator('.progress-fold-head')
+    await heads.nth(0).click()
+    await expect(page.locator('.progress-fold').nth(0)).toContainText('전공 바인딩을 등록했습니다.')
+    await expect(page.locator('.progress-fold').nth(0)).not.toContainText('지원 범위를 다시 읽겠습니다.')
+    await heads.nth(1).click()
+    await expect(page.locator('.progress-fold').nth(1)).toContainText('지원 범위를 다시 읽겠습니다.')
+    await expect(page.locator('.progress-fold').nth(1)).not.toContainText('전공 바인딩을 등록했습니다.')
+    await shot(page, 'system-boundary-open')
   } finally {
     await electronApp.close()
   }
@@ -225,6 +269,57 @@ test('자유롭게 답하기로 바꾸면 카드가 사라지므로 질문 원�
     await expect(form).toBeVisible()
     await expect(body.locator('.q-fold')).toBeVisible()
     await expect(body).not.toContainText('[Q3] 작목과 자금 방향')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+/**
+ * Roh 1회째 중요2 — 종이 사건 줄(`PaperEvent`)이 두 중간말 사이에 오면 묶음이 하나로 남아,
+ * 묶음이 앞말 시각에 서고 사건이 뒤로 밀린다. 사건 시각을 경계로 넘겨 A → 사건 → B 순서로 세운다.
+ *
+ * 사건 시각은 앱이 절 본문 변화를 알아챈 순간(`new Date()`)이라 심을 수 없다. 그래서 앞말은 과거,
+ * 뒤말은 5분 뒤로 심어 그 사이에 사건이 실제로 떨어지게 한다(창이 5분이라 흔들리지 않는다).
+ */
+test('종이 사건이 사이에 낀 중간말은 사건 앞뒤로 갈라 접힌다', async () => {
+  const dir = scratch()
+  const root = synthProject()
+  const now = Date.now()
+  const iso = (ms: number): string => new Date(ms).toISOString()
+  seedChat(root, [
+    { id: 'u1', role: 'user', text: '머리말을 고쳐 주세요', at: iso(now - 60_000), delivery: 'sent' },
+    { id: 'a1', role: 'assistant', text: '절 본문을 읽어 보겠습니다.', at: iso(now - 50_000) },
+    { id: 'a2', role: 'assistant', text: '고친 문장을 저장하겠습니다.', at: iso(now + 300_000) },
+    { id: 'a3', role: 'assistant', text: '머리말을 고쳤습니다. 더 고칠 곳이 있으면 말해 주세요.', at: iso(now + 400_000) }
+  ])
+  const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
+  try {
+    await openProject(page, root, splitReady)
+    await expect(page.locator('.progress-fold'), '묶음이 서지 않았다').toHaveCount(1, { timeout: 30_000 })
+    // 도우미가 절 본문을 저장하면 앱이 사건 줄을 하나 그린다 — 그 시각이 a1 과 a2 사이에 떨어진다.
+    rewriteSection(root, { body: '농장A의 재배 면적은 600평이다. 고친 문장이다.', expected: 1 })
+    await expect(page.locator('.chat-event'), '사건 줄이 없다').toHaveCount(1, { timeout: 30_000 })
+    const rows = await page.locator('.chat-thread > .progress-fold, .chat-thread > .chat-event, .chat-thread > .chat-msg').evaluateAll((els) =>
+      els.map((e) => ({
+        kind: e.classList.contains('progress-fold') ? 'fold'
+          : e.classList.contains('chat-event') ? 'event'
+            : e.classList.contains('assistant') ? 'assistant'
+              : e.classList.contains('system') ? 'system' : 'user',
+        text: (e.textContent ?? '').replace(/\s+/g, ' ').trim()
+      })))
+    // 예전에는 A·B 가 한 묶음으로 A 자리에 서서 사건이 B 뒤로 밀렸다.
+    expect(rows.map((r) => r.kind), '사건이 앞말과 뒷말 사이에 서지 않았다').toEqual(['user', 'fold', 'event', 'fold', 'assistant'])
+    expect(rows[2].text).toContain('Ⅰ. 머리말')
+
+    // 묶음은 각자 자기 자리의 말만 담는다 — 펼쳐도 사건을 넘나들지 않는다.
+    const heads = page.locator('.progress-fold-head')
+    await heads.nth(0).click()
+    await expect(page.locator('.progress-fold').nth(0)).toContainText('절 본문을 읽어 보겠습니다.')
+    await expect(page.locator('.progress-fold').nth(0)).not.toContainText('고친 문장을 저장하겠습니다.')
+    await heads.nth(1).click()
+    await expect(page.locator('.progress-fold').nth(1)).toContainText('고친 문장을 저장하겠습니다.')
+    await expect(page.locator('.progress-fold').nth(1)).not.toContainText('절 본문을 읽어 보겠습니다.')
+    await shot(page, 'event-boundary-open')
   } finally {
     await electronApp.close()
   }

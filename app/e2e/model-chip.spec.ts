@@ -130,7 +130,9 @@ function codexSandbox(extra: Record<string, string>, root = mkdtempSync(join(tmp
   writeFileSync(paths.applied, '')
   writeFileSync(paths.state, 'chatgpt\n')
   // ChatService.send()를 건너뛰는 직접 연결이므로 그 전제인 프로젝트 스킬 설치를 수행한다.
-  const skill = skillTargets(root).codex
+  // Codex 사본은 논문 폴더 안이라 `userData` 가 자리를 정하지 않는다(Claude 만 앱 자리를 쓴다).
+  const userData = join(dir, 'user-data')
+  const skill = skillTargets(root, userData).codex
   installSkill(source, skill, skillVersion(source))
   const env = {
     ...subscriptionEnv(),
@@ -146,7 +148,7 @@ function codexSandbox(extra: Record<string, string>, root = mkdtempSync(join(tmp
     binary, root, skill, env,
     openExternal: async () => {}, modelChoice: choiceOf, modelChosen: chosenOf
   })
-  return { paths, root, connect }
+  return { paths, root, userData, connect }
 }
 
 function readJsonLines(file: string): Record<string, unknown>[] {
@@ -170,7 +172,7 @@ async function withCodex(
 
 test('스킬 파일이 없으면 대화를 시작하지 않고 학생에게 설치 오류를 알린다', async () => {
   const box = codexSandbox({})
-  unlinkSync(join(skillTargets(box.root).codex, 'SKILL.md'))
+  unlinkSync(join(skillTargets(box.root, box.userData).codex, 'SKILL.md'))
   const conn = box.connect(() => null)
   try {
     await expect(conn.run('보내지 않아야 할 글', undefined, noopEvents)).rejects.toThrow('프로젝트의 knuaf-dev 스킬을 찾지 못했어요.')

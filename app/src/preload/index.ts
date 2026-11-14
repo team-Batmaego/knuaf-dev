@@ -1,7 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { NoticeChoiceValue, NoticeRow } from '../shared/notice'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
+import type { ProgressFile } from '../shared/progress-file'
+import type { LinkOpenReply } from '../shared/link'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -13,6 +16,8 @@ export interface AppUpdateStatus {
 }
 
 type UpdateReply<T> = { result: T } | { error: { code: string; message: string } }
+/** `notices:read` 응답 — 알림(규칙집이 쓴 파일 해석) + 닫기 기억(앱 데이터 폴더). */
+export interface NoticesRead { notices: NoticeRow[]; dismissed: string[] }
 /**
  * `shell:open`·`shell:open-link` 응답. 열지 못했으면 메인이 이미 폴더에서 보여 주고
  * `revealed: true` 를 돌려준다 — `open_failed` 는 OS 열기 실패, `extension` 은 원래 열지 않는
@@ -186,6 +191,31 @@ const api = {
     const listener = (_e: unknown, entry: { stream: string; line: string }) => fn(entry)
     ipcRenderer.on('sidecar:log', listener)
     return () => ipcRenderer.removeListener('sidecar:log', listener)
+  },
+  /**
+   * 학교 재무 양식 알림 — 읽기·닫기 기억. 알림 파일은 규칙집이 쓰므로 앱은 **읽기만** 한다.
+   * 선택 기록은 전용 IPC(`notices:choose`) 한 길이다 — 메인이 열린 폴더·알림·값을 다시 검사한 뒤
+   * sidecar 로 넘기고, 정본·파일 다시 쓰기는 규칙집 몫이다. generic `rpc` 로는 그 method 가 거절된다.
+   */
+  notices: {
+    read: (root: string): Promise<{ result: NoticesRead } | { error: { code: string; message: string } }> =>
+      ipcRenderer.invoke('notices:read', root),
+    dismiss: (root: string, key: string): Promise<{ result: string[] } | { error: { code: string; message: string } }> =>
+      ipcRenderer.invoke('notices:dismiss', root, key),
+    choose: (root: string, identity: string, value: NoticeChoiceValue): Promise<RpcResult<Envelope>> =>
+      ipcRenderer.invoke('notices:choose', root, identity, value)
+  },
+  // progress (v0.6.4 2단계): 논문 폴더의 진행 파일(main이 검증해 읽은 값). 경로 인자 없음 —
+  // main이 지금 열린 논문만 읽는다. `onChanged`는 논문이 바뀌거나 파일이 다시 쓰일 때 온다.
+  progress: {
+    get: (): Promise<{ result: ProgressFile | null }> => ipcRenderer.invoke('progress:get'),
+    onChanged: (fn: (payload: { root: string; progress: ProgressFile | null }) => void): (() => void) =>
+      subscribe('progress:changed', fn)
+  },
+  // link (v0.6.4): 답변 속 http(s) 주소 하나를 기본 브라우저로. 검사는 main이 다시 한다 —
+  // 화면은 주소만 넘기고, 열지 못한 이유(`scheme`·`credentials`·`malformed`…)만 돌려받는다.
+  link: {
+    open: (url: string): Promise<LinkOpenReply> => ipcRenderer.invoke('link:open', url)
   }
 }
 

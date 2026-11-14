@@ -244,13 +244,14 @@ test('A→B: A 의 늦은 준비 확인 응답이 B 의 준비 상태를 바꾸�
     await expect.poll(() => held(electronApp)).toBe(true)
     await pickRecent(page, b)
     await splitReady(page)
-    const now = page.locator('.titlebar .tbtn.now')
-    await expect(now).not.toContainText('준비')     // B 는 준비됨 — 1단계가 아니다
+    // T1: 제목줄 진행은 대화가 없어 "시작 전"이다 — A의 늦은 준비 확인이
+    // 이 표시를 바꾸지 않는지를 본다(internal 5단계 기대와 다르다).
+    const now = page.locator('.titlebar .tbtn.stg')
     const before = await now.textContent()
+    expect(before).toContain('시작 전')
     await releaseHold(electronApp)
     await settle(page)
-    await expect(now, 'A 의 늦은 "준비 안 됨"이 B 의 단계를 준비로 내렸다').toHaveText(before ?? '')
-    await expect(now).not.toContainText('준비')
+    await expect(now, 'A 의 늦은 준비 확인이 B 의 진행 표시를 바꿨다').toHaveText(before ?? '')
     await expect(page.locator('.chat-zone')).not.toContainText('처음 쓸 준비')
   } finally {
     await electronApp.close()
