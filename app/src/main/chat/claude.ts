@@ -1,15 +1,18 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
-import { randomUUID } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { query, type ModelInfo, type Query, type PermissionResult, type SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
-import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
+import { MainTurnUsageError, type AgentConnection, type AgentEvents, type AgentOptions } from './contracts'
 import { workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
+import { claudeTokens } from './jobs/tokens'
+import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 import type { ChatModelInfo, ConnectionStatus } from '../../shared/chat'
+import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
 import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 
 export class ClaudeAuthenticationError extends Error {
@@ -1194,6 +1197,23 @@ export class ClaudeConnection implements AgentConnection {
         }
       }
     })
+    /**
+     * **이 턴 안에서** 한도 거절 사건을 받았는가(설계 §1-2). `run()` 지역 변수라 다음 턴이
+     * 물려받지 않는다 — 앞 턴의 거절로 다음 턴 실패에 단추를 띄우면 안 된다.
+     */
+    let rejectedSeen = false
+    /**
+     * 이 턴이 **실제로 보낸** 값. 한도는 **위 거절 사건만** 근거로 삼는다 — 결과 오류
+     * 문구에 "한도"가 들어 있는지로 정하지 않는다(§1-2).
+     *
+     * 모델을 보내지 않은 턴은 **이 턴의 init 이 알려 준 계정 기본값**이 실제로 쓴 모델이다.
+     * 그래서 값을 미리 굳히지 않고 던지는 자리에서 만든다 — 시작할 때 만들면 init 이 오기
+     * 전 값(`null`)이 남아 "실패 당시 보낸 모델"이 비고, 반대로 실패 뒤 칩을 다시 읽으면
+     * 보내지 않은 값이 된다. 둘 다 아니다: 턴 계획 + **이 턴에 배운** 기본값이다(중요 1·5).
+     * 턴 지역 변수라 앞 턴의 기본값이 새지도 않는다.
+     */
+    let turnModel: string | null = plan.sentModel ?? null
+    const entryOf = (): LaneEntry => ({ company: 'claude', model: turnModel, effort: plan.effort ?? null, how: 'main' })
     try {
       const commands = await q.supportedCommands()
       if (!commands.some(c => c.name === 'knuaf-dev' || c.name.endsWith(':knuaf-dev'))) throw new Error('Claude가 knuaf-dev 스킬을 찾지 못했어요.')
@@ -1205,6 +1225,7 @@ export class ClaudeConnection implements AgentConnection {
       // 칩이 바뀌면 보내지 않은 값으로 경고하거나 저장하게 된다(중요 5).
       let verified = false
       for await (const message of q) {
+        if (message.type === 'rate_limit_event' && claudeUsageState(message.rate_limit_info) === 'limit') rejectedSeen = true
         if (claudeAuthenticationFailed(message)) throw new ClaudeAuthenticationError()
         if ('session_id' in message && message.session_id) events.session(message.session_id)
         // 계정 기본값은 **모델을 보내지 않은** 대화의 첫 init 에서만 인정한다. 첫 턴부터
@@ -1218,7 +1239,7 @@ export class ClaudeConnection implements AgentConnection {
            * 새 대화의 init 이 곧 그때의 답이다. 처음 본 값만 붙들면 기본값이 바뀐 뒤에도
            * 옛 모델을 계속 명시해 보낸다. 모델을 보낸 턴(핀 포함)은 여전히 제외한다.
            */
-          if (!sessionId && !plan.sentModel && actual) this.accountDefault = actual
+          if (!sessionId && !plan.sentModel && actual) { this.accountDefault = actual; turnModel = actual }
           // 새 대화의 표식은 초기화가 왔으므로 이제 붙인다(위 주석) — 다음 턴부터 같은 대화다.
           if (plan.marksOverride && message.session_id) this.overriddenFor = message.session_id
           if (plan.sentModel && actual && !this.sameModel(plan.sentModel, actual)) {
@@ -1230,13 +1251,18 @@ export class ClaudeConnection implements AgentConnection {
           const text = message.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
           if (text) events.message(message.uuid, text)
         }
-        if (message.type === 'result' && message.is_error) throw new Error('Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
+        if (message.type === 'result' && message.is_error) throw new MainTurnUsageError(rejectedSeen ? 'limit' : 'unknown', entryOf(), 'Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
       }
       // 턴이 성공으로 끝나도 그 안에서 조용히 죽은 작업이 있으면 그대로 말한다.
       // 이걸 안 하면 도우미의 마무리 인사만 남고 실패는 아무 데도 안 보인다.
       if (lost > 0) events.note(`도우미가 이번 작업 중에 파일 ${lost}건을 저장하지 못했어요. 앱이 승인 창을 띄우기 전에 통로가 닫혀서, 그 저장은 일어나지 않았어요. 필요하면 다시 요청해 주세요.`)
     } catch (e) {
       if (claudeAuthenticationFailed(e)) throw new ClaudeAuthenticationError()
+      // 결과 줄 없이 스트림이 끊겨도, **그 턴 안에서** 거절 사건을 봤다면 한도 실패다(§1-2).
+      if (rejectedSeen && !(e instanceof MainTurnUsageError)) {
+        throw new MainTurnUsageError('limit', entryOf(), e instanceof Error && e.message
+          ? e.message : 'Claude 작업이 완료되지 않았어요. 연결·사용 한도와 마지막 대화를 확인해 주세요.')
+      }
       throw e
     } finally {
       q.close(); this.active = undefined
@@ -1260,4 +1286,399 @@ export class ClaudeConnection implements AgentConnection {
     for (const answer of this.approvals.values()) answer(false)
     this.controller?.abort(); this.active?.close(); if (this.loginProcess) killTree(this.loginProcess)
   }
+}
+
+/**
+ * 담당(relay) 한 번의 한도 판정 — 설계 §3.5 A.
+ *
+ * A 는 **관측된 rate limit 사건**만으로 정한다. `utilization`·`resetsAt` 으로
+ * "아직 여유 있겠지"를 추론하지 않는다(설계 §3.5 "사용률·리셋으로 추정 금지").
+ * 읽을 수 없거나 모르는 값이면 `'unknown'` 이다 — `'allowed'` 를 지어내지 않는다.
+ *
+ * 근거(동봉 SDK 0.3.275 `sdk.d.ts`): `SDKRateLimitInfo` = `{status: 'allowed'|'allowed_warning'|'rejected',
+ * overageStatus?, isUsingOverage?, overageInUse?, utilization?, resetsAt?, …}`.
+ * 과금으로 넘어가는 중(`isUsingOverage`/`overageInUse` 참)은 "기본 사용 한도 안"이 아니므로 A 가 아니다.
+ */
+export function claudeUsageState(info: { status?: unknown; isUsingOverage?: unknown; overageInUse?: unknown } | null | undefined): UsageState {
+  if (!info || typeof info !== 'object') return 'unknown'
+  if (info.status === 'rejected') return 'limit'
+  if (info.status !== 'allowed' && info.status !== 'allowed_warning') return 'unknown'
+  if (info.isUsingOverage === true || info.overageInUse === true) return 'limit'
+  return 'allowed'
+}
+
+/** `"Claude Max"`·`"claude.ai Max"` 처럼 오는 구독 이름을 `lanes.ts` 가 보는 `'max'`/`'pro'` 로 접는다. */
+export function claudeSubscriptionTier(value: unknown): 'max' | 'pro' | null {
+  if (typeof value !== 'string') return null
+  const words = new Set(value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean))
+  return words.has('max') ? 'max' : words.has('pro') ? 'pro' : null
+}
+
+/**
+ * 이 계정이 누구인가 — `JobRunner` 는 실행 전에 `options.account()`(앱 동의 반영본)와
+ * `availability()` 값의 **지문(JSON.stringify)** 이 같은지 본다. 두 값이 같은 함수에서
+ * 나오지 않으면 모든 주문이 `rejected` 로 닫힌다. 그래서 계정 값의 생산은 여기 한 곳이고,
+ * 배선 C 의 `jobAccount` 도 이 함수를 부른다.
+ *
+ * `consented` 는 **엔진이 정하지 않는다**(false) — 앱 저장소가 정본이고 `service.ts` 가 덮는다.
+ * `usage` 도 여기서 정하지 않는다(`availability()` 가 관측값으로 채운다).
+ */
+export function claudeExecutionAccount(options: AgentOptions, models: readonly ModelCatalogEntry[] | null,
+  detail: { apiKeySource?: string | null; subscriptionType?: string | null; subject?: string } = {}): ExecutionAccount {
+  const tier = claudeSubscriptionTier(detail.subscriptionType)
+  // 계정 식별자는 요금제·이메일이 아니라 **계정 자체**를 가리켜야 한다 — 동의가 계정 단위로
+  // 남기 때문이다(설계 §3.5 규칙 1). 값이 없으면 앱이 아는 경로로 대신한다.
+  const subject = detail.subject ?? options.root
+  return {
+    accountId: createHash('sha256').update(JSON.stringify([options.binary, subject])).digest('hex'),
+    connected: true,
+    account: {
+      company: 'claude',
+      ...(typeof detail.apiKeySource === 'string' ? { apiKeySource: detail.apiKeySource } : {}),
+      ...(tier ? { subscriptionType: tier } : {}),
+      models
+    },
+    consented: false,
+    usage: 'unknown'
+  }
+}
+
+/** 담당(relay) 세션에 붙이는 앱 지침 — 본대화 지침에 담당 전용 경계를 덧붙인다. */
+const RELAY_SYSTEM_APPEND = `${CLAUDE_SYSTEM_APPEND} 이 세션은 앱이 연 담당(relay)입니다. 결과는 주문서가 정한 출력 칸에만 쓰고, 그 밖의 파일은 만들지도 고치지도 마세요. 학생에게 직접 묻지 말고, 판단이 필요하면 주문서의 조건 칸에 적으세요.`
+
+/**
+ * 이 주문 전용 플러그인 폴더를 만든다 — **앱 전용 자리** 아래 `relay-plugin/<jobId>`.
+ *
+ * 왜 학생 폴더가 아닌가: 이 조립은 **SDK 격리가 시작되기 전**에 앱 프로세스가 한다. 학생 폴더
+ * 안에 만들면 그 폴더에 접근할 수 있는 쪽(학생·다른 앱·링크)이 우리가 검사한 뒤 경로를 바꿔
+ * 우리 쓰기를 자기 목적지로 돌릴 수 있다(검토 1~3회차). 앱 전용 자리(`userData`)는 그런
+ * 경로가 없으므로, 검사와 쓰기 대상이 갈라지는 문제 자체가 사라진다.
+ *
+ * SDK 에는 **절대경로**로만 넘어가므로 위치가 학생 폴더일 필요가 없다(실측: `plugins[].path`).
+ *
+ * 수명: 주문 하나가 끝나면(`removeRelayPlugin`) 지운다. 앱이 중간에 죽어 남으면 다음 시작의
+ * `sweepRelayPlugins` 가 치운다.
+ */
+/** 주문 id 이자 플러그인 폴더 이름의 규칙 — 만들 때·지울 때·정리할 때 같은 규칙을 쓴다. */
+const RELAY_JOB_ID = /^[a-zA-Z0-9_-]+$/
+
+export function relayPluginPath(appDir: string, jobId: string): string {
+  if (!RELAY_JOB_ID.test(jobId)) throw new Error('Invalid job id')
+  return join(appDir, 'relay-plugin', jobId)
+}
+
+export function prepareRelayPlugin(appDir: string, jobId: string, skill: string): string {
+  const dir = relayPluginPath(appDir, jobId)
+  // 기존 폴더에 표식이 없으면 **우리 것이 아니다** — 그 자리는 쓰지 않는다(덮어쓰기·삭제 금지).
+  if (existsSync(dir) && !ownsRelayPlugin(dir)) {
+    throw new Error('담당 플러그인 자리에 앱이 만들지 않은 폴더가 있어요. 이 주문은 열지 않습니다.')
+  }
+  mkdirSync(dir, { recursive: true })
+  const manifest = join(dir, '.claude-plugin')
+  mkdirSync(manifest, { recursive: true })
+  writeFileSync(join(manifest, 'plugin.json'), JSON.stringify({ name: 'knuaf', version: '1.0.0', description: 'knuaf-dev relay skill' }))
+  // 스킬 사본은 앱이 소유한 원본에서 이 주문 전용으로 한 번만 뜬다.
+  cpSync(skill, join(dir, 'skills', 'knuaf-dev'), { recursive: true, force: true })
+  // 표식은 **다 만든 뒤에** 쓴다 — 정리가 반쯤 만들어진 폴더를 "우리 것"으로 지우지 않게.
+  writeFileSync(join(dir, RELAY_PLUGIN_MARK), JSON.stringify({ version: 1 }) + '\n')
+  return dir
+}
+
+/** 이 폴더가 앱이 만든 담당 플러그인 폴더인가 — 표식 파일 이름은 `RELAY_PLUGIN_MARK`. */
+const RELAY_PLUGIN_MARK = '.knuaf-relay-plugin'
+
+/**
+ * 소유 판정. **표식 파일**이 있고, 폴더 자체가 링크가 아니고, 그 표식도 링크가 아닐 때만 참이다.
+ * 이름 규칙(`<jobId>`)만으로는 남의 폴더가 우연히 맞을 수 있어 표식을 함께 본다.
+ */
+function ownsRelayPlugin(dir: string): boolean {
+  try {
+    if (lstatSync(dir).isSymbolicLink() || !lstatSync(dir).isDirectory()) return false
+    const mark = lstatSync(join(dir, RELAY_PLUGIN_MARK))
+    return mark.isFile() && !mark.isSymbolicLink()
+  } catch { return false }
+}
+
+/** 주문이 끝났을 때(성공·실패·중단) 그 주문 전용 폴더를 지운다. 우리 것이 아니면 건드리지 않는다. */
+export function removeRelayPlugin(appDir: string, jobId: string): void {
+  if (!RELAY_JOB_ID.test(jobId)) return
+  const path = relayPluginPath(appDir, jobId)
+  // 표식이 없으면 이 폴더는 우리가 만든 것이 아니다 — 지우지 않는다.
+  if (!ownsRelayPlugin(path)) return
+  try { rmSync(path, { recursive: true, force: true }) } catch { /* 다음 시작 정리가 맡는다 */ }
+}
+
+/**
+ * 앱 시작 때 지난 실행의 잔여 폴더를 치운다.
+ *
+ * **앱이 만든 것만** 지운다:
+ *  · 기준 폴더(`relay-plugin`)가 링크면 **아무것도 하지 않는다** — 바깥을 우리 저장소로 착각하면
+ *    남의 파일을 지울 수 있다(검토 4회차 정적 분석).
+ *  · 항목마다 `ownsRelayPlugin` 로 표식을 확인한다. 표식이 없는 폴더·파일은 남긴다.
+ *  · 항목이 링크면 따라가지 않고 링크 자체만 지운다 — 그것도 표식이 없으면 그대로 둔다.
+ */
+export function sweepRelayPlugins(appDir: string): void {
+  const base = join(appDir, 'relay-plugin')
+  let names: string[]
+  try {
+    const stat = lstatSync(base)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return
+    names = readdirSync(base)
+  } catch { return }
+  for (const name of names) {
+    // 표식 **과** 이름 규칙이 둘 다 맞아야 우리 것이다 — 이름을 바꾼 폴더(예: `job-a.backup`)는
+    // 사람이 손댄 것이라 남긴다(검토 5회차).
+    if (!RELAY_JOB_ID.test(name)) continue
+    const path = join(base, name)
+    if (!ownsRelayPlugin(path)) continue
+    try { rmSync(path, { recursive: true, force: true }) } catch { /* 하나 못 지워도 나머지는 지운다 */ }
+  }
+}
+
+/**
+ * 담당 연결 — 본대화와 **완전히 다른 옵션 객체**를 쓴다(발주 §④-a).
+ *
+ * 격리(설계 §3.3 ①②③):
+ *  · `settingSources: []` — 학생·프로젝트 설정 파일을 읽지 않는다(SDK "isolation mode").
+ *  · `hooks.PreToolUse` + `canUseTool` — 둘 다 `request.isolation` 의 **같은 판정**을 옮긴다.
+ *    훅 `allow` 는 `canUseTool` 을 건너뛰므로, 한쪽만 두면 관문이 갈라진다.
+ *  · `sandbox` — 셸을 OS 샌드박스에 가두고, 샌드박스가 안 되면 실패하게 한다.
+ *  · `disallowedTools` — 하위 담당 도구는 엔진이 주지 않는다(§3.2 [r11]).
+ *
+ * 스킬: `settingSources: []` 는 `.claude/skills` 발견도 끊는다. 그래서 앱이 그 주문 전용
+ * 플러그인 폴더를 만들고(`<root>/.knuaf-gui/relay-plugin/<jobId>`), `plugins` 로 넘긴다.
+ * 그래야 도구 목록에 `knuaf-dev` 가 뜨고 `Skill` 도구 없이 슬래시 명령으로 펼쳐진다.
+ */
+export class ClaudeRelayConnection implements JobConnection {
+  readonly relayProtocol = 1 as const
+  /**
+   * ㉠(형님 확정) — Claude 는 턴 **밖에서** A 를 관측할 통로가 없다(실측 3건). 그래서
+   * `availability()` 는 `usage:'unknown'` 을 돌려주고, 러너는 이 선언이 있을 때만 그 unknown 을
+   * 통과시켜 첫 턴을 연다. 그 턴에서 첫 `rate_limit_event` 가 `limit` 면 **그 자리에서**
+   * `JobFailure('limit')` 로 닫고 결과를 넘기지 않는다(아래 `runJob`). 필드 이름은 a-gate 갈래
+   * `jobs/types.ts` 의 `gateInTurn` 과 같다. */
+  readonly gateInTurn = true
+  private active?: Query
+  private controller?: AbortController
+  /** 이미 실행 중인 주문 — 같은 연결에 두 주문이 겹치면 관문·중지가 뒤엉킨다. */
+  private running = false
+  constructor(private options: AgentOptions, private request: RelayRequest, private appDir: string) {}
+
+  status(): Promise<ConnectionStatus> { return new ClaudeConnection(this.options).status() }
+  /** 담당 연결은 로그인 창을 열지 않는다 — 본대화 연결의 몫이다. */
+  login(): Promise<void> { return Promise.reject(new Error('담당 연결은 로그인을 열지 않아요.')) }
+  /** 러너가 무조건 부른다 — 던지면 주문 정리가 흐트러진다. 담당에는 승인 카드가 없다. */
+  respond(): void {}
+  run(): Promise<void> { return Promise.reject(new Error('담당 연결은 runJob 으로만 움직여요.')) }
+
+  /**
+   * 주문 시작 전 계정 상태. 설계 §3.5 는 A 를 **관측된 사건**으로만 정하게 했는데,
+   * Claude 는 턴 밖에서 그 사건을 읽을 통로가 없다(실측 3건: 빈 입력 턴 0 이벤트,
+   * `usage_EXPERIMENTAL…` 은 `rate_limits: null`). 그래서 여기서는 `'unknown'` 을 **정직하게**
+   * 돌려주고, A 판정은 `runJob` 안에서 첫 `rate_limit_event` 로 한다. `'allowed'` 를
+   * 지어내면 한도를 넘은 계정에 주문을 열어 주게 된다.
+   */
+  async availability(): Promise<ExecutionAccount> {
+    const status = await this.status()
+    if (!status.connected) return { ...claudeExecutionAccount(this.options, null), connected: false, usage: 'auth' }
+    const controller = new AbortController()
+    const q = query({ prompt: (async function* () {})(), options: this.queryOptions(controller) })
+    try {
+      // 초기화 응답 한 번으로 명령·모델·계정을 함께 받는다. `supportedModels()` 는 별도 왕복이다.
+      const init = await q.initializationResult()
+      const models = (Array.isArray(init?.models) ? init.models : [])
+        .map(toChatModelInfo)
+        .filter((m): m is ChatModelInfo => m !== null)
+        .map((m): ModelCatalogEntry => ({ model: m.model, name: m.name, efforts: m.efforts }))
+      const account = init?.account
+      const known = claudeExecutionAccount(this.options, models, {
+        apiKeySource: account?.apiKeySource,
+        subscriptionType: account?.subscriptionType,
+        subject: account?.email ?? account?.organization
+      })
+      // API 키 경로는 구독이 아니다 — 러너가 `auth` 로 닫도록 그 값을 그대로 알린다.
+      const keyed = Boolean(account?.apiKeySource) && account?.apiKeySource !== 'none'
+      const provider = account?.apiProvider
+      return { ...known, connected: !keyed && (!provider || provider === 'firstParty'), usage: keyed ? 'auth' : 'unknown' }
+    } catch {
+      // 초기화를 못 받았다 = 지금 쓸 수 있는지 모른다. 모름을 `allowed` 로 바꾸지 않는다.
+      return { ...claudeExecutionAccount(this.options, null), usage: 'unknown' }
+    } finally { q.close() }
+  }
+
+  /** 주문 한 건. 순서와 관문은 `runJob` 주석 참조. */
+  async runJob(text: string, events: JobEvents): Promise<void> {
+    if (this.running) throw new Error('이 담당 연결은 이미 한 주문을 실행 중이에요.')
+    this.running = true
+    // 앞 단계(상태 확인·플러그인 조립·query 생성)에서 던져도 잠금과 핸들이 남지 않게 한다.
+    let q: Query | undefined
+    // 한도가 턴 중간에 깨졌는가 — `events.availability` 는 `connection.stop()` 을 부르므로
+    // 우리도 같은 사실을 알고 `JobFailure('limit')` 로 정확히 닫는다(설계 §3.5 규칙 3).
+    let verdict: 'limit' | null = null
+    try {
+      const status = await this.status()
+      if (!status.connected) throw new JobFailure('auth', status.detail || 'Claude 구독 계정 로그인이 필요해요.')
+      this.controller = new AbortController()
+      const plugin = this.pluginDir()
+      q = this.active = query({ prompt: this.relayPrompt(text), options: this.queryOptions(this.controller, plugin) })
+      const commands = await q.supportedCommands()
+      if (!Array.isArray(commands) || !commands.some(c => c.name === 'knuaf-dev' || c.name.endsWith(':knuaf-dev'))) {
+        throw new Error('담당 세션에서 knuaf-dev 스킬을 찾지 못했어요.')
+      }
+      events.skill()
+      const account = await q.accountInfo()
+      if (account?.apiKeySource && account.apiKeySource !== 'none') throw new JobFailure('auth', 'API 인증이 감지되어 담당을 열지 않았어요.')
+      if (account?.apiProvider && account.apiProvider !== 'firstParty') throw new JobFailure('auth', '구독 인증이 아닌 경로라 담당을 열지 않았어요.')
+      let announced = false
+      for await (const message of q) {
+        if (claudeAuthenticationFailed(message)) throw new JobFailure('auth', CLAUDE_AUTH_COPY.required)
+        // 순서 고정: 러너는 세션 id 가 없으면 토큰 기록을 버린다(jobs.ts `tokens`).
+        if ('session_id' in message && message.session_id) events.session(message.session_id)
+        if (message.type === 'system' && message.subtype === 'init') {
+          // 실제 모델은 별칭이 아니라 CLI 가 푼 id 다 — 러너가 요청값과 대조해 기록한다.
+          announced = true
+          events.actualModel(typeof message.model === 'string' ? message.model : this.request.model, this.request.effort)
+        }
+        if (message.type === 'rate_limit_event') {
+          const state = claudeUsageState(message.rate_limit_info)
+          events.availability(state)
+          if (state === 'limit') { verdict = 'limit'; q.close(); break }
+        }
+        if (message.type === 'result') {
+          if (message.is_error) throw new JobFailure(classifyRelayResult(message), relayResultDetail(message))
+          if (message.usage) {
+            // 요청 순번 1 / 알림 순번 1 — 주문 한 건은 단일 턴(단일 프롬프트)이다.
+            events.tokens(claudeTokens(message.usage, 1, 1))
+          }
+        }
+      }
+      if (verdict) throw new JobFailure(verdict, '담당이 기본 사용 한도를 넘어 멈췄어요.')
+      if (!announced) throw new Error('담당 세션이 초기화를 알려 주지 않았어요.')
+    } finally {
+      q?.close(); this.active = undefined; this.running = false
+      // 성공·실패·한도·중단 어느 쪽으로 끝나도 이 주문의 플러그인 사본은 남기지 않는다.
+      removeRelayPlugin(this.appDir, this.request.jobId)
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.controller?.abort(); this.active?.close(); this.active = undefined
+    // 주문이 시작되기 전에 멈춰도 그 주문의 사본이 남지 않게 한다.
+    removeRelayPlugin(this.appDir, this.request.jobId)
+  }
+
+  /**
+   * 주문 첫 글의 `/knuaf-dev` 를 플러그인 스킬 이름으로 바꾼다.
+   * 러너는 `/knuaf-dev 담당 모드: <주문서>` 를 보내지만, 플러그인 스킬은 `<플러그인>:<스킬>` 로
+   * 불린다(실측: 명령 목록에 `knuaf:knuaf-dev`). 앞 공백은 CLI 가 이 줄을 슬래시 명령이 아니라
+   * 평범한 글로 읽게 만든다 — 그러면 스킬이 안 실린다.
+   */
+  private relayPrompt(text: string): string {
+    return text.replace(/^\s*\/knuaf-dev\b/, '/knuaf:knuaf-dev')
+  }
+
+  /** 이 주문 전용 플러그인 폴더 — 학생 폴더가 아니라 앱 전용 자리다. */
+  private pluginDir(): string {
+    return prepareRelayPlugin(this.appDir, this.request.jobId, this.request.skill)
+  }
+
+  /**
+   * 조립된 옵션을 그대로 보여준다 — 시험 이음매.
+   * "SDK 에 넘어간 `plugins` 경로가 앱 전용 자리인가"를 실제 옵션으로 확인하기 위한 것이다.
+   */
+  debugQueryOptions(): Record<string, unknown> {
+    // 경로만 계산한다 — 이 이음매가 파일을 만들면 시험이 검증하려는 대상이 흐려진다.
+    return this.queryOptions(new AbortController(), relayPluginPath(this.appDir, this.request.jobId))
+  }
+
+  /**
+   * 담당 전용 옵션. 본대화 `queryOptions()` 와 **별개로** 조립한다 — 한쪽을 고치면 다른 쪽의
+   * 관문이 조용히 약해지는 일을 막는다(발주 §④-a).
+   */
+  private queryOptions(controller: AbortController, plugin?: string) {
+    const isolation = this.request.isolation
+    return {
+      cwd: this.request.cwd,
+      pathToClaudeCodeExecutable: this.options.binary,
+      ...claudeSpawnOptions(this.options.binary),
+      env: this.options.env,
+      // ① 설정 출처 없음 — 학생·프로젝트 settings.json 과 CLAUDE.md 를 읽지 않는다.
+      settingSources: [...isolation.settingSources] as ('user' | 'project' | 'local')[],
+      // 설정 파일을 안 읽는 것만으로는 부족하다. `strictMcpConfig` 가 없으면 CLI 가 학생 계정·환경에
+      // 연동된 MCP 서버를 담당 세션에 끌어올 수 있다 — 담당은 본대화보다 느슨하면 안 된다(덧붙임 1).
+      // 담당이 쓰는 도구는 관문(`relayIsolation.preToolUse`)의 허용 목록뿐이라 MCP 도구는 어차피
+      // 거절되므로 이 제한과 부딪치는 정당한 MCP 는 없다.
+      strictMcpConfig: true,
+      abortController: controller,
+      permissionMode: 'default' as const,
+      // ③ 셸은 OS 샌드박스에 가두고, 샌드박스를 못 걸면 세션을 열지 않는다.
+      sandbox: isolation.sandbox,
+      model: this.request.model,
+      ...(this.request.effort ? { effort: this.request.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
+      systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: RELAY_SYSTEM_APPEND },
+      // 하위 담당 금지(§3.2 [r11]) + 셸을 못 가두는 플랫폼에서는 셸 도구 자체를 뺀다(§3.3).
+      disallowedTools: [...DISALLOWED_SUBAGENT_TOOLS, ...(isolation.shellEnabled ? [] : ['Bash'])],
+      ...(plugin ? { plugins: [{ type: 'local' as const, path: plugin, skipMcpDiscovery: true }] } : {}),
+      hooks: { PreToolUse: [{ hooks: [this.relayHook.bind(this)] }] },
+      canUseTool: this.relayPermission.bind(this)
+    }
+  }
+
+  /**
+   * PreToolUse 훅 — 관문의 1차 겹.
+   *
+   * **절대 던지지 않는다.** 훅 콜백이 예외를 던지면 CLI 는 그 도구 호출을 통과시킨다(fail-open,
+   * 실측). 판정에서 무엇이 터지든 거절로 접는다.
+   */
+  private async relayHook(input: unknown): Promise<SyncHookJSONOutput> {
+    try {
+      const hook = input as { hook_event_name?: unknown; tool_name?: unknown; tool_input?: unknown }
+      if (hook?.hook_event_name !== 'PreToolUse') return { continue: true }
+      const decision = this.request.isolation.preToolUse(String(hook.tool_name), (hook.tool_input ?? {}) as Record<string, unknown>)
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: decision.permissionDecision,
+          ...(decision.permissionDecisionReason ? { permissionDecisionReason: decision.permissionDecisionReason } : {})
+        }
+      }
+    } catch {
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse', permissionDecision: 'deny',
+          permissionDecisionReason: '담당 도구 판정이 실패해 이 호출을 거절했어요.'
+        }
+      }
+    }
+  }
+
+  /**
+   * `canUseTool` — 관문의 2차 겹. 훅이 `allow` 를 내면 이 콜백은 불리지 않으므로(실측),
+   * 두 겹이 **같은 함수**(`request.isolation`)를 봐야 판정이 갈라지지 않는다.
+   * `appApproved = true` 는 "앱이 승인한 셸"이라는 뜻이다 — 이 연결에는 묻는 학생이 없다.
+   */
+  private async relayPermission(name: string, input: Record<string, unknown>): Promise<PermissionResult> {
+    const decision = this.request.isolation.canUseTool(name, input, true)
+    return decision.permissionDecision === 'allow'
+      ? { behavior: 'allow', updatedInput: input }
+      : { behavior: 'deny', message: decision.permissionDecisionReason ?? '담당은 승인된 출력 칸만 사용할 수 있어요.' }
+  }
+}
+
+/** 담당 턴이 실패로 끝났을 때 그 까닭을 분류한다. 문구 추측이 아니라 원인을 나눈다. */
+/**
+ * 결과 오류의 종류 — **구조 신호**로만 가른다(§1-2). 한도는 이 함수가 아니라 그 턴의
+ * `rate_limit_event{status:'rejected'}`(`runJob` 의 `verdict`)가 정한다. 오류 글에 '한도'가
+ * 들어 있는지로 판정하면 정상 답변이 인용한 낱말에도 걸린다([C4 3번]).
+ * 인증은 SDK 오류 필드 문구만 본다 — `claudeAuthenticationFailed` 와 같은 규칙이다.
+ */
+function classifyRelayResult(message: { errors?: unknown[]; result?: unknown }): 'auth' | 'unknown' {
+  return Array.isArray(message.errors) && message.errors.some(e => typeof e === 'string' && AUTH_FAILURE.test(e))
+    ? 'auth' : 'unknown'
+}
+
+function relayResultDetail(message: { errors?: unknown[]; result?: unknown }): string {
+  const parts = Array.isArray(message.errors) ? message.errors.filter((e): e is string => typeof e === 'string') : []
+  if (typeof message.result === 'string' && message.result) parts.push(message.result)
+  return parts.join(' / ').slice(0, 500)
 }

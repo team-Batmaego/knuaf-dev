@@ -1,14 +1,17 @@
 import { MODEL_SELECTION_COPY } from '../../shared/copy'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { JsonRpcProcess } from './transport'
 import { applyRejection, recordRejection } from './rejectLog'
 import { codexSkillConfigOverride, workFolderInstructions } from '../agent'
 import { writeFileAtomic } from '../safeWrite'
-import type { AgentConnection, AgentEvents, AgentOptions } from './contracts'
-import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../../shared/chat'
-import { isCrossProviderModelId } from '../../shared/chat'
+import { MainTurnUsageError, type AgentConnection, type AgentEvents, type AgentOptions } from './contracts'
+import type { ChatModelInfo, ConnectionStatus, PermissionFileChange, PermissionRequest } from '../../shared/chat'
+import { isCrossProviderModelId, resolveCodexAlias } from '../../shared/chat'
+import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
+import { codexTokens } from './jobs/tokens'
+import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
@@ -79,6 +82,12 @@ export class CodexConnection implements AgentConnection {
   /** 마지막 `thread/start`/`thread/resume` 응답이 알려 준 그 대화의 model·effort. */
   private threadModel: string | null = null
   private threadEffort: string | null = null
+  /**
+   * 마지막 `turn/start` 에 **실제로 실어 보낸** model·effort(설계 §1-3 ②). 거절은
+   * `connect()` 의 `turn/completed` 처리에서 오는데 거기엔 `run()` 지역 값이 없다 —
+   * 실패 당시의 출처를 만들려면 보낸 값을 여기 남겨야 한다. 턴마다 새로 덮는다.
+   */
+  private turnChoice: { model: string | null; effort: string | null } = { model: null, effort: null }
   /** 재개한 대화가 기본값과 다른지 한 번만 본다. */
   private resumeChecked = false
   /** 서버가 새 대화에 실제로 쓰는 기본값(계정·CLI 설정). `model/list` 나 설정을 추측하지 않는다. */
@@ -256,7 +265,17 @@ export class CodexConnection implements AgentConnection {
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') w?.resolve()
         else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
-        else w?.reject(new Error(p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
+        // 한도는 **구조 코드** `usageLimitExceeded` 만 인정한다(설계 §1-2, p1X 11-11).
+        // `rateLimitExceeded` 는 한도가 아니라 `unknown` 이다 — 단추를 덜 띄우는 방향.
+        else if (p.turn.error?.codexErrorInfo === 'usageLimitExceeded') {
+          w?.reject(new MainTurnUsageError('limit',
+            { company: 'codex', model: this.turnChoice.model, effort: this.turnChoice.effort, how: 'main' },
+            p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
+        } else {
+          w?.reject(new MainTurnUsageError('unknown',
+            { company: 'codex', model: this.turnChoice.model, effort: this.turnChoice.effort, how: 'main' },
+            p.turn.error?.message ?? '작업이 중단됐어요. 저장된 대화에서 이어갈 수 있어요.'))
+        }
       }
     }
     rpc.onRequest = (id, method, p) => {
@@ -442,6 +461,9 @@ export class CodexConnection implements AgentConnection {
      * 서버가 새 대화에 쓰는 기본값을 명시적으로 다시 보낸다(검토 MC1-01).
      */
     const turnModel = await this.turnModelParams(!!sessionId)
+    // 실패 당시 출처는 **이 턴이 실제로 실어 보낸** 값이다(설계 §1-3 ②). 거절은
+    // `connect()` 의 `turn/completed` 에서 오므로 여기에 남긴다.
+    this.turnChoice = { model: turnModel.params.model ?? null, effort: turnModel.params.effort ?? null }
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {
@@ -563,5 +585,478 @@ export class CodexConnection implements AgentConnection {
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
     this.fileChanges.clear(); this.pendingFileApprovals.clear()
+  }
+}
+
+/**
+ * 담당(relay) 한 번의 한도 판정 — 설계 §3.5 A.
+ *
+ * 근거(동봉 `codex app-server generate-ts`, 0.167.0):
+ * `v2/GetAccountRateLimitsResponse.ordinaryUsageAllowed: boolean | null` — 주석이
+ * "Null means unavailable; clients must not infer recovery from percentages or reset times" 다.
+ * 즉 `true` 만 A 이고, `false` 는 B(한도 밖), `null`·미확인은 **모름**이다.
+ * `rateLimits.primary/secondary` 의 사용률·리셋 시각으로 추론하지 않는다.
+ */
+export function codexUsageState(ordinaryUsageAllowed: unknown): UsageState {
+  return ordinaryUsageAllowed === true ? 'allowed' : ordinaryUsageAllowed === false ? 'limit' : 'unknown'
+}
+
+/**
+ * 이 계정이 누구인가 — `JobRunner` 가 `options.account()`(앱 동의 반영본)와
+ * `availability()` 를 **지문으로 대조**하므로 두 값은 같은 함수에서 나와야 한다.
+ * `consented`·`usage` 는 여기서 정하지 않는다(앱 저장소·관측값이 정본).
+ *
+ * 계정 식별자는 `account/read` 가 준 `accountId` 를 쓴다. 앱이 서버에 물어 얻는 값이므로
+ * 이메일·요금제를 해시해 지어내지 않는다. 없으면(옛 서버) 쓸 수 있는 값으로 대신하고,
+ * 그 사실을 호출자가 `detail.subjectKnown=false` 로 알 수 있게 한다.
+ */
+export function codexExecutionAccount(options: AgentOptions, models: readonly ModelCatalogEntry[] | null,
+  detail: { accountId?: string | null; accountType?: string | null; subject?: string } = {}): ExecutionAccount {
+  const subject = detail.accountId ?? detail.subject ?? options.root
+  const accountType = typeof detail.accountType === 'string' ? detail.accountType : null
+  return {
+    accountId: detail.accountId ?? createHash('sha256').update(JSON.stringify([options.binary, subject])).digest('hex'),
+    connected: true,
+    account: { company: 'codex', ...(accountType ? { accountType } : {}), models },
+    consented: false,
+    usage: 'unknown'
+  }
+}
+
+/**
+ * 담당 턴의 샌드박스 정책 — 격리의 **본체**다.
+ *
+ * `thread/start.sandbox: 'workspace-write'` 문자열은 정책을 정하지 못한다: 실측(PATH codex
+ * 0.167.0)에서 `thread/start` 응답이 `writableRoots: []` 로 와서 **작업 폴더 밖 쓰기가 그대로
+ * 통과**했다(`outside-a.md` 생성). 같은 명령이 이 정책을 `turn/start` 에 실으면
+ * `operation not permitted` 로 막혔다. 그래서 턴마다 이 값을 싣는다.
+ * `excludeTmpdirEnvVar`/`excludeSlashTmp` 는 참 — 임시 폴더가 쓰기 구멍이 되지 않게 한다.
+ */
+export function codexSandboxPolicy(cwd: string): {
+  type: 'workspaceWrite'; writableRoots: string[]; networkAccess: boolean
+  excludeTmpdirEnvVar: boolean; excludeSlashTmp: boolean
+} {
+  return { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
+}
+
+/**
+ * 담당 스레드를 여는 값 — 시험도 같은 함수를 써서 요청 모양이 갈라지지 않게 한다.
+ *
+ * `approvalsReviewer: 'user'` 를 **명시**한다. 스키마(`v2/ApprovalsReviewer.ts`, 0.167.0):
+ * `"user" | "auto_review" | "guardian_subagent"` 이고 주석은 "Configures who approval requests
+ * are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval
+ * prompts, and ARC escalations. Defaults to `user`." 다. 즉 생략하면 **사용자 설정을 상속**해
+ * `auto_review`/`guardian_subagent` 가 샌드박스 탈출·네트워크 승격을 따로 심사할 수 있다.
+ * 담당에는 묻는 학생이 없고 앱이 승인 요청을 전부 거절하므로, 심사자도 앱 쪽(사용자 자리)으로
+ * 고정해 승격 경로를 만들지 않는다(검토 차단 2).
+ *
+ * `lockdown` 은 담당에서만 싣는다 — 학생의 MCP·플러그인·Apps 를 담당 스레드에서 끄는 값이고
+ * 본대화의 `open()`/`serverArgsFor` 는 같은 값을 쓰지 않는다(발주 C3). 시험은 이 값을 그대로 고정한다.
+ */
+export function codexThreadParams(request: RelayRequest, model: string, lockdown?: RelayLockdown) {
+  return {
+    cwd: request.cwd, approvalPolicy: 'on-request' as const, sandbox: request.isolation.codexSandbox,
+    approvalsReviewer: 'user' as const,
+    model, developerInstructions: RELAY_DEVELOPER_INSTRUCTIONS,
+    // 담당 전용 자리 — 본대화(`serverArgsFor`, `CodexConnection`)는 이 값을 쓰지 않는다.
+    ...(lockdown ? { config: lockdown } : {})
+  }
+}
+
+/** RPC 응답은 `unknown` 이다 — 객체가 아니면 빈 표로 본다(필드 하나 읽으려고 캐스팅하지 않는다). */
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+}
+
+/** 이름 → `{enabled:false}` 표. 빈 이름은 codex 가 거절하므로 거른다. */
+function disabledTable(table: unknown): Record<string, { enabled: false }> {
+  return Object.fromEntries(Object.keys(asRecord(table)).filter(name => name !== '')
+    .map(name => [name, { enabled: false as const }]))
+}
+
+/**
+ * 담당 스레드에서 학생의 MCP 서버·플러그인·Apps 를 끄는 값(`thread/start.config`).
+ *
+ * 실측(PATH codex 0.167.0, 합성 HOME): `-c mcp_servers={}`·`-c mcp.enabled=false`·
+ * `-c orchestrator.mcp.enabled=false` 는 **안 듣는다**(미끼 서버가 그대로 기동). 듣는 것은
+ * 이름별 `enabled=false` 뿐이고, `-c` 는 본대화와 공유(`serverArgsFor`)라 여기 쓴다.
+ *  · `mcp_servers.<이름>.enabled=false` → 그 서버는 기동조차 않는다(표식 파일 0회).
+ *  · `plugins.<id>.enabled=false` → 그 플러그인이 딸고 오는 MCP 가 사라진다.
+ *  · `features.apps=false` → 계정 커넥터(Apps)가 `app/list` 에서 0개, `codex_apps` 도구 0개.
+ * 이름을 **모두 열거**해야 한다(전체 끄기 키 없음). 이름은 `config/read` 의 `mcp_servers`/
+ * `plugins` 키와 `plugin/installed` 의 설치 id 합집합에서 받는다 — 추측 금지, 그리고 둘 다
+ * MCP 를 기동하지 않는다(실측: 미끼 표식 파일 0회).
+ *
+ * 실측 함정 셋: ① `config.mcp_servers` 에 **없는** 이름을 넣으면 `invalid transport` 로
+ * `thread/start` 가 실패한다(플러그인 MCP 이름을 여기 넣으면 안 된다). ② `-c` 로
+ * `plugins."id@mkt"` 처럼 따옴표를 쓰면 새 키가 생길 뿐 원래 키는 안 꺼진다.
+ * ③ 설정의 `plugins` 는 설치 목록보다 작다(17 vs 26) — 원격 Apps 플러그인(`gmail@…` 등)이
+ * 설정 표에 없어도 설치되어 있으므로 합집합이 필요하다(없는 id 를 넣어도 무해 — 실측).
+ */
+export interface RelayLockdown {
+  features: { apps: false }
+  mcp_servers: Record<string, { enabled: false }>
+  plugins: Record<string, { enabled: false }>
+}
+
+export function codexRelayLockdown(config: unknown, installed?: unknown): RelayLockdown {
+  const settings = asRecord(config)
+  // `plugin/installed` → `{ marketplaces: [{ plugins: [{ id }] }] }`.
+  const marketplaces = asRecord(installed).marketplaces
+  const installedIds = (Array.isArray(marketplaces) ? marketplaces : []).flatMap(market => {
+    const plugins = asRecord(market).plugins
+    return (Array.isArray(plugins) ? plugins : []).map(plugin => asRecord(plugin).id)
+  })
+  const plugins = disabledTable(settings.plugins)
+  for (const id of installedIds) if (typeof id === 'string' && id !== '') plugins[id] = { enabled: false }
+  return { features: { apps: false }, mcp_servers: disabledTable(settings.mcp_servers), plugins }
+}
+
+/** 담당 세션의 개발자 지침 — 본대화와 달리 "묻지 말고 출력 칸에만 쓰라"가 핵심이다. */
+const RELAY_DEVELOPER_INSTRUCTIONS = '이 세션은 knuaf-dev 개인용 GUI가 연 담당(relay)입니다. 주문서 파일을 읽고 그 지시대로 일하세요. 결과 파일은 주문서가 정한 출력 칸에만 쓰세요 — 그 밖의 경로는 샌드박스가 막습니다. 학생에게 직접 묻지 말고, 판단이 필요한 항목은 주문서의 조건 칸에 적으세요. 셸 명령은 앱이 그대로 읽을 수 있게 따옴표로 감싼 절대경로를 쓰고 변수 대입·서브셸·리다이렉트를 피하세요.'
+
+/**
+ * 담당 연결 — 본대화 `CodexConnection` 과 **별개의 프로세스·스레드**를 쓴다.
+ *
+ * 격리(설계 §3.3 Codex 몫)는 두 곳을 함께 걸어야 실제로 선다 — 실측(PATH codex 0.167.0):
+ *  · `spawn` cwd 와 `thread/start.cwd` = `jobs/<id>/out`
+ *  · **`turn/start.sandboxPolicy`** = `workspaceWrite{writableRoots:[out], networkAccess:false,
+ *    excludeTmpdirEnvVar:true, excludeSlashTmp:true}`
+ *  `thread/start.sandbox: 'workspace-write'` 문자열만 주면 `thread/start` 응답의 정책이
+ *  `writableRoots: []` 로 와서 **out 밖 쓰기가 그대로 통과했다**(실측: `outside-a.md` 생성됨).
+ *  `turn/start.sandboxPolicy` 를 주면 같은 명령이 `operation not permitted` 로 막혔다.
+ *  그래서 이 클래스는 `sandboxPolicy` 를 **반드시** 싣는다.
+ *
+ * 승인: 이 연결에는 묻는 학생이 없다. 명령·파일변경 승인 요청은 전부 `decline` 이고,
+ * `requestUserInput` 은 빈 답, 모르는 요청은 `-32601` 이다. 그래서 모델이 샌드박스 밖으로
+ * 나가려 해도 통과하지 못한다(`danger-full-access` 승격 경로가 없다).
+ */
+export class CodexRelayConnection implements JobConnection {
+  readonly relayProtocol = 1 as const
+  private rpc?: JsonRpcProcess
+  private connecting?: Promise<JsonRpcProcess>
+  private serverArgs: string[]
+  private thread?: string
+  private turn?: string
+  private waiter?: { resolve: () => void; reject: (error: Error) => void }
+  private stopped = false
+  private events?: JobEvents
+  /** 알림 순번 — 토큰 기록의 `notificationSequence`. 주문 한 건 안에서 1부터 센다. */
+  private notifications = 0
+  constructor(private options: AgentOptions, private request: RelayRequest) {
+    this.serverArgs = serverArgsFor(options.env)
+  }
+
+  async status(): Promise<ConnectionStatus> {
+    try {
+      const rpc = await this.connect()
+      const r = await rpc.request('account/read', { refreshToken: false })
+      const connected = r?.account?.type === 'chatgpt'
+      return { installed: true, connected, version: this.version, probe: 'ok',
+        detail: connected ? '' : 'ChatGPT 로그인이 필요해요. API 계정으로 자동 전환하지 않아요.' }
+    } catch (error) {
+      return { installed: true, connected: false, version: this.version, probe: 'failed',
+        detail: `Codex 연결을 확인하지 못했어요. (${(error as Error)?.message ?? '알 수 없음'})` }
+    }
+  }
+  login(): Promise<void> { return Promise.reject(new Error('담당 연결은 로그인을 열지 않아요.')) }
+  respond(): void {}
+  run(): Promise<void> { return Promise.reject(new Error('담당 연결은 runJob 으로만 움직여요.')) }
+
+  private version: string | null = null
+
+  /**
+   * 주문 전 계정·한도 조회. Codex 는 턴 **밖에서도** `account/rateLimits/read` 가
+   * `ordinaryUsageAllowed` 를 직접 준다(실측: `{ordinaryUsageAllowed, rateLimits, …, accountId}`).
+   * 그래서 Claude 와 달리 여기서 A 를 사실대로 판정할 수 있다.
+   */
+  async availability(): Promise<ExecutionAccount> {
+    let rpc: JsonRpcProcess
+    try { rpc = await this.connect() } catch { return { ...codexExecutionAccount(this.options, null), connected: false, usage: 'auth' } }
+    let accountType: string | null = null
+    try { const account = await rpc.request('account/read', { refreshToken: false }); accountType = account?.account?.type ?? null }
+    catch { /* 확인 실패는 아래 usage 로 드러난다 */ }
+    const models = await this.catalog(rpc)
+    const limits = await this.readLimits(rpc)
+    return {
+      ...codexExecutionAccount(this.options, models, { accountId: limits.accountId, accountType }),
+      connected: accountType === 'chatgpt',
+      usage: accountType === 'chatgpt' ? limits.usage : 'auth'
+    }
+  }
+
+  /** 한도 스냅샷 한 번. 못 읽으면 `'unknown'` — `allowed` 를 지어내지 않는다(설계 §3.5). */
+  private async readLimits(rpc: JsonRpcProcess): Promise<{ usage: UsageState; accountId: string | null }> {
+    try {
+      const limits = await rpc.request('account/rateLimits/read', {})
+      return {
+        usage: codexUsageState(limits?.ordinaryUsageAllowed),
+        accountId: typeof limits?.accountId === 'string' ? limits.accountId : null
+      }
+    } catch { return { usage: 'unknown', accountId: null } }
+  }
+
+  /** 이 계정의 모델 목록 — `JobRunner.listed()` 가 요청 모델을 이 목록에서 찾는다. */
+  private async catalog(rpc: JsonRpcProcess): Promise<ModelCatalogEntry[] | null> {
+    const out: ModelCatalogEntry[] = []
+    let cursor: string | null = null
+    try {
+      for (let page = 0; page < 20; page++) {
+        const r = await rpc.request('model/list', cursor ? { limit: 100, cursor } : { limit: 100 })
+        for (const raw of Array.isArray(r?.data) ? r.data : []) {
+          if (!raw || typeof raw !== 'object') continue
+          const m = raw as Record<string, unknown>
+          if (m.hidden === true) continue
+          const model = typeof m.model === 'string' && m.model ? m.model : ''
+          if (!model || isCrossProviderModelId(model) || out.some(x => x.model === model)) continue
+          out.push({
+            model,
+            name: typeof m.displayName === 'string' && m.displayName ? m.displayName : model,
+            efforts: Array.isArray(m.supportedReasoningEfforts)
+              ? m.supportedReasoningEfforts
+                .map(e => (e && typeof e === 'object' && 'reasoningEffort' in e ? e.reasoningEffort : undefined))
+                .filter((e): e is string => typeof e === 'string' && e !== '')
+              : []
+          })
+        }
+        cursor = typeof r?.nextCursor === 'string' && r.nextCursor ? r.nextCursor : null
+        if (!cursor) break
+      }
+    } catch { return null }
+    return out
+  }
+
+  async runJob(text: string, events: JobEvents): Promise<void> {
+    this.events = events
+    const rpc = await this.connect()
+    const account = await rpc.request('account/read', { refreshToken: false })
+    if (account?.account?.type !== 'chatgpt') throw new JobFailure('auth', 'ChatGPT 계정 로그인이 필요해요.')
+    // 별칭(`astra`·`sol`…)을 이 계정의 실제 id 로 푼다. 목록에 없으면 보낸 값을 그대로 쓴다 —
+    // 서버가 거절하면 그 오류가 그대로 주문 실패로 남는다(추측으로 다른 모델을 고르지 않는다).
+    const models = (await this.catalog(rpc)) ?? []
+    const model = resolveCodexAlias([...models], this.request.model) ?? this.request.model
+    const skillPath = join(this.request.skill, 'SKILL.md')
+    // 스킬 폴더가 작업 폴더 밖이므로 경로 루트를 따로 알려 준다(실측: 이것 없이는 발견 못 함).
+    try { await rpc.request('skills/extraRoots/set', { extraRoots: [dirname(this.request.skill)] }) } catch { /* 옛 서버: 아래 확인이 실패로 잡는다 */ }
+    const skills = await rpc.request('skills/list', { cwds: [this.request.cwd], forceReload: true })
+    const found = (Array.isArray(skills?.data) ? skills.data : []).some((entry: unknown) => {
+      const list = (entry as { skills?: unknown })?.skills
+      return Array.isArray(list) && list.some((s: unknown) => {
+        const skill = s as { path?: unknown; enabled?: unknown }
+        return typeof skill?.path === 'string' && realOrSelf(skill.path) === realOrSelf(skillPath) && skill.enabled === true
+      })
+    })
+    if (!found) throw new Error('Codex가 knuaf-dev 스킬을 찾지 못했어요.')
+    events.skill()
+    /**
+     * 학생 설정에서 **이름만** 받아 담당 전용 제한을 만든다. `config/read` 는 MCP 를 기동하지
+     * 않으므로 여기서 먼저 불러도 부작용이 없다(실측).
+     *
+     * 플러그인은 `config.plugins` 만으로 부족하다 — 실측 0.167.0: 설정 17개 vs 설치 26개,
+     * 원격 Apps 플러그인(`gmail@…` 등)은 설정 표에 없어도 설치되어 있다. 그래서 설치 목록과
+     * 합집합을 쓴다(없는 id 를 넣어도 `thread/start` 는 정상 — 실측).
+     *
+     * **설치 목록을 읽지 못하면 스레드를 열지 않는다**(검토 중요 2). 목록 없이 만든 제한은 설치
+     * 전용 플러그인을 놓치고, 그 플러그인이 딸고 오는 MCP 는 `thread/start` 순간 기동된다 —
+     * 뒤의 `assertIsolated` 가 턴은 막아도 이미 뜬 프로세스는 되돌릴 수 없다. 실측 0.163.0·
+     * 0.164.0·0.167.0 셋 다 이 요청을 가지므로(응답 `{marketplaces, marketplaceLoadErrors}`),
+     * 실패는 "이 판이 지원하지 않는다"가 아니라 진짜 이상 상태다.
+     */
+    const userConfig = await rpc.request('config/read', { cwd: this.request.cwd, includeLayers: false })
+      .catch(() => { throw new Error('학생 설정을 읽지 못해 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.') })
+    const installed = await rpc.request('plugin/installed', {}).catch(() => {
+      throw new Error('학생이 설치한 플러그인 목록을 읽지 못해 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.')
+    })
+    // 응답 형식도 확인한다 — `marketplaces` 가 배열이 아니면 열거가 끝났는지 알 수 없다.
+    if (!Array.isArray(asRecord(installed).marketplaces)) {
+      throw new Error('학생이 설치한 플러그인 목록의 형식이 예상과 달라 담당을 안전하게 격리할 수 없어요. 이 주문은 열지 않습니다.')
+    }
+    const lockdown = codexRelayLockdown(userConfig?.config, installed)
+    const started = await rpc.request('thread/start', codexThreadParams(this.request, model, lockdown))
+    const threadId = started?.thread?.id
+    if (typeof threadId !== 'string' || !threadId) throw new Error('Codex가 담당 스레드를 열지 못했어요.')
+    /**
+     * **보낸 값만 믿지 않는다** — 사용자 설정이 심사자를 바꿔 놓으면 서버가 다른 값을 돌려준다.
+     * 그 상태로 턴을 열면 승인 요청이 자동 심사 에이전트로 흘러 앱의 거절을 우회할 수 있다.
+     * 그래서 돌려받은 심사자를 대조하고, 다르면 턴을 열지 않는다(검토 차단 2).
+     */
+    if (started.approvalsReviewer !== 'user') {
+      throw new Error('Codex 담당 스레드의 승인 심사자가 앱이 정한 값과 달라요. 이 주문은 열지 않습니다.')
+    }
+    await this.assertIsolated(rpc, threadId, lockdown)
+    this.thread = threadId
+    // 순서 고정: 세션 id 가 먼저 와야 러너가 토큰 기록을 남긴다(jobs.ts `tokens`).
+    events.session(threadId)
+    /**
+     * 실제 노력 수준은 **주문이 보낸 값**이다. `started.reasoningEffort` 는 스레드 기본값이라
+     * 주문이 low 인데 서버 기본이 high 면 기록이 high 로 남는다(검토 중요 2). `turn/start.effort`
+     * 는 "this turn and subsequent turns" 에 적용되므로 이 턴의 실제 값은 `request.effort` 다.
+     * 모델은 서버가 돌려준 값을 그대로 쓴다(별칭→실제 id 해석은 서버 몫이다).
+     */
+    events.actualModel(typeof started.model === 'string' && started.model ? started.model : model, this.request.effort)
+    await new Promise<void>((resolve, reject) => {
+      this.waiter = { resolve, reject }
+      rpc.request('turn/start', {
+        threadId,
+        input: [{ type: 'text', text, text_elements: [] }, { type: 'skill', name: 'knuaf-dev', path: skillPath }],
+        model,
+        // 격리의 본체 — 이 키가 없으면 out 밖 쓰기가 통과한다(실측).
+        sandboxPolicy: codexSandboxPolicy(this.request.cwd),
+        ...(this.request.effort ? { effort: this.request.effort } : {})
+      }).then(r => {
+        if (typeof r?.turn?.id === 'string') this.turn = r.turn.id
+      }).catch(error => { this.waiter = undefined; reject(error) })
+    })
+  }
+
+  /**
+   * 보낸 제한이 실제로 걸렸는지 **서버에 물어** 확인한다. `thread/start` 가 성공했다고 믿지 않는다
+   * — 옛 판이 키를 무시하거나 사용자 설정이 나중에 이기면 도구가 그대로 살아 있다.
+   *
+   * 판정은 **`disabled` 만 통과**다. `mcpServerStatus` 의 다른 값(`connected`, `starting`,
+   * `authenticationRequired`, `failed`, `cancelled`, `notStarted`, `null`)은 모두 "우리 설정이
+   * 안 먹었다"는 뜻이라 턴을 열지 않는다 — 서버를 하나라도 놓치면 학생 도구가 담당에 붙는다
+   * (실측 0.167.0 실제 설정: 제한 없이는 17개 항목 중 13 connected·2 disabled·2 failed,
+   * 제한을 걸면 13개 항목 전부 disabled).
+   *
+   * **확인하지 못한 상태를 통과로 넘기지 않는다**(검토 중요 1). 목록은 쪽 단위로 오므로
+   * ① 쪽 상한에 닿았는데 `nextCursor` 가 남아 있으면, ② 응답의 `data` 가 배열이 아니면,
+   * ③ 제한을 건 이름이 하나라도 있는데 목록이 비어 있으면 — 전부 "판정 불가"라 주문을 닫는다.
+   * 끝까지 읽고 전부 `disabled` 인 경우에만 통과한다.
+   */
+  private async assertIsolated(rpc: JsonRpcProcess, threadId: string, lockdown: RelayLockdown): Promise<void> {
+    const expected = Object.keys(lockdown.mcp_servers).length
+    const live: string[] = []
+    let seen = 0
+    let cursor: string | null = null
+    for (let page = 0; page < 5; page++) {
+      const r = await rpc.request('mcpServerStatus/list',
+        cursor ? { threadId, cursor, detail: 'toolsAndAuthOnly' } : { threadId, detail: 'toolsAndAuthOnly' })
+      const data = asRecord(r).data
+      if (!Array.isArray(data)) {
+        throw new Error('Codex 담당 스레드의 MCP 상태 목록 형식이 예상과 달라 격리를 확인하지 못했어요. 이 주문은 열지 않습니다.')
+      }
+      for (const raw of data) {
+        seen++
+        const entry = asRecord(raw)
+        if (entry.runtimeStatus !== 'disabled') {
+          const name = typeof entry.name === 'string' && entry.name ? entry.name : '(이름 없음)'
+          live.push(`${name}=${String(entry.runtimeStatus)}`)
+        }
+      }
+      cursor = typeof asRecord(r).nextCursor === 'string' && asRecord(r).nextCursor ? asRecord(r).nextCursor as string : null
+      if (!cursor) break
+    }
+    if (cursor) {
+      throw new Error('Codex 담당 스레드의 MCP 상태 목록이 끝나지 않아 격리를 확인하지 못했어요. 이 주문은 열지 않습니다.')
+    }
+    // 제한을 건 이름이 있는데 목록이 통째로 비면 "꺼졌다"가 아니라 "볼 것이 없다"이다.
+    if (expected > 0 && seen === 0) {
+      throw new Error('Codex 담당 스레드의 MCP 상태 목록이 비어 있어 격리를 확인하지 못했어요. 이 주문은 열지 않습니다.')
+    }
+    if (live.length > 0) {
+      throw new Error(`Codex 담당 스레드에서 MCP 서버가 꺼지지 않았어요(${live.join(', ')}). 이 주문은 열지 않습니다.`)
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+    const rpc = this.rpc
+    if (this.thread && this.turn && rpc && !rpc.closed) {
+      try { await rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }) } catch { /* 프로세스 종료가 뒤따른다 */ }
+    }
+    this.waiter?.reject(new Error('담당이 중단됐어요.'))
+    this.waiter = undefined
+    await rpc?.stop(); this.rpc = undefined
+  }
+
+  private async connect(): Promise<JsonRpcProcess> {
+    if (this.stopped) throw new JobFailure('unknown', 'Codex 담당 연결이 중단됐어요.')
+    const inflight = this.connecting
+    if (inflight) return inflight
+    if (this.rpc && !this.rpc.closed) return this.rpc
+    return (this.connecting = this.open().finally(() => { this.connecting = undefined }))
+  }
+
+  /**
+   * app-server 프로세스. **`spawn` cwd 도 작업 폴더**로 준다 — 서버 쪽 기본 cwd 가 남의
+   * 폴더가 되면 `command/exec` 나 상대경로 해석이 그 폴더를 기준으로 움직인다(실측).
+   */
+  private async open(): Promise<JsonRpcProcess> {
+    if (this.stopped) throw new JobFailure('unknown', 'Codex 담당 연결이 중단됐어요.')
+    const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.serverArgs, this.request.cwd, this.options.env)
+    rpc.onNotification = (method, p) => this.notify(method, p)
+    rpc.onRequest = (id, method) => {
+      // 묻는 학생이 없다. 승인 계열은 전부 거절, 인터뷰형 요청은 빈 답, 나머지는 미지원.
+      if (method === 'item/tool/requestUserInput') return rpc.send({ id, result: { answers: {} } })
+      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+        return rpc.send({ id, result: { decision: 'decline' } })
+      }
+      /**
+       * 이 요청만 응답 모양이 다르다 — 스키마(`v2/PermissionsRequestApprovalResponse.ts`):
+       * `{permissions: {network, fileSystem}, scope: 'turn'|'session'}`. 승인 계열 공통 모양
+       * (`{decision:'decline'}`)을 보내면 서버 역직렬화가 실패해 턴이 중단될 수 있다(검토 중요 3).
+       * **빈 허용 목록 + `turn` 범위**가 "아무것도 더 주지 않는다"는 뜻이다.
+       */
+      if (method === 'item/permissions/requestApproval') {
+        return rpc.send({ id, result: { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
+      }
+      if (method === 'applyPatchApproval' || method === 'execCommandApproval') return rpc.send({ id, result: { decision: 'decline' } })
+      if (method === 'mcpServer/elicitation/request') return rpc.send({ id, result: { action: 'decline' } })
+      return rpc.send({ id, error: { code: -32601, message: '담당 연결은 이 요청을 지원하지 않아요.' } })
+    }
+    rpc.onClose = () => {
+      const w = this.waiter; this.waiter = undefined
+      w?.reject(new JobFailure('unknown', 'Codex 담당 연결이 종료됐어요.'))
+    }
+    let init: { userAgent?: string } | undefined
+    try {
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.0' }, capabilities: { experimentalApi: true } })
+    } catch (error) {
+      this.rpc = undefined
+      await rpc.stop().catch(() => {})
+      if (this.stopped) throw error
+      if (!this.serverArgs.includes('--listen')) {
+        this.serverArgs = [...this.serverArgs, '--listen', 'stdio://']
+        return this.open()
+      }
+      const detail = [(error as Error)?.message, rpc.lastStderr].filter(Boolean).join(' / ')
+      throw new JobFailure('unknown', 'Codex 담당 연결을 열지 못했어요.' + (detail ? ` (${detail})` : ''))
+    }
+    const ua = typeof init?.userAgent === 'string' ? init.userAgent : ''
+    this.version = /^[^/\s]+\/([^\s]+)/.exec(ua)?.[1] ?? /(\d+\.\d+\.\d+)/.exec(ua)?.[1] ?? null
+    rpc.send({ method: 'initialized', params: {} })
+    return rpc
+  }
+
+  /** 알림 한 건. 이 스레드 것만 본다 — 다른 담당·본대화 스레드는 이 클래스에 오지 않는다. */
+  private notify(method: string, p: any): void {
+    if (p?.threadId && this.thread && p.threadId !== this.thread) return
+    if (method === 'thread/started' && typeof p?.thread?.id === 'string' && !this.thread) this.thread = p.thread.id
+    if (method === 'turn/started' && typeof p?.turn?.id === 'string') this.turn = p.turn.id
+    if (method === 'thread/tokenUsage/updated') {
+      this.notifications++
+      const usage = p?.tokenUsage
+      if (usage && typeof usage === 'object') this.events?.tokens(codexTokens(usage, 1, this.notifications))
+      return
+    }
+    if (method === 'account/rateLimits/updated') {
+      // 이 알림은 단면(`rateLimits`)만 준다 — `ordinaryUsageAllowed` 가 없다. 다시 읽어 판정한다.
+      // 스키마 주석: "merge … or refetch that snapshot" — 여기서는 재조회 쪽을 고른다.
+      const rpc = this.rpc
+      if (!rpc || rpc.closed) return
+      void this.readLimits(rpc).then(limits => this.events?.availability(limits.usage)).catch(() => {})
+      return
+    }
+    if (method === 'turn/completed') {
+      const w = this.waiter; this.waiter = undefined
+      const error = p?.turn?.error
+      if (p?.turn?.status === 'completed') { w?.resolve(); return }
+      if (p?.turn?.status === 'interrupted') { w?.reject(new JobFailure('unknown', '담당 턴이 중단됐어요.')); return }
+      const code = typeof error?.codexErrorInfo === 'string' ? error.codexErrorInfo : ''
+      if (code === 'usageLimitExceeded' || code === 'rateLimitExceeded') { w?.reject(new JobFailure('limit', error?.message ?? '한도에 걸렸어요.')); return }
+      if (code === 'unauthorized') { w?.reject(new JobFailure('auth', 'ChatGPT 인증이 거절됐어요.')); return }
+      w?.reject(new Error(error?.message ?? '담당 작업이 완료되지 않았어요.'))
+    }
   }
 }

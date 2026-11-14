@@ -139,6 +139,12 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).
   if (env.KNUAF_E2E_HIDDEN === undefined && env.KNUAF_E2E_VISIBLE !== '1') env.KNUAF_E2E_HIDDEN = '1'
+  /**
+   * 시험용 주입 통로(`knuaf:lanes-test*`)를 연다 — preload 가 이 값을 `knuaf.testHooks` 로 내보내고
+   * `store/lanes.ts` `attach()` 가 그때만 리스너를 건다(검토 I-01). **제품 실행은 이 값을 켜지
+   * 않으므로 리스너가 아예 없다** — 음성 시험은 `env: { KNUAF_E2E_TEST_HOOKS: '0' }` 로 끈다.
+   */
+  if (env.KNUAF_E2E_TEST_HOOKS === undefined) env.KNUAF_E2E_TEST_HOOKS = '1'
   const electronApp = await electron.launch({
     args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
     env,
@@ -579,6 +585,29 @@ export function markSectionReady(root: string, opts: { id?: string; expected?: n
 /** 창 크기를 실제로 바꾼다 — 폭 경계는 창 폭이라 `page.setViewportSize` 로는 안 바뀐다. */
 export async function setWindowWidth(electronApp: ElectronApplication, width: number): Promise<void> {
   await electronApp.evaluate(({ BrowserWindow }, w) => { BrowserWindow.getAllWindows()[0].setBounds({ width: w }) }, width)
+}
+
+/**
+ * 폭·높이를 함께 바꾼다 — 검토 C07-⑤: 높이를 지정하지 않으면 900×600 조건의 증거가 안 된다.
+ * `page.setViewportSize` 는 렌더러 뷰포트만 바꾸고 창(그리고 그 안의 modal 높이 기준 `100vh`)은 그대로다.
+ */
+export async function setWindowBounds(electronApp: ElectronApplication, width: number, height: number): Promise<void> {
+  await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, { width, height })
+}
+
+/**
+ * 창을 바꾼 뒤 렌더러가 **정말 그 크기를 받았는지** 확인한다 — 검토 C07-⑤.
+ *
+ * `setBounds` 는 비동기로 반영되고, 예전 코드는 `page.setViewportSize` 로 뷰포트를 따로 고정해 두어
+ * 창 크기가 화면에 닿지 않아도 시험이 통과했다. 창 안쪽 높이는 제목줄 몫만큼 작을 수 있으므로
+ * 아래쪽 여유(60px)를 두되, **옛 크기(800)가 그대로면 위쪽 경계에서 걸린다**.
+ */
+export async function expectWindowInner(page: Page, width: number, height: number): Promise<void> {
+  await page.waitForFunction(
+    ({ w, h }) => Math.abs(window.innerWidth - w) <= 2 && window.innerHeight <= h && window.innerHeight > h - 60,
+    { w: width, h: height },
+    { timeout: 5000 }
+  )
 }
 
 /**

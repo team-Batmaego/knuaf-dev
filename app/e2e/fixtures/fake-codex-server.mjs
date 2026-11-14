@@ -236,9 +236,18 @@ function handle(message) {
               : TURN_FAILURE === 'refresh-network' ? 'Your access token could not be refreshed: network timeout'
                 : TURN_FAILURE === 'bare401' ? 'HTTP 401 Unauthorized: authentication failed'
                   : TURN_FAILURE === 'external401' ? '401 from external research website'
-                    : TURN_FAILURE === 'rate' ? 'HTTP 429 rate limit exceeded' : 'Network error: ECONNRESET'
+                    : TURN_FAILURE === 'rate' ? 'HTTP 429 rate limit exceeded'
+                      : TURN_FAILURE === 'usage-limit' ? '사용 한도를 넘었어요.' : 'Network error: ECONNRESET'
+        /**
+         * 실패 코드는 **문구와 따로** 준다(설계 §1-2). `usage-limit` 은 구조 코드
+         * `usageLimitExceeded`(앱이 한도로 인정하는 유일한 Codex 신호), `rate-code` 는
+         * `rateLimitExceeded`(한도 아님 — 단추를 띄우지 않는다)를 흉내 낸다.
+         */
+        const codexErrorInfo = TURN_FAILURE.startsWith('401') ? 'unauthorized'
+          : TURN_FAILURE === 'usage-limit' ? 'usageLimitExceeded'
+            : TURN_FAILURE === 'rate-code' ? 'rateLimitExceeded' : undefined
         const fail = () => out({ method: 'turn/completed', params: { threadId, turn: {
-          id: turnId, status: 'failed', error: { message, ...(TURN_FAILURE.startsWith('401') ? { codexErrorInfo: 'unauthorized' } : {}) }
+          id: turnId, status: 'failed', error: { message, ...(codexErrorInfo ? { codexErrorInfo } : {}) }
         } } })
         if (TURN_RELEASE) {
           const timer = setInterval(() => { if (existsSync(TURN_RELEASE)) { clearInterval(timer); fail() } }, 50)

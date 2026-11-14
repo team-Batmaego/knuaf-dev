@@ -14,8 +14,10 @@
   --bg: #f7f9fc; --bg-2: #eef2f7; --panel: #ffffff; --panel-2: #f3f5f9;
   --ink: #0f172a; --ink-2: #334155; --muted: #5b6b80; --faint: #627186;
   --line: #e3e8f0; --line-strong: #c8d2e1; --ring: color-mix(in srgb, var(--ink-2) 55%, transparent);
-  /* 소프트 코발트 — 주 행동 단추. 채운 단추(보내기)와 구별한다. */
-  --btn-bg: #e9eef8; --btn-ink: #1e3a6e; --btn-border: #cdd8ec;
+  /* 소프트 코발트 — 주 행동 단추. 채운 단추(보내기)와 구별한다.
+     형님 결정(검토 C2-fix2): 사진에서 너무 연해 실행 단추로 안 읽혔다 → 한 단계 진하게.
+     바탕/테두리만 바꾼다. 글자 대비: --btn-bg 대비 --btn-ink 8.28:1, 흰 패널 대비 1.34:1(면 경계는 테두리가 맡는다). */
+  --btn-bg: #d3dff3; --btn-ink: #1e3a6e; --btn-border: #b8cae6;
   --send-bg: #1f2937; --send-ink: #ffffff;
   --sel-bg: #edf0f5; --hover: #f3f5f9;
   /* 통과 배지 글자도 배지 바탕 위에서 4.5 이상이어야 한다. 네 자리 모두 넘는다:
@@ -64,7 +66,7 @@
     --bg: #0e131c; --bg-2: #121925; --panel: #161d2a; --panel-2: #1b2433;
     --ink: #eef2f7; --ink-2: #c6d0dd; --muted: #8e9cb0; --faint: #8190a5;
     --line: #243046; --line-strong: #34445f; --ring: color-mix(in srgb, var(--ink-2) 55%, transparent);
-    --btn-bg: #25324a; --btn-ink: #dbe5f7; --btn-border: #34445f;
+    --btn-bg: #31425f; --btn-ink: #dbe5f7; --btn-border: #435a80;
     --send-bg: #e5e7eb; --send-ink: #0b0f17;
     --sel-bg: #1f2a3c; --hover: #1b2433;
     --ok: #6cc093; --bad: #e08a7d; --warn: #d9a443; --blocked: #a5a8e0;

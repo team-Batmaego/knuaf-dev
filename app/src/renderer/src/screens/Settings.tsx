@@ -9,14 +9,23 @@ import { Feedback } from '../components/Feedback'
 import { RuntimeSetup } from '../components/RuntimeFix'
 import { OutputsTools } from './Outputs'
 import { TroubleshootSections } from './Troubleshoot'
-import { CREDIT, HELPER, PRIVACY_NOTE, SETTINGS, describeError, type DescribedError } from '../copy'
+import { CREDIT, HELPER, PRIVACY_NOTE, PROVIDER_NAME, SETTINGS, describeError, type DescribedError } from '../copy'
 import { useShallow } from 'zustand/react/shallow'
 import { APP_NAME } from '../../../shared/name'
 import { UpdateSettings } from '../components/Updates'
 import { settingsSectionForFocus, type SettingsSection } from '../copy-menus'
+import { requestArchive } from './Chat'
+import { useLanes } from '../store/lanes'
+import { LANE_ARCHIVE, LANES_SETTINGS, providerName, stampKo } from '../copy-lanes'
+import type { ArchivedChatSummary } from '../../../shared/lanes-ipc'
+import { LanesSettings } from './LanesSettings'
+
+/** 폴더가 다르거나 아직 안 왔을 때 — 참조가 고정돼야 셀렉터가 매번 새 배열을 만들지 않는다. */
+const NO_ARCHIVES: ArchivedChatSummary[] = []
 
 const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'helper', label: '도우미 연결' },
+  { id: 'lanes', label: LANES_SETTINGS.title },
   { id: 'folder', label: '폴더' },
   { id: 'trouble', label: '문제 해결' },
   { id: 'tools', label: '고급 도구' },
@@ -39,6 +48,9 @@ export function SettingsScreen() {
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [buildCopy, setBuildCopy] = useState<'idle' | 'copied' | 'failed'>('idle')
   const body = useRef<HTMLDivElement>(null)
+  /** §4-2 이 폴더의 보관 대화 — 설정 창이 스스로 받아 그린다(대화 칸과 같은 store). */
+  const laneSnapshot = useLanes((s) => s.snapshot)
+  const laneArchives = laneSnapshot && laneSnapshot.root === root ? laneSnapshot.archives : NO_ARCHIVES
   useEffect(() => { void window.knuaf.appInfo().then(setInfo) }, [])
   useEffect(() => { setOverride(settings?.python_override ?? ''); void refreshSidecar() }, [settings])
   /** Failure deep links: open the matching 펼침, then clear so it behaves like a normal disclosure. */
@@ -87,14 +99,18 @@ export function SettingsScreen() {
   const pickFolder = async () => { const d = await window.knuaf.pickFolder(); if (d) void tryOpen(d) }
   const base = (p: string) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? p
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-      <nav aria-label={SETTINGS.title} style={{ width: 196, flex: '0 0 196px', overflowY: 'auto', padding: 10, background: 'var(--bg-2)' }}>
+    <div className="settings-wrap" style={{ display: 'flex', height: '100%', minHeight: 0, containerType: 'inline-size', containerName: 'settings-wrap' }}>
+      <nav className="settings-nav" aria-label={SETTINGS.title} style={{ overflowY: 'auto', padding: 10, background: 'var(--bg-2)' }}>
         {SETTINGS_SECTIONS.map(({ id, label }) => <button key={id} type="button" aria-current={section === id ? 'page' : undefined}
           onClick={() => setSection(id)} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', borderRadius: 8,
             border: section === id ? 'var(--hairline) solid var(--line)' : 'var(--hairline) solid transparent',
             background: section === id ? 'var(--panel)' : 'transparent', fontWeight: section === id ? 600 : 400 }}>{label}</button>)}
       </nav>
-      <div ref={body} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '0 16px' }}>
+      <div ref={body} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '0 16px', containerType: 'inline-size' }}>
+      <section className="card" hidden={section !== 'lanes'}>
+        <div className="card-head"><h2>{LANES_SETTINGS.title}</h2></div>
+        <LanesSettings root={root} />
+      </section>
       <section className="card" hidden={section !== 'folder'}>
         <div className="card-head"><h2>{SETTINGS.folderTitle}</h2></div>
         {root && <div className="row"><strong>{base(root)}</strong><span className="caption">{root}</span></div>}
@@ -111,6 +127,20 @@ export function SettingsScreen() {
             <span className="caption">최근:</span>
             {settings!.recent.map((r) => <button key={r.root} className="quiet" onClick={() => void tryOpen(r.root)} disabled={loading || r.root === root}>{base(r.root)}</button>)}
             <button className="quiet" onClick={async () => { await window.knuaf.setSettings({ recent: [] }); await loadSettings() }}>{SETTINGS.folderRecentClear}</button>
+          </div>
+        )}
+        {/* §4-2 한도로 멈춘 대화 — 이 논문 폴더 단위. 0개면 줄 자체가 없다. */}
+        {laneArchives.length > 0 && (
+          <div style={{ marginTop: 'var(--sp-3)' }}>
+            <div className="set-sub">{LANE_ARCHIVE.folderSub(laneArchives.length)}</div>
+            {laneArchives.map((a) => (
+              <div className="set-row2" key={a.archiveId}>
+                <span className="nm">{providerName(a.company)}</span>
+                <span className="grow">{LANE_ARCHIVE.stoppedAt(stampKo(a.stoppedAt))}</span>
+                <button type="button" className="quiet" onClick={() => requestArchive(a.archiveId)}>{LANE_ARCHIVE.open}</button>
+              </div>
+            ))}
+            <p className="caption">{LANE_ARCHIVE.note}</p>
           </div>
         )}
         {permission === 'ask' && (settings?.trusted_roots?.length ?? 0) > 0 && (

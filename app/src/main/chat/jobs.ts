@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { continueAfterLimit, subscriptionCheck } from '../../shared/lanes'
 import { resolveCodexAlias } from '../../shared/chat'
 import { readRecoverable, writeFileAtomic } from '../safeWrite'
+import { shutdownWithin, type ShutdownTask } from '../shutdown'
 import { canonical, createOutput, inside, outputName, relayIsolation, sha256, thesisHashes } from './jobs/isolation'
 import { chatConnectionKey } from './jobs/key'
 import { tokenRecord } from './jobs/tokens'
@@ -23,7 +24,24 @@ interface Approval {
   company: string; model: string; effort: string | null; accountId: string; contentHash: string
 }
 const now = () => new Date().toISOString()
-const fingerprint = (account: ExecutionAccount) => sha256(JSON.stringify(account))
+/**
+ * 계정 지문 — **앱과 엔진이 함께 아는 값**만 센다.
+ *
+ * 동의(`consented`)는 앱 저장소가 정본이고 엔진은 그 값을 모른다(설계 §3.5 규칙 1). 엔진
+ * `availability()` 는 `consented:false` 를 돌려주므로 전체 객체를 그대로 지문에 넣으면 앱이
+ * 동의한 주문도 매번 `rejected` 가 된다(검토 중요 1: runJob 0회). 그래서 지문에서 `consented`
+ * 를 빼고, 동의는 앱 값으로만 판정한다(`accountFailure`).
+ */
+const fingerprint = (account: ExecutionAccount) =>
+  sha256(JSON.stringify([account.accountId, account.connected, account.usage, account.account]))
+
+/**
+ * 담당 연결(`JobConnection.stop`) 정리의 상한 — 학생 중단이 쓴다.
+ *
+ * `ChatService.CLOSE_CONNECTION_DEADLINE_MS` 와 같은 3초이며, 종료·인계 경로는 **남은 예산**을
+ * 넘겨 두 마감이 겹쳐 바깥 종료 마감(10초)을 갉아먹지 않게 한다(REVIEW-C4 I-03).
+ */
+const STOP_DEADLINE_MS = 3_000
 
 /** A single app-owned runner; no engine imports, polling, automatic retries, or hidden model changes. */
 export class JobRunner {
@@ -31,10 +49,16 @@ export class JobRunner {
   private approvals = new Map<string, Approval>()
   private active: { record: JobRecord; connection: JobConnection | null; stopped: boolean; failure?: 'limit' | 'unknown' | 'auth' } | null = null
   private draining: Promise<void> | null = null
+  private drainScopes = new Set<string>()
   private generations = new Map<string, number>()
   private ownerTransitions = new Map<string, object>()
   private pendingDeliveries = new Set<JobRecord>()
   private delivering = new Map<string, Set<Promise<void>>>()
+  /**
+   * 아직 정리가 끝나지 않은 담당 연결 — root 별로 둔다.
+   * 종료·인계가 마감을 넘긴 연결은 여기 남아 `unsettledConnections()` 로 pid 회수 대상이 된다.
+   */
+  private relays = new Map<JobConnection, string>()
   private file: string
   constructor(private options: JobRunnerOptions) {
     mkdirSync(options.stateDir, { recursive: true, mode: 0o700 })
@@ -55,6 +79,18 @@ export class JobRunner {
   private persist(): void {
     const result = writeFileAtomic(this.file, JSON.stringify(this.state), { mode: 0o600 })
     if (!result.ok) throw result.error
+    // [C1-14] 원장이 바뀌면 화면 묶음도 바뀐다 — 구독자를 통해 `lanes:changed` 가 붙는다.
+    for (const listener of this.listeners) {
+      try { listener() } catch { /* 구독자 오류가 실행을 되돌리지는 않는다 */ }
+    }
+  }
+
+  private readonly listeners = new Set<() => void>()
+
+  /** 러너의 **실제** 상태 변경(실행 시작·완료·한도·전달·중지)을 구독한다. */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
   }
   records(): JobRecord[] { return structuredClone(this.state.jobs) }
   proposals(): ContinuationProposal[] { return structuredClone(this.state.proposals.filter(p => p.state === 'open')) }
@@ -111,20 +147,38 @@ export class JobRunner {
   private update(record: JobRecord, status: JobStatus, reason?: string): void {
     record.status = status; record.reason = reason; this.persist(); this.publish(record)
   }
-  runQueued(): Promise<void> {
-    if (!this.draining) this.draining = this.drain().finally(() => { this.draining = null })
-    return this.draining
+  /**
+   * 예약된 주문을 실행한다. `root` 를 주면 **그 폴더의** 주문만 돈다 — 러너의 `skill()` 이
+   * 폴더 인자를 받지 않는 계약이라, 남의 폴더 대기 주문을 이번 수집 폴더의 스킬 경로로
+   * 실행하지 않으려면 실행 자체를 폴더 단위로 가둬야 한다. 그 주문은 자기 폴더의 수집
+   * 차례가 올 때 실행된다. 인자를 주지 않으면 예전처럼 전부 돈다(러너 단독 시험용).
+   */
+  runQueued(root?: string): Promise<void> {
+    const scope = root ? canonical(root) : ''
+    // 같은 폴더의 재요청은 이미 예약·진행 중인 회차에 합류한다.
+    if (this.drainScopes.has(scope)) return this.draining ?? Promise.resolve()
+    const run = (this.draining ?? Promise.resolve()).catch(() => {}).then(() => {
+      this.drainScopes.add(scope)
+      return this.drain(scope || null).finally(() => { this.drainScopes.delete(scope) })
+    })
+    this.draining = run
+    void run.catch(() => {}).finally(() => { if (this.draining === run) this.draining = null })
+    return run
   }
-  private async drain(): Promise<void> {
+  /** 러너가 이미 전달 처리한 결과 번호 — 앱 저장소 기록과 대조하는 복구 점검이 쓴다. */
+  deliveredRootJobs(): string[] { return [...this.state.delivered] }
+  private async drain(scope: string | null): Promise<void> {
     for (;;) {
-      const next = this.state.jobs.find(j => j.status === 'queued')
+      const next = this.state.jobs.find(j => j.status === 'queued' && (scope === null || j.root === scope))
       if (!next) return
       await this.execute(next)
     }
   }
-  private accountFailure(account: ExecutionAccount | null, consent = true): 'auth' | 'unknown' | 'limit' | 'rejected' | null {
+  private accountFailure(account: ExecutionAccount | null, consent = true, gateInTurn = false): 'auth' | 'unknown' | 'limit' | 'rejected' | null {
     if (!account?.connected || !subscriptionCheck(account.account).usable || account.usage === 'auth') return 'auth'
     if (consent && !account.consented) return 'rejected'
+    // ㉠: 첫 턴 안에서 limit을 판정해 닫을 수 있다고 선언한 연결만 unknown을 넘긴다.
+    if (account.usage === 'unknown' && gateInTurn) return null
     if (account.usage !== 'allowed') return account.usage
     return null
   }
@@ -156,7 +210,9 @@ export class JobRunner {
       const account = await this.options.account(spec.company)
       if (current.stopped) return
       const failure = this.accountFailure(account)
-      if (failure) { this.update(record, failure); return }
+      // ㉠: 제1판정은 unknown을 보류로만 둔다. 연결 선언이 없으면 뒤에서 막지 못하므로
+      // unknown 보류는 제2판정에서 선언 기준으로 재판정된다. auth·limit·동의 없이는 이미 닫힌다.
+      if (failure && failure !== 'unknown') { this.update(record, failure); return }
       if (!account || account.account.company !== spec.company || !this.listed(account, spec)) { this.update(record, 'rejected'); return }
       if (approval) {
         const proposal = this.state.proposals.find(p => p.proposalId === approval.proposalId)!
@@ -170,18 +226,26 @@ export class JobRunner {
         isolation: relayIsolation(cwd, spec.outputs, this.options.shellSandboxAvailable) }
       const connection = this.options.connectionFactory(request)
       current.connection = connection
+      this.relays.set(connection, record.root)
       if (connection.relayProtocol !== 1) throw new Error('Engine relay isolation is not wired')
       const status = await connection.status()
       if (current.stopped) return
       if (!status.connected) { this.update(record, status.probe === 'failed' ? 'unknown' : 'auth'); return }
       const live = await connection.availability()
       if (current.stopped) return
-      const liveFailure = this.accountFailure(live)
+      /**
+       * 두 번째 판정은 **엔진이 관측한 값**만 본다 — 동의는 위에서 앱 값으로 이미 끝냈다.
+       * 엔진은 동의를 모르므로(`availability()` 의 `consented:false`) 여기서 다시 동의를
+       * 검사하면 앱이 승인한 주문도 닫힌다(배선 A 검토 중요 1). 동의의 소유 경계는 앱 저장소다.
+       * ㉠(형님 결정 ts 1794242990): `unknown` 은 연결이 `gateInTurn` 을 선언했을 때만 첫 턴 안 확인으로 넘긴다.
+       */
+      const liveFailure = this.accountFailure(live, false, connection.gateInTurn === true)
       if (liveFailure) { this.update(record, liveFailure); return }
       if (fingerprint(live) !== fingerprint(account)) { this.update(record, 'rejected'); return }
       // Restore the app-authorized specification immediately before the engine reads its job file.
       if (this.content(spec, record.root) !== record.contentHash) throw new Error('Input changed before start')
       if (!spec.parent && !this.approved(spec, record.root)) { this.update(record, 'rejected', 'Approved plan changed'); return }
+      record.startedAt = new Date().toISOString()
       this.update(record, 'running')
       await connection.runJob(`/knuaf-dev 담당 모드: ${join(record.root, '.knuaf-gui', 'jobs', `${spec.id}.json`)}`, {
         message: () => {}, note: () => {}, skill: () => {},
@@ -226,7 +290,15 @@ export class JobRunner {
     } catch (error) {
       if (!current.stopped) this.update(record, current.failure ?? (error instanceof JobFailure ? error.status : 'error'))
     } finally {
-      try { await current.connection?.stop() } finally {
+      try {
+        const connection = current.connection
+        if (connection) {
+          await connection.stop()
+          // 정리가 끝난 담당 연결은 회수 대상에서 뺀다 — 남기면 `ownedPids()` 가 이미 죽은 pid 를
+          // 계속 돌려주고 종료 판정이 거짓 미완료가 된다. 마감을 넘긴 연결만 `settleStopped` 가 남긴다.
+          this.relays.delete(connection)
+        }
+      } finally {
         this.active = null
         this.approvals.delete(record.spec.id)
       }
@@ -344,7 +416,20 @@ export class JobRunner {
     for (const record of pending) await this.deliver(record)
   }
   private replaceOwner(root: string, owner: ConversationOwner): JobRecord[] {
-    for (const record of this.state.jobs) if (record.root === root) record.owner = structuredClone(owner)
+    const owned = this.state.jobs.filter(record => record.root === root)
+    const previous = new Map(owned.map(record => [record, structuredClone(record.owner)]))
+    for (const record of owned) record.owner = structuredClone(owner)
+    try {
+      // 공개 주문서도 새 소유자를 알려야 한다 — 학생(스킬)이 읽는 파일이 옛 대화를 가리키면
+      // 결과를 엉뚱한 대화로 넘기려 한다.
+      for (const record of owned) this.publish(record)
+    } catch (error) {
+      // [C1-11] 공개 사본 쓰기가 실패하면 **메모리 소유자도 되돌린다**. 예전에는 공개 쓰기가
+      // 던지면 activate·메모리 변경만 남고 영속·성공 반환이 없어 "닫힌 새 세션을 가리키는"
+      // 부분 커밋이 됐다. 영속(`persist`)은 이 함수 끝에서 한 번뿐이라 여기서 되돌리면 된다.
+      for (const [record, ownerBefore] of previous) record.owner = ownerBefore
+      throw error
+    }
     const latest = new Map<string, JobRecord>()
     for (const record of this.state.jobs) if (record.root === root) latest.set(record.rootJobId, record)
     const pending = [...latest.values()].filter(record => record.status === 'limit' && !this.state.delivered.includes(record.rootJobId))
@@ -388,22 +473,130 @@ export class JobRunner {
     spec.id = newJobId; delete spec.parent; delete spec.cause
     return this.enqueue(previous.root, spec, previous.owner, previous.authorSessionId)
   }
-  async stop(root: string): Promise<void> {
+  /**
+   * §2-1 [이 담당 멈추기] — 그 주문 하나만(Q2). 본대화도, 같은 폴더의 다른 주문도 건드리지
+   * 않는다. 세대(`generations`)도 올리지 않는다: 세대는 소유자·대화 단위 사건이라 여기서
+   * 올리면 진행 중인 다른 전달·제안이 조용히 무효가 된다.
+   */
+  async stopJob(jobId: string): Promise<JobRecord> {
+    const record = this.job(jobId)
+    for (const proposal of this.state.proposals) {
+      if (proposal.parentJobId === jobId && proposal.state === 'open') proposal.state = 'discarded'
+    }
+    // 결과가 아직 대화로 가지 않았다면 가지 않게 한다(`deliver` 의 첫 검사).
+    if (!this.state.delivered.includes(record.rootJobId)) this.state.delivered.push(record.rootJobId)
+    if (['queued', 'running', 'limit'].includes(record.status)) this.update(record, 'stopped')
+    else this.persist()
+    const active = this.active?.record.spec.id === jobId ? this.active : null
+    if (active) active.stopped = true
+    await active?.connection?.stop()
+    return structuredClone(record)
+  }
+  /**
+   * §2-1 앱 재시작 줄 [버리기] — 다시 맡기지 않고 접는다. `JobStatus` 에 `discarded` 가 없어
+   * (계약 고정) `stopped` 로 닫고, 화면 줄은 앱 저장소의 닫은 줄 목록이 감춘다.
+   */
+  discard(jobId: string): JobRecord {
+    const record = this.job(jobId)
+    if (record.status !== 'interrupted') throw new Error('Job cannot be discarded')
+    if (!this.state.delivered.includes(record.rootJobId)) this.state.delivered.push(record.rootJobId)
+    this.update(record, 'stopped')
+    return structuredClone(record)
+  }
+  /**
+   * §2-1 인증 [나중에] — 인증으로 멈춘 주문만 받는다. 그 주문은 `auth` 미실행 결과로 도우미에게
+   * 넘어간다. `execute` 가 이미 넘겼으면(at-most-once) 아무 일도 하지 않는다.
+   */
+  async authLater(jobId: string): Promise<JobRecord> {
+    const record = this.job(jobId)
+    if (record.status !== 'auth') throw new Error('Job is not waiting for authentication')
+    if (!this.state.delivered.includes(record.rootJobId)) await this.deliver(record)
+    return structuredClone(record)
+  }
+  /**
+   * 아직 정리가 끝나지 않은 담당 연결의 자식 pid — 종료 회수 대상(검토 C4 I-03).
+   * 마감을 넘긴 담당 연결은 `this.active` 가 비면 다른 경로로 pid 를 알 길이 없다.
+   */
+  ownedPids(): number[] {
+    const pids: number[] = []
+    for (const connection of this.relays.keys()) pids.push(...(connection.ownedPids?.() ?? []))
+    return [...new Set(pids)]
+  }
+  /** 종료·인계가 마감을 넘겨 회수도 못 한 담당 연결들 — 서비스가 `pending.pids` 에 합친다. */
+  unsettledConnections(): JobConnection[] { return [...this.relays.keys()] }
+
+  /**
+   * §3.5 [멈추기]의 **동기 절반** — 세대를 올리고, 제안을 버리고, 주문을 `stopped` 로 닫는다.
+   * 기다림(담당 연결·본대화 `stop()`)은 `settleStopped` 가 **마감 안에서** 맡는다.
+   *
+   * 예전에는 `stop()` 하나가 세대 올리기와 무한 대기를 함께 했다. 그래서 담당 `stop()` 이
+   * 끝나지 않으면 인계·종료 마감이 그것을 기다렸다(REVIEW-C4 I-03: `closeForUpdate` 4,209ms 미완료).
+   * 두 절반을 나누면 부르는 쪽이 **이미 아는 사실**(주문은 멈췄다)을 먼저 확정하고, 남은 정리는
+   * 자기 예산 안에서만 기다린다.
+   */
+  markStopped(root: string): void {
     root = canonical(root)
     this.generations.set(root, (this.generations.get(root) ?? 0) + 1)
     const records = this.state.jobs.filter(j => j.root === root)
     for (const p of this.state.proposals) if (this.job(p.parentJobId).root === root && p.state === 'open') p.state = 'discarded'
     for (const job of records) {
-      this.state.delivered.push(job.rootJobId)
+      // 두 번 불러도 원장이 자라지 않게 한다(`stop()` 재호출·`stop` 뒤 `close`).
+      if (!this.state.delivered.includes(job.rootJobId)) this.state.delivered.push(job.rootJobId)
       if (['queued', 'running', 'limit'].includes(job.status)) this.update(job, 'stopped')
     }
     if (this.active?.record.root === root) this.active.stopped = true
     this.persist()
-    const owners = new Map(records.map(j => [j.owner.id, j.owner]))
-    await Promise.all([
-      this.active?.record.root === root ? this.active.connection?.stop() : undefined,
-      ...[...owners.values()].map(owner => this.options.stopMain(owner))
-    ])
-    await this.draining
+  }
+  /**
+   * `markStopped` 가 남긴 정리를 **한 예산 안에서** 기다린다.
+   *
+   * - 진행 담당 연결의 `stop()` — `relay:<i>`
+   * - 그 폴더 주문들의 본대화 `stopMain` — `main:<i>`
+   *
+   * 마감을 넘긴 연결은 `relays` 에 남겨 `unsettledConnections()`/`ownedPids()` 로 소유권을
+   * 유지한다(재사용은 하지 않는다). `this.active` 는 건드리지 않는다 — 실행 루프의 `finally` 가
+   * 정리한다. 던지지 않고 결과를 돌려준다: 부르는 쪽이 분류를 정한다.
+   */
+  async settleStopped(roots: readonly string[], deadlineMs: number): Promise<{ pending: JobConnection[]; failed: unknown[] }> {
+    const scope = new Set(roots.map(root => canonical(root)))
+    const tasks: ShutdownTask[] = []
+    const relays: JobConnection[] = []
+    const active = this.active
+    // 같은 연결을 두 번 멈추지 않는다(fake 계수 시험이 `stops === 1` 을 잠근다). 이름도 한 번만.
+    if (active?.connection && scope.has(active.record.root) && !relays.includes(active.connection)
+      && this.relays.has(active.connection)) {
+      relays.push(active.connection)
+      tasks.push({ name: `relay:${relays.length - 1}`, start: () => active.connection!.stop() })
+    }
+    const owners = new Map<string, ConversationOwner>()
+    for (const record of this.state.jobs) if (scope.has(record.root)) owners.set(record.owner.id, record.owner)
+    let mainIndex = 0
+    for (const owner of owners.values()) {
+      const name = `main:${mainIndex++}`
+      tasks.push({ name, start: () => this.options.stopMain(owner) })
+    }
+    if (!tasks.length) return { pending: [], failed: [] }
+    const outcome = await shutdownWithin(tasks, Math.max(0, deadlineMs))
+    const pending = relays.filter((_, i) => outcome.pending.includes(`relay:${i}`))
+    // 정착한 담당 연결은 회수 목록에서 뺀다 — 남겨 두면 다음 `close()` 가 거짓 미완료를 본다.
+    for (const connection of relays) if (!pending.includes(connection)) this.relays.delete(connection)
+    return { pending, failed: outcome.failed.map(f => f.reason) }
+  }
+
+  /**
+   * §3.5 [멈추기] — 진행 담당·열린 제안·본대화를 함께 멈춘다.
+   *
+   * 기다림에는 **상한**이 있다(REVIEW-C4 I-03). 예전에는 `await this.draining` 이 마감 없이
+   * 실행 루프 전체를 기다렸고, 그 위에 담당·본대화 `stop()` 이 겹겹이 쌓여 인계·종료의 10초
+   * 예산을 갉아먹었다. 지금은 `markStopped` 로 상태를 먼저 확정하고 `settleStopped` 만 기다린다 —
+   * 실행 루프는 자기 `stopped` 표시를 보고 스스로 빠져나온다.
+   */
+  async stop(root: string): Promise<void> {
+    this.markStopped(root)
+    const settled = await this.settleStopped([root], STOP_DEADLINE_MS)
+    if (settled.pending.length) {
+      this.options.diagnostic({ type: 'stop-pending', pending: settled.pending.length })
+    }
+    if (settled.failed.length) throw settled.failed[0]
   }
 }

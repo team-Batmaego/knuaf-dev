@@ -89,6 +89,14 @@ interface ProjectState {
   consumeQuoteIntent: (seq: number) => void
   setFoldNotice: () => void
   settingsFocus: SettingsFocus
+  /**
+   * 대화의 [나눠 맡기기 켜기](설계 §2-2 지속 안내)가 설정 화면의 승인 카드까지 가야 한다.
+   * `settingsFocus` 는 펼침만 열 수 있어(`Settings.tsx` 의 `details[data-preset]`) 카드 요청은 따로 둔다.
+   * 설정 화면이 소비하면 곧바로 비운다 — 다시 열 때 옛 요청이 되살아나면 안 된다.
+   */
+  lanesCardRequest: 'enable' | 'revert' | null
+  requestLanesCard: (kind: 'enable' | 'revert') => void
+  consumeLanesCardRequest: () => void
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
   closeSheet: () => void
@@ -255,6 +263,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   consumeQuoteIntent: (seq) => set((s) => s.quoteIntent?.seq === seq ? { quoteIntent: null } : s),
   setFoldNotice: () => { if (get().paperClosed) set({ foldNotice: true }) },
   settingsFocus: null,
+  lanesCardRequest: null,
   logs: [],
   sections: null,
   materials: null,
@@ -290,6 +299,8 @@ export const useProject = create<ProjectState>((set, get) => ({
   setPreviewNotice: (previewNotice) => set({ previewNotice }),
   openSettings: (focus = null) => { set({ sheet: 'settings', settingsFocus: focus }); location.hash = 'settings' },
   clearSettingsFocus: () => set({ settingsFocus: null }),
+  requestLanesCard: (kind) => set({ lanesCardRequest: kind }),
+  consumeLanesCardRequest: () => set({ lanesCardRequest: null }),
   loadSettings: async () => {
     const settings = await window.knuaf.getSettings()
     const root = get().root
