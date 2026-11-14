@@ -827,7 +827,7 @@ async function terminalLockArgs(agentPath: string, root: string, env: NodeJS.Pro
   ])
   const rpc = new JsonRpcProcess(agentPath, serverArgsFor(env), root, env)
   try {
-    await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.2' }, capabilities: { experimentalApi: true } })
+    await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.4' }, capabilities: { experimentalApi: true } })
     rpc.send({ method: 'initialized', params: {} })
     const outcome = await codexToolLock({ root, form: 'terminal', injected: [], rpc })
     if (!outcome.ok) throw new AgentToolLockError(outcome.studentCopy)
