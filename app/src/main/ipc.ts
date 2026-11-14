@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, systemPreferences } from 'electron'
-import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
 import { probeProjectWritable } from './project-write'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
@@ -11,6 +11,9 @@ import { registerLinkIpc } from './links'
 // paper-images (v0.6.4 사진 갈래): 종이 칸 그림 — 스킴(`knuaf-img:`) 처리기 하나. electron 값 import 없음.
 import { createPaperImages } from './paper-images'
 import type { PaperImages } from './paper-images'
+// figures (v0.7 그림 갈래): 앱 전용 저장소·요청 감시를 여는 유일한 입구. 앱 상태는 전부 인자로 준다.
+import { startFigureChannel } from './figures'
+import type { FigureChannel } from './figures'
 import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
@@ -54,6 +57,36 @@ export function windowInfo(): WindowInfo {
   return { platform: process.platform, vibrancy: darwin && !reduceTransparency, titleBarInset: darwin, overlay: !darwin }
 }
 
+/**
+ * 그림 저장소 자리를 **동기로** 미리 만든다 — `figures/storage.ts` 의 `prepareHome` 과 같은 네 폴더.
+ *
+ * 왜 필요한가: 통로 쪽(`figures/index.ts`)은 이제 준비 실패를 스스로 삼키지만(I-03), 그때 그림은
+ * **조용히 꺼진 채** 앱이 뜬다. 저장소 자리를 여기서 먼저 만들어 두면 흔한 실패(권한·경로)를 앱 시작
+ * 시점에 알아채고 통로를 아예 열지 않을 수 있다. 뒤따르는 `prepareHome` 은 사실상 no-op 이 된다
+ * (같은 자리에 `mkdir recursive` 는 무해하다).
+ *
+ * 남는 창은 "지금 만든 폴더를 곧바로 지울 수 없게 되는" 경우뿐이다 — 그때는 통로를 열지 않고
+ * 끝나며 앱은 지금처럼 뜬다(그림만 꺼짐).
+ */
+function prepareFigureHome(figureHome: string): void {
+  mkdirSync(figureHome, { recursive: true })
+  for (const dir of ['res', 'store', 'choices', 'tmp']) mkdirSync(join(figureHome, dir), { recursive: true })
+  // 마지막 확인: `prepareHome` 이 하는 일이 "`tmp` 를 지우고 다시 만들기"라, 폴더가 있다는 것만으로는
+  // 부족하다(읽기 전용·남의 소유 폴더). 우리가 만든 임시 파일을 지워 그 권한을 실제로 확인한다.
+  const probe = join(figureHome, 'tmp', `.probe-${process.pid}`)
+  writeFileSync(probe, '')
+  unlinkSync(probe)
+}
+
+/**
+ * 폴더 표기를 realpath 로 푼다. 못 풀면 `null` — 그림 고리는 그 경로를 **쓰지 않는다**(건너뛴다).
+ * 통로 쪽 폴더 해시(`figures/turn.ts`·`storage.ts`)와 같은 값을 쓰기 위한 유일한 정규화 지점이다.
+ */
+function realFolder(root: string | null): string | null {
+  if (!root) return null
+  try { return realpathSync(root) } catch { return null }
+}
+
 /** Read `<root>/project.json` without the sidecar; never throws. */
 function peekProject(root: string): ProjectPeek {
   const out: ProjectPeek = { exists: false, hasProject: false, revision: null, project_id: null, mtime: null }
@@ -89,8 +122,23 @@ function findNestedProject(root: string): string | null {
 /**
  * Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit.
  * `images`는 스킴 처리기다 — `index.ts`만 `protocol`을 알므로 등록도 거기서 한다(ipc는 electron을 값으로 더 잡지 않는다).
+ * `figures`는 그림 통로다 — 열지 못했으면 `null`(앱은 그대로 뜨고 그림만 꺼진다).
  */
-export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages } {
+export function registerIpc(
+  sidecar: Sidecar,
+  win: () => BrowserWindow | null,
+  onRecentsChanged: () => void = () => {},
+  /**
+   * 그림 통로를 열 것인가. **`index.ts`(앱 생명주기 소유자)만 `true` 를 준다.**
+   *
+   * 통로는 타이머(하트비트·폴더 확인)를 가진 서비스라, 열었으면 반드시 `stop()` 해야 한다. 그
+   * 의무는 앱 종료 경로(`index.ts` 의 `figures.stop`)에 있다. 반면 대역 등록(단위 시험의 IPC
+   * 하네스)은 종료 경로가 없어 `stop()` 을 부르지 않으므로, 여기서 통로를 열면 시험이 자기 임시
+   * 폴더를 지운 뒤에도 타이머가 계속 돌아 **거절이 프로세스로 새어 나간다**. 그래서 기본값은
+   * "열지 않음"이고, 여는 쪽이 자기 정리 의무를 명시한다.
+   */
+  runFigures = false
+): { chat: ChatService; images: PaperImages; figures: FigureChannel | null } {
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
@@ -114,6 +162,36 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const store = new SkillStore(app.getPath('userData'), skillSource(APP_ROOT, app.isPackaged, process.resourcesPath), app.getVersion(), config.keys)
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
   configureSkillSource(() => store.resolveSkillSource())
+  /**
+   * figures (v0.7 그림 갈래): 그림 통로. `index.ts` 가 앱 시작에 한 번 열고 종료에 닫는다.
+   *
+   * 여기서 하는 일은 셋뿐이다 — 저장소 자리(`<userData>/figures`)를 만들고, 앱 상태를 **인자로**
+   * 넘기고(`getFolder`·`resolveSkillSource`), 실패하면 통로를 **아예 만들지 않는다**. 마지막이
+   * 요점이다: 그림은 대화의 조건이 아니므로, 열지 못하면 그림만 꺼지고 앱은 지금처럼 뜬다
+   * (학생 화면에 오류·알림 없음). 자리 만들기를 먼저 하는 이유도 같다 — 저장소를 못 만들면
+   * 통로를 열지 않고 끝나므로, 뒤늦게 터지는 쓰기 실패가 앱 시작 경로로 새지 않는다.
+   */
+  const figureHome = join(app.getPath('userData'), 'figures')
+  const figures: FigureChannel | null = ((): FigureChannel | null => {
+    if (!runFigures) return null
+    try {
+      prepareFigureHome(figureHome)
+      return startFigureChannel({
+        figureHome,
+        /**
+         * 계약은 **논문 폴더 realpath**다. `currentRoot` 는 `project:open` 이 받은 경로 그대로라
+         * 심링크일 수 있으므로 여기서 푼다 — 못 풀면(열린 채 지워진 폴더) 그 경로를 그대로 주지 않고
+         * `null` 을 돌려 통로를 닫는다. 폴더가 없으면 요청을 집을 곳도 없다.
+         */
+        getFolder: () => realFolder(currentRoot),
+        resolveSkillSource: () => store.resolveSkillSource()
+      })
+    } catch (error) {
+      // 규칙집 보관 정리 실패와 같은 모양으로 남긴다 — 앱은 계속 뜬다(그림만 꺼짐).
+      console.error('[knuaf] 그림 통로를 열지 못했어요', error)
+      return null
+    }
+  })()
   const updates = new SkillUpdates(store, {
     config, fetch: netRequestTransport,
     restartSidecar: () => sidecar.restart(),
@@ -591,6 +669,34 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const chat = new ChatService({
     skillSource: () => skillSource(APP_ROOT, app.isPackaged, process.resourcesPath),
     userData: app.getPath('userData'),
+    /**
+     * figures (v0.7 그림 갈래): 통로의 고리 넷을 그대로 넘긴다. 통로를 못 열었으면 `undefined` —
+     * 그러면 `ChatService` 는 지금까지와 같은 객체를 쓰고 env 도 손대지 않는다(바이트까지 동일).
+     *
+     * `env` 는 규칙집이 읽는 이름 **둘뿐**이다(`CONTRACT.md` §1). `KNUAF_GUI` 는 앱 밖과 앱 안의
+     * 선택 규칙이 다르기 때문에 필요하고(§4: 앱 안은 앱 기록 학생 메시지가 정확히 X 여야 한다),
+     * `KNUAF_FIGURE_HOME` 은 저장소 자리다. 지금 판(규칙집 v0.4.10)에는 이 이름을 읽는 코드도
+     * 그림 명령도 없으므로, 이 두 값은 그냥 환경에 얹혀 아무 일도 일으키지 않는다.
+     */
+    figures: figures ? {
+      env: { KNUAF_GUI: '1', KNUAF_FIGURE_HOME: figureHome },
+      /**
+       * `ChatService` 가 넘기는 `root` 는 `send` 의 인자 = `currentRoot` 그대로라 **심링크일 수 있다**.
+       * 반면 통로의 `getFolder` 는 realpath 를 주고, 감시자·후보표는 그 값으로 폴더를 가른다
+       * (`turn.json` 의 `folder`, `choices/<해시>`). 여기서 풀지 않으면 턴 파일과 감시자가 다른 폴더를
+       * 가리켜, 방금 연 턴의 요청이 전부 `stale` 이 된다. 그래서 고리에 넘기기 전에 풀고,
+       * 못 풀면(열린 채 지워진 폴더) 그 고리는 **건너뛴다** — 없는 폴더로 턴을 열지 않는다.
+       */
+      beginTurn: (root, turnId) => {
+        const real = realFolder(root)
+        return real === null ? Promise.resolve() : figures.beginTurn(real, turnId)
+      },
+      endTurn: (turnId) => figures.endTurn(turnId),
+      recordStudentMessage: (root, text) => {
+        const real = realFolder(root)
+        return real === null ? Promise.resolve(0) : figures.recordStudentMessage(real, text)
+      }
+    } : undefined,
     // 지킴이 무결성 열쇠(§4.3). OS 보관소(`safeStorage`)를 못 쓰면 `null` — 지킴이는 꺼지고
     // Codex 연결은 종전 경로 그대로 돈다. 열쇠를 꺼내는 일은 앱 시작 때 한 번뿐이다.
     guardKey: loadGuardKey(app.getPath('userData'), safeStorage),
@@ -885,5 +991,6 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   sidecar.on('log', (entry) => win()?.webContents.send('sidecar:log', entry))
   sidecar.on('exit', (entry) => win()?.webContents.send('sidecar:exit', entry))
-  return { chat, images }
+  // figures (v0.7 그림 갈래): 통로는 `index.ts` 가 종료에 닫는다(창·IPC 는 이 값을 모른다).
+  return { chat, images, figures }
 }

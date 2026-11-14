@@ -49,6 +49,32 @@ const CLOSE_CONNECTION_DEADLINE_MS = 3_000
  * 더해지므로, 이 값만으로 "10초 안에 닫힌다"를 보장할 수는 없다.
  */
 export const QUIT_FLUSH_DELAYS_MS = [20, 30]
+/**
+ * 그림 준비(옛 턴 닫기·후보표·턴 열기)를 기다리는 상한(I-02).
+ *
+ * 이 대기는 **엔진을 부르기 전**이라 `runs` 에 아직 없다. 상한이 없으면 옛 `endTurn()` 하나가 안
+ * 끝날 때 그 폴더의 다음 전송이 영원히 매달린다. 넘기면 그림 고리만 건너뛰고 엔진을 부른다 —
+ * 늦게 끝난 옛 `endTurn` 이 새 `turn.json` 을 지우는 문제는 통로 쪽 소유권 검사가 막는다.
+ */
+const FIGURE_PREP_DEADLINE_MS = 3_000
+
+/**
+ * 그림 준비 대기 하나(I-02). `stop()`·종료가 `wake()` 로 깨우고, 깨운 쪽은 `cancelled` 로 끝난다.
+ * 기다리는 쪽이 `settle()` 을 부르면 그 뒤의 `wake()` 는 아무 일도 하지 않는다(한 번만 정착).
+ */
+interface PrepWait {
+  promise: Promise<void>
+  /** 대기 끝 — 정상 정착(계속 진행) 또는 취소. 이미 정착했으면 무시된다. */
+  settle(): void
+  wake(): void
+  cancelled: boolean
+}
+
+interface Prep extends PrepWait {
+  settled: boolean
+  /** 이 시각을 넘기면 남은 고리를 포기하고 엔진을 부른다(준비 전체의 상한). */
+  until: number
+}
 // 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
@@ -61,6 +87,23 @@ export class ChatService {
   private connections = new Map<string, AgentConnection>()
   private owners = new Set<string>()
   private runs = new Map<string, Promise<void>>()
+  /**
+   * 아직 안 끝난 `figures.endTurn()` — 턴이 끝난 **뒤**에 시작해 다음 턴 **전**에 기다린다.
+   *
+   * 왜 잠금과 분리했나: 잠금 해제(`release`)를 `endTurn()` 뒤로 미루면, 그 사이 스냅샷은 이미
+   * `idle` 인데 폴더는 잠겨 있어 학생의 바로 다음 전송이 "작업이 끝난 뒤 다시 실행해 주세요"로
+   * 거절된다(통로가 있을 때도 똑같이 터진다). 그래서 잠금은 예전처럼 즉시 풀고, 턴 닫기만
+   * 약속으로 잡아 둔다. 순서는 그대로 지켜진다 — 옛 `endTurn` 이 끝나기 전에는 새 턴을 열지 않는다.
+   */
+  private figureClosing: Promise<void> | null = null
+  /**
+   * 그림 준비(옛 턴 닫기 → 후보표 → 턴 열기) 중인 요청의 취소 토큰(I-02).
+   *
+   * 그 대기는 엔진 실행 **전**이라 `runs` 에 아직 없다. 그래서 `stop()` 이 `runs` 만 보면 대기 중인
+   * 전송을 멈출 수 없고, 대기 풀린 뒤 엔진이 뒤늦게 실행된다(검토 실측). 여기 등록해 두면 `stop()` 이
+   * 대기를 깨우고, 대기 뒤 취소를 본 `send` 는 엔진을 부르지 않는다.
+   */
+  private preps = new Map<string, PrepWait>()
   private shuttingDown = false
   private authRequired = new Set<Provider>()
   private authGeneration: Record<Provider, number> = { codex: 0, claude: 0 }
@@ -124,7 +167,11 @@ export class ChatService {
     }
   }
   /** 종료 시작과 동시에 새 연결·상태 확인을 막는다. 기존 연결은 close()가 정리한다. */
-  beginShutdown(): void { this.shuttingDown = true }
+  beginShutdown(): void {
+    this.shuttingDown = true
+    // 종료도 그림 준비 대기를 깨운다(I-02) — 종료 중에 매달린 전송이 남지 않게.
+    for (const prep of this.preps.values()) prep.wake()
+  }
   private ensureActive(): void {
     if (this.shuttingDown) throw new Error('앱을 종료하고 있어요.')
   }
@@ -181,6 +228,19 @@ export class ChatService {
      * 덮지 않는다(검토 MC1-03).
      */
     storeModelChoice?: (provider: Provider, choice: ModelChoice | null) => void
+    /**
+     * 그림 통로(`figures/index.ts` 의 `FigureChannel`). 앱이 하는 일은 **고리 넷**뿐이다 — 메인 엔진의
+     * 환경에 저장소 자리를 얹고(`env`), 학생 원문을 후보표에 남기고(`recordStudentMessage`),
+     * 턴을 열고(`beginTurn`), 닫는다(`endTurn`). 무엇을 어떻게 할지는 규칙집이 정한다: 그림 명령이
+     * 없는 판에서는 이 고리가 불려도 조용해야 한다. 없으면 지금까지와 바이트까지 같은 동작이다.
+     */
+    figures?: {
+      env: Record<string, string>
+      beginTurn(root: string, turnId: string): Promise<void>
+      /** `turnId` 를 받는 이유는 통로가 하나뿐이기 때문이다 — 소유자만 자기 턴을 닫는다(I-01). */
+      endTurn(turnId: string): Promise<void>
+      recordStudentMessage(root: string, text: string): Promise<number>
+    }
     /** Test seam: 대화 기록·초안을 쓰는 파일시스템(e2e/safe-write.spec.ts 가 실패를 주입한다). */
     fs?: SafeWriteFs
   }) {}
@@ -446,8 +506,13 @@ export class ChatService {
     let c = this.connections.get(key)
     if (!c) {
       const guard = this.guardFor(root)
+      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))
+      const figureEnv = this.opts.figures?.env
       const options: AgentOptions = {
-        binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
+        binary: '', root, skill: this.skillDir(root, provider),
+        // 그림 통로의 저장소 자리는 **메인 턴 엔진에만** 얹는다. 고리가 없으면 같은 객체 그대로다
+        // (정체성까지 지금과 같다) — 전역 연결(상태 확인·로그인)에는 얹지 않는다, 턴이 없으니까.
+        env: figureEnv ? { ...env, ...figureEnv } : env,
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
         guard,
         // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
@@ -675,7 +740,79 @@ export class ChatService {
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
       this.publish(s)
-      const run = this.execute(s, live, text, requestId).finally(release)
+      /**
+       * 그림 통로 고리 — 학생 메시지가 대화에 남은 뒤, 엔진을 부르기 전. 그림 명령이 없는 판에서는
+       * 이 고리가 할 일이 없고, 있는 판에서도 그림은 대화의 **조건이 아니다**: 던지거나 거절하면
+       * 조용히 버린다(학생 화면에 오류·알림을 만들지 않는다). 순서는 계약이다 —
+       * `recordStudentMessage`(후보표에 원문) → `beginTurn`(턴 열기). turnId 는 이 요청 id.
+       */
+      const figures = this.opts.figures
+      const figureKey = this.key(root, provider)
+      if (figures) {
+        /**
+         * 그림 준비 대기 — 옛 턴 닫기 · 후보표 · 턴 열기(I-02). 이 대기는 엔진 실행 **전**이라 `runs`
+         * 에 아직 없다. 그래서 취소 토큰(`preps`)에 등록해 중단·종료가 깨울 수 있게 하고, 전체 대기에
+         * 상한도 둔다. 깨우면 남은 고리를 건너뛰고 **엔진을 부르지 않는다**(중단된 요청을 뒤늦게
+         * 실행하지 않는다). 상한을 넘기면 그림 고리만 포기하고 대화는 그대로 간다 — 그때 늦게 끝나는
+         * 옛 `endTurn` 이 새 턴을 지우지 않는 것은 통로가 맡는다: 소유권 검사와 `turn.json` 쓰기·지우기가
+         * 통로 안의 **한 사슬**에 서 있어(I-01 남은 경계), 늦은 옛 삭제가 새 턴의 파일에 닿지 않는다.
+         */
+        const prep = this.beginFigurePrep(figureKey)
+        let opening: Promise<unknown> = Promise.resolve()
+        try {
+          // 옛 턴의 `endTurn()` 이 아직 돌고 있으면 **새 턴을 열기 전에** 기다린다. 안 기다리면 옛
+          // `endTurn` 이 방금 연 새 턴의 `turn.json` 을 지워, 감시자가 새 턴의 요청을 전부 `stale` 로 본다.
+          const closing = this.figureClosing
+          if (closing) {
+            await this.racePrep(prep, closing)
+            if (this.figureClosing === closing) this.figureClosing = null
+          }
+          if (!prep.settled) await this.racePrep(prep, figures.recordStudentMessage(root, text))
+          // 취소된 뒤에는 턴을 열지 않는다 — 열면 곧바로 닫아야 하고, 그 사이 감시자가 요청을 집는다.
+          if (!prep.settled) {
+            opening = figures.beginTurn(root, requestId)
+            await this.racePrep(prep, opening)
+          }
+        } finally {
+          prep.settle()
+          if (this.preps.get(figureKey) === prep) this.preps.delete(figureKey)
+        }
+        if (prep.cancelled) {
+          // 중단·종료가 준비 도중에 왔다. `stop()` 이 이미 `stopped` 를 게시했다 — 여기서 엔진을 부르면
+          // 학생이 멈춘 턴이 뒤늦게 시작된다. 잠금만 풀고 지금 스냅샷을 돌려준다.
+          //
+          // 다만 **열린 턴은 닫는다**. 안 닫으면 감시자가 멈춘 턴의 요청을 계속 집는다. `beginTurn` 이
+          // 아직 도는 중일 수 있으므로 그 약속 뒤에 닫고, 그 약속은 다음 전송이 기다리도록 기존
+          // `figureClosing` 에 잡아 둔다(소유권 검사가 있어 새 턴을 지울 위험은 없다).
+          this.trackFigureClose(figures, requestId, opening)
+          // 엔진에 닿지 못했지만 학생 화면에서는 "전송 중"이 영원히 남으면 안 된다 — 중단으로 끝난
+          // 턴(`execute` 의 catch)과 같은 표기로 맞춘다.
+          const sentMsg = s.messages.find((m) => m.id === requestId)
+          if (sentMsg?.delivery === 'pending') sentMsg.delivery = 'uncertain'
+          // `stop()` 이 게시한 것과 같은 상태로 맞춘다 — 종료 경로(`beginShutdown`)로 깨어난 경우에도
+          // 스냅샷이 'running' 으로 남아 학생 화면이 "작업 중"에 걸리지 않게.
+          if (s.state === 'running' || s.state === 'permission') { s.state = 'stopped'; s.error = undefined; this.publish(s) }
+          release()
+          return structuredClone(s)
+        }
+      }
+      /**
+       * 잠금 해제는 통로가 있든 없든 **예전 그대로** `.finally(release)` 다. `async` 콜백·`await` 로
+       * 감싸면 해제가 마이크로태스크만큼 늦어지는데, 그 사이 `state` 는 이미 `idle` 이라
+       * (`execute` 가 반환 전에 정한다) 바로 다음 `send` 가 `acquire` 에서 "작업 중"으로 거절된다
+       * (`e2e/chat.spec.ts` "규칙집 갱신" 시험이 결정적으로 그 자리였다). 그래서 통로가 있을 때는
+       * 잠금을 그대로 풀고 `endTurn()` **약속만** `figureClosing` 에 잡아 둔다 — 다음 턴이 시작 전에
+       * 그 약속을 기다린다(위 `figures` 블록). 통로가 없으면 이 블록 자체가 없다(바이트 동일 경로).
+       */
+      const finished = this.execute(s, live, text, requestId)
+      const run = figures
+        ? finished.finally(() => {
+          // 턴이 성공·실패·중단 어느 쪽으로 끝나도 닫는다. 동기 예외까지 삼키고 잠금은 반드시 푼다.
+          try { this.trackFigureClose(figures, requestId) }
+          catch { /* 위와 같다 */ }
+          finally { release() }
+        })
+        : finished.finally(release)
       this.runs.set(this.key(root, provider), run)
       void run.finally(() => this.runs.delete(this.key(root, provider)))
       return structuredClone(s)
@@ -771,6 +908,60 @@ export class ChatService {
     this.publish(s)
   }
   /**
+   * 그림 턴 닫기를 `figureClosing` 에 잡아 둔다 — 다음 전송이 이 약속 **전체**를 기다린다.
+   *
+   * 이미 잡힌 종료가 있으면(준비 상한을 넘겨 기다리지 못한 것) 그것도 함께 기다린다. 덮어쓰면 그 종료가
+   * 새 턴의 `turn.json` 을 지울 수 있는데, 그 한 번을 놓치는 것이 여기서 잃는 전부는 아니다.
+   * 동기 예외까지 삼키고 잠금 해제는 호출부가 한다(그림은 대화의 조건이 아니다).
+   */
+  private trackFigureClose(figures: { endTurn(turnId: string): Promise<void> }, turnId: string, opening: Promise<unknown> = Promise.resolve()): void {
+    const previous = this.figureClosing ?? Promise.resolve()
+    // `opening` 이 거절해도 턴은 닫아야 한다 — 열렸는지 확실하지 않으면 통로가 소유권으로 판단한다.
+    const close = Promise.allSettled([previous, opening]).then(() => figures.endTurn(turnId))
+    this.figureClosing = close.catch(() => { /* 그림 통로 실패는 대화에 알리지 않는다 */ })
+  }
+  /**
+   * 그림 준비 대기 하나를 연다(I-02). 같은 폴더·공급자의 옛 대기가 남아 있으면 먼저 깨운다 — 잠금이
+   * 이미 그 자리를 배타적으로 쥐고 있으므로 실제로는 하나뿐이지만, 남아 있다면 그것은 끝나지 않은
+   * 대기이고 새 전송을 막을 이유가 없다.
+   */
+  private beginFigurePrep(key: string): Prep {
+    this.preps.get(key)?.wake()
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const prep: Prep = {
+      promise,
+      settled: false,
+      cancelled: false,
+      // 상한은 준비 **전체**에 하나다 — 고리마다 새로 재면 세 고리가 각각 기다려 3배가 된다.
+      until: Date.now() + FIGURE_PREP_DEADLINE_MS,
+      settle() {
+        if (prep.settled) return
+        prep.settled = true
+        resolve()
+      },
+      wake() {
+        prep.cancelled = true
+        prep.settle()
+      }
+    }
+    this.preps.set(key, prep)
+    return prep
+  }
+  /**
+   * 준비 대기 하나를 **상한·취소** 안에서 기다린다. 거절은 삼킨다(그림은 대화의 조건이 아니다).
+   * 상한을 넘기면 그 대기는 포기하고 진행한다 — 통로 쪽 소유권 검사가 늦은 `endTurn` 을 무해하게 만든다.
+   */
+  private async racePrep(prep: Prep, work: Promise<unknown>): Promise<void> {
+    if (prep.settled) return
+    const settled = work.then(() => 'work' as const, () => 'work' as const)
+    const { promise: timer, resolve } = Promise.withResolvers<'timer'>()
+    const handle = setTimeout(() => resolve('timer'), Math.max(0, prep.until - Date.now()))
+    handle.unref?.()
+    try {
+      await Promise.race([settled, prep.promise.then(() => 'prep' as const), timer])
+    } finally { clearTimeout(handle) }
+  }
+  /**
    * 연결 정리 하나를 상한 안에서 기다린다.
    *
    * `shutdownWithin` 은 던지지 않으므로, **정착한 거절은 종전처럼 다시 던진다**(IPC 오류 문구가
@@ -791,7 +982,14 @@ export class ChatService {
     // 시계도 문자열도 만들지 않는다(검토 RT3 권고) — 중단 버튼은 학생이 누르는 경로다.
     const traced = diagEnabled()
     const startedAt = traced ? Date.now() : 0
-    if (s && this.runs.has(key)) { s.state = 'stopped'; s.error = undefined; this.publish(s) }
+    /**
+     * 아직 `runs` 에 없는 **그림 준비 대기**도 멈춘다(I-02). 이걸 빼면 중단이 효력이 없어 대기가 풀린 뒤
+     * 엔진이 뒤늦게 실행된다(검토 실측). 상태를 `stopped` 로 게시하는 것과 같은 틱에 깨운다 — 그래야
+     * 깨어난 `send` 가 게시된 `stopped` 를 그대로 보고 엔진을 부르지 않는다.
+     */
+    const prep = this.preps.get(key)
+    prep?.wake()
+    if (s && (this.runs.has(key) || prep)) { s.state = 'stopped'; s.error = undefined; this.publish(s) }
     // 멈춘 연결은 버린다 — 다음 send/status 가 새 연결을 열어야 '다시 확인'이 살아난다.
     const connection = this.connections.get(key)
     if (traced) diag(`stop:connection:start provider=${provider} has=${connection ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
