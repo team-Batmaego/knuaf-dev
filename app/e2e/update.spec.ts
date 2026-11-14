@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { createServer } from 'node:http'
-import type { AddressInfo, Socket } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -571,18 +571,32 @@ test('channel 302 surfaces as a response, the allowlist rejects it, and the poin
   }
 })
 
+/** 사건이 창 안에 서지 않으면 실패로 닫는 상한 — 판정 값이 아니라 실패 처리용이다. */
+async function within<T>(milliseconds: number, work: Promise<T>, what: string): Promise<T> {
+  const { promise, resolve, reject } = Promise.withResolvers<T>()
+  const timer = setTimeout(() => reject(new Error(`${what} — ${milliseconds}ms 안에 사건이 서지 않았다(실패 상한)`)), milliseconds)
+  void work.then(resolve, reject)
+  try { return await promise } finally { clearTimeout(timer) }
+}
+
 /**
- * Roh R-01 회귀 시험 — 받은 본문을 **큐에 쌓지 않고** 소비자 속도로 당긴다.
+ * Roh R-01 회귀 시험 — 받은 본문을 **큐에 쌓지 않고** 소비자 속도로 당긴다(수신 배압).
  *
- * 예전 구현은 `data` 를 붙여 흘려 받았다: 4MiB 응답을 300ms 동안 읽지 않아도 4,194,304바이트가
- * 전부 들어왔다(R1 실측). 본문 상한은 80MiB(`manifest.MAX_BYTES`)·1GiB
- * (`appManifest.MAX_INSTALLER_BYTES`)라 그 큐가 힙에 그대로 남는다.
- *
- * 그래서 16MiB 를 로컬에서 주고, **읽지 않고 1.5초** 둔 뒤 서버가 실제로 몇 바이트를 내보냈는지 본다.
- * 흘려 받는 구현이면 16MiB 가 loopback 에서 수십 ms 만에 다 나가 서버 쓰기가 끝나 있다. 당기는
- * 구현이면 서버 쓰기가 `drain` 에서 멈춘다(`allWritten=false`). 이어서 끝까지 읽어 **바이트 수와
- * SHA-256 이 일치**하는지 확인한다(배압이 본문을 자르지 않는다는 증거). 마지막으로 큐가 멈춘
- * 상태에서 '취소'가 연결을 실제로 끊는지(`AbortError` + 서버 소켓 close) 확인한다.
+ * 판정은 **사건**으로 한다. 고정 대기·표본·전송률 비율로 하지 않는다(Roh BP1-R-01):
+ *   1. 소비자는 응답을 연 뒤 **한 번도 읽지 않는다**. 있으면 안 되는 것은 '읽지 않는데 본문이
+ *      끝까지 들어오는 것'이다.
+ *   2. 서버는 16MiB 를 64KiB 씩 밀고, `res.write()` 가 false 를 돌려주면 `drain` 을 기다린다.
+ *      16MiB 는 루프백 소켓·Chromium 버퍼 어느 것으로도 다 들어가지 않는다 — 흘려 받는 구현은
+ *      소비자가 없어도 끝까지 밀어 넣고 `finished` 가 선다.
+ *   3. 테스트는 `finished`(끝까지 밀었다 = 배압 없음)와 '막혀 멈춤'(배압 있음)을 사건으로 가른다.
+ *      판정의 뼈대는 **`blocked`(`res.write()` 가 false)가 섰고, 읽기를 재개하기 전까지 `finished`
+ *      가 서지 않았다**는 두 사건이다. 그 사이에 오는 `drain` 은 소켓·Chromium 버퍼가 흡수한 몫이라
+ *      멈춤이 아니므로 창을 다시 세고, 창이 잇달아 두 번 조용해야 '더 못 밀었다'로 닫는다. 창의
+ *      길이는 판정 값이 아니라 '더 올 사건이 없다'를 닫는 장치다(진행 사건이 서면 즉시 끝난다).
+ *   4. 그 다음에야 **읽기를 재개한다**(명시 신호, 표본 경계와 분리). 재개하면 `finished` 가 서고
+ *      본문은 16,777,216바이트 + SHA-256 일치로 끝까지 온다 — 막고 있던 것이 소비자였음의 증거다.
+ *      배압 없는 옛 구현은 1에서 이미 `finished` 가 서므로 이 단계에 오지 못하고 결정적으로 실패한다.
+ *   5. 마지막으로 멈춘 상태에서 '취소' → `AbortError`, 서버 소켓 `close` 사건.
  *
  * 전송 계층은 Electron 메인에만 있으므로 앱을 띄워 `netTransport.ts` 를 그 자리에서 심는다.
  */
@@ -591,25 +605,47 @@ test('a stalled consumer stops the transfer instead of buffering the whole body,
   for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) & 0xff
   const digest = createHash('sha256').update(payload).digest('hex')
 
-  // 서버 쪽 관측점: 이 요청의 소켓이 실제로 내보낸 바이트와, 쓰기 루프가 끝났는지.
-  let socketRef: Socket | null = null
-  let allWritten = false
-  let socketClosed = false
+  /**
+   * 사건 하나. 값은 사건이 설 때 서버 쪽에서 **직접** 오르고, 기다리는 쪽은 그 수가 달라지기를
+   * 기다린다 — 표본을 되짚어 추정하지 않는다. `drain` 처럼 여러 번 서는 사건도 같은 방식으로 센다.
+   */
+  type Signal = { readonly count: number; bump(): void; waitFor(from: number): Promise<void> }
+  const signal = (): Signal => {
+    const waiters: (() => void)[] = []
+    let total = 0
+    return {
+      get count() { return total },
+      bump() { total += 1; for (const wake of waiters.splice(0)) wake() },
+      waitFor(from: number) {
+        if (total !== from) return Promise.resolve()
+        const { promise, resolve } = Promise.withResolvers<void>()
+        waiters.push(resolve)
+        return promise
+      }
+    }
+  }
+  /** 연결 하나의 관측점. 서버 쓰기 루프가 사건을 세운다. */
+  type Conn = { sent: number; blocked: Signal; drained: Signal; finished: Signal; closed: Signal }
+  const conns: Conn[] = []
   const server = createServer((req, res) => {
-    const socket = req.socket
-    socketRef = socket
-    socket.on('close', () => { socketClosed = true })
+    const conn: Conn = { sent: 0, blocked: signal(), drained: signal(), finished: signal(), closed: signal() }
+    conns.push(conn)
+    req.socket.on('close', () => conn.closed.bump())
     void (async () => {
       res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(payload.length) })
       for (let offset = 0; offset < payload.length; offset += 64 * 1024) {
-        if (!res.write(payload.subarray(offset, offset + 64 * 1024))) {
-          const drained = Promise.withResolvers<void>()
-          res.once('drain', drained.resolve)
-          await drained.promise
-        }
+        const chunk = payload.subarray(offset, offset + 64 * 1024)
+        const accepted = res.write(chunk)
+        conn.sent += chunk.length
+        if (accepted) continue
+        conn.blocked.bump()
+        // 소비자가 당겨 소켓이 빌 때까지 여기서 선다 — 이동이 이 사건으로만 일어난다.
+        const drained = Promise.withResolvers<void>()
+        res.once('drain', () => { conn.drained.bump(); drained.resolve() })
+        await drained.promise
       }
       res.end()
-      allWritten = true
+      conn.finished.bump()
     })().catch(() => {})
   })
   const listening = Promise.withResolvers<void>()
@@ -622,10 +658,10 @@ test('a stalled consumer stops the transfer instead of buffering the whole body,
   }).outputText
 
   const { electronApp } = await launch({ env: { KNUAF_AGENT_PATH_ONLY: '1' } })
-  const stall = 1_500
-  type Outcome = { stallStart: number; stallEnd: number; bytes: number; digest: string; error: string }
-  const run = (mode: 'stall' | 'cancel'): Promise<Outcome> =>
-    electronApp.evaluate(async (electron, args) => {
+  type Body = { bytes: number; digest: string; error: string }
+  /** 응답을 열고 **거기서 멈춘다** — 읽기는 테스트가 `consume` 으로 따로 지시한다. */
+  const open = async (): Promise<void> => {
+    await electronApp.evaluate(async (electron, args: { source: string; url: string }) => {
       type Transport = (url: string, init: { signal: AbortSignal; redirect: 'manual' }) => Promise<Response>
       const loaded = { exports: {} as { netRequestTransport: Transport } }
       // 실물 모듈을 그대로 심는다 — `electron` 말고는 의존하지 않는다(계약 import 는 타입뿐이라 사라진다).
@@ -633,77 +669,114 @@ test('a stalled consumer stops the transfer instead of buffering the whole body,
         if (name === 'electron') return electron
         throw new Error(`unexpected dependency ${name}`)
       }, loaded, loaded.exports)
-      const { createHash } = process.getBuiltinModule('node:crypto')
       const controller = new AbortController()
       const response = await loaded.exports.netRequestTransport(args.url, { signal: controller.signal, redirect: 'manual' })
       const reader = response.body!.getReader()
-      const hash = createHash('sha256')
-      let bytes = 0
-      let error = ''
-      const stallStart = Date.now()
-      const waited = Promise.withResolvers<void>()
-      setTimeout(waited.resolve, args.stall)
-      await waited.promise
-      const stallEnd = Date.now()
-      if (args.mode === 'cancel') {
-        controller.abort()
-        // 취소는 **다음 당김**에서 드러난다(이미 큐에 든 조각 하나는 정상 반환). 그래서 끝까지 당겨 본다.
-        for (;;) {
-          try {
-            const { done } = await reader.read()
-            if (done) break
-          } catch (thrown) {
-            const failure = thrown as Error
-            error = `${failure.name}:${failure.message}`
-            break
+      Reflect.set(globalThis, 'stallProbe', {
+        consume: async (mode: 'stall' | 'cancel'): Promise<{ bytes: number; digest: string; error: string }> => {
+          const { createHash } = process.getBuiltinModule('node:crypto')
+          const hash = createHash('sha256')
+          let bytes = 0
+          let error = ''
+          if (mode === 'cancel') {
+            controller.abort()
+            // 취소는 **다음 당김**에서 드러난다(이미 당겨 둔 조각 하나는 정상 반환). 그래서 끝까지 당긴다.
+            for (;;) {
+              try {
+                const { done } = await reader.read()
+                if (done) break
+              } catch (thrown) {
+                const failure = thrown as Error
+                error = `${failure.name}:${failure.message}`
+                break
+              }
+            }
+            return { bytes, digest: '', error }
           }
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            bytes += value.byteLength
+            hash.update(value)
+          }
+          return { bytes, digest: hash.digest('hex'), error }
         }
-        return { stallStart, stallEnd, bytes, digest: '', error }
-      }
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        bytes += value.byteLength
-        hash.update(value)
-      }
-      return { stallStart, stallEnd, bytes, digest: hash.digest('hex'), error }
-    }, { source, url, stall, mode })
+      })
+    }, { source, url })
+  }
+  const consume = (mode: 'stall' | 'cancel'): Promise<Body> =>
+    electronApp.evaluate(async (_electron, how: 'stall' | 'cancel') => {
+      const probe = Reflect.get(globalThis, 'stallProbe') as { consume: (mode: 'stall' | 'cancel') => Promise<{ bytes: number; digest: string; error: string }> }
+      return await probe.consume(how)
+    }, mode)
 
-  /** 멈춰 있는 동안 서버가 내보낸 양. 흘려 받는 구현이면 여기서 이미 16MiB 가 다 나간다. */
-  const sample = async (outcome: Promise<{ stallStart: number; stallEnd: number }>): Promise<{ peak: number; finished: boolean }> => {
-    const samples: { t: number; flushed: number; written: boolean }[] = []
-    const timer = setInterval(() => samples.push({ t: Date.now(), flushed: socketRef?.bytesWritten ?? 0, written: allWritten }), 25)
-    let window: { stallStart: number; stallEnd: number }
-    try { window = await outcome } finally { clearInterval(timer) }
-    const during = samples.filter(entry => entry.t >= window.stallStart && entry.t <= window.stallEnd)
-    return { peak: Math.max(0, ...during.map(entry => entry.flushed)), finished: during.some(entry => entry.written) }
+  const QUIET = 500
+  const OBSERVE = 30_000
+  const CONFIRM = 2
+  /**
+   * 읽기를 재개하지 않은 채로 서버가 '더 못 밀고 멈췄는지'(`quiet`) '끝까지 밀었는지'(`finished`)를
+   * 사건으로 가른다. 두 단계다:
+   *   1. `blocked`(`res.write()` 가 false)가 서기를 기다린다 — 밀려 막힌 증거다. 흘려 받는 구현은
+   *      소비자가 없어도 소켓이 계속 비어 `blocked` 가 서지 않고 `finished` 가 먼저 선다.
+   *   2. 막힌 뒤 `drain` 이 QUIET 동안 하나도 안 서는 창이 **잇달아 CONFIRM 번** 서면 멈춤이다.
+   *      소켓·Chromium 버퍼가 흡수하는 몫은 `drain` 으로 오므로 창은 매번 새로 선다. 창 하나로
+   *      끊지 않는 이유는 같은 이유다 — 늦게 도착하는 `drain` 한 번이 판정을 뒤집지 않게 한다.
+   * QUIET·OBSERVE 는 판정 값이 아니라 '더 올 사건이 없다'를 닫는 실패 상한이다(사건이 서면 즉시 끝난다).
+   */
+  const settle = async (conn: Conn): Promise<'finished' | 'quiet'> => {
+    let confirmed = 0
+    for (;;) {
+      if (conn.finished.count > 0) return 'finished'
+      // `blocked` 와 `drained` 는 번갈아 선다(서버 쓰기 루프가 순차적이다) — 수가 같으면 지금 막혀 있다.
+      const blocked = conn.blocked.count > conn.drained.count
+      const quiet = Promise.withResolvers<'quiet'>()
+      const timer = setTimeout(() => quiet.resolve('quiet'), blocked ? QUIET : OBSERVE)
+      const step = await Promise.race([
+        conn.finished.waitFor(0).then(() => 'finished' as const),
+        (blocked ? conn.drained.waitFor(conn.drained.count) : conn.blocked.waitFor(conn.blocked.count))
+          .then(() => 'progress' as const),
+        quiet.promise
+      ]).finally(() => clearTimeout(timer))
+      if (step === 'finished') return 'finished'
+      if (step === 'quiet' && blocked) {
+        confirmed += 1
+        if (confirmed >= CONFIRM) return 'quiet'
+        continue
+      }
+      confirmed = 0
+      // 막히지도 끝나지도 않은 채 조용해졌다 — 배압 판정이 아니라 계측이 성립하지 않은 것이다.
+      if (step === 'quiet') throw new Error(`서버가 ${OBSERVE}ms 안에 막히지도 끝나지도 않았다(sent=${conn.sent}) — 판정 불가`)
+    }
   }
 
   try {
-    const stalled = run('stall')
-    const during = await sample(stalled)
-    expect(during.peak, '수신이 아예 시작되지 않았다').toBeGreaterThan(0)
-    expect(during.finished, '읽지 않는데 서버가 본문을 끝까지 내보냈다 — 수신 배압이 없다').toBe(false)
-    // 흘려 받는 구현은 16MiB 를 다 밀어 넣는다. 배압이 있으면 소켓·파이프 버퍼 몫만 남는다.
-    expect(during.peak, '읽지 않는 동안 본문이 거의 다 들어왔다').toBeLessThan(payload.length * 0.75)
+    // 1) 소비자는 읽지 않는다. 서버는 16MiB 를 밀려고 한다.
+    await open()
+    expect(conns, '요청이 한 번만 나가야 한다').toHaveLength(1)
+    const conn = conns[0]
+    // 2) 끝까지 밀었는가(배압 없음), 더 못 밀고 멈췄는가(배압 있음) — 사건으로 가른다.
+    const stalled = await settle(conn)
+    expect(conn.sent, '서버가 한 바이트도 못 밀었다 — 배압이 아니라 연결 문제다').toBeGreaterThan(0)
+    expect(
+      stalled,
+      `읽지 않는데 서버가 16MiB 를 끝까지 밀어 넣었다(sent=${conn.sent}, blocked=${conn.blocked.count}, drain=${conn.drained.count}) — 수신 배압이 없다`
+    ).toBe('quiet')
 
-    // 이어서 읽으면 잘리지 않고 전부 온다 — 배압이 본문을 훼손하지 않는다.
-    const outcome = await stalled
-    expect(outcome.bytes).toBe(payload.length)
-    expect(outcome.digest).toBe(digest)
-    await expect.poll(() => allWritten).toBe(true)
-    // `bytesWritten` 은 응답 헤더까지 센다 — 본문 길이 이상이면 다 나간 것이다.
-    await expect.poll(() => socketRef?.bytesWritten ?? 0).toBeGreaterThanOrEqual(payload.length)
+    // 3) 이제 읽기를 재개한다 — 잘리지 않고 전부 와야 한다(배압이 본문을 훼손하지 않는다).
+    const body = await within(30_000, consume('stall'), '이어 읽기')
+    expect(body.bytes).toBe(payload.length)
+    expect(body.digest).toBe(digest)
+    // 재개가 풀어 준 것이 맞다 — 소비가 시작된 뒤에야 서버 쓰기가 끝까지 갔다.
+    await within(20_000, conn.finished.waitFor(0), '이어 읽은 뒤 서버 쓰기 완료')
 
-    // 멈춘 상태에서의 '취소' — 남은 본문을 흘려보내지 않고 연결을 끊는다.
-    socketClosed = false
-    allWritten = false
-    const cancelled = run('cancel')
-    const held = await sample(cancelled)
-    expect(held.finished).toBe(false)
-    const abort = await cancelled
-    expect(abort.error).toMatch(/^AbortError:/)
-    await expect.poll(() => socketClosed, { message: "'취소' 뒤에도 서버 소켓이 살아 있다" }).toBe(true)
+    // 4) 멈춘 상태에서의 '취소' — 남은 본문을 흘려보내지 않고 연결을 끊는다.
+    await open()
+    expect(conns, '취소 시험은 새 연결에서 시작한다').toHaveLength(2)
+    const fresh = conns[1]
+    expect(await settle(fresh), "'취소' 전에 서버가 이미 끝까지 밀었다 — 이 시험은 멈춘 상태를 전제한다").toBe('quiet')
+    const cancelled = await within(20_000, consume('cancel'), "'취소' 뒤 읽기 정착")
+    expect(cancelled.error).toMatch(/^AbortError:/)
+    await within(20_000, fresh.closed.waitFor(0), "'취소' 뒤 서버 소켓 close")
   } finally {
     await electronApp.close()
     server.closeAllConnections()
