@@ -61,6 +61,15 @@ export class ChatService {
   private connections = new Map<string, AgentConnection>()
   private owners = new Set<string>()
   private runs = new Map<string, Promise<void>>()
+  /**
+   * 아직 안 끝난 `figures.endTurn()` — 턴이 끝난 **뒤**에 시작해 다음 턴 **전**에 기다린다.
+   *
+   * 왜 잠금과 분리했나: 잠금 해제(`release`)를 `endTurn()` 뒤로 미루면, 그 사이 스냅샷은 이미
+   * `idle` 인데 폴더는 잠겨 있어 학생의 바로 다음 전송이 "작업이 끝난 뒤 다시 실행해 주세요"로
+   * 거절된다(통로가 있을 때도 똑같이 터진다). 그래서 잠금은 예전처럼 즉시 풀고, 턴 닫기만
+   * 약속으로 잡아 둔다. 순서는 그대로 지켜진다 — 옛 `endTurn` 이 끝나기 전에는 새 턴을 열지 않는다.
+   */
+  private figureClosing: Promise<void> | null = null
   private shuttingDown = false
   private authRequired = new Set<Provider>()
   private authGeneration: Record<Provider, number> = { codex: 0, claude: 0 }
@@ -181,6 +190,18 @@ export class ChatService {
      * 덮지 않는다(검토 MC1-03).
      */
     storeModelChoice?: (provider: Provider, choice: ModelChoice | null) => void
+    /**
+     * 그림 통로(`figures/index.ts` 의 `FigureChannel`). 앱이 하는 일은 **고리 넷**뿐이다 — 메인 엔진의
+     * 환경에 저장소 자리를 얹고(`env`), 학생 원문을 후보표에 남기고(`recordStudentMessage`),
+     * 턴을 열고(`beginTurn`), 닫는다(`endTurn`). 무엇을 어떻게 할지는 규칙집이 정한다: 그림 명령이
+     * 없는 판에서는 이 고리가 불려도 조용해야 한다. 없으면 지금까지와 바이트까지 같은 동작이다.
+     */
+    figures?: {
+      env: Record<string, string>
+      beginTurn(root: string, turnId: string): Promise<void>
+      endTurn(): Promise<void>
+      recordStudentMessage(root: string, text: string): Promise<number>
+    }
     /** Test seam: 대화 기록·초안을 쓰는 파일시스템(e2e/safe-write.spec.ts 가 실패를 주입한다). */
     fs?: SafeWriteFs
   }) {}
@@ -446,8 +467,13 @@ export class ChatService {
     let c = this.connections.get(key)
     if (!c) {
       const guard = this.guardFor(root)
+      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))
+      const figureEnv = this.opts.figures?.env
       const options: AgentOptions = {
-        binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
+        binary: '', root, skill: this.skillDir(root, provider),
+        // 그림 통로의 저장소 자리는 **메인 턴 엔진에만** 얹는다. 고리가 없으면 같은 객체 그대로다
+        // (정체성까지 지금과 같다) — 전역 연결(상태 확인·로그인)에는 얹지 않는다, 턴이 없으니까.
+        env: figureEnv ? { ...env, ...figureEnv } : env,
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
         guard,
         // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
@@ -675,7 +701,41 @@ export class ChatService {
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
       this.publish(s)
-      const run = this.execute(s, live, text, requestId).finally(release)
+      /**
+       * 그림 통로 고리 — 학생 메시지가 대화에 남은 뒤, 엔진을 부르기 전. 그림 명령이 없는 판에서는
+       * 이 고리가 할 일이 없고, 있는 판에서도 그림은 대화의 **조건이 아니다**: 던지거나 거절하면
+       * 조용히 버린다(학생 화면에 오류·알림을 만들지 않는다). 순서는 계약이다 —
+       * `recordStudentMessage`(후보표에 원문) → `beginTurn`(턴 열기). turnId 는 이 요청 id.
+       */
+      const figures = this.opts.figures
+      if (figures) {
+        // 옛 턴의 `endTurn()` 이 아직 돌고 있으면 **새 턴을 열기 전에** 기다린다. 안 기다리면 옛
+        // `endTurn` 이 방금 연 새 턴의 `turn.json` 을 지워, 감시자가 새 턴의 요청을 전부 `stale` 로 본다.
+        const closing = this.figureClosing
+        if (closing) {
+          try { await closing } catch { /* endTurn 실패는 이미 삼켰다 */ }
+          if (this.figureClosing === closing) this.figureClosing = null
+        }
+        try { await figures.recordStudentMessage(root, text) } catch { /* 그림은 대화를 막지 않는다 */ }
+        try { await figures.beginTurn(root, requestId) } catch { /* 위와 같다 */ }
+      }
+      /**
+       * 잠금 해제는 통로가 있든 없든 **예전 그대로** `.finally(release)` 다. `async` 콜백·`await` 로
+       * 감싸면 해제가 마이크로태스크만큼 늦어지는데, 그 사이 `state` 는 이미 `idle` 이라
+       * (`execute` 가 반환 전에 정한다) 바로 다음 `send` 가 `acquire` 에서 "작업 중"으로 거절된다
+       * (`e2e/chat.spec.ts` "규칙집 갱신" 시험이 결정적으로 그 자리였다). 그래서 통로가 있을 때는
+       * 잠금을 그대로 풀고 `endTurn()` **약속만** `figureClosing` 에 잡아 둔다 — 다음 턴이 시작 전에
+       * 그 약속을 기다린다(위 `figures` 블록). 통로가 없으면 이 블록 자체가 없다(바이트 동일 경로).
+       */
+      const finished = this.execute(s, live, text, requestId)
+      const run = figures
+        ? finished.finally(() => {
+          // 턴이 성공·실패·중단 어느 쪽으로 끝나도 닫는다. 동기 예외까지 삼키고 잠금은 반드시 푼다.
+          try { this.figureClosing = Promise.resolve(figures.endTurn()).catch(() => { /* 그림 통로 실패는 대화에 알리지 않는다 */ }) }
+          catch { /* 위와 같다 */ }
+          finally { release() }
+        })
+        : finished.finally(release)
       this.runs.set(this.key(root, provider), run)
       void run.finally(() => this.runs.delete(this.key(root, provider)))
       return structuredClone(s)

@@ -11,6 +11,7 @@ import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
+import type { FigureChannel } from './figures'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
 
@@ -23,6 +24,8 @@ else migrateUserDataDir(app.getPath('userData'), LEGACY_USERDATA_NAMES.map((n) =
 let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
 let chat: ChatService | null = null
+/** 그림 통로 — `registerIpc` 가 열고 여기서 종료에 닫는다. 열지 못했으면 `null`(그림만 꺼짐). */
+let figures: FigureChannel | null = null
 let quitting = false
 /**
  * 종료 정리를 기다리는 상한. Playwright 의 시험 상한(90초)과 워커 정리(같은 값) 안에 넉넉히
@@ -157,8 +160,10 @@ else {
       const iconPng = join(APP_ROOT, 'build', 'icon.png')
       if (existsSync(iconPng)) app.dock?.setIcon(nativeImage.createFromPath(iconPng))
     }
-    const services = registerIpc(sidecar, () => win, () => installMenu(sendMenu))
+    // 네 번째 인자가 그림 통로를 연다 — 이 앱만 그 통로의 정리 의무(`figures.stop`)를 진다.
+    const services = registerIpc(sidecar, () => win, () => installMenu(sendMenu), true)
     chat = services.chat
+    figures = services.figures
     // 그림 요청 하나가 들어오면 read → 폴더 안 판정 → 응답. 실패는 404로 닫고, 렌더러가
     // "그림을 찾지 못했어요 · <경로>"로 바꾼다(main.tsx 문서 리스너).
     protocol.handle(IMAGE_SCHEME, (request) => services.images.handle(request))
@@ -241,7 +246,13 @@ else {
         task('chat.close', async () => {
           const result = await (chat?.close() ?? Promise.resolve({ outcome: 'done' as const }))
           if (result.outcome === 'pending') throw new Error(`연결 정리 미완료 pids=${result.pids.join(',') || '없음'}`)
-        })
+        }),
+        /**
+         * figures (v0.7 그림 갈래): 그림 통로를 멈춘다. 타이머(하트비트·폴더 확인)를 지우고 지금 도는
+         * 요청은 끝까지 둔다 — 도우미의 60초 대기 안에서 결과가 나가야 하기 때문이다. 통로를 못
+         * 열었으면(`null`) 할 일이 없고, 그 경우도 정리 목록에는 남겨 로그에서 "그림도 닫았다"가 보이게 한다.
+         */
+        task('figures.stop', () => figures?.stop() ?? Promise.resolve())
       ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
         trace(`before-quit#${quitPasses}:shutdown-outcome`, `done=[${outcome.done.join(', ')}] pending=[${outcome.pending.join(', ')}] failed=[${outcome.failed.map((f) => f.name).join(', ')}] elapsedMs=${outcome.elapsedMs}`)
         for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, codeOf(failure.reason))

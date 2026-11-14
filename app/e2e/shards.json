@@ -66,7 +66,9 @@
       "edits-store",
       "sameword",
       "guard-codex-thread-lock",
-      "kordoc-mcp-policy"
+      "kordoc-mcp-policy",
+      "figure-channel-app",
+      "figure-wiring"
     ],
     [
       "artifacts-states",
@@ -274,6 +276,7 @@
       "diagnosis-feedback",
       "docx-zip",
       "fetch-codex",
+      "figure-channel-app",
       "file-open-guard",
       "invariants",
       "job-handoff",
@@ -334,7 +337,8 @@
       "guard-key",
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
-      "kordoc-mcp-wiring"
+      "kordoc-mcp-wiring",
+      "figure-wiring"
     ]
   ]
 }
