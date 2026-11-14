@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test'
-import { generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
+import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import { ASSET_PREFIX, CHANNEL_URL, compare, MAX_BYTES, sha256, verifySkill, type SkillManifest } from '../src/main/update/manifest'
 import { extractSkill } from '../src/main/update/archive'
 import { UPDATE_KEYS, updateConfig } from '../src/main/update/keys'
@@ -567,5 +568,147 @@ test('channel 302 surfaces as a response, the allowlist rejects it, and the poin
     await electronApp.close()
     await new Promise<void>((resolve, reject) => channel.close(error => error ? reject(error) : resolve()))
     await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()))
+  }
+})
+
+/**
+ * Roh R-01 회귀 시험 — 받은 본문을 **큐에 쌓지 않고** 소비자 속도로 당긴다.
+ *
+ * 예전 구현은 `data` 를 붙여 흘려 받았다: 4MiB 응답을 300ms 동안 읽지 않아도 4,194,304바이트가
+ * 전부 들어왔다(R1 실측). 본문 상한은 80MiB(`manifest.MAX_BYTES`)·1GiB
+ * (`appManifest.MAX_INSTALLER_BYTES`)라 그 큐가 힙에 그대로 남는다.
+ *
+ * 그래서 16MiB 를 로컬에서 주고, **읽지 않고 1.5초** 둔 뒤 서버가 실제로 몇 바이트를 내보냈는지 본다.
+ * 흘려 받는 구현이면 16MiB 가 loopback 에서 수십 ms 만에 다 나가 서버 쓰기가 끝나 있다. 당기는
+ * 구현이면 서버 쓰기가 `drain` 에서 멈춘다(`allWritten=false`). 이어서 끝까지 읽어 **바이트 수와
+ * SHA-256 이 일치**하는지 확인한다(배압이 본문을 자르지 않는다는 증거). 마지막으로 큐가 멈춘
+ * 상태에서 '취소'가 연결을 실제로 끊는지(`AbortError` + 서버 소켓 close) 확인한다.
+ *
+ * 전송 계층은 Electron 메인에만 있으므로 앱을 띄워 `netTransport.ts` 를 그 자리에서 심는다.
+ */
+test('a stalled consumer stops the transfer instead of buffering the whole body, and cancel still tears it down', async () => {
+  const payload = Buffer.alloc(16 * 1024 * 1024)
+  for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) & 0xff
+  const digest = createHash('sha256').update(payload).digest('hex')
+
+  // 서버 쪽 관측점: 이 요청의 소켓이 실제로 내보낸 바이트와, 쓰기 루프가 끝났는지.
+  let socketRef: Socket | null = null
+  let allWritten = false
+  let socketClosed = false
+  const server = createServer((req, res) => {
+    const socket = req.socket
+    socketRef = socket
+    socket.on('close', () => { socketClosed = true })
+    void (async () => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(payload.length) })
+      for (let offset = 0; offset < payload.length; offset += 64 * 1024) {
+        if (!res.write(payload.subarray(offset, offset + 64 * 1024))) {
+          const drained = Promise.withResolvers<void>()
+          res.once('drain', drained.resolve)
+          await drained.promise
+        }
+      }
+      res.end()
+      allWritten = true
+    })().catch(() => {})
+  })
+  const listening = Promise.withResolvers<void>()
+  server.listen(0, '127.0.0.1', listening.resolve)
+  await listening.promise
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/asset.bin`
+
+  const source = transpileModule(readFileSync(join(__dirname, '../src/main/update/netTransport.ts'), 'utf8'), {
+    compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+  }).outputText
+
+  const { electronApp } = await launch({ env: { KNUAF_AGENT_PATH_ONLY: '1' } })
+  const stall = 1_500
+  type Outcome = { stallStart: number; stallEnd: number; bytes: number; digest: string; error: string }
+  const run = (mode: 'stall' | 'cancel'): Promise<Outcome> =>
+    electronApp.evaluate(async (electron, args) => {
+      type Transport = (url: string, init: { signal: AbortSignal; redirect: 'manual' }) => Promise<Response>
+      const loaded = { exports: {} as { netRequestTransport: Transport } }
+      // 실물 모듈을 그대로 심는다 — `electron` 말고는 의존하지 않는다(계약 import 는 타입뿐이라 사라진다).
+      new Function('require', 'module', 'exports', args.source)((name: string) => {
+        if (name === 'electron') return electron
+        throw new Error(`unexpected dependency ${name}`)
+      }, loaded, loaded.exports)
+      const { createHash } = process.getBuiltinModule('node:crypto')
+      const controller = new AbortController()
+      const response = await loaded.exports.netRequestTransport(args.url, { signal: controller.signal, redirect: 'manual' })
+      const reader = response.body!.getReader()
+      const hash = createHash('sha256')
+      let bytes = 0
+      let error = ''
+      const stallStart = Date.now()
+      const waited = Promise.withResolvers<void>()
+      setTimeout(waited.resolve, args.stall)
+      await waited.promise
+      const stallEnd = Date.now()
+      if (args.mode === 'cancel') {
+        controller.abort()
+        // 취소는 **다음 당김**에서 드러난다(이미 큐에 든 조각 하나는 정상 반환). 그래서 끝까지 당겨 본다.
+        for (;;) {
+          try {
+            const { done } = await reader.read()
+            if (done) break
+          } catch (thrown) {
+            const failure = thrown as Error
+            error = `${failure.name}:${failure.message}`
+            break
+          }
+        }
+        return { stallStart, stallEnd, bytes, digest: '', error }
+      }
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        bytes += value.byteLength
+        hash.update(value)
+      }
+      return { stallStart, stallEnd, bytes, digest: hash.digest('hex'), error }
+    }, { source, url, stall, mode })
+
+  /** 멈춰 있는 동안 서버가 내보낸 양. 흘려 받는 구현이면 여기서 이미 16MiB 가 다 나간다. */
+  const sample = async (outcome: Promise<{ stallStart: number; stallEnd: number }>): Promise<{ peak: number; finished: boolean }> => {
+    const samples: { t: number; flushed: number; written: boolean }[] = []
+    const timer = setInterval(() => samples.push({ t: Date.now(), flushed: socketRef?.bytesWritten ?? 0, written: allWritten }), 25)
+    let window: { stallStart: number; stallEnd: number }
+    try { window = await outcome } finally { clearInterval(timer) }
+    const during = samples.filter(entry => entry.t >= window.stallStart && entry.t <= window.stallEnd)
+    return { peak: Math.max(0, ...during.map(entry => entry.flushed)), finished: during.some(entry => entry.written) }
+  }
+
+  try {
+    const stalled = run('stall')
+    const during = await sample(stalled)
+    expect(during.peak, '수신이 아예 시작되지 않았다').toBeGreaterThan(0)
+    expect(during.finished, '읽지 않는데 서버가 본문을 끝까지 내보냈다 — 수신 배압이 없다').toBe(false)
+    // 흘려 받는 구현은 16MiB 를 다 밀어 넣는다. 배압이 있으면 소켓·파이프 버퍼 몫만 남는다.
+    expect(during.peak, '읽지 않는 동안 본문이 거의 다 들어왔다').toBeLessThan(payload.length * 0.75)
+
+    // 이어서 읽으면 잘리지 않고 전부 온다 — 배압이 본문을 훼손하지 않는다.
+    const outcome = await stalled
+    expect(outcome.bytes).toBe(payload.length)
+    expect(outcome.digest).toBe(digest)
+    await expect.poll(() => allWritten).toBe(true)
+    // `bytesWritten` 은 응답 헤더까지 센다 — 본문 길이 이상이면 다 나간 것이다.
+    await expect.poll(() => socketRef?.bytesWritten ?? 0).toBeGreaterThanOrEqual(payload.length)
+
+    // 멈춘 상태에서의 '취소' — 남은 본문을 흘려보내지 않고 연결을 끊는다.
+    socketClosed = false
+    allWritten = false
+    const cancelled = run('cancel')
+    const held = await sample(cancelled)
+    expect(held.finished).toBe(false)
+    const abort = await cancelled
+    expect(abort.error).toMatch(/^AbortError:/)
+    await expect.poll(() => socketClosed, { message: "'취소' 뒤에도 서버 소켓이 살아 있다" }).toBe(true)
+  } finally {
+    await electronApp.close()
+    server.closeAllConnections()
+    const closed = Promise.withResolvers<void>()
+    server.close(error => error ? closed.reject(error) : closed.resolve())
+    await closed.promise
   }
 })
