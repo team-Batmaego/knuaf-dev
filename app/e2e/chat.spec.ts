@@ -1036,6 +1036,12 @@ test('한글 마무리 항목도 이름으로 불린다', () => {
   expect(checkLabel('진짜모르는검사')).toBe('확인 항목')
 })
 
+test('재무 안내 두 항목도 사람 말 이름을 갖는다', () => {
+  // 규칙집 계약이 이 두 id 를 보내는데 이름표가 없으면 학생 화면에 "확인 항목" 두 줄만 남는다.
+  expect(checkLabel('finance_unsupported_notice')).toBe('이 전공 재무 자료 안내')
+  expect(checkLabel('finance_blank_copy_notice')).toBe('재무 엑셀 빈 사본 안내')
+})
+
 test('물을 때는 원시 JSON 이 아니라 사람 말로 말한다', () => {
   const out = describeTool('Write', { file_path: '/etc/hosts' }, ROOT)
   expect(out.title).toBe('논문 폴더 밖의 파일을 건드리려고 해요')
