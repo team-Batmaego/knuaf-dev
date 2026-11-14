@@ -659,6 +659,84 @@ describe('startFigureChannel', () => {
   })
 
   /**
+   * I-01 남은 경계(검토 VM 재현): 소유권 확인이 끝난 뒤의 **지우기**가 늦어지는 동안 새 턴이 열리면,
+   * 지우기가 새 턴의 `turn.json` 을 지운다. 확인만 앞에 두고 지우기를 늦추면 그 사이에 새 쓰기가 끼어
+   * 들기 때문이다. 그래서 확인과 지우기를 한 사슬 안에서 하고, 새 턴의 쓰기는 그 사슬 **뒤**에 선다.
+   */
+  it('지우기가 늦는 사이 새 턴이 열려도 옛 endTurn은 새 turn.json을 지우지 않는다(I-01 남은 경계)', async () => {
+    const clearGate = Promise.withResolvers<void>()
+    let clearHits = 0
+    const c = await makeChannel({
+      // 실제 지우기를 그대로 하되 첫 호출을 멈춘다 — 확인은 이미 통과한 상태다(검토 재현 그대로).
+      clearTurn: async (path) => {
+        clearHits += 1
+        await clearGate.promise
+        await rm(path, { force: true })
+      }
+    })
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    const ending = c.channel.endTurn('turn-a')
+    assert.equal(await until(async () => clearHits === 1), true, '옛 삭제가 시작됐다')
+    // 삭제가 멈춘 사이 새 턴이 열린다 — 서비스 상한(3초)을 넘겨 실행된 경우와 같은 순서다.
+    let opened = false
+    const opening = c.channel.beginTurn(c.folder, 'turn-b').then(() => { opened = true })
+    await until(async () => opened, 60)
+    assert.equal(opened, false, '옛 삭제가 끝나기 전에는 새 턴의 쓰기가 시작하지 않는다')
+    clearGate.resolve()
+    await ending
+    await opening
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b', '새 턴의 turn.json 은 살아 있다')
+    // 새 턴도 정상으로 닫힌다.
+    await c.channel.endTurn('turn-b')
+    assert.equal(await readRes(c.paths.turn), null)
+    await c.channel.stop()
+  })
+
+  /**
+   * I-03 남은 경계(검토 실측): `figure-channel.json` 자리가 디렉터리면 첫 박자가 실패한다. 예전에는 그
+   * 실패를 삼키기만 해서 `beginTurn` 이 `turn.json` 을 쓰고 감시자가 계속 돌았다 — 결과를 받을 곳 없는
+   * 통로다. 이제 첫 박자 실패는 통로 시작 실패다: 턴 파일도, 감시자도 남지 않는다.
+   */
+  it('첫 하트비트가 실패하면 통로가 시작되지 않는다(I-03 남은 경계)', async () => {
+    const base = join(root, `case-beat-${++counter}`)
+    const home = join(base, 'home')
+    await mkdir(home, { recursive: true })
+    // 하트비트 파일 자리만 디렉터리로 막는다 — 저장소 준비(`prepareHome`)는 성공한다.
+    await mkdir(join(home, 'figure-channel.json'))
+    const folder = join(base, 'paper')
+    await mkdir(requestFile.requestDir(folder), { recursive: true })
+    const real = await realpath(folder)
+    const paths = storage.figurePaths(home)
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const channel = index.startFigureChannel({
+      figureHome: home,
+      getFolder: () => real,
+      resolveSkillSource: () => null,
+      decode: async () => ({ png: PNG, width: 8, height: 8 }),
+      fetchFn,
+      scanMs: 5,
+      ttlMs: 60_000
+    })
+    try {
+      await channel.beginTurn(real, 'turn-1')
+      await putRequest(folder, IDS.a, {}, 'turn-1')
+      await channel.idle()
+      // 감시자가 살아 있었다면 이 요청이 결과 파일로 닫혔을 것이다.
+      for (let i = 0; i < 200; i += 1) await new Promise<void>((done) => setImmediate(done))
+      await channel.endTurn('turn-1')
+      await channel.stop()
+      await new Promise<void>((done) => setImmediate(done))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    assert.equal(await readRes(paths.turn), null, '턴 파일을 쓰지 않는다')
+    assert.equal(await readRes(join(paths.res, `${IDS.a}.res.json`)), null, '감시자도 돌지 않는다')
+    assert.deepEqual(seen, [], '첫 박자 실패가 비처리 거절로 새지 않는다')
+  })
+
+  /**
    * I-03: 저장소 준비가 실패하면(여기서는 `tmp` 를 파일로 막는다) 그 거절이 밖으로 새지 않고
    * 통로만 꺼진다. 예전에는 `void ensureRunner()`·첫 `void beat()` 가 비처리 거절이 되어 프로세스를
    * 종료 코드 1 로 끝냈다.

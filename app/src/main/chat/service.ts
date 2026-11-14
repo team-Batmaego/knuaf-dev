@@ -754,7 +754,8 @@ export class ChatService {
          * 에 아직 없다. 그래서 취소 토큰(`preps`)에 등록해 중단·종료가 깨울 수 있게 하고, 전체 대기에
          * 상한도 둔다. 깨우면 남은 고리를 건너뛰고 **엔진을 부르지 않는다**(중단된 요청을 뒤늦게
          * 실행하지 않는다). 상한을 넘기면 그림 고리만 포기하고 대화는 그대로 간다 — 그때 늦게 끝나는
-         * 옛 `endTurn` 이 새 턴을 지우지 않는 것은 통로의 소유권 검사가 맡는다.
+         * 옛 `endTurn` 이 새 턴을 지우지 않는 것은 통로가 맡는다: 소유권 검사와 `turn.json` 쓰기·지우기가
+         * 통로 안의 **한 사슬**에 서 있어(I-01 남은 경계), 늦은 옛 삭제가 새 턴의 파일에 닿지 않는다.
          */
         const prep = this.beginFigurePrep(figureKey)
         let opening: Promise<unknown> = Promise.resolve()

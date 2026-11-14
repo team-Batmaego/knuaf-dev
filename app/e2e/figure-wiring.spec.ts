@@ -11,10 +11,13 @@
 //    규칙집에 그림 명령이 없는 판에서는 고리가 불려도 조용해야 한다.
 import { expect, test } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
 import type { AgentConnection, AgentOptions } from '../src/main/chat/contracts'
+import { startFigureChannel } from '../src/main/figures'
+import { figurePaths } from '../src/main/figures/storage'
 
 const FIGURE_ENV = { KNUAF_FIGURE_HOME: '/tmp/figures-home' }
 
@@ -314,4 +317,92 @@ test('⑧ 끝나지 않는 옛 endTurn 은 다음 전송을 영원히 막지 않
     expect(svc.snapshot(root, 'codex').state).toBe('idle')
     stuck.resolve()
   } finally { await svc.close() }
+})
+
+/**
+ * I-01 남은 경계 — 서비스와 통로를 **실제로** 이어 붙인 재현(검토 VM 반례).
+ *
+ * 옛 `endTurn` 의 삭제가 늦어지는 사이, 두 번째 전송이 준비 상한(3초)을 넘겨 실행되고 그 턴의
+ * `turn.json` 이 기록된다. 그 뒤에 옛 삭제가 풀리면 예전에는 **실행 중인 새 턴의 파일이 지워졌다**
+ * (B 는 `busy` 인데 `turn.json` 이 없음). 지금은 소유권 확인과 삭제가 한 사슬 안에 있고 새 턴의
+ * 쓰기도 그 사슬 뒤에 서므로, 늦은 옛 삭제가 새 턴에 닿지 않는다.
+ */
+test('⑨ 상한을 넘긴 새 턴의 turn.json 은 옛 endTurn 의 늦은 삭제로 지워지지 않는다(I-01 남은 경계)', async () => {
+  const { root, bundle } = scratch('late-clear')
+  const home = join(dirname(root), 'figures-home')
+  const paths = figurePaths(home)
+  const clearGate = Promise.withResolvers<void>()
+  const firstCleared = Promise.withResolvers<void>()
+  let clearHits = 0
+  const channel = startFigureChannel({
+    figureHome: home,
+    // 감시자는 이 시험의 관심 밖이다 — 폴더가 없으면 요청도 집지 않는다.
+    getFolder: () => null,
+    resolveSkillSource: () => null,
+    scanMs: 5,
+    // 실제 삭제를 그대로 하되 **첫 호출만** 멈춘다: 소유권 확인은 이미 통과한 상태다(검토 재현 그대로).
+    clearTurn: async (path) => {
+      clearHits += 1
+      const first = clearHits === 1
+      if (first) await clearGate.promise
+      await rm(path, { force: true })
+      // 지우기가 **끝난** 뒤에만 판정한다 — 안 그러면 삭제가 아직 안 닿은 파일을 보고 통과한다.
+      if (first) firstCleared.resolve()
+    }
+  })
+  let runs = 0
+  const runGate = Promise.withResolvers<void>()
+  const svc = new ChatService({
+    skillSource: () => bundle, userData: mkdtempSync(join(tmpdir(), 'kd-figwire-ud-')),
+    emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => fake({
+      run: async () => {
+        runs += 1
+        // 두 번째 턴(A 의 늦은 삭제가 풀리기 전에 열린 턴)은 여기서 붙잡아 둔다 — 그래야 그 턴 파일이
+        // 지워지는지 **실행 중에** 볼 수 있다.
+        if (runs === 2) await runGate.promise
+      }
+    }),
+    figures: {
+      env: { KNUAF_FIGURE_HOME: home },
+      recordStudentMessage: (r, text) => channel.recordStudentMessage(r, text),
+      beginTurn: (r, id) => channel.beginTurn(r, id),
+      endTurn: (id) => channel.endTurn(id)
+    }
+  })
+  const turnId = async (): Promise<string | null> => {
+    try { return JSON.parse(await readFile(paths.turn, 'utf8')).turnId as string } catch { return null }
+  }
+  try {
+    await svc.send(root, 'codex', '첫 그림', 'req-a')
+    for (let i = 0; i < 400 && clearHits === 0; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(clearHits, '옛 턴의 삭제가 시작됐다').toBe(1)
+
+    // 두 번째 전송은 옛 종료를 상한(3초)까지만 기다리고 진행한다 — 그 사이 옛 삭제는 아직 멈춰 있다.
+    await svc.send(root, 'codex', '두 번째', 'req-b')
+    expect(runs, '상한이 지나면 두 번째 턴이 실제로 실행된다').toBe(2)
+
+    // 판정 지점: 옛 삭제가 멈춰 있는 동안 새 턴의 `turn.json` 쓰기는 **사슬 뒤에서 기다린다**. 쓰기가
+    // 먼저 닿으면(사슬 없음) 뒤이어 풀린 옛 삭제가 그 파일을 지워, 실행 중인 턴의 파일이 사라진다.
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(await turnId(), '옛 삭제가 끝나기 전에는 새 턴의 쓰기가 시작하지 않는다').not.toBe('req-b')
+
+    // 삭제를 풀면 그때서야 새 턴 파일이 기록되고, 실행 중인 턴의 파일로 남는다.
+    clearGate.resolve()
+    await firstCleared.promise
+    for (let i = 0; i < 400 && (await turnId()) !== 'req-b'; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(await turnId(), '늦은 옛 삭제가 새 턴의 turn.json 을 지우지 않는다').toBe('req-b')
+    expect(svc.busy(root), '그 턴은 여전히 실행 중이다').toBe(true)
+
+    // 두 번째 턴이 정상으로 끝나면 파일도 정상으로 지워진다(남지 않는다).
+    runGate.resolve()
+    for (let i = 0; i < 400 && (await turnId()) !== null; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(await turnId(), '정상 종료는 지운다').toBeNull()
+    expect(clearHits, '지운 것은 새 턴의 종료 한 번뿐이다').toBe(2)
+  } finally {
+    runGate.resolve()
+    clearGate.resolve()
+    await svc.close()
+    await channel.stop()
+  }
 })
