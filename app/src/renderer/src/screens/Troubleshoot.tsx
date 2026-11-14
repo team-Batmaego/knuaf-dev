@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import { preparationFailureTitle, usePrep } from '../store/prep'
+import { useEdits } from '../store/edits'
 import { rpc } from '../rpc'
 import { Disclosure } from '../components/Disclosure'
 import { Feedback } from '../components/Feedback'
@@ -77,7 +78,10 @@ export function TroubleshootSections() {
         const r = await rpc.restore(root, c.rev, status.revision)
         if (mine()) setMsg({ title: COMPLETION.restored, body: `${r.restored_from}번째 기록의 정본을 ${r.revision}번째 기록으로 되돌렸어요. 복원 직전 상태는 ${r.pre_restore_snapshot}에 남아 있어요.` })
       }
-      if (c.kind === 'init') { await rpc.init(root); if (mine()) setMsg({ title: COMPLETION.init_done }) }
+      // 정본을 새로 만들면 개정이 0 부터 다시 센다 — 폴더는 그대로라 `PaperPane` 의 '폴더가 바뀌었나'
+      // 검사로는 안 걸린다. 옛 기억(마지막 성공 개정·지문)이 남아 있으면 새 논문의 개정이 우연히
+      // 그 값에 닿는 순간 저장이 옛 값으로 통과한다(검토 R1 노트 A). 여기서 비운다.
+      if (c.kind === 'init') { await rpc.init(root); useEdits.getState().reset(); if (mine()) setMsg({ title: COMPLETION.init_done }) }
       if (!mine()) return
       await refresh()
       if (mine()) await load()

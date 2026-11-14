@@ -519,6 +519,91 @@ test('그사이 남이 그 장을 다시 썼으면 우리 지문을 쓰지 않�
   })
 })
 
+// ── 검토 R1 노트 A~C ────────────────────────────────────────────────────────
+
+test('노트 A — 다른 폴더의 기억은 그 절 id 가 같아도 쓰지 않는다 (root 격리)', async () => {
+  // 절 id(`sec-01`)는 논문 안에서만 유일하다. 지문 기억을 root 로 걸러 내지 않으면, B 폴더의
+  // 같은 id 절에 A 에서 기억한 지문을 보내 헛되이 `stale_view` 가 된다.
+  const sent: { root: string; revision: number; hash: unknown }[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit') return { result: null }
+    sent.push({ root: String(p.root), revision: p.expected_revision as number, hash: p.expected_draft_hash })
+    return { result: { ...editResult((p.expected_revision as number) + 1), draft_hash: 'hA' } }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'hA0', before_block: '가', after_block: '나'
+    })
+    // B 폴더의 같은 id 절 — 화면은 개정 3, 지문 `hB0`. A 의 기억(개정 4, `hA`)을 쓰면 안 된다.
+    await useEdits.getState().save('/B', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'hB0', before_block: '가', after_block: '나'
+    })
+    expect(sent[1]).toEqual({ root: '/B', revision: 3, hash: 'hB0' })
+  })
+})
+
+test('노트 A — reset() 이 개정·지문 기억을 비운다 (같은 폴더에 정본을 새로 만든 경우)', async () => {
+  // `project.init` 은 같은 폴더에서 개정을 0 부터 다시 센다. 그때 기억이 남아 있으면 새 논문의
+  // 개정이 우연히 옛 값에 닿는 순간 저장이 옛 값으로 통과한다 — 화면 경로(`Troubleshoot`)가
+  // `project.init` 뒤에 `reset()` 을 부르는 것을 이 시험이 잠근다.
+  const sent: { revision: number; hash: unknown }[] = []
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit') return { result: null }
+    sent.push({ revision: p.expected_revision as number, hash: p.expected_draft_hash })
+    return { result: { ...editResult((p.expected_revision as number) + 1), draft_hash: 'hNew' } }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'hOld', before_block: '가', after_block: '나'
+    })
+    // 같은 폴더에서 정본을 새로 만들었다 — 화면은 개정 0, 지문 `h0`.
+    useEdits.getState().reset()
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 0, expected_draft_hash: 'h0', before_block: '가', after_block: '나'
+    })
+    expect(sent[1]).toEqual({ revision: 0, hash: 'h0' })
+  })
+})
+
+test('노트 B — 늦게 온 옛 응답이 더 새 기억(개정·지문)을 덮지 않는다', async () => {
+  // 저장 두 건이 겹쳐 나가고 응답이 **역순**으로 도착하는 꼴. 나중 저장이 5 를 만들었는데 앞
+  // 저장의 응답(4)이 늦게 오면, 단조 갱신이 없으면 기억이 4 로 되돌아가 다음 저장이 4 로 나가고
+  // sidecar 가 거절한다(원고는 그대로, "그사이 글이 바뀌었어요"만).
+  const sent: { revision: number; hash: unknown }[] = []
+  const gate = Promise.withResolvers<void>()
+  const model = { knuaf: { call: async (method: string, p: Record<string, unknown>) => {
+    if (method === 'section.edits') return { result: { edits: [], notices: [] } }
+    if (method !== 'section.edit') return { result: null }
+    const revision = p.expected_revision as number
+    sent.push({ revision, hash: p.expected_draft_hash })
+    // 첫 저장(3 -> 4)의 응답만 붙잡아 두었다가, 두 번째 저장이 끝난 뒤에 풀어 준다.
+    if (revision === 3) await gate.promise
+    return { result: { ...editResult(revision + 1), draft_hash: revision === 3 ? 'h4' : 'h5' } }
+  } } }
+  await withWindow(model, async () => {
+    useEdits.getState().reset()
+    const first = useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 3, expected_draft_hash: 'h0', before_block: '가', after_block: '나'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const second = await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 4, expected_draft_hash: 'h4', before_block: '나', after_block: '다'
+    })
+    expect(second.ok).toBe(true)   // 4 -> 5
+    gate.resolve()                 // 이제 첫 저장의 응답(4, `h4`)이 도착한다.
+    expect((await first).ok).toBe(true)
+    // 세 번째 저장은 화면이 아직 4 라 해도 **5** 로, 지문도 5 의 `h5` 로 나가야 한다.
+    await useEdits.getState().save('/A', {
+      kind: 'one', id: 'sec-01', expected_revision: 4, expected_draft_hash: 'h4', before_block: '다', after_block: '라'
+    })
+    expect(sent[2]).toEqual({ revision: 5, hash: 'h5' })
+  })
+})
+
 // ── 고침1: 턴 단위 answered · uncertain → pending · 유실 행은 화면에서만 닫기 ─────
 
 test('고침1 — 메모 실린 턴이 실패하면 그 건은 pending 으로 돌아오고 다음 턴이 정상 끝나도 answered 가 아니다', async () => {

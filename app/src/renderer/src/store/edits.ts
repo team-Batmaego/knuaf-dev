@@ -139,6 +139,10 @@ const turnOf = new Map<string, Set<string>>()
  * 그것은 **우리가 방금 만든 개정**이라 덮어쓸 남의 글이 없다. 그사이 도우미가 정말 바꿨다면
  * 개정이 더 올라가 있어 여전히 거절되고, 파일이 밖에서 바뀌었으면 `_Manuscript` 의
  * `draft_unregistered` 가 막는다. 즉 이 값은 **저장 응답이 알려 준 개정만** 기억한다.
+ *
+ * 갱신은 **단조**다(검토 R1 노트 B) — 응답 순서가 뒤집혀 늦게 온 응답(옛 개정)이 새 기억을 덮지
+ * 않는다. 덮이면 다음 저장이 옛 번호로 나가 헛되이 거절된다(덮어쓰기는 아니지만 학생 눈에는
+ * 같은 거절 줄이다).
  */
 let committed: { root: string | null; revision: number } = { root: null, revision: 0 }
 
@@ -152,6 +156,8 @@ let committed: { root: string | null; revision: number } = { root: null, revisio
  * `revision` 은 그 지문이 정본이던 개정이다. 화면이 든 개정이 그것보다 **뒤**면 화면이 아직 앞
  * 저장을 못 따라온 것이므로 기억한 지문을 쓰고, **같거나 앞서면** 화면이 이미 그 글을 읽은 쪽이므로
  * 화면의 지문을 그대로 쓴다 — 도우미가 고친 뒤의 정상 고침을 막지 않는다.
+ *
+ * 이쪽도 **단조**다 — 늦게 온 응답이 더 새 지문을 옛 지문으로 되돌리면 같은 거절이 되풀이된다.
  */
 const ownHashes = new Map<string, { root: string; hash: string; revision: number }>()
 
@@ -222,6 +228,7 @@ export const useEdits = create<EditState>((set, get) => ({
     // 화면이 들고 있는 개정은 `refresh()` 응답이 돌아와야 오른다. 방금 성공한 저장이 알려 준
     // 개정이 더 크면 그쪽을 쓴다 — 안 그러면 그 사이에 누른 다음 저장이 옛 번호로 나가 거절된다.
     // 기억한 값이 실제보다 크면 sidecar 가 그대로 거절하므로 stale 보호는 약해지지 않는다.
+    // 기억은 **같은 폴더**일 때만 쓴다 — 폴더를 바꾸면 개정은 논문마다 따로 센다.
     const expected = committed.root === root ? Math.max(params.expected_revision, committed.revision) : params.expected_revision
     try {
       const result = params.kind === 'one'
@@ -240,6 +247,7 @@ export const useEdits = create<EditState>((set, get) => ({
       // 이 개정은 우리가 방금 만들었다 — 다음 저장은 최소 이 번호로 나가야 한다. 응답이 개정을
       // 안 알려 주는 옛 sidecar 면 `undefined` 라 여기서 아무것도 기억하지 않는다(그때는 지금처럼).
       // 개정은 논문마다 따로 센다 — 다른 논문의 번호와 견주지 않고 그 논문 것으로 갈아 끼운다.
+      // 갱신은 **단조**다: 늦게 온 응답(옛 개정)이 새 기억을 덮지 않는다.
       if (Number.isInteger(result.revision) && (committed.root !== root || result.revision > committed.revision)) {
         committed = { root, revision: result.revision }
       }
@@ -252,7 +260,10 @@ export const useEdits = create<EditState>((set, get) => ({
           hashes[params.id] = result.draft_hash
         }
         for (const [sid, hash] of Object.entries(hashes)) {
-          ownHashes.set(sid, { root, hash, revision: result.revision })
+          // 이쪽도 단조 — 같은 논문의 더 새 개정이 이미 적힌 지문을 옛 응답이 덮지 않는다.
+          const prev = ownHashes.get(sid)
+          const same = prev !== undefined && prev.root === root
+          if (!same || result.revision >= prev.revision) ownHashes.set(sid, { root, hash, revision: result.revision })
         }
       }
       if (get().available === null) set({ available: true })
