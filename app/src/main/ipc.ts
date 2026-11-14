@@ -60,11 +60,10 @@ export function windowInfo(): WindowInfo {
 /**
  * 그림 저장소 자리를 **동기로** 미리 만든다 — `figures/storage.ts` 의 `prepareHome` 과 같은 네 폴더.
  *
- * 왜 필요한가: `startFigureChannel` 은 `void ensureRunner()` 로 저장소 준비를 띄우는데, 그 약속은
- * 아무도 안 받는다(감시 시작 실패 자체가 통로를 열지 말아야 할 이유라 `figures/*` 가 잡지 않는다).
- * 준비가 거절되면 그 거절이 메인 프로세스의 unhandled rejection 이 되어, 그림 때문에 **앱 시작이
- * 죽는다** — 발주가 금지한 바로 그 결과다. 그래서 같은 네 폴더를 먼저 동기로 만들어, 뒤따르는
- * `prepareHome` 이 사실상 no-op 이 되게 한다(같은 자리에 `mkdir recursive` 는 무해하다).
+ * 왜 필요한가: 통로 쪽(`figures/index.ts`)은 이제 준비 실패를 스스로 삼키지만(I-03), 그때 그림은
+ * **조용히 꺼진 채** 앱이 뜬다. 저장소 자리를 여기서 먼저 만들어 두면 흔한 실패(권한·경로)를 앱 시작
+ * 시점에 알아채고 통로를 아예 열지 않을 수 있다. 뒤따르는 `prepareHome` 은 사실상 no-op 이 된다
+ * (같은 자리에 `mkdir recursive` 는 무해하다).
  *
  * 남는 창은 "지금 만든 폴더를 곧바로 지울 수 없게 되는" 경우뿐이다 — 그때는 통로를 열지 않고
  * 끝나며 앱은 지금처럼 뜬다(그림만 꺼짐).
@@ -692,7 +691,7 @@ export function registerIpc(
         const real = realFolder(root)
         return real === null ? Promise.resolve() : figures.beginTurn(real, turnId)
       },
-      endTurn: () => figures.endTurn(),
+      endTurn: (turnId) => figures.endTurn(turnId),
       recordStudentMessage: (root, text) => {
         const real = realFolder(root)
         return real === null ? Promise.resolve(0) : figures.recordStudentMessage(real, text)

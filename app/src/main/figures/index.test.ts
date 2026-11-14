@@ -279,7 +279,7 @@ describe('startFigureChannel', () => {
     const record = await readRes(c.paths.turn)
     assert.equal(record?.turnId, 'turn-1')
     assert.equal(record?.folder, c.folder)
-    await c.channel.endTurn()
+    await c.channel.endTurn('turn-1')
     assert.equal(await readRes(c.paths.turn), null)
     await c.channel.stop()
   })
@@ -461,7 +461,7 @@ describe('startFigureChannel', () => {
     await putRequest(c.folder, IDS.a)
     assert.equal(await until(async () => seam.state.hit), true)
     let early: DiskSnapshot | null = null
-    const ended = c.channel.endTurn().then(() => {
+    const ended = c.channel.endTurn('turn-1').then(() => {
       early = diskSnapshot(c)
     })
     await until(async () => early !== null, 50)
@@ -483,7 +483,7 @@ describe('startFigureChannel', () => {
     await putRequest(c.folder, IDS.a)
     assert.equal(await until(async () => seam.state.hit), true)
     let early: DiskSnapshot | null = null
-    const ended = c.channel.endTurn().then(() => {
+    const ended = c.channel.endTurn('turn-1').then(() => {
       early = diskSnapshot(c)
     })
     await until(async () => early !== null, 50)
@@ -526,7 +526,7 @@ describe('startFigureChannel', () => {
     })
     await c.channel.beginTurn(c.folder, 'turn-1')
     // 진행 중인 요청이 없으니 배수는 즉시 끝나고, `endTurn`은 턴 지우기에서 멈춘다.
-    const ended = c.channel.endTurn()
+    const ended = c.channel.endTurn('turn-1')
     assert.equal(await until(async () => clearHits === 1), true)
     await putRequest(c.folder, IDS.a)
     // 감시자가 집어 페이지 받기에 들어갔다 — 이 요청은 `endTurn`이 시작된 뒤에 시작했다.
@@ -574,7 +574,7 @@ describe('startFigureChannel', () => {
     // 페이지 받기가 실제로 걸린 뒤에 턴을 끊는다 — 그 전에 끊으면 시작 검사만 보고 지나간다.
     // 감시자 박자는 unref 타이머라 그냥 await하면 Electron Node 22의 시험 실행기가 부모 취소로 끊는다.
     assert.equal(await until(async () => started), true)
-    await c.channel.endTurn()
+    await c.channel.endTurn('turn-1')
     gate.resolve()
     assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
     const res = await readRes(c.resPath(IDS.a))
@@ -591,5 +591,106 @@ describe('startFigureChannel', () => {
     await c.channel.stop()
     await c.channel.stop()
     await c.channel.idle()
+  })
+
+  /**
+   * I-01: 통로는 하나인데 턴은 폴더·공급자마다 있다. 소유자가 아닌 턴의 `endTurn` 이 새 턴의
+   * `turn.json` 을 지우면, 지금 도는 턴의 정상 요청이 전부 `stale`·`cancelled` 가 된다.
+   */
+  it('다른 턴의 endTurn은 지금 턴의 turn.json을 지우지 않는다(I-01)', async () => {
+    const c = await makeChannel()
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    // 다른 폴더·공급자의 턴이 같은 통로를 잡았다(소유권 이전).
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    await c.channel.endTurn('turn-a')
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b', '남의 턴 종료는 무시된다')
+    // 소유자 종료는 그대로 지운다.
+    await c.channel.endTurn('turn-b')
+    assert.equal(await readRes(c.paths.turn), null)
+    await c.channel.stop()
+  })
+
+  it('이미 닫힌 턴의 늦은 beginTurn은 turn.json을 되살리지 않는다(I-02 상한)', async () => {
+    const c = await makeChannel()
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    // 준비 상한으로 `endTurn` 이 먼저 도착하고, `beginTurn` 이 그 뒤에야 끝난 경우.
+    await c.channel.endTurn('turn-a')
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    assert.equal(await readRes(c.paths.turn), null, '끝난 턴이 파일을 남기면 감시자가 유령 턴을 본다')
+    // 다음 턴은 정상으로 열린다.
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b')
+    await c.channel.endTurn('turn-b')
+    await c.channel.stop()
+  })
+
+  it('남의 턴이 끝나도 지금 턴의 요청은 계속 처리된다(I-01)', async () => {
+    const c = await makeChannel()
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    await c.channel.endTurn('turn-a')
+    await putRequest(c.folder, IDS.a, {}, 'turn-b')
+    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    const res = await readRes(c.resPath(IDS.a))
+    assert.equal(res?.status, 'done', '지금 턴의 요청은 stale 이 아니다')
+    await c.channel.endTurn('turn-b')
+    await c.channel.stop()
+  })
+
+  /**
+   * I-01 남은 경로: 소유 턴의 `endTurn` 이 진행 중인 쓰기를 기다리는 사이 새 턴이 열리면, 깨어난
+   * `endTurn` 이 그 새 `turn.json` 을 지우면 안 된다.
+   */
+  it('기다리는 사이 새 턴이 열리면 옛 endTurn은 turn.json을 지우지 않는다(I-01)', async () => {
+    const seam = stallSeam('atomic')
+    const c = await makeChannel({ write: seam.write })
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    await putRequest(c.folder, IDS.a, {}, 'turn-a')
+    assert.equal(await until(async () => seam.state.hit), true)
+    const ending = c.channel.endTurn('turn-a')
+    // 쓰기가 멈춘 사이(=`endTurn` 이 기다리는 사이) 새 폴더·공급자의 턴이 열린다.
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    seam.release()
+    await ending
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b', '새 턴의 turn.json 은 살아 있다')
+    await c.channel.endTurn('turn-b')
+    assert.equal(await readRes(c.paths.turn), null)
+    await c.channel.stop()
+  })
+
+  /**
+   * I-03: 저장소 준비가 실패하면(여기서는 `tmp` 를 파일로 막는다) 그 거절이 밖으로 새지 않고
+   * 통로만 꺼진다. 예전에는 `void ensureRunner()`·첫 `void beat()` 가 비처리 거절이 되어 프로세스를
+   * 종료 코드 1 로 끝냈다.
+   */
+  it('저장소 준비가 실패하면 거절을 흘리지 않고 그림만 꺼진다(I-03)', async () => {
+    const base = join(root, `case-broken-${++counter}`)
+    const home = join(base, 'home')
+    await mkdir(base, { recursive: true })
+    // 저장소 자리를 **파일**로 막는다 — `prepareHome` 의 mkdir 과 하트비트의 쓰기가 모두 실패하고,
+    // 실패한 쓰기가 지워지는 도중에 다시 폴더를 만들지도 않는다(정리 경합 없음).
+    await writeFile(home, 'not a directory')
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const channel = index.startFigureChannel({
+        figureHome: home,
+        getFolder: () => null,
+        resolveSkillSource: () => null,
+        scanMs: 5
+      })
+      await channel.beginTurn('/tmp/paper', 'turn-1')
+      await channel.recordStudentMessage('/tmp/paper', '안녕')
+      await channel.idle()
+      // 실패가 굳은 뒤에도 종료 경로는 안전하다.
+      await channel.endTurn('turn-1')
+      await channel.stop()
+      // 비처리 거절이 실제로 등록되었는지 보려면 한 틱은 돌려야 한다.
+      await new Promise<void>((done) => setImmediate(done))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    assert.deepEqual(seen, [], '저장소 실패가 비처리 거절로 새지 않는다')
   })
 })

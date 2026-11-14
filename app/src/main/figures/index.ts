@@ -9,7 +9,7 @@
  * })
  * await channel.beginTurn(folder, turnId)            // 메인 턴 시작 지점
  * await channel.recordStudentMessage(folder, text)   // 학생 메시지 원문
- * await channel.endTurn()                            // 턴 끝·중단
+ * await channel.endTurn(turnId)                      // 턴 끝·중단(소유 턴만 닫는다)
  * await channel.stop()                               // 앱 종료
  * ```
  *
@@ -57,7 +57,12 @@ export interface FigureChannelOptions {
 
 export interface FigureChannel {
   beginTurn(folder: string, turnId: string): Promise<void>
-  endTurn(): Promise<void>
+  /**
+   * 턴 하나를 닫는다. **`turnId` 가 지금 소유자일 때만** 지운다 — 통로는 하나인데 턴은 폴더·공급자마다
+   * 있으므로, 다른 폴더의 옛 턴이 늦게 끝나면서 지금 도는 턴의 `turn.json` 을 지우면 그 턴의 정상
+   * 요청이 전부 `stale` 이 된다(I-01).
+   */
+  endTurn(turnId: string): Promise<void>
   /** 학생 메시지 원문을 그 폴더의 빈 후보표 전부에 붙인다. 갱신한 표 수. */
   recordStudentMessage(folder: string, text: string): Promise<number>
   /** 앱 종료 — 타이머를 멈추고 지금 도는 요청은 끝까지 둔다. */
@@ -75,6 +80,18 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
   let runner: Runner | null = null
   let runnerFolder: string | null = null
   let stopped = false
+  /**
+   * 지금 통로를 쥔 턴의 id (I-01). 통로는 하나인데 턴은 폴더·공급자마다 있으므로, **소유자만**
+   * `turn.json` 을 지우고 게이트를 닫는다. 소유자 확인 없이 닫으면 다른 폴더의 옛 턴이 늦게 끝나면서
+   * 지금 도는 턴의 `turn.json` 을 지우고, 그 턴의 정상 요청이 전부 `stale`·`cancelled` 가 된다.
+   */
+  let ownerTurnId: string | null = null
+  /**
+   * 마지막으로 **닫힌** 턴 id. `beginTurn` 이 늦게 도착한 경우를 막는다 — 준비 상한(I-02)으로
+   * `endTurn` 이 먼저 돌면, 뒤늦게 시작한 `beginTurn` 이 이미 끝난 턴의 `turn.json` 을 남겨 감시자가
+   * 유령 턴의 요청을 계속 집는다. 요청 id 는 턴마다 유일하므로 마지막 하나만 기억하면 충분하다.
+   */
+  let lastClosedTurnId: string | null = null
 
   /**
    * 턴 세대값 (R-6). `endTurn()`은 세대값을 올리고 **게이트를 닫은 뒤** 진행 중인 쓰기가 끝나기를
@@ -160,8 +177,22 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
     })
   }
 
+  /**
+   * 저장소 준비 실패는 **통로만 끈다**(I-03). 예전에는 `void ensureRunner()` 의 거절을 아무도 받지 않아
+   * 비처리 거절이 되었고, 그 실패가 앱 종료로 이어질 수 있었다. 이제 실패를 여기서 받아 `failed` 로
+   * 굳히고, 그 뒤의 고리는 전부 조용한 no-op 이 된다(그림만 꺼지고 대화는 그대로).
+   */
+  let failed = false
   const ensureRunner = async (): Promise<void> => {
-    await ready
+    if (failed) return
+    try {
+      await ready
+    } catch {
+      failed = true
+      runner?.stop()
+      runner = null
+      return
+    }
     const folder = options.getFolder()
     // 폴더가 없거나 그대로면 할 일이 없다(감시자는 자기 폴더만 본다).
     if (folder === runnerFolder) return
@@ -178,6 +209,7 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
     })
   }
 
+  // 첫 감시 시작도 거절을 밖으로 내보내지 않는다 — 위 `ensureRunner` 가 이미 실패를 삼킨다.
   void ensureRunner()
   const folderTimer = setInterval(() => {
     void ensureRunner().catch(() => {
@@ -188,26 +220,43 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
 
   return {
     async beginTurn(folder, turnId) {
-      await ready
+      if (failed) return
+      try { await ready } catch { failed = true; return }
+      // 준비 상한에 걸려 이미 닫힌 턴이면 열지 않는다 — 열면 지운 턴 파일이 되살아난다(위 주석).
+      if (lastClosedTurnId === turnId) return
       // 새 턴은 옛 요청의 쓰기를 끊는다 — 세대값을 올리고, 이 틱에 게이트를 연다. 열지 않으면 감시자가
       // 집은 요청이 전부 `cancelled`가 된다(게이트는 `endTurn` 뒤 닫힌 채로 남는다, R-6).
       generation += 1
       closed = false
+      // 소유권은 디스크에 쓰기 **전**에 잡는다 — 쓰기가 실패해도 그 턴이 통로를 쥔 것으로 남겨,
+      // 늦게 끝나는 옛 턴이 남의 `turn.json` 을 지우지 않게 한다.
+      ownerTurnId = turnId
       await writeTurn(paths.turn, turnId, folder, now())
       // 턴이 시작되면 그 폴더의 감시자가 필요하다 — 다음 박자를 안 기다린다.
       if (options.getFolder() !== runnerFolder) await ensureRunner()
     },
-    async endTurn() {
-      await ready
+    async endTurn(turnId) {
+      // 이 턴은 닫혔다 — 늦게 도착할 `beginTurn` 이 되살리지 못하게 먼저 적는다.
+      lastClosedTurnId = turnId
+      // **소유자만** 닫는다(I-01). 통로는 하나지만 턴은 폴더·공급자마다 있으므로, 다른 폴더의 옛 턴이
+      // 늦게 끝나면서 지금 도는 턴의 `turn.json` 을 지우면 그 턴의 정상 요청이 전부 stale 이 된다.
+      if (ownerTurnId !== turnId) return
+      ownerTurnId = null
+      if (failed) return
+      try { await ready } catch { failed = true; return }
       // 세대값을 올림과 **같은 틱에** 게이트를 닫아 새 쓰기를 막고, 이미 시작한 쓰기가 끝나기를 기다린 뒤
       // 턴을 지운다(R-6). 세대값만 올리면 턴 파일을 지우는 사이 집힌 요청이 새 세대값으로 살아남는다.
       generation += 1
       closed = true
       await new Promise<void>((done) => onDrained(done))
+      // 기다리는 사이 다른 폴더·공급자가 새 턴을 열었으면 지우지 않는다 — 지우면 그 턴의 정상 요청이
+      // 전부 stale 이 된다(I-01의 남은 경로). 소유권은 `beginTurn` 이 디스크를 쓰기 전에 이미 잡았다.
+      if (ownerTurnId !== null) return
       await (options.clearTurn ?? clearTurn)(paths.turn)
     },
     async recordStudentMessage(folder, text) {
-      await ready
+      if (failed) return 0
+      try { await ready } catch { failed = true; return 0 }
       // 요청 처리 쪽과 같은 해시를 쓰려면 폴더 표기도 같이 정규화해야 한다(맥 /tmp·/private/tmp).
       const hash = folderHash(await realpath(folder).catch(() => folder))
       const dir = join(paths.choices, hash)
@@ -221,6 +270,7 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
     },
     async stop() {
       stopped = true
+      ownerTurnId = null
       clearInterval(folderTimer)
       runner?.stop()
       runner = null
@@ -229,7 +279,8 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
       await ready.catch(() => {})
     },
     async idle() {
-      await ready
+      if (failed) return
+      try { await ready } catch { failed = true; return }
       await runner?.idle()
     }
   }

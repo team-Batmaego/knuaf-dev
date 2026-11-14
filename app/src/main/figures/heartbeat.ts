@@ -42,7 +42,14 @@ export function startHeartbeat(
     await writeJson(path, { v: 1, pid, updatedAt: now() } satisfies HeartbeatState)
   }
 
-  void beat()
+  /**
+   * 첫 박자도 거절을 밖으로 내보내지 않는다(I-03). 저장소 자리를 쓸 수 없으면(예: `figure-channel.json`
+   * 이름이 디렉터리) 이 쓰기가 거절되는데, `void` 만 붙이면 아무도 받지 않아 **비처리 거절**이 되고
+   * 그림 하나 때문에 앱이 종료된다. 실패는 아래 반복 박자와 같은 규칙으로 삼킨다.
+   */
+  void beat().catch(() => {
+    /* 첫 쓰기 실패는 다음 박자와 같다 — 그림만 꺼지고 앱은 뜬다. */
+  })
   timer = setInterval(() => {
     void beat().catch(() => {
       /* 쓰기 실패는 다음 박자에 다시 시도한다 — 하트비트 때문에 앱을 멈추지 않는다. */

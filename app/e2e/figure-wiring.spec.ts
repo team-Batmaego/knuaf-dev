@@ -215,3 +215,103 @@ test('⑤ 턴이 끝난 직후의 다음 전송은 거절되지 않고, 새 턴�
     'end:done', 'begin:req-b', 'run', 'end:start', 'end:done'
   ])
 })
+
+test('⑥ 그림 준비 중 중단은 대기를 깨우고 엔진을 부르지 않는다(I-02)', async () => {
+  const { root, bundle } = scratch('prep-stop')
+  const log: string[] = []
+  const gate = Promise.withResolvers<void>()
+  const svc = new ChatService({
+    skillSource: () => bundle, userData: mkdtempSync(join(tmpdir(), 'kd-figwire-ud-')),
+    emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => fake({ run: async () => { log.push('run') } }),
+    figures: {
+      env: FIGURE_ENV,
+      recordStudentMessage: async () => 0,
+      // 턴 열기가 걸려 있다 — 이 대기는 아직 `runs` 에 없으므로 예전 `stop()` 이 건드리지 못했다.
+      beginTurn: async (_root, turnId) => { log.push(`begin:${turnId}`); await gate.promise },
+      endTurn: async (turnId) => { log.push(`end:${turnId}`) }
+    }
+  })
+  try {
+    const sent = svc.send(root, 'codex', '그림 넣어 주세요', 'req-prep')
+    for (let i = 0; i < 200 && !log.includes('begin:req-prep'); i++) await new Promise((r) => setTimeout(r, 5))
+    expect(log, '준비가 걸려 있다').toContain('begin:req-prep')
+    expect(svc.busy(root), '준비 중에도 잠금은 쥐고 있다').toBe(true)
+    await svc.stop(root, 'codex')
+    const s = await sent
+    expect(s.state, '중단은 준비 중에도 효력이 있다').toBe('stopped')
+    const msg = s.messages.find((m) => m.id === 'req-prep')
+    expect(msg, '보낸 말은 남는다').toBeDefined()
+    expect(msg!.delivery, '전송 중 표시가 남지 않는다').not.toBe('pending')
+    // 대기가 풀려도 엔진이 뒤늦게 시작되면 안 되고, 열린 턴은 닫혀야 한다 — 안 닫으면 감시자가
+    // 멈춘 턴의 요청을 계속 집는다.
+    gate.resolve()
+    for (let i = 0; i < 200 && !log.includes('end:req-prep'); i++) await new Promise((r) => setTimeout(r, 5))
+    expect(log, '중단된 턴은 엔진을 부르지 않는다').not.toContain('run')
+    expect(log, '중단으로 끝난 턴도 통로를 닫는다').toContain('end:req-prep')
+    expect(svc.snapshot(root, 'codex').state).toBe('stopped')
+    // 다음 전송은 그 종료를 기다렸다가 정상으로 돈다(잠금도 대기도 남지 않는다).
+    await svc.send(root, 'codex', '다시', 'req-after')
+    await untilTurnDone(svc, root, log)
+    expect(log.filter((l) => l === 'run'), '중단 뒤의 전송은 정상 실행').toHaveLength(1)
+  } finally { await svc.close() }
+})
+
+test('⑦ endTurn 은 자기 턴 id 를 받는다 — 통로가 소유자만 닫게(I-01)', async () => {
+  const { root, bundle } = scratch('turnid')
+  const ended: string[] = []
+  const svc = new ChatService({
+    skillSource: () => bundle, userData: mkdtempSync(join(tmpdir(), 'kd-figwire-ud-')),
+    emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => fake({ run: async () => {} }),
+    figures: {
+      env: FIGURE_ENV,
+      recordStudentMessage: async () => 0,
+      beginTurn: async () => {},
+      endTurn: async (turnId) => { ended.push(turnId) }
+    }
+  })
+  try {
+    await svc.send(root, 'codex', '첫째', 'req-one')
+    await untilTurnDone(svc, root, ['end'])
+    await svc.send(root, 'codex', '둘째', 'req-two')
+    for (let i = 0; i < 400 && ended.length < 2; i++) await new Promise((r) => setTimeout(r, 5))
+  } finally { await svc.close() }
+  expect(ended, '지운 턴 id 가 곧 그 요청 id 다').toEqual(['req-one', 'req-two'])
+})
+
+test('⑧ 끝나지 않는 옛 endTurn 은 다음 전송을 영원히 막지 않는다(I-02)', async () => {
+  const { root, bundle } = scratch('prep-deadline')
+  const log: string[] = []
+  const stuck = Promise.withResolvers<void>()
+  let ends = 0
+  const svc = new ChatService({
+    skillSource: () => bundle, userData: mkdtempSync(join(tmpdir(), 'kd-figwire-ud-')),
+    emit: () => {}, openExternal: async () => {},
+    connectionFactory: () => fake({ run: async () => { log.push('run') } }),
+    figures: {
+      env: FIGURE_ENV,
+      recordStudentMessage: async () => 0,
+      beginTurn: async (_root, turnId) => { log.push(`begin:${turnId}`) },
+      endTurn: async () => {
+        ends += 1
+        log.push('end:start')
+        if (ends === 1) await stuck.promise
+        log.push('end:done')
+      }
+    }
+  })
+  try {
+    await svc.send(root, 'codex', '첫 그림', 'req-a')
+    for (let i = 0; i < 400 && !log.includes('end:start'); i++) await new Promise((r) => setTimeout(r, 5))
+    expect(log, '첫 턴의 endTurn 이 걸려 있다').toContain('end:start')
+    const startedAt = Date.now()
+    await svc.send(root, 'codex', '두 번째', 'req-b')
+    const waited = Date.now() - startedAt
+    expect(log, '상한이 지나면 그림 고리만 건너뛰고 대화는 간다').toContain('begin:req-b')
+    expect(waited, '기다림에 상한이 있다').toBeLessThan(6_000)
+    await untilTurnDone(svc, root, log)
+    expect(svc.snapshot(root, 'codex').state).toBe('idle')
+    stuck.resolve()
+  } finally { await svc.close() }
+})

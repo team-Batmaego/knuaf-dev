@@ -11,7 +11,7 @@ import type * as heartbeatTypes from './heartbeat'
 
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -91,6 +91,28 @@ describe('startHeartbeat', () => {
     t.mock.timers.tick(60_000)
     await until(async () => false, 20)
     assert.equal((await readState(path))?.updatedAt, 1_000)
+  })
+
+  /**
+   * I-03: 첫 박자의 쓰기 실패가 **비처리 거절**로 새면 그림 하나 때문에 프로세스가 종료된다.
+   * 경로를 디렉터리로 막아 첫 쓰기를 반드시 실패시킨다.
+   */
+  it('첫 박자가 실패해도 거절이 밖으로 새지 않는다(I-03)', async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval'] })
+    const path = join(root, 'broken-first')
+    await mkdir(path)
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const beat = heartbeat.startHeartbeat(path, { intervalMs: 5_000, pid: 9 })
+      // 쓰기 시도·거절 처리까지 한 바퀴 돌린다.
+      for (let i = 0; i < 50; i += 1) await new Promise<void>((done) => setImmediate(done))
+      await beat.stop()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    assert.deepEqual(seen, [])
   })
 
   it('beat()은 직접 한 번 더 쓸 수 있다', async (t) => {
