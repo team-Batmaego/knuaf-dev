@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { generateKeyPairSync, sign } from 'node:crypto'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,12 +9,13 @@ import { deflateRawSync } from 'node:zlib'
 import { ASSET_PREFIX, CHANNEL_URL, compare, MAX_BYTES, sha256, verifySkill, type SkillManifest } from '../src/main/update/manifest'
 import { extractSkill } from '../src/main/update/archive'
 import { UPDATE_KEYS, updateConfig } from '../src/main/update/keys'
-import { boundedFetch } from '../src/main/update/network'
+import { boundedFetch, type Transport } from '../src/main/update/network'
 import { SkillStore } from '../src/main/update/store'
 import { SkillSwitch, skillSwitch } from '../src/main/update/switch'
 import { SkillUpdates } from '../src/main/update/service'
 import { ChatService } from '../src/main/chat/service'
 import { installSkill, setTreeAccess, skillTargets, skillVersion } from '../src/main/agent'
+import { launch } from './helpers'
 
 // Ephemeral test-only keys remain in this test process; no private key file is emitted.
 const pair = generateKeyPairSync('ed25519')
@@ -300,6 +303,24 @@ test('redirects to an arbitrary host stop before second request, allowed CDN wor
   await expect(large.arrayBuffer()).rejects.toThrow(/상한/)
 })
 
+test('redirect chain stops at five hops and channel addresses never follow a redirect', async () => {
+  const f = fixture(), signal = new AbortController().signal, requests: string[] = []
+  // 끝없는 허용 목록 이동 — 5회를 넘기면 멈춰야 한다(루프가 요청을 무한히 내지 않는다는 증거).
+  const chain: Transport = async url => {
+    requests.push(url)
+    return new Response(null, { status: 302, headers: { location: `https://release-assets.githubusercontent.com/r${requests.length}` } })
+  }
+  await expect(boundedFetch(f.manifest.url, signal, chain, f.zip.length, config())).rejects.toThrow(/이동 주소/)
+  expect(requests).toHaveLength(6)
+  const channelRequests: string[] = []
+  const c = config()
+  await expect(boundedFetch(c.channel, signal, async url => {
+    channelRequests.push(url)
+    return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/r1' } })
+  }, 1024, c, true)).rejects.toThrow(/이동 주소/)
+  expect(channelRequests).toEqual([c.channel])
+})
+
 test('same-process update downloads and publishes before switch; timeout keeps verified storage and highest', async () => {
   const { store, bundled } = setup(), lock = new SkillSwitch(), release = lock.enter(), { updates } = updater(store, fixture(), async () => {}, lock)
   await updates.check()
@@ -468,4 +489,83 @@ test('select accepts a stored version and null; rollback keeps highest', async (
   expect(restarts).toBe(3)
   expect(lock.attempts).toBe(3)
   expect(phases).toEqual(['switching', 'ready', 'switching', 'ready', 'switching', 'ready'])
+})
+
+/**
+ * 실제 전송 계층(`netRequestTransport`)은 Electron 메인에만 있으므로 **앱을 띄워** 태운다.
+ * 결함(0.6.1~0.6.3): `net.fetch(…, {redirect:'manual'})` 이 3xx 를 돌려주지 않고 스스로 취소해
+ * `Redirect was cancelled` 로 끝났다 — 허용 목록 검사가 한 번도 실행되지 않았다.
+ *
+ * 이 시험이 잠그는 것 셋:
+ *   1. Electron 이 manual 모드에서 `redirect` 이벤트로 3xx 를 준다(고침이 기대는 계약).
+ *   2. 그 3xx 가 **응답으로** 올라와 허용 목록 검사에 닿는다(오류 문구가 '이동 주소').
+ *   3. 가리킨 호스트로 요청이 **한 건도** 나가지 않는다(서버 로그가 증거).
+ * 양성 대조(같은 서버가 200 서명 채널을 주면 정상)가 없으면 위 실패가 '설정이 틀려서'와 구별되지 않는다.
+ */
+test('channel 302 surfaces as a response, the allowlist rejects it, and the pointed host is never contacted', async () => {
+  const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const hitsA: string[] = [], hitsB: string[] = []
+  let mode: 'redirect' | 'ok' = 'redirect'
+  const upstream = createServer((req, res) => { hitsB.push(req.url ?? ''); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"schema":1}') })
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  const upstreamPort = (upstream.address() as AddressInfo).port
+  const channel = createServer((req, res) => {
+    hitsA.push(req.url ?? '')
+    if (mode === 'redirect') { res.writeHead(302, { location: `http://127.0.0.1:${upstreamPort}/evil.json` }); res.end(); return }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ schema: 1, app: { latest: '0.0.1', page: 'https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.0.1' } }))
+  })
+  await new Promise<void>(resolve => channel.listen(0, '127.0.0.1', resolve))
+  const channelUrl = `http://127.0.0.1:${(channel.address() as AddressInfo).port}/channel.json`
+  const { electronApp, page, appLog } = await launch({ env: {
+    KNUAF_AGENT_PATH_ONLY: '1', KNUAF_UPDATE_PUBLIC_KEY: publicKey, KNUAF_UPDATE_CHANNEL_URL: channelUrl
+  } })
+  try {
+    // 1. Electron 계약: manual 모드에서 3xx 는 `redirect` 이벤트로 온다(따라가지 않는다).
+    const observed = await electronApp.evaluate(({ net }, url) => new Promise<string>(resolve => {
+      const request = net.request({ url, method: 'GET', redirect: 'manual' })
+      // 따라가지 않으면 Chromium 이 스스로 요청을 취소한다 — 그 'error' 는 정상이고, 우리는 이벤트만 본다.
+      request.on('redirect', (status, _method, location) => resolve(`${status} ${location}`))
+      request.on('error', (error: Error) => resolve(`error ${error.message}`))
+      request.end()
+    }), channelUrl)
+    expect(observed).toBe(`302 http://127.0.0.1:${upstreamPort}/evil.json`)
+
+    // 2. 두 갈래(규칙집·앱)가 같은 채널 읽기를 쓴다 — 둘 다 허용 목록 오류로 끝나야 한다.
+    type Reply = { result?: { phase: string; message?: string }; error?: { code: string; message: string } }
+    const ask = (): Promise<[Reply, Reply]> => page.evaluate(() => Promise.all([window.knuaf.update.check(), window.knuaf.appUpdate.check()])) as Promise<[Reply, Reply]>
+    const [skill, appUpdate] = await ask()
+    expect(skill.result?.phase).toBe('error')
+    expect(skill.result?.message).toContain('허용되지 않은 업데이트 이동 주소')
+    expect(appUpdate.result?.phase).toBe('error')
+    expect(appUpdate.result?.message).toContain('허용되지 않은 업데이트 이동 주소')
+
+    // 3. 증거: 가리킨 호스트는 요청을 한 건도 받지 않았다(응답 문구만으로는 부족하다).
+    expect(hitsA.length).toBeGreaterThanOrEqual(1)
+    expect(hitsB).toHaveLength(0)
+
+    // 4. main 로그 한 줄 — 맥 실측에서 실패 원인이 로그에 0줄이었다(ORDER 추가 3). 남기는 것은
+    //    단계·호스트·상태 코드·오류 이름뿐이고 쿼리 문자열·주소 전체는 싣지 않는다.
+    const appLogText = (): string => existsSync(appLog) ? readFileSync(appLog, 'utf-8') : ''
+    await expect.poll(appLogText).toMatch(/update:failed stage=channel host=127\.0\.0\.1 status=302 error=Error/)
+    // 두 갈래(규칙집·앱)가 같은 채널을 각각 읽으므로 줄이 둘 이상일 수 있다 - 전부 같은 모양이어야 한다.
+    const failureLines = appLogText().split('\n').filter(line => line.includes('update:failed'))
+    expect(failureLines.length).toBeGreaterThanOrEqual(2)
+    for (const line of failureLines) {
+      // 주소·쿼리 문자열은 싣지 않는다 - 이 줄은 CI 산출물로 올라간다.
+      expect(line).not.toContain('channel.json')
+      expect(line).not.toContain('http')
+    }
+
+    // 양성 대조: 같은 서버가 200 으로 채널을 주면 두 갈래 모두 오류 없이 '할 일 없음'으로 끝난다.
+    // 시작 시 자동 확인(ipc.ts 의 `void …check()`)의 결과가 섞일 수 있어 최종 상태가 바뀔 때까지 다시 묻는다.
+    mode = 'ok'
+    await expect.poll(async () => (await ask()).map(reply => `${reply.error?.code ?? '-'}/${reply.result?.phase ?? '-'}`).join(' '), { timeout: 20_000 })
+      .toBe('-/idle -/idle')
+    expect(hitsB).toHaveLength(0)
+  } finally {
+    await electronApp.close()
+    await new Promise<void>((resolve, reject) => channel.close(error => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => upstream.close(error => error ? reject(error) : resolve()))
+  }
 })
