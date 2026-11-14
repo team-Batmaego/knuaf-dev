@@ -519,6 +519,8 @@ export const CHECK_LABEL: Record<string, string> = {
   rule_location: '학교 규칙의 본문 위치',
   // 재무·문서
   finance_gate: '본문 전 재무 기록',
+  finance_unsupported_notice: '이 전공 재무 자료 안내',
+  finance_blank_copy_notice: '재무 엑셀 빈 사본 안내',
   body_finance_crosscheck: '본문 숫자와 재무 자료 대조',
   document_parse: '문서 읽기',
   output_superseded_by: '더 새로 만든 파일 존재 여부',

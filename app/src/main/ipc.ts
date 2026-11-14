@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, safeStorage, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, systemPreferences } from 'electron'
 import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
 import { probeProjectWritable } from './project-write'
@@ -26,6 +26,8 @@ import { APP_NAME } from '../shared/name'
 import { hideAppDirs } from './hidden'
 import { projectFolderName } from '../shared/project-folder'
 import { updateConfig } from './update/keys'
+// 302 이동은 전송 계층이 응답으로 돌려주고 허용 검사는 `boundedFetch` 가 한다(`net.fetch` manual 은 취소한다).
+import { netRequestTransport } from './update/netTransport'
 import { SkillStore } from './update/store'
 import { SkillUpdates } from './update/service'
 import { configureSkillSource } from './update/source'
@@ -113,7 +115,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
   configureSkillSource(() => store.resolveSkillSource())
   const updates = new SkillUpdates(store, {
-    config, fetch: (url, init) => net.fetch(url, init),
+    config, fetch: netRequestTransport,
     restartSidecar: () => sidecar.restart(),
     emit: status => win()?.webContents.send('update:status', status)
   })
@@ -641,7 +643,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const handoff = new AppHandoff({ chat, sidecar, windows })
   const appUpdates = new AppUpdates({
     userData: app.getPath('userData'), current: app.getVersion(), platform: process.platform, arch: process.arch,
-    config, fetch: (url, init) => net.fetch(url, init), handoff,
+    config, fetch: netRequestTransport, handoff,
     startInstaller: request => windows.startInstaller(request), quit: () => app.quit(),
     openExternal: url => shell.openExternal(url),
     emit: status => win()?.webContents.send('app-update:status', status)
