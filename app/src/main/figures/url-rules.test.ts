@@ -1,4 +1,5 @@
 import type * as urlTypes from './url-rules'
+import type * as rulesTypes from './rules'
 /**
  * figures/url-rules.test.ts — 허용목록 정규화·판정 (설계 R4-4, C-02).
  *
@@ -8,6 +9,7 @@ import type * as urlTypes from './url-rules'
 
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { describe, it } from 'node:test'
 
 registerHooks({
@@ -21,7 +23,15 @@ registerHooks({
   }
 })
 
-const url = (await import(new URL('./url-rules.ts', import.meta.url).href)) as typeof import('./url-rules')
+// 확장자 없는 내부 import에 등록한 해석 훅을 적용하려고 훅 등록 뒤 모듈을 읽는다.
+const url = (await import(new URL('./url-rules.ts', import.meta.url).href)) as typeof urlTypes
+const rulesMod = (await import(new URL('./rules.ts', import.meta.url).href)) as typeof rulesTypes
+const vectors = JSON.parse((await readFile(new URL('./fixtures/pagequery-vectors.json', import.meta.url), 'utf8'))
+  .replace(/\{\{(.)\*(\d+)\}\}/g, (_match, char: string, count: string) => char.repeat(Number(count)))) as {
+  rules: unknown
+  page: [string, string | null, string][]
+  image: [string, string, boolean, string][]
+}
 
 const rule = (over: Partial<urlTypes.FigureRule> = {}): urlTypes.FigureRule => ({
   id: 'rda',
@@ -73,8 +83,9 @@ describe('parseHttpsUrl', () => {
 
 describe('matchPage / matchImage', () => {
   it('페이지와 그림이 같은 규칙이면 통과', () => {
-    const page = new URL('https://www.rda.go.kr/home/sub/1.do')
-    const allowed = url.isAllowedImage('https://www.rda.go.kr/upload/a.jpg', page, RULES)
+    const pageRule = url.selectPageRule('https://www.rda.go.kr/home/sub/1.do', RULES)
+    assert.ok(pageRule)
+    const allowed = url.isAllowedImage('https://www.rda.go.kr/upload/a.jpg', pageRule, RULES)
     assert.equal(allowed.ok, true)
     if (!allowed.ok) return
     assert.equal(allowed.rule.id, 'rda')
@@ -84,30 +95,24 @@ describe('matchPage / matchImage', () => {
   it('접미사로 위장한 호스트는 안 걸린다', () => {
     const page = new URL('https://www.rda.go.kr.evil.example/home/1')
     assert.equal(url.matchPage(page, RULES), null)
-    assert.deepEqual(url.isAllowedImage('https://www.rda.go.kr.evil.example/upload/a.jpg', page, RULES), {
-      ok: false,
-      reason: 'page_not_allowlisted'
-    })
   })
 
   it('페이지가 허용목록 밖이면 그림도 승인 후보가 아니다', () => {
-    const page = new URL('https://news.example/home/1')
-    assert.deepEqual(url.isAllowedImage('https://www.rda.go.kr/upload/a.jpg', page, RULES), {
-      ok: false,
-      reason: 'page_not_allowlisted'
-    })
+    assert.equal(url.selectPageRule('https://news.example/home/1', RULES), null)
   })
 
   it('그림 경로가 페이지 규칙의 그림 경로가 아니면 host', () => {
-    const page = new URL('https://www.rda.go.kr/home/1')
-    assert.deepEqual(url.isAllowedImage('https://www.rda.go.kr/other/a.jpg', page, RULES), { ok: false, reason: 'host' })
+    const pageRule = url.selectPageRule('https://www.rda.go.kr/home/1', RULES)
+    assert.ok(pageRule)
+    assert.deepEqual(url.isAllowedImage('https://www.rda.go.kr/other/a.jpg', pageRule, RULES), { ok: false, reason: 'host' })
   })
 
   it('페이지와 그림이 다른 규칙 항목에 걸리면 rule_mismatch', () => {
     // 페이지는 `rda`(/home/), 그림은 `rda-board`(/board-img/)에 걸린다 — 호스트는 같다.
     const rules = [rule({ id: 'rda-board', pagePath: '^/board/.*', imagePath: '^/board-img/.*' }), rule()]
-    const page = new URL('https://www.rda.go.kr/home/1')
-    assert.deepEqual(url.isAllowedImage('https://www.rda.go.kr/board-img/a.jpg', page, rules), {
+    const pageRule = url.selectPageRule('https://www.rda.go.kr/home/1', rules)
+    assert.ok(pageRule)
+    assert.deepEqual(url.isAllowedImage('https://www.rda.go.kr/board-img/a.jpg', pageRule, rules), {
       ok: false,
       reason: 'rule_mismatch'
     })
@@ -143,4 +148,32 @@ describe('pathPattern — 전체 일치 강제', () => {
     assert.equal(url.matchImage(new URL('https://www.rda.go.kr/ps/img/a.jpg'), looseImage), null)
     assert.equal(url.matchImage(new URL('https://www.rda.go.kr/img'), looseImage)?.rule.id, 'loose-img')
   })
+})
+
+describe('pageQuery — 공용 벡터', () => {
+  const rules = rulesMod.parseRules(JSON.stringify(vectors.rules))
+  for (const [raw, expected, memo] of vectors.page) {
+    it(`page: ${memo}`, () => {
+      const selected = url.selectPageRule(raw, rules)
+      assert.equal(selected?.id ?? null, expected)
+      if (selected?.rule === url.RULE_PAGE_QUERY) {
+        assert.equal(new URL(raw).href, raw)
+        assert.equal(url.matchPage(new URL(raw), rules), null)
+      }
+    })
+  }
+  for (const [page, image, expected, memo] of vectors.image) {
+    it(`image: ${memo}`, () => {
+      const selected = url.selectPageRule(page, rules)
+      assert.ok(selected)
+      const result = url.isAllowedImage(image, selected, rules)
+      assert.equal(result.ok, expected)
+      if (result.ok) assert.equal(result.rule, selected)
+      else {
+        const parsed = url.parseHttpsUrl(image)
+        assert.ok(parsed.ok)
+        assert.equal(result.reason, url.matchImage(parsed.url, rules) ? 'rule_mismatch' : 'host')
+      }
+    })
+  }
 })

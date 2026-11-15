@@ -23,7 +23,15 @@ import {
 } from './contract'
 import { checkTurn, readTurn, type TurnRecord } from './turn'
 import type { RulesLoad } from './rules'
-import { isAllowedImage, matchImage, matchPage, parseHttpsUrl, type FigureRule } from './url-rules'
+import {
+  imageAllowedByRule,
+  isAllowedImage,
+  pageHopAllowed,
+  parseHttpsUrl,
+  RULE_PAGE_QUERY,
+  selectPageRule,
+  type FigureRule
+} from './url-rules'
 import { fetchLimited } from './fetch'
 import { sniffImage } from './image-header'
 import {
@@ -121,14 +129,13 @@ export interface ProcessInput {
 interface ImageJob {
   n: number
   raw: string
-  pageUrl: URL
   pageHtml: string
   pageSha: string
   pageUrlHref: string
   /** 페이지 HTML 안 그림 태그 전부(자리 포함) — 실재 대조와 제3자 표기 기준점. */
   occurrences: readonly ImageOccurrence[]
   rules: readonly FigureRule[]
-  pageRuleId: string
+  pageRule: FigureRule
   fetch: FetchFn
   deps: ProcessDeps
   deadline: number
@@ -202,15 +209,21 @@ export async function processRequest(input: ProcessInput, deps: ProcessDeps): Pr
 
   const rules = await deps.loadRules()
   if (!rules.ok) return reject('no_channel')
-  const pageParsed = parseHttpsUrl(request.page)
-  if (!pageParsed.ok) return reject('invalid')
-  const pageMatch = matchPage(pageParsed.url, rules.rules)
-  if (!pageMatch) return reject('rule_missing')
+  const pageRule = selectPageRule(request.page, rules.rules)
+  if (!pageRule) return reject('rule_missing')
 
   const fetchOne = deps.fetchFn ?? fetchLimited
   const deadline = now() + REQUEST_TIMEOUT_MS
   const page = await fetchOne(request.page, {
-    validate: (url) => validateForHop(url, rules.rules, 'page', pageMatch.rule.id),
+    validate: (url) => {
+      if (pageRule.rule === RULE_PAGE_QUERY) {
+        return url.href === request.page ? { ok: true } : { ok: false, reason: 'outside_rules' }
+      }
+      const parsed = parseHttpsUrl(url.href)
+      if (!parsed.ok) return { ok: false, reason: parsed.reason }
+      return pageHopAllowed(pageRule, parsed.url) ? { ok: true } : { ok: false, reason: 'outside_rules' }
+    },
+    ...(pageRule.rule === RULE_PAGE_QUERY ? { maxRedirects: 0 } : {}),
     maxBytes: PAGE_MAX_BYTES,
     timeoutMs: Math.min(FILE_TIMEOUT_MS, Math.max(1, deadline - now())),
     headers: { accept: 'text/html,application/xhtml+xml' }
@@ -230,13 +243,12 @@ export async function processRequest(input: ProcessInput, deps: ProcessDeps): Pr
     const job: ImageJob = {
       n: index + 1,
       raw,
-      pageUrl: page.finalUrl,
       pageHtml: html,
       pageSha,
       pageUrlHref: page.finalUrl.href,
       occurrences,
       rules: rules.rules,
-      pageRuleId: pageMatch.rule.id,
+      pageRule,
       fetch: fetchOne,
       deps,
       deadline,
@@ -346,10 +358,9 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
     counters: job.counters
   })
 
-  // 승인 후보 판정: 페이지·그림이 **같은 규칙 항목**에 걸려야 한다(R4-4).
-  const allowed = isAllowedImage(job.raw, job.pageUrl, job.rules)
+  // 처음 페이지에서 고른 객체의 imagePath만 쓴다. 규칙집의 첫 그림 일치로 다시 고르지 않는다(PQ-8).
+  const allowed = isAllowedImage(job.raw, job.pageRule, job.rules)
   if (!allowed.ok) return refuse(allowed.reason)
-  if (allowed.rule.id !== job.pageRuleId) return refuse('rule_mismatch')
 
   const remaining = job.deadline - job.now()
   if (remaining <= 0) return refuse('timeout')
@@ -357,8 +368,12 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
   if (budget <= 0) return refuse('limit')
 
   const fetched = await job.fetch(job.raw, {
-    // 홉마다 **페이지와 같은 규칙 id**의 imagePath를 요구한다(B-3). 다른 기관 규칙으로 넘어가면 거절.
-    validate: (url) => validateForHop(url, job.rules, 'image', job.pageRuleId),
+    // 처음·중간·마지막 홉 모두 처음 고른 항목 하나만 허용한다(PQ-9).
+    validate: (url) => {
+      const parsed = parseHttpsUrl(url.href)
+      if (!parsed.ok) return { ok: false, reason: parsed.reason }
+      return imageAllowedByRule(job.pageRule, parsed.url) ? { ok: true } : { ok: false, reason: 'outside_rules' }
+    },
     maxBytes: budget,
     timeoutMs: Math.min(FILE_TIMEOUT_MS, remaining),
     headers: { accept: 'image/jpeg,image/png,image/gif' }
@@ -368,8 +383,7 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
   const finalUrl = fetched.finalUrl.href
   // 받기 홉 검사와 **따로** 최종 URL을 규칙에 다시 물린다 — 판정 입력을 상수로 두지 않는다(B-3).
   const finalParsed = parseHttpsUrl(finalUrl)
-  const finalMatch = finalParsed.ok ? matchImage(finalParsed.url, job.rules) : null
-  const finalAllowed = finalMatch !== null && finalMatch.rule.id === job.pageRuleId
+  const finalAllowed = finalParsed.ok && imageAllowedByRule(job.pageRule, finalParsed.url)
 
   const shippedType = (fetched.contentType ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
   // Content-Type은 참고만 한다 — 판정은 매직 바이트로 한다(헤더 주장은 위조 가능).
@@ -500,26 +514,6 @@ export function decodeBody(body: Uint8Array, contentType: string | null): string
 /** charset 이름을 읽기 위한 1바이트 해석 — 본문 앞부분만 본다. */
 function decodeAscii(bytes: Uint8Array): string {
   return new TextDecoder('latin1').decode(bytes)
-}
-
-/**
- * 받기 홉마다 규칙을 다시 본다 — 리다이렉트가 규칙 밖 호스트·경로로 나가면 거절.
- *
- * 이미 페이지가 걸린 규칙(`ruleId`)의 **같은 항목**만 허용한다. 다른 기관 규칙의 그림 경로로
- * 넘어가면 그 기관 그림에 이 페이지의 공공누리를 붙이게 되므로, 홉 단계에서 끊는다(B-3).
- */
-function validateForHop(
-  url: URL,
-  rules: readonly FigureRule[],
-  kind: 'page' | 'image',
-  ruleId: string
-): { ok: true } | { ok: false; reason: string } {
-  const parsed = parseHttpsUrl(url.href)
-  if (!parsed.ok) return { ok: false, reason: parsed.reason }
-  const match = kind === 'page' ? matchPage(parsed.url, rules) : matchImage(parsed.url, rules)
-  if (!match) return { ok: false, reason: 'outside_rules' }
-  if (match.rule.id !== ruleId) return { ok: false, reason: 'outside_rules' }
-  return { ok: true }
 }
 
 /** 이미 처리한 id인가 — 결과 파일 또는 증명 줄. 계약 §3: 같은 id 재사용 거절. */

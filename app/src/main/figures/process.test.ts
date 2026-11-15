@@ -38,6 +38,13 @@ const contract = (await import(new URL('./contract.ts', import.meta.url).href)) 
 const choices = (await import(new URL('./choices.ts', import.meta.url).href)) as typeof import('./choices')
 const fetchMod = (await import(new URL('./fetch.ts', import.meta.url).href)) as typeof import('./fetch')
 const verdict = (await import(new URL('./verdict.ts', import.meta.url).href)) as typeof import('./verdict')
+// 확장자 없는 내부 import에 등록한 해석 훅을 적용하려고 훅 등록 뒤 모듈을 읽는다.
+const rulesMod = (await import(new URL('./rules.ts', import.meta.url).href)) as typeof rulesTypes
+const vectors = JSON.parse((await readFile(new URL('./fixtures/pagequery-vectors.json', import.meta.url), 'utf8'))
+  .replace(/\{\{(.)\*(\d+)\}\}/g, (_match, char: string, count: string) => char.repeat(Number(count)))) as {
+  rules: unknown
+  flow: ['page' | 'image', string, string | null, string[], boolean, string][]
+}
 
 const NOW = Date.UTC(2026, 10, 11, 12)
 const PAGE_URL = 'https://www.nongsaro.go.kr/portal/ps/psv/psvr/psvre/curationDtl.ps'
@@ -246,13 +253,13 @@ describe('processRequest — 받지 않는 요청', () => {
     assert.deepEqual(fetch.calls, [])
   })
 
-  it('https가 아닌 페이지는 invalid', async () => {
+  it('https가 아닌 페이지는 rule_missing', async () => {
     const h = await harness()
     const res = await processMod.processRequest(
       { request: { ...h.request, page: 'http://www.nongsaro.go.kr/portal/x' }, folder: h.folder },
       h.deps()
     )
-    assert.equal(res.reason, 'invalid')
+    assert.equal(res.reason, 'rule_missing')
   })
 
   it('페이지 받기 실패는 limit·timeout만 그대로, 나머지는 page_fetch', async () => {
@@ -603,5 +610,71 @@ describe('decodeBody — 문자셋 (R-3)', () => {
     const res = await processMod.processRequest({ request: h.request, folder: h.folder }, h.deps({ fetchFn: fetch.fn }))
     assert.equal(res.images[0]?.verdict, 'approved')
     assert.equal(res.images[0]?.kogl, 1)
+  })
+})
+
+describe('pageQuery — 공용 flow 벡터', () => {
+  const rules = rulesMod.parseRules(JSON.stringify(vectors.rules))
+  for (const [kind, page, image, locations, expected, memo] of vectors.flow) {
+    it(memo, async () => {
+      const h = await harness({ rules: { ...loadedRules, rules } })
+      const start = kind === 'page' ? page : image!
+      // 최종 그림 주소를 페이지에 넣어 실재 대조가 홉 규칙 시험을 가리지 않게 한다.
+      let final = new URL(start)
+      for (const location of locations) final = new URL(location, final)
+      const html = pageHtml(kind === 'image' ? [final.href] : [])
+      const sent: string[] = []
+      const transport = hopTransport((hop) => hop < locations.length
+        ? { status: 302, location: locations[hop]! }
+        : { status: 200, body: kind === 'image' ? JPEG : Buffer.from(html) })
+      const fetchFn: processTypes.FetchFn = async (raw, options) => {
+        if (kind === 'image' && raw === page) return okPage(html, page)[page]!
+        return fetchMod.fetchLimited(raw, {
+          ...options,
+          deps: {
+            lookupAll: PUBLIC_DNS,
+            transport: (request, respond) => {
+              sent.push(`https://${request.host}${request.path}`)
+              return transport.transport(request, respond)
+            }
+          }
+        })
+      }
+      const request = { ...h.request, page, images: kind === 'image' ? [image!] : [] }
+      const res = await processMod.processRequest({ request, folder: h.folder }, h.deps({ fetchFn }))
+      assert.equal(kind === 'page' ? res.status === 'done' : res.images[0]?.verdict === 'approved', expected)
+      // 실제 전송 목록을 독립적인 원문 경로 경계로 계산한다. 거절된 홉은 전송되지 않아야 한다.
+      const expectedSent = [start]
+      let current = new URL(start)
+      for (const location of locations) {
+        if (kind === 'page' && page.startsWith('https://www.example.go.kr/')) break
+        if (expectedSent.length === 4) break
+        const next = new URL(location, current)
+        const allowedPrefix = kind === 'page'
+          ? 'https://plain.example.go.kr/plain/view.do?'
+          : start.slice(0, start.lastIndexOf('/') + 1)
+        if (!next.href.startsWith(allowedPrefix)) break
+        expectedSent.push(next.href)
+        current = next
+      }
+      assert.deepEqual(sent, expectedSent)
+      if (!expected && kind === 'page') assert.equal(res.reason, 'page_fetch')
+      if (!expected) assert.deepEqual(await readdir(h.paths.store), [])
+    })
+  }
+
+  it('같은 호스트·겹친 imagePath의 둘째 페이지 항목이 승인·증명까지 간다', async () => {
+    const h = await harness({ rules: { ...loadedRules, rules } })
+    const page = 'https://www.example.go.kr/board/board.do?boardId=cardnews&prgId=con_cardnews&mode=view&dataNo=1'
+    const image = 'https://www.example.go.kr/files/a.png'
+    const fetch = fakeFetch({ ...okPage(pageHtml([image]), page), [image]: okImage(image) })
+    const request = { ...h.request, page, images: [image] }
+    const res = await processMod.processRequest({ request, folder: h.folder }, h.deps({ fetchFn: fetch.fn }))
+    assert.equal(res.images[0]?.verdict, 'approved')
+    assert.equal(res.images[0]?.org, '시험기관(카드뉴스)')
+    assert.deepEqual(await readdir(h.paths.store), [`${storage.sha256Hex(PNG)}.png`])
+    const receipt = JSON.parse((await readFile(h.paths.receipts, 'utf8')).trim())
+    assert.equal(receipt.image.ruleId, 't-card')
+    assert.equal(contract.isApprovedReceipt(receipt), true)
   })
 })
