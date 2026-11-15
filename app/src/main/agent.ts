@@ -279,6 +279,7 @@ const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json']
 /** Walk `abs`, collecting "rel/path:sha256(content)" for the files installSkill copies. */
 function skillFingerprint(abs: string, rel: string, out: string[], strictHost: boolean): void {
   if (!existsSync(abs)) return
+  if (strictHost && lstatSync(abs).isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
   for (const name of readdirSync(abs)) {
     const child = join(abs, name)
     if (!copyFilter(child)) {
@@ -287,7 +288,8 @@ function skillFingerprint(abs: string, rel: string, out: string[], strictHost: b
       continue
     }
     try {
-      const st = statSync(child)
+      const st = strictHost ? lstatSync(child) : statSync(child)
+      if (strictHost && st.isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
       if (st.isDirectory()) skillFingerprint(child, `${rel}/${name}`, out, strictHost)
       else if (st.isFile()) out.push(`${rel}/${name}:${createHash('sha256').update(readFileSync(child)).digest('hex')}`)
     } catch (error) {
@@ -314,11 +316,13 @@ export function skillVersion(source: string): string {
 function skillDigest(source: string, strictHost = false): string {
   const h = createHash('sha256')
   const skillMd = join(source, 'SKILL.md')
+  if (strictHost && lstatSync(skillMd).isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
   h.update(existsSync(skillMd) ? readFileSync(skillMd) : Buffer.alloc(0))
   const entries: string[] = []
   for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries, strictHost)
   for (const name of SKILL_METADATA) {
     const file = join(source, name)
+    if (strictHost && existsSync(file) && lstatSync(file).isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
     if (existsSync(file)) entries.push(`${name}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`)
   }
   entries.sort()

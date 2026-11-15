@@ -188,7 +188,7 @@ export function touchesProtected(root: string, t: string[], userData?: string): 
   const ownSkill = !!script && !script.startsWith('-') && !script.includes('..')
     && SKILL_PATH.test(script) && SKILL_SCRIPT.test(script)
     && INTERPRETERS.test(exeName(exe))
-    && ((protectedRel(root, script) ?? '').startsWith(APP_SKILL_PREFIX) || isSkillHostPath(script, userData))
+    && ((protectedRel(root, script) ?? '').startsWith(APP_SKILL_PREFIX) || isHostTarget(root, script, userData))
   return !(ownSkill && hits.length === 1 && hits[0] === script)
 }
 
@@ -598,6 +598,14 @@ function pathOpsFor(root: string): typeof posix {
   return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(root) ? win32 : posix
 }
 
+/** 도구의 cwd는 논문 폴더다. 원문·존재하는 조상까지 푼 링크 대상을 같은 앱 자리 경계로 본다. */
+function isHostTarget(root: string, value: string, userData?: string): boolean {
+  if (!userData || !value) return false
+  const ops = pathOpsFor(root)
+  const absolute = ops.resolve(root, value)
+  return isSkillHostPath(ops === win32 ? absolute.replace(/\\/g, '/') : absolute, userData)
+}
+
 /**
  * 뿌리 기준 상대경로(윈도우는 앞으로 슬래시). 밖이면 null. 윈도우는 대소문자를 구분하지 않으므로
  * 접는다.
@@ -757,11 +765,13 @@ function powerShellWords(raw: string): { words: string[]; safe: boolean } | null
  * - 나머지 인자는 폴더 안이어야 하고, 보호 경로(`.claude`·`CLAUDE.md` 등)를 가리키면 묻는다.
  * - `;`·`|`·`&`·`$()`·백틱·리다이렉트가 하나라도 섞이면 `safe` 가 꺼져 묻는다.
  */
-function powerShellSkillCall(root: string, raw: string): boolean {
+function powerShellSkillCall(root: string, raw: string, userData?: string): boolean {
   const parsed = powerShellWords(raw)
   if (!parsed?.safe) return false
   const { words } = parsed
   if (words.length < 2) return false
+  // 폴더 안 .claude 별칭도 실제 앱 사본이면 로컬 스킬 예외·지문 검사를 건너뛰지 않는다.
+  if (argsHitHost(root, words, userData)) return false
   const [exe, script, ...args] = words
   if (!INTERPRETERS.test(exeName(exe))) return false
   const ops = pathOpsFor(root)
@@ -794,8 +804,8 @@ function isSkillCommand(root: string, input: unknown, userData?: string): boolea
   if (typeof raw !== 'string' || !raw.trim()) return false
   const segs = parseShell(raw)
   return !!segs?.length && segs.every((t) => segmentReason(t) === null
-    && (hostSkillCall(t, userData)
-      || (argsInRoot(root, t.slice(1)) && !argsHitHost(t.slice(1), userData))))
+    && (hostSkillCall(root, t, userData)
+      || (argsInRoot(root, t.slice(1)) && !argsHitHost(root, t, userData))))
 }
 
 /**
@@ -806,44 +816,40 @@ function isSkillCommand(root: string, input: unknown, userData?: string): boolea
  * 대상은 앱이 매 전송마다 다시 까는 사본이다. 링크를 풀어 실제 자리로 판정한다.
  * 실행 예외(`hostSkillCall`)는 호출 **모양**이 인정될 때만 서므로 여기서 먼저 닫는다.
  */
-function argsHitHost(args: string[], userData?: string): boolean {
+function argsHitHost(root: string, args: string[], userData?: string): boolean {
   if (!userData) return false
-  return args.some((a) => argPathPieces(a).some((p) => isSkillHostPath(p, userData)))
+  return args.some((a) => argPathPieces(a).some((p) => isHostTarget(root, p, userData)))
 }
 
 /**
- * 앱 스킬 자리의 스크립트를 인터프리터로 여는 호출인가(내용 불일치 카드·쓰기 예외용).
- *
- * 스킬이 폴더 밖으로 나갔으므로 `argsInRoot` 만으로는 모든 스킬 실행이 카드가 된다.
- * 인정 범위는 **스크립트 하나 + 그 스크립트의 인자**까지다. 인자 어딘가에 앱 스킬 자리
- * 경로가 또 나오면(예: 스크립트에게 자기 사본을 쓰라고 넘기는 경우) 인정하지 않는다 —
- * 읽기·실행만 예외이고 쓰기는 아니다(`hostWriteDecision` 이 한 번 더 막는다).
+ * 앱 자리 코드를 여는 호출인가. 직접 실행(t[0])과 인터프리터의 첫 인자를 모두 본다.
+ * 이 인식은 승인 카드·쓰기 예외용이며, 자동 실행에 필요한 절대경로·파일명·깊이는 별도로 본다.
+ * 추가 인자로 앱 자리 경로를 주면 자기 사본 쓰기일 수 있으므로 여기서 예외로 인정하지 않는다.
  */
-function hostScriptInvocation(t: string[], userData?: string): boolean {
+function hostScriptInvocation(root: string, t: string[], userData?: string): boolean {
   const [exe, script, ...args] = t
-  if (!exe || !script) return false
-  if (!INTERPRETERS.test(exeName(exe))) return false
-  if (script.startsWith('-') || script.includes('..')) return false
-  if (!SKILL_PATH.test(script) || !SKILL_SCRIPT.test(script)) return false
-  if (!isSkillHostPath(script, userData)) return false
-  for (const a of args) {
-    if (a.includes('..')) return false
-    for (const piece of argPathPieces(a)) if (isSkillHostPath(piece, userData)) return false
-  }
-  return true
+  if (!exe) return false
+  if (isHostTarget(root, exe, userData)) return !argsHitHost(root, t.slice(1), userData)
+  if (!INTERPRETERS.test(exeName(exe)) || !script || script.startsWith('-')) return false
+  return isHostTarget(root, script, userData) && !argsHitHost(root, args, userData)
 }
 
 /** 자동 실행 예외는 scripts/ 바로 아래만. 동봉 스킬의 실행 진입점은 모두 이 자리에 있다. */
-function hostSkillCall(t: string[], userData?: string): boolean {
-  if (!userData || !hostScriptInvocation(t, userData)) return false
+function hostSkillCall(root: string, t: string[], userData?: string): boolean {
+  if (!userData || !hostScriptInvocation(root, t, userData)) return false
+  const [exe, script, ...args] = t
+  if (!script || !INTERPRETERS.test(exeName(exe)) || isHostTarget(root, exe, userData)) return false
   const ops = pathOpsFor(userData)
+  // 원문이 앱 자리 절대경로인 인터프리터 호출만 자동 실행한다. 상대경로·링크 별칭은 카드다.
+  if (!ops.isAbsolute(script) || script.includes('..') || args.some((a) => a.includes('..'))) return false
+  if (!SKILL_PATH.test(script) || !SKILL_SCRIPT.test(script)) return false
   const scripts = ops.join(skillHostDir(userData), 'scripts')
-  const rel = relIn(ops, scripts, t[1])
+  const rel = relIn(ops, scripts, script)
   if (!rel || rel.includes('/')) return false
   // scripts/ 바로 아래 링크가 하위 폴더·뿌리·references/·assets/를 가리켜도 자동 실행하지 않는다.
   // 맥에서 윈도 경로를 판정하는 시험처럼 실제 뿌리를 볼 수 없으면 문자열 경계만 쓴다.
   if (!existsSync(scripts)) return true
-  const realRel = relIn(ops, realOrSelfDeep(scripts), realOrSelfDeep(t[1]))
+  const realRel = relIn(ops, realOrSelfDeep(scripts), realOrSelfDeep(script))
   return !!realRel && !realRel.includes('/')
 }
 
@@ -1311,7 +1317,7 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   const hostContentIntact = (): boolean => hostIntact ? hostIntact()
     : (memo ??= !!userData && !!bundleSource && sameTreeContent(skillHostDir(userData), bundleSource))
   const ok = (v: unknown) => outsideRoot(root, v) === null
-    || (typeof v === 'string' && (allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')) || isSkillHostPath(v, userData)))
+    || (typeof v === 'string' && (allowed.includes(realOrSelf(resolve(root, v)).normalize('NFC')) || isHostTarget(root, v, userData)))
   const keys = PATH_TOOLS[name]
   if (keys) {
     const values = keys.map((k) => argOf(input, k))
@@ -1319,7 +1325,7 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
     // 폴더 안이어도 권한 파일은 묻는다 — 도우미가 자기 권한을 스스로 넓히는 통로를 막는다.
     if (!READ_ONLY_TOOLS[name]) {
       // 앱 스킬 자리는 실행·읽기만 예외다(§4.2-1). 쓰기는 이 자리에서 먼저 닫는다.
-      if (values.some((v) => typeof v === 'string' && isSkillHostPath(v, userData))) return false
+      if (values.some((v) => typeof v === 'string' && isHostTarget(root, v, userData))) return false
       if (values.some((v) => protectedRel(root, v) !== null)) return false
     }
     return true
@@ -1327,7 +1333,7 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   if (POWERSHELL_TOOLS[name]) {
     const raw = argOf(input, 'command')
     // PowerShell 은 Bash 파서로 판정하지 않는다(문법이 다르다). 확실히 아는 꼴 하나만 통과.
-    return typeof raw === 'string' && powerShellSkillCall(root, raw)
+    return typeof raw === 'string' && powerShellSkillCall(root, raw, userData)
   }
   if (name === 'Bash') {
     const raw = argOf(input, 'command')
@@ -1337,7 +1343,7 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
     if (!isSkillCommand(root, input, userData)) return false
     // 앱 스킬 자리의 스크립트를 여는 호출만 내용 대조를 건다 — 폴더 안 일만 하는 명령은
     // 스킬 사본 상태와 무관하다(사본이 낡았다고 학생의 평범한 명령을 카드로 만들지 않는다).
-    if (bundleSource !== undefined && segs?.some((t) => hostSkillCall(t, userData)) && !hostContentIntact()) return false
+    if (bundleSource !== undefined && segs?.some((t) => hostSkillCall(root, t, userData)) && !hostContentIntact()) return false
     return true
   }
   // 형님 결정(2026-11-09): 앱 AI의 웹 조회는 학생 허락 없이 허용한다.
@@ -1348,7 +1354,7 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
 
 /** 앱 자리 호출은 내용 일치와 실행 위치를 따로 검증한다. 어느 쪽도 trusted로 덮지 않는다. */
 function hostScriptReview(
-  name: string, input: unknown, userData?: string, hostIntact?: () => boolean
+  root: string, name: string, input: unknown, userData?: string, hostIntact?: () => boolean
 ): 'location' | 'content' | null {
   if (!userData) return null
   const raw = argOf(input, 'command')
@@ -1357,17 +1363,16 @@ function hostScriptReview(
   if (name === 'Bash') segs = parseShell(raw)
   else if (POWERSHELL_TOOLS[name]) {
     const parsed = powerShellWords(raw)
-    if (!parsed?.safe || parsed.words.length < 2) return null
-    const [exe, script, ...args] = parsed.words
-    segs = [[exe, script.replace(/\\/g, '/'), ...args]]
+    if (!parsed?.safe) return null
+    segs = [parsed.words.map((word) => word.replace(/\\/g, '/'))]
   } else return null
   if (!segs) return null // 해석 불가 명령은 앞선 hostWriteDecision이 거절한다.
   let invocation = false
   for (const t of segs) {
-    if (!hostScriptInvocation(t, userData)) continue
+    if (!hostScriptInvocation(root, t, userData)) continue
     invocation = true
     // 지문이 같거나 동봉본을 모르는 옛 호출자여도 실행 위치 예외 밖이면 한 번은 묻는다.
-    if (!hostSkillCall(t, userData)) return 'location'
+    if (!hostSkillCall(root, t, userData)) return 'location'
   }
   return invocation && hostIntact && !hostIntact() ? 'content' : null
 }
@@ -1431,7 +1436,7 @@ export function hostWriteDecision(
     if (READ_ONLY_TOOLS[name]) return null
     for (const k of keys) {
       const v = argOf(input, k)
-      if (typeof v === 'string' && isSkillHostPath(v, userData)) return deny(v)
+      if (typeof v === 'string' && isHostTarget(root, v, userData)) return deny(v)
     }
     return null
   }
@@ -1442,15 +1447,15 @@ export function hostWriteDecision(
   if (name === 'Bash') segs = parseShell(raw)
   else {
     const parsed = powerShellWords(raw)
-    segs = parsed?.safe ? parsed.words.length ? [parsed.words] : null : null
+    segs = parsed?.safe && parsed.words.length ? [parsed.words.map((word) => word.replace(/\\/g, '/'))] : null
   }
   if (!segs) return { behavior: 'deny' as const, message: UNPARSEABLE_SHELL_COPY }
   for (const t of segs) {
     // 인터프리터 호출 자체를 쓰기로 오인하지 않는다. 자동 실행 범위·내용 대조는 별도 판정한다.
-    if (hostScriptInvocation(t, userData)) continue
-    for (const a of t.slice(1)) {
+    if (hostScriptInvocation(root, t, userData)) continue
+    for (const a of t) {
       for (const piece of argPathPieces(a)) {
-        if (isSkillHostPath(piece, userData)) return deny(piece)
+        if (isHostTarget(root, piece, userData)) return deny(piece)
       }
     }
   }
@@ -1882,7 +1887,7 @@ export class ClaudeConnection implements AgentConnection {
         if (this.autoAllowed(name, input, hostIntact)) return { behavior: 'allow', updatedInput: input }
         // 앱 자리의 내용 불일치뿐 아니라 자동 실행 위치 밖 호출도 trusted()보다 먼저 묻는다.
         // autoAllow=false만으로는 부족하다 — 지문이 같아도 아래 trusted 통로로 열리면 안 된다.
-        const hostReview = hostScriptReview(name, input, this.options.guard?.userData, hostIntact)
+        const hostReview = hostScriptReview(this.options.root, name, input, this.options.guard?.userData, hostIntact)
         if (hostReview) {
           const id = randomUUID()
           const allowed = await this.askPermission(id, options.signal, events, describeHostMismatch(input, hostReview))

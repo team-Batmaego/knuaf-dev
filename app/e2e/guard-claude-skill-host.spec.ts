@@ -13,11 +13,11 @@
 import { expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import {
   buildLaunchScript, installSkill, sameTreeContent, setTreeAccess, skillBackupDir, skillSource, skillState, skillTargets, skillVersion,
@@ -499,6 +499,156 @@ test('앱 사본의 scripts·references·assets 안 캐시 파일은 탐지하�
       expect(installSkill(source, codex, version, source).action).toBe('unchanged')
       expect(readFileSync(join(codex, relative), 'utf-8')).toBe('student cache')
     }
+  }
+})
+
+test('SWEEP C02–C07·C23·C30: 직접 실행·상대 링크·상위 경로는 trusted와 무관하게 앱 실행 카드다', async () => {
+  const { root, userData, target } = installedBox()
+  const py = join(target, 'scripts', 'gg.py')
+  const injected = join(target, 'scripts', 'gg_extra.py')
+  symlinkSync(target, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+  symlinkSync(py, join(root, 'gg_link.py'), 'file')
+  mkdirSync(join(root, '.claude', 'skills'), { recursive: true })
+  symlinkSync(target, join(root, '.claude', 'skills', 'knuaf-dev'), process.platform === 'win32' ? 'junction' : 'dir')
+  const q = (path: string) => `"${path.replace(/\\/g, '/')}"`
+  const cases = [
+    ['C02-direct-script', q(py)],
+    ['C03-direct-injected', q(injected)],
+    ['C04-absolute-link', `python3 ${q(join(root, 'gg_link.py'))}`],
+    ['C05-relative-link', 'python3 alias/scripts/gg.py'],
+    ['C06-relative-file-link', 'python3 gg_link.py'],
+    ['C07-root-relative', `python3 ${q(relative(root, py))}`],
+    ['C23-host-as-executable', `${q(injected)} status`],
+    ['C30-relative-local-skill-alias', 'python3 .claude/skills/knuaf-dev/scripts/gg.py']
+  ]
+  for (const changed of [false, true]) {
+    if (changed) {
+      setTreeAccess(target, true)
+      writeFileSync(py, '# changed script\n')
+      writeFileSync(injected, '# injected script\n')
+    }
+    expect(sameTreeContent(target, source)).toBe(!changed)
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      for (const trusted of [true, false]) {
+        const r = await rig({ root, userData }, { trusted })
+        for (const [id, command] of cases) {
+          const call = { command }
+          expect(autoAllow(root, tool, call, [], userData, source), `${id}/${tool}/${trusted}/${changed}`).toBe(false)
+          expect(hostWriteDecision(root, tool, call, userData), `${id}/${tool}`).toBeNull()
+          const count = r.cards.length
+          const pending = r.ask(tool, call)
+          await settle(() => r.cards.length > count)
+          expect(r.cards, `${id}/${tool}/${trusted}`).toHaveLength(count + 1)
+          expect(r.cards[count].title, id).toContain('자동 실행 범위')
+          r.answer(false)
+          expect(plain(await pending), id).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+        }
+      }
+    }
+  }
+})
+
+test('SWEEP C21·C29: 앱 자리를 향한 상대 링크 쓰기는 셸·모든 쓰기 도구에서 trusted 전에 거절한다', async () => {
+  const { root, userData, target } = installedBox()
+  symlinkSync(target, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+  symlinkSync(join(target, 'scripts', 'gg.py'), join(root, 'gg_link.py'), 'file')
+  const paths = ['alias/scripts/gg.py', 'alias/scripts/gg_new.py', 'gg_link.py', relative(root, join(target, 'scripts', 'gg_new.py')).replace(/\\/g, '/')]
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    for (const path of paths) {
+      for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+        const call = tool === 'NotebookEdit' ? { notebook_path: path } : { file_path: path, content: 'not executed' }
+        expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${path}`).toBe(false)
+        expect(hostWriteDecision(root, tool, call, userData), `${tool}/${path}`).toMatchObject({ behavior: 'deny' })
+        expect(plain(await r.ask(tool, call)), `${tool}/${path}`).toMatchObject({ behavior: 'deny' })
+      }
+      for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+        for (const command of [`touch "${path}"`, `tee "${path}"`, `python3 analysis.py --out=${path}`]) {
+          const call = { command }
+          expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${command}`).toBe(false)
+          expect(hostWriteDecision(root, tool, call, userData), `${tool}/${command}`).toMatchObject({ behavior: 'deny' })
+          expect(plain(await r.ask(tool, call)), `${tool}/${command}`).toMatchObject({ behavior: 'deny' })
+        }
+      }
+    }
+    expect(r.cards).toHaveLength(0)
+  }
+  expect(existsSync(join(target, 'scripts', 'gg_new.py'))).toBe(false)
+  expect(sameTreeContent(target, source)).toBe(true)
+})
+
+test('SWEEP 대조군: 정상 절대 스킬 호출·일반 상대 파일 작업은 앱 자리 제한으로 바뀌지 않는다', async () => {
+  const { root, userData, target } = installedBox()
+  writeFileSync(join(root, 'draft.md'), '# draft\n')
+  writeFileSync(join(root, 'analysis.py'), 'print("student analysis")\n')
+  const normal = { command: `python3 "${join(target, 'scripts', 'gg.py').replace(/\\/g, '/')}" status` }
+  expect(autoAllow(root, 'Bash', normal, [], userData, source)).toBe(true)
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    expect(plain(await r.ask('Bash', normal))).toEqual({ behavior: 'allow', updatedInput: normal })
+    for (const tool of ['Read', 'Write', 'Edit']) {
+      const call = { file_path: 'draft.md', content: 'local edit' }
+      expect(hostWriteDecision(root, tool, call, userData)).toBeNull()
+      expect(autoAllow(root, tool, call, [], userData, source)).toBe(true)
+      expect(plain(await r.ask(tool, call))).toEqual({ behavior: 'allow', updatedInput: call })
+    }
+    for (const command of ['cat draft.md', 'touch new.md', 'echo hello']) {
+      const call = { command }
+      expect(autoAllow(root, 'Bash', call, [], userData, source), command).toBe(true)
+      expect(plain(await r.ask('Bash', call))).toEqual({ behavior: 'allow', updatedInput: call })
+    }
+    expect(r.cards).toHaveLength(0)
+    // 임의 Python은 원래부터 자동 실행 예외가 아니다. trusted일 때 종전처럼 통과하며 앱 카드가 아니다.
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      const call = { command: 'python3 analysis.py' }
+      expect(hostWriteDecision(root, tool, call, userData)).toBeNull()
+      expect(autoAllow(root, tool, call, [], userData, source)).toBe(false)
+      const before = r.cards.length
+      const pending = r.ask(tool, call)
+      if (!trusted) {
+        await settle(() => r.cards.length > before)
+        expect(r.cards).toHaveLength(before + 1)
+        expect(r.cards[before].title).not.toContain('앱 규칙 사본')
+        r.answer(true)
+      }
+      expect(plain(await pending)).toEqual({ behavior: 'allow', updatedInput: call })
+      expect(r.cards).toHaveLength(before + (trusted ? 0 : 1))
+    }
+  }
+})
+
+test('SWEEP F07·F08: 바이트가 같아도 앱 스크립트·scripts 디렉터리 링크는 무결한 사본이 아니다', async () => {
+  const { root, userData, target } = installedBox()
+  const script = join(target, 'scripts', 'gg.py')
+  const call = { command: `python3 "${script.replace(/\\/g, '/')}" status` }
+  for (const location of ['file', 'directory']) {
+    setTreeAccess(target, true)
+    if (location === 'file') {
+      const outside = join(root, 'outside.py')
+      writeFileSync(outside, readFileSync(script))
+      unlinkSync(script)
+      symlinkSync(outside, script, 'file')
+    } else {
+      const outside = join(root, 'outside-scripts')
+      renameSync(join(target, 'scripts'), outside)
+      symlinkSync(outside, join(target, 'scripts'), process.platform === 'win32' ? 'junction' : 'dir')
+    }
+    expect(sameTreeContent(target, source), location).toBe(false)
+    expect(skillState(target, version, source), location).toBe('outdated')
+    expect(autoAllow(root, 'Bash', call, [], userData, source), location).toBe(false)
+    for (const trusted of [true, false]) {
+      for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+        const r = await rig({ root, userData }, { trusted })
+        const pending = r.ask(tool, call)
+        await settle(() => r.cards.length > 0)
+        expect(r.cards).toHaveLength(1)
+        r.answer(false)
+        expect(plain(await pending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+      }
+    }
+    expect(installSkill(source, target, version, source).action).toBe('updated')
+    expect(sameTreeContent(target, source)).toBe(true)
+    expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
   }
 })
 
