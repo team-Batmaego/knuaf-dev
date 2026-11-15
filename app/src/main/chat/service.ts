@@ -3,17 +3,23 @@ import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { findExecutable, installSkill, skillState, skillTargets, skillVersion, VERSION_FILE } from '../agent'
+import { folderHash } from '../guard/scope'
+import type { GuardKey } from '../guard/store'
 import { readRecoverable, tmpOf, writeFileAtomic, type SafeWriteFs } from '../safeWrite'
 import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
-import { subscriptionEnv, type AgentConnection, type AgentOptions } from './contracts'
+import { subscriptionEnv, type AgentConnection, type AgentOptions, type GuardContext } from './contracts'
 import { chatConnectionKey } from './jobs/key'
+import { KordocMcpRegistry } from './kordocMcpRegistry'
+import type { KordocMcpSpec, KordocRuntime } from './kordocMcp'
+import { rootKey } from './kordocMcp'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
 
 import { skillSwitch } from '../update/switch'
 import { agentActivity } from '../update/activity'
 import { shutdownWithin } from '../shutdown'
+import { codeOf, diag, diagEnabled } from '../diagLog'
 /** 저장된 대화 기록을 읽고 모양을 확인한다 — 망가졌으면 던진다. */
 function parseChat(text: string, provider: Provider): ChatSnapshot {
   const v = JSON.parse(text) as ChatSnapshot
@@ -27,9 +33,28 @@ const authCopy = (provider: Provider): string => provider === 'codex' ? CODEX_AU
  * 곧 끝나고, 이 상한에 걸리는 것은 **종료 뒤에도 안 끝난 턴**뿐이다(그 자체가 결함 신호).
  */
 const CLOSE_RUN_DEADLINE_MS = 5_000
+/**
+ * 연결 정리(`connection.stop()`)의 상한. 종료(`close`)와 업데이트 인계(`closeForUpdate`)가 같이 쓴다.
+ *
+ * 이 상한이 없던 때에도 바깥 10초 마감은 걸려 있었다 — 부모(`596379f`) 실행은 10 003ms 에 끝나며
+ * `pending=[chat.close]` 를 남겼다(검토 RT3 정정: "바깥 마감이 걸리지 않았다"는 서술은 틀렸다).
+ * 문제는 그 안에서 **어느 연결이 안 끝났는지** 알 수 없고, 마감을 넘긴 연결이 조용히 성공으로
+ * 집계되어 회수(reclaim) 대상에서 빠졌다는 점이다. 여기서 먼저 끊어 연결 단위로 분류한다.
+ */
+const CLOSE_CONNECTION_DEADLINE_MS = 3_000
+/**
+ * 종료 중 초안 쓰기의 재시도 예산. 정상 경로(300ms, `safeWrite.ts`)를 그대로 쓰면 main 스레드가
+ * 그만큼 막히고, **그 루프가 돌아야** 종료 마감 타이머가 울린다 — 막는 시간이 곧 마감 지연이다.
+ * 20+30=50ms 는 **파일 하나**의 상한이다: 대기 중인 초안이 N개면 최대 50×N ms 에 동기 I/O 가
+ * 더해지므로, 이 값만으로 "10초 안에 닫힌다"를 보장할 수는 없다.
+ */
+export const QUIT_FLUSH_DELAYS_MS = [20, 30]
 // 문자열만 온 이전 Codex에서는 실제 로그아웃·계정 변경으로 갱신이 거부된 문장만 인정한다.
 const codexAuthFailure = (error: unknown): boolean => error instanceof CodexAuthenticationError ||
   (error instanceof Error && /\b(?:your )?access token could not be refreshed because you have since logged out or signed in to another account\b/i.test(error.message))
+
+/** 사양 적용 결과. `unsafe` = 공급자가 사양도 해제도 받지 못해 MCP 상태를 확인할 수 없다. */
+type KordocApplyOutcome = 'attached' | 'rejected' | 'unsafe'
 
 export class ChatService {
   private snapshots = new Map<string, ChatSnapshot>()
@@ -42,7 +67,31 @@ export class ChatService {
   private reauthenticating = new Map<Provider, AgentConnection>()
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
+  /** 폴더별 kordoc MCP 수명 — 성공 캐시·실패 재시도·안내 1회는 레지스트리가 지킨다(§3.2). */
+  private kordocRegistries = new Map<string, KordocMcpRegistry>()
+  /** acquire 가 도는 동안만 열리는 안내 통로 — 폴더 키로 그 대화 스냅샷에 묶는다. */
+  private kordocNoteSinks = new Map<string, (text: string) => void>()
+  /** 연결별 kordoc 부착 상태. 항목 없음 = 아직 확인 안 함. `key` 는 부착 당시의 폴더 식별(realpath). */
+  private kordocAttach = new WeakMap<AgentConnection, { state: 'attached' | 'notified'; key: string }>()
+  /**
+   * 마감을 넘겼거나 실패로 정착한 연결 — **재사용 금지**는 그대로지만, 앱이 띄운 자식 pid 는
+   * 계속 우리 소유로 남겨 회수(reclaim) 대상에 들어가야 한다(검토 RT3 차단).
+   * 예전에는 마감을 넘긴 연결을 `connections`/`closingConnections` 에서 지워 pid 가 `ownedPids()`
+   * 에서 사라졌고, 호출부는 그 정리를 `done` 으로 읽어 회수 분기를 건너뛰었다.
+   */
+  private reclaimPending = new Set<AgentConnection>()
   hasPendingLogin(): boolean { return this.pendingLogins.size > 0 }
+  /**
+   * 앱이 띄운 엔진 자식 pid — 종료 마감 뒤 회수 대상(검토 RT2-03).
+   * 연결이 스스로 아는 것만 돌려준다(`Connection.ownedPids` 선택 메서드). 없으면 빈 배열이다.
+   */
+  ownedPids(): number[] {
+    const pids: number[] = []
+    for (const connection of new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections, ...this.reclaimPending])) {
+      if (typeof connection.ownedPids === 'function') pids.push(...connection.ownedPids())
+    }
+    return pids
+  }
   suspend(): void { agentActivity.suspend() }
   resume(): void { agentActivity.resume() }
   private async checkedStatus(provider: Provider, connection: AgentConnection): Promise<ConnectionStatus> {
@@ -97,8 +146,20 @@ export class ChatService {
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
     /** Test seam: build connections without spawning real agent processes (e2e/chat.spec.ts). */
     connectionFactory?: (provider: Provider, options: AgentOptions) => AgentConnection
+    /**
+     * 지킴이 무결성 열쇠(§4.3). `null`/`undefined` 는 **디스크 장부를 못 믿는다**는 뜻이지
+     * 지킴이가 꺼진다는 뜻이 아니다 — 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돈다.
+     * 열쇠가 없으면 원장은 메모리에만 남고(다음 실행에서 사라진다) 디스크에는 쓰지 않는다(C-02).
+     */
+    guardKey?: GuardKey
     /** True while the app itself holds a sidecar write transaction; send() must not interleave. */
     sidecarBusy?: (root: string) => boolean
+    /**
+     * 폴더의 kordoc 실행 런타임(설계 §3.2). 값은 v0.6.0 ③이 정하고, 여기서는 **입력으로만** 받는다 —
+     * 없으면 MCP 를 붙이지 않고(기존 동작 그대로) `setMcpSpec` 도 부르지 않는다.
+     * 실패는 `null` 또는 예외(둘 다 "이번엔 못 붙었다")이고, 그때도 대화는 그대로 간다.
+     */
+    ensureKordoc?: (root: string) => Promise<KordocRuntime | null>
     /** 도우미가 쓸 Python — 프로젝트 .venv 와 번들 CPython. */
     venvPython?: (root: string) => string | null
     bundledPython?: () => string | null
@@ -163,8 +224,18 @@ export class ChatService {
     this.draftTimer = setTimeout(() => this.flushDrafts(), 250)
     return true
   }
-  /** 대기 중인 초안을 지금 쓴다. 종료 직전에도 불리므로 동기다. */
-  flushDrafts(): void {
+  /**
+   * 대기 중인 초안을 지금 쓴다. 종료 직전에도 불리므로 동기다.
+   *
+   * `delaysMs` 는 재시도 예산이다 — 종료 경로는 `QUIT_FLUSH_DELAYS_MS` 로 줄여 부른다. 이 함수가
+   * 동기라서, 예산만큼 main 스레드가 서고 그동안 종료 마감 타이머도 서 있는다(멈춤 후보 1a).
+   */
+  flushDrafts(opts: { delaysMs?: number[] } = {}): void {
+    // 진단: 이 함수는 before-quit 마다 동기로 돌고, 재시도 대기(safeWrite)를 안고 있다 — 멈춤 후보 1a.
+    // 진단이 꺼져 있으면 시계 읽기·문자열 조립도 하지 않는다(검토 RT3 권고).
+    const traced = diagEnabled() && this.draftPending.size > 0
+    const startedAt = traced ? Date.now() : 0
+    if (traced) diag(`drafts:flush:start n=${this.draftPending.size} shuttingDown=${this.shuttingDown}`)
     if (this.draftTimer) { clearTimeout(this.draftTimer); this.draftTimer = null }
     for (const [root, text] of this.draftPending) {
       const file = this.draftFile(root)
@@ -176,7 +247,7 @@ export class ChatService {
           try { this.writeFs.unlinkSync(path) } catch (e) {
             if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') continue
             cleared = false
-            console.error(`[knuaf] 빈 초안을 지우지 못했어요: ${path} (${(e as NodeJS.ErrnoException)?.code ?? String(e)})`)
+            console.error(`[knuaf] 빈 초안을 지우지 못했어요: ${basename(path)} (${codeOf(e)})`)
           }
         }
         if (cleared) this.draftPending.delete(root)
@@ -185,8 +256,11 @@ export class ChatService {
       try { mkdirSync(dirname(file), { recursive: true }) } catch { /* 아래 쓰기가 같은 이유로 실패한다 */ }
       // 던지지 않는 공용 쓰기(WIN-ONEDRIVE). **성공한 것만** 지운다 — 실패하면 대기 값으로 남겨
       // 다음 flush 가 다시 시도하고, 그 사이 `draft()` 는 최신 글을 계속 돌려준다.
-      if (writeFileAtomic(file, text, { mode: 0o600, fs: this.writeFs }).ok) this.draftPending.delete(root)
+      const at = traced ? Date.now() : 0
+      if (writeFileAtomic(file, text, { mode: 0o600, fs: this.writeFs, delaysMs: opts.delaysMs }).ok) this.draftPending.delete(root)
+      if (traced) diag(`drafts:flush:file elapsed=${Date.now() - at}ms pending=${this.draftPending.size}`)
     }
+    if (traced) diag(`drafts:flush:end elapsed=${Date.now() - startedAt}ms 남음=${this.draftPending.size}`)
   }
   /**
    * 대화 기록을 남기고 화면으로 내보낸다.
@@ -242,15 +316,143 @@ export class ChatService {
     this.owners.add(root)
     return () => { this.owners.delete(root); releaseSwitch(); releaseActivity() }
   }
-  private skillDir(root: string, provider: Provider) { return skillTargets(root)[provider] }
+  private skillDir(root: string, provider: Provider) { return skillTargets(root, this.opts.userData)[provider] }
+  /**
+   * 지킴이 보관본 자리(§4.3). 열쇠를 못 얻었으면 `key: null` — 디스크 장부를 믿지 않는 것이지
+   * 지킴이를 끄는 것이 아니다(C-02). 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돌아야 하므로
+   * 문맥 자체는 언제나 넘긴다.
+   */
+  private guardFor(root: string): GuardContext {
+    return { userData: this.opts.userData, folderHash: folderHash(root), key: this.opts.guardKey ?? null }
+  }
+  /** 폴더의 kordoc 레지스트리 — 성공 캐시·실패 재시도·안내 1회는 이 객체가 지킨다(§3.2). */
+  private kordocRegistry(root: string): KordocMcpRegistry {
+    const key = rootKey(root)
+    let registry = this.kordocRegistries.get(key)
+    if (!registry) {
+      const ensureKordoc = this.opts.ensureKordoc
+      if (!ensureKordoc) throw new Error('kordoc 런타임 공급자가 없어요.')
+      registry = new KordocMcpRegistry({
+        ensureKordoc,
+        // 안내 줄은 **그 순간 그 폴더의 대화**에만 남는다 — acquire 는 폴더별 잠금 안에서만 돈다.
+        note: (text) => this.kordocNoteSinks.get(key)?.(text)
+      })
+      this.kordocRegistries.set(key, registry)
+    }
+    return registry
+  }
+  /**
+   * 이 턴에 붙일 kordoc MCP 사양을 연결에 넘긴다(설계 §3.2 '언제'·'실패 시').
+   *
+   * - **`send()` 에서만** 부른다(`status()`·`login()`·전역 연결은 타지 않는다).
+   * - 공급자가 `setMcpSpec` 을 구현하지 않았거나 런타임 공급자가 없으면 아무 것도 하지 않는다 —
+   *   확인 자체가 kordoc 설치(수백 MB)를 일으킬 수 있으므로 받을 곳이 없으면 시도하지 않는다.
+   * - 확인에 실패하면 `null` 을 넘기고 대화는 그대로 간다. 안내 줄은 레지스트리가 폴더당 1회 넣는다.
+   * - 같은 연결·같은 폴더에 이미 붙은 사양은 다시 넘기지 않는다 — 공급자에게는 이 호출이 재기동이다.
+   *   폴더 식별(realpath)이 달라졌으면 **옛 사양을 먼저 뗀다** — A 의 울타리로 B 턴을 돌리지 않는다(M1-01).
+   * - 부착·해제가 모두 실패해 상태를 확인할 수 없으면 그 연결로는 턴을 열지 않고, 새 연결로 한 번만
+   *   다시 연다. 그것도 안 되면 전송을 막고 알린다(M1-02). 반환된 연결을 `execute()` 에 넘긴다.
+   */
+  private async attachKordoc(s: ChatSnapshot, connection: AgentConnection): Promise<{ notes: string[]; connection: AgentConnection }> {
+    if (!connection.setMcpSpec || !this.opts.ensureKordoc) return { notes: [], connection }
+    const key = rootKey(s.root)
+    const state = this.kordocAttach.get(connection)
+    if (state?.state === 'attached' && state.key === key) return { notes: [], connection }
+
+    const notes: string[] = []
+    this.kordocNoteSinks.set(key, (text) => { notes.push(text) })
+    try {
+      const registry = this.kordocRegistry(s.root)
+      const spec = await registry.acquire(s.root)
+      let target = connection
+      let outcome: KordocApplyOutcome = 'rejected'
+      // 남아 있는 상태가 **다른 폴더의 부착**이면 옛 울타리를 먼저 뗀다 — A 의 사양으로 B 턴을
+      // 돌리지 않는다(M1-01). 이 해제는 필수다: 못 떼면 그 연결의 MCP 범위를 확인할 수 없다.
+      if (state?.state === 'attached' && state.key !== key) {
+        outcome = (await this.releaseKordocSpec(target, registry, s.root, true)) ? 'rejected' : 'unsafe'
+      }
+      if (outcome !== 'unsafe') {
+        if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
+        // 처음 보는 연결에는 "붙일 것이 없다"를 알린다. 실패해도 안전 문제는 아니다 — 아직 아무것도
+        // 넘기지 않은 연결이므로 남은 구성이 없다(M1-02 는 이미 사양이 올라간 연결의 경우다).
+        else if (!state) await this.releaseKordocSpec(target, registry, s.root, false)
+      }
+      if (outcome === 'unsafe') {
+        target = await this.reopenConnection(s.root, s.provider, connection, s.sessionId)
+        // 새 연결은 처음 보는 연결이다 — 같은 사양을 한 번 더 적용한다.
+        if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
+        else { await this.releaseKordocSpec(target, registry, s.root, false); outcome = 'rejected' }
+        if (outcome === 'unsafe') {
+          throw new Error('한글 문서 읽기 도구를 붙이지 못했어요. 이 대화 도구가 문서 읽기 설정을 받아들이지 못해 안전하게 보낼 수 없어요. 잠시 뒤 다시 시도해 주세요.')
+        }
+      }
+      this.kordocAttach.set(target, { state: outcome === 'attached' ? 'attached' : 'notified', key })
+      return { notes, connection: target }
+    } finally {
+      this.kordocNoteSinks.delete(key)
+    }
+  }
+  /** 논문 폴더 밖 접근을 막는 사양을 하나 적용한다. 공급자가 거절하면 `null` 로 내리는 것까지가 몫이다. */
+  private async applyKordocSpec(
+    connection: AgentConnection,
+    spec: KordocMcpSpec,
+    registry: KordocMcpRegistry,
+    root: string
+  ): Promise<KordocApplyOutcome> {
+    const setSpec = connection.setMcpSpec!
+    try { await setSpec.call(connection, spec); return 'attached' }
+    catch {
+      // 공급자가 사양을 받아들이지 못하면 MCP 없이 간다 — 붙이지 못한 것이 전송을 막지는 않는다.
+      // 다음 send 는 레지스트리의 성공 캐시에서 같은 사양을 다시 받아 재시도한다.
+      registry.reportProviderFailure(root)
+      return (await this.releaseKordocSpec(connection, registry, root, false)) ? 'rejected' : 'unsafe'
+    }
+  }
+  /**
+   * 사양을 내린다. `required` 면 이것이 옛 울타리를 떼는 일이라 실패가 곧 "MCP 범위를 확인할 수
+   * 없음"이다(M1-02). 아니면 아직 아무것도 안 올라간 연결을 정리하는 것이라 실패해도 안전하다.
+   * 반환값 `true` = MCP 없는 상태로 확인됨.
+   */
+  private async releaseKordocSpec(
+    connection: AgentConnection,
+    registry: KordocMcpRegistry,
+    root: string,
+    required: boolean
+  ): Promise<boolean> {
+    try { await connection.setMcpSpec!.call(connection, null); return true }
+    catch {
+      if (!required) return false
+      registry.reportProviderFailure(root)
+      return false
+    }
+  }
+  /** 안전을 확인하지 못한 연결을 버리고 같은 폴더·공급자의 새 연결을 연다(M1-02). */
+  private async reopenConnection(root: string, provider: Provider, dead: AgentConnection, sessionId: string | undefined): Promise<AgentConnection> {
+    const key = this.key(root, provider)
+    if (this.connections.get(key) === dead) this.connections.delete(key)
+    this.kordocAttach.delete(dead)
+    try { await dead.stop() } catch { /* 이미 죽은 연결 — 버리는 것이 목적이다 */ }
+    const fresh = this.connection(root, provider)
+    if (!(await this.checkedStatus(provider, fresh)).connected) {
+      throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
+    }
+    // 새 연결도 첫 전송과 같은 준비를 거친다 — 모델 기본값 확인을 건너뛰면 다른 모델로 조용히 보낸다.
+    await fresh.prepare?.(sessionId)
+    return fresh
+  }
   private connection(root: string, provider: Provider): AgentConnection {
     this.ensureActive()
     const key = this.key(root, provider)
     let c = this.connections.get(key)
     if (!c) {
+      const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
+        guard,
+        // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
+        // 같은 함수를 쓴다(`skillSource`).
+        skillBundleSource: () => this.opts.skillSource(),
         // 연결은 폴더·공급자마다 한 번만 만들어진다 — 선택은 전송할 때마다 다시 읽는다.
         modelChoice: () => this.effectiveChoice(provider),
         modelChosen: () => this.opts.modelChosen?.(provider) ?? false
@@ -373,10 +575,16 @@ export class ChatService {
     let c = this.globals.get(provider)
     if (!c) {
       const root = this.connectRoot()
+      // 이 연결은 상태 확인·로그인만 한다(턴 없음). 그래도 받는 자리를 똑같이 채운다 —
+      // 공급자 코드가 guard 유무로 갈리므로 전역 연결만 종전 모양으로 남기지 않는다.
+      // 열쇠가 없어도(`key: null`) 문맥은 넘긴다(C-02) — 격리·열거는 열쇠와 무관하다.
+      const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
         env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
-        openExternal: this.opts.openExternal, trusted: () => false
+        openExternal: this.opts.openExternal, trusted: () => false,
+        guard,
+        skillBundleSource: () => this.opts.skillSource()
       }
       if (this.opts.connectionFactory) {
         c = this.opts.connectionFactory(provider, options)
@@ -441,25 +649,33 @@ export class ChatService {
       const skill = this.skillDir(root, provider)
       const source = this.opts.skillSource()
       const version = skillVersion(source)
-      const state = skillState(skill, version)
-      if (state === 'missing') installSkill(source, skill, version)
+      // 대조본을 넘겨 판 표시뿐 아니라 **내용**까지 본다(C-01ⓒ) — 표시만 같은 변조본은 다시 깐다.
+      const state = skillState(skill, version, source)
+      if (state === 'missing') installSkill(source, skill, version, source)
       else if (state === 'outdated' || (s.skillHash && s.skillHash !== version)) {
         // A changed skill is never a send-blocker: reinstall (with backup) and note it in the transcript.
         const marker = join(skill, VERSION_FILE)
         const old = s.skillHash && s.skillHash !== version ? s.skillHash : existsSync(marker) ? readFileSync(marker, 'utf-8').trim() : '이전 버전'
-        installSkill(source, skill, version)
+        installSkill(source, skill, version, source)
         s.messages.push({ id: randomUUID(), role: 'system', text: `규칙집이 갱신됐어요 (이전 ${old} → 현재 ${version})`, at: new Date().toISOString() })
-      } else installSkill(source, skill, version) // Refresh GUI ownership even for an unchanged copy.
+      } else installSkill(source, skill, version, source) // Refresh GUI ownership even for an unchanged copy.
       const connection = this.connection(root, provider)
       if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로
       // 조용히 보내는 대신 학생에게 오류로 알린다(검토 MC1-01).
       await connection.prepare?.(s.sessionId)
+      // 폴더의 첫 전송에서만 kordoc 런타임을 확인해 이 연결에 넘긴다(§3.2). 실패해도 대화는 간다.
+      // 상태를 확인하지 못한 연결은 버리고 새 연결을 받을 수 있다(M1-02) — 그 연결로 실행한다.
+      const attach = await this.attachKordoc(s, connection)
+      for (const note of attach.notes) {
+        s.messages.push({ id: randomUUID(), role: 'system', text: note, at: new Date().toISOString() })
+      }
+      const live = attach.connection
       s.skillHash = version; s.skillLoaded = false; s.state = 'running'; s.error = undefined
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
       this.publish(s)
-      const run = this.execute(s, connection, text, requestId).finally(release)
+      const run = this.execute(s, live, text, requestId).finally(release)
       this.runs.set(this.key(root, provider), run)
       void run.finally(() => this.runs.delete(this.key(root, provider)))
       return structuredClone(s)
@@ -554,29 +770,151 @@ export class ChatService {
     if (!s.permission) s.state = 'running'
     this.publish(s)
   }
+  /**
+   * 연결 정리 하나를 상한 안에서 기다린다.
+   *
+   * `shutdownWithin` 은 던지지 않으므로, **정착한 거절은 종전처럼 다시 던진다**(IPC 오류 문구가
+   * 그대로 살아야 한다). 마감을 넘긴 것은 `'pending'` 으로 **돌려준다** — 이름만 남기고 넘어가면
+   * 호출부가 그 정리를 완료로 읽고(검토 RT3 차단) 회수 분기를 건너뛴다. 기다림 자체는 여기서 끝난다:
+   * 끝나지 않는 연결 때문에 호출자(중단 버튼·앱 종료)가 매달리지는 않는다.
+   */
+  private async stopConnectionWithin(name: string, connection: AgentConnection, deadlineMs: number, label: string): Promise<'settled' | 'pending'> {
+    const outcome = await shutdownWithin([{ name, start: () => connection.stop() }], deadlineMs)
+    if (outcome.failed.length) throw outcome.failed[0].reason
+    if (!outcome.pending.length) return 'settled'
+    console.error(`[shutdown] ${label}: ${deadlineMs}ms 안에 끝나지 않은 연결 — ${outcome.pending.join(', ')}`)
+    return 'pending'
+  }
   async stop(root: string, provider: Provider) {
     const key = this.key(root, provider), s = this.snapshots.get(key)
+    // 진단: 예전에는 아래 두 기다림이 마감 밖이었다 — 멈춤 후보 1b. 진단이 꺼져 있으면
+    // 시계도 문자열도 만들지 않는다(검토 RT3 권고) — 중단 버튼은 학생이 누르는 경로다.
+    const traced = diagEnabled()
+    const startedAt = traced ? Date.now() : 0
     if (s && this.runs.has(key)) { s.state = 'stopped'; s.error = undefined; this.publish(s) }
     // 멈춘 연결은 버린다 — 다음 send/status 가 새 연결을 열어야 '다시 확인'이 살아난다.
-    await this.connections.get(key)?.stop(); this.connections.delete(key)
-    await this.runs.get(key)
+    const connection = this.connections.get(key)
+    if (traced) diag(`stop:connection:start provider=${provider} has=${connection ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
+    if (connection) {
+      // 마감을 넘긴 연결은 **재사용하지 않지만**(맵에서 지운다) 소유권은 남긴다 — 나중 `close()` 가
+      // 그 자식까지 회수해야 한다(검토 RT3 차단).
+      if (await this.stopConnectionWithin(`stop:${provider}`, connection, CLOSE_CONNECTION_DEADLINE_MS, '중단') === 'pending') this.reclaimPending.add(connection)
+    }
+    this.connections.delete(key)
+    if (traced) diag(`stop:connection:end provider=${provider} elapsed=${Date.now() - startedAt}ms`)
+    const run = this.runs.get(key)
+    if (traced) diag(`stop:run:start provider=${provider} has=${run ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
+    if (run) {
+      // 턴도 상한을 둔다. 마감을 넘긴 턴은 상태가 이미 `stopped` 라 화면은 멈췄고,
+      // 실행기 쪽 정리는 그 연결의 stop 이 맡는다 — 여기서 더 기다려 봐야 호출자만 막힌다.
+      const outcome = await shutdownWithin([{ name: `run:${provider}`, start: () => run }], CLOSE_RUN_DEADLINE_MS)
+      if (outcome.failed.length) throw outcome.failed[0].reason
+      if (outcome.pending.length) console.error(`[shutdown] 중단: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 — ${outcome.pending.join(', ')}`)
+    }
+    if (traced) diag(`stop:run:end provider=${provider} elapsed=${Date.now() - startedAt}ms`)
   }
-  /** Reversible handoff teardown: never sets shuttingDown; dead connection objects are not reused. */
-  async closeForUpdate(confirmStopped: () => Promise<void>): Promise<void> {
+  /**
+   * Reversible handoff teardown: never sets shuttingDown; dead connection objects are not reused.
+   *
+   * 마감을 넘긴 연결은 여기서 **던지지 않는다**(인계는 계속돼야 한다). 다만 그 연결은
+   * `reclaimPending` 에 남겨 소유권을 유지하고 `'pending'` 으로 알린다 — 정리를 완료로 읽지 않게.
+   * **호출 전부터 남아 있던 미회수 연결**(학생 중단이 3초를 넘긴 것)도 같은 판정에 들어간다:
+   * 이번 호출이 그 `stop()` 을 다시 부르지 않더라도, 아직 살아 있는 자식은 완료가 아니다.
+   */
+  async closeForUpdate(confirmStopped: () => Promise<void>): Promise<'settled' | 'pending'> {
     for (const connection of [...this.connections.values(), ...this.globals.values()]) this.closingConnections.add(connection)
     this.connections.clear()
     this.globals.clear()
     this.reauthenticating.clear()
-    const results = await Promise.allSettled([...this.closingConnections].map(connection => connection.stop()))
+    // 진단: 예전에는 이 기다림이 마감 밖이었다 — 멈춤 후보 1b.
+    // 진단이 꺼져 있으면 시계도 문자열도 만들지 않는다(검토 RT3 권고).
+    const traced = diagEnabled()
+    const startedAt = traced ? Date.now() : 0
+    /**
+     * 인계 전에 이미 마감을 넘겨 남아 있던 연결(`stop()` 타임아웃분). 이번 `list` 에는 없으므로
+     * 따로 합쳐야 완료 판정이 "정말 다 정리됐는가"가 된다 — `close()` 와 같은 규칙이다.
+     */
+    const stranded = [...this.reclaimPending]
+    if (traced) diag(`closeForUpdate:stop:start n=${this.closingConnections.size} stranded=${stranded.length}`)
+    // 이름(`stop:<i>`)을 같은 배열의 순번으로 되돌려야 한다 — 순회 대상은 한 번만 만든다.
+    const list = [...this.closingConnections]
+    const stopped = await shutdownWithin(
+      // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — 순번만.
+      list.map((connection, i) => ({ name: `stop:${i}`, start: () => connection.stop() })),
+      CLOSE_CONNECTION_DEADLINE_MS
+    )
+    if (traced) diag(`closeForUpdate:stop:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+    if (stopped.pending.length) console.error(`[shutdown] 연결 정리: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
+    const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
+    for (const connection of pending) this.reclaimPending.add(connection)
+    // 이번 호출에서 실제로 정착한 연결은 회수 목록에서도 지운다 — 남겨 두면 완료 판정이 거짓 미완료가 된다.
+    for (const connection of list) if (!pending.includes(connection)) this.reclaimPending.delete(connection)
+    // 인계 판정도 이번 pending ∪ (아직 남아 있는) 호출 전 미회수 — 이전 `stop()` 타임아웃분이 있으면 완료가 아니다.
+    const unreclaimed = [...this.reclaimPending]
     await confirmStopped()
-    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (traced) diag(`closeForUpdate:confirm:end elapsed=${Date.now() - startedAt}ms unreclaimed=${unreclaimed.length}`)
+    const failed = stopped.failed[0]
     if (failed) throw failed.reason
-    this.closingConnections.clear()
+    // 확인까지 끝났고 마감을 넘긴 연결이 없을 때만 목록을 비운다.
+    if (!pending.length) this.closingConnections.clear()
+    if (unreclaimed.length) {
+      console.error(`[shutdown] 연결 정리: 회수하지 못한 연결 ${unreclaimed.length}건 — 이번 마감 초과 ${pending.length} · 이전 타임아웃 ${stranded.length}`)
+      return 'pending'
+    }
+    return 'settled'
   }
-  async close() {
+  /**
+   * 종료 정리. 돌려주는 값은 **정리 결과의 분류**다:
+   *  - `done` — 모든 연결 정리가 마감 안에 끝났다(진행 중 턴은 종전처럼 자기 상한만 둔다).
+   *  - `pending` — 마감을 넘긴 연결이 있다. `pids` 는 그 연결들이 띄운 자식이다.
+   *
+   * 예전에는 `void` 를 돌려주고 마감 초과를 `console.error` 로만 남겼다. 호출부(`index.ts`)는
+   * 그 `chat.close` 를 완료로 읽어 `needsReclaim=false` → 회수 분기를 건너뛰었고, 그 연결의 pid 는
+   * `ownedPids()` 에서도 사라졌다(검토 RT3 차단). 분류를 돌려주면 호출부가 실패로 승격할 수 있다.
+   * 마감을 넘긴 연결은 **다시 쓰지 않지만**(맵을 비운다) 소유권은 `reclaimPending` 에 남는다.
+   * `done` 의 뜻은 "지금 정말로 회수할 것이 없다"다 — 이번 호출에서 마감을 넘긴 연결뿐 아니라
+   * **이전 `stop()` 이 남겨 둔 미회수 연결**까지 없어야 `done` 이다(검토 hangfix-fix2 차단).
+   */
+  async close(): Promise<{ outcome: 'done' } | { outcome: 'pending'; pids: number[] }> {
+    // 진단이 꺼져 있으면 시계·문자열 조립을 하지 않는다(검토 RT3 권고) — 종료 경로다.
+    const traced = diagEnabled()
+    const startedAt = traced ? Date.now() : 0
+    /**
+     * **호출 전부터 남아 있던 미회수 연결.** `stop()`(학생 중단)이 3초 마감을 넘기면 그 연결을
+     * `reclaimPending` 에 넣고 활성 맵에서 지운다 — 재사용하면 안 되기 때문이다. 그런데 이 목록을
+     * 완료 판정에서 빼면 다음 `close()` 가 "이번에 찾은 pending 없음"만 보고 `done` 을 돌려준다:
+     * 검토 hangfix-fix2 실측이 정확히 그랬다(close 0ms · done=[sidecar.stop, chat.close] ·
+     * `needsReclaim=false` · 자식 생존). 그래서 **이번 pending 과 이 스냅숏의 합집합**으로 정한다.
+     *
+     * 이 연결들의 `stop()` 은 **다시 부르지 않는다**: 이미 한 번 마감을 넘긴 stop 을 또 3초
+     * 기다리면 종료만 늦어지고(검토자 실측 stop 호출 1회), 남은 자식은 `reclaimChildren` 이 pid 로
+     * 회수한다. "남아 있다"는 사실 자체가 미완료다.
+     */
+    const stranded = [...this.reclaimPending]
+    if (traced) diag(`close:start runs=${this.runs.size} connections=${this.connections.size} globals=${this.globals.size} closing=${this.closingConnections.size} stranded=${stranded.length}`)
     this.beginShutdown()
     const connections = new Set([...this.connections.values(), ...this.globals.values(), ...this.closingConnections])
-    const results = await Promise.allSettled([...connections].map(connection => connection.stop()))
+    /**
+     * 연결 정리에도 **상한**을 둔다. 예전에는 이 `Promise.allSettled` 가 `shutdownWithin` **밖**이라
+     * 바깥 10초 마감이 걸리지 않았다: 연결 하나의 `stop()` 이 안 끝나면 정리 전체가 마감 없이
+     * 매달렸다(멈춤 후보 1b). 정착한 거절은 종전처럼 나중에 다시 던진다.
+     */
+    if (traced) diag(`close:connections:start n=${connections.size}`)
+    // 이름(`stop:<i>`)을 같은 배열의 순번으로 되돌려야 한다 — 순회 대상은 한 번만 만든다.
+    const list = [...connections]
+    const stopped = await shutdownWithin(
+      // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — 순번만.
+      list.map((connection, i) => ({ name: `stop:${i}`, start: () => connection.stop() })),
+      CLOSE_CONNECTION_DEADLINE_MS
+    )
+    if (traced) diag(`close:connections:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+    if (stopped.pending.length) console.error(`[shutdown] close: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
+    const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
+    for (const connection of pending) this.reclaimPending.add(connection)
+    // 이번 호출에서 실제로 정착한 연결은 회수 목록에서도 지운다 — 아니면 한 번 넘긴 것이 영원히 미완료로 남는다.
+    for (const connection of list) if (!pending.includes(connection)) this.reclaimPending.delete(connection)
+    // 완료 판정 대상 = 이번 pending ∪ 호출 전부터 남아 있던 미회수(위에서 둘을 합쳐 놓았다).
+    const unreclaimed = new Set(this.reclaimPending)
     /**
      * 진행 중인 턴을 기다리되 **상한**을 둔다. 예전에는 `await Promise.all(this.runs.values())`
      * 였는데, 턴 하나가 안 끝나면 앱 종료가 영원히 매달렸다(윈도우 e2e 종료 멈춤). 남은 턴은
@@ -584,16 +922,46 @@ export class ChatService {
      * `snapshot()` 이 `running`/`permission` 상태를 `interrupted` 로 복구한다(service.ts:212-215).
      */
     const runs = [...this.runs.entries()]
+    if (traced) diag(`close:runs:start n=${runs.length} elapsed=${Date.now() - startedAt}ms`)
     const outcome = await shutdownWithin(
-      runs.map(([key, run]) => ({ name: `run:${key.replace(/\0/g, '/')}`, promise: run })),
+      runs.map(([key, run], i) => {
+        // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — provider/role 만.
+        const name = `run:${key.split('\0').slice(1).join('/') || i}`
+        return {
+          name,
+          start: () => {
+            // 진단이 꺼져 있으면 문자열 조립도 구독도 만들지 않는다 — 이 함수는 종료 경로다.
+            if (traced) {
+              diag(`close:run:start ${name} elapsed=${Date.now() - startedAt}ms`)
+              // 거절도 함께 받는다: 성공 콜백만 달면 남은 턴의 거절이 unhandled 로 샌다.
+              void run.then(
+                () => diag(`close:run:end ${name} elapsed=${Date.now() - startedAt}ms`),
+                (e: unknown) => diag(`close:run:reject ${name} code=${codeOf(e)} elapsed=${Date.now() - startedAt}ms`)
+              )
+            }
+            return run
+          }
+        }
+      }),
       CLOSE_RUN_DEADLINE_MS
     )
+    if (traced) diag(`close:runs:end elapsed=${Date.now() - startedAt}ms done=${outcome.done.length} pending=${outcome.pending.length} 내부경과=${outcome.elapsedMs}ms`)
     if (outcome.pending.length) console.error(`[shutdown] close: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 ${outcome.pending.length}건 — ${outcome.pending.join(', ')}`)
     this.connections.clear()
     this.globals.clear()
-    this.closingConnections.clear()
-    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    // 마감을 넘긴 연결이 있으면 그 목록은 남긴다 — 소유권(pid)이 회수 경로까지 살아야 한다.
+    if (!pending.length) this.closingConnections.clear()
+    if (traced) diag(`close:end elapsed=${Date.now() - startedAt}ms pendingConnections=${pending.length}`)
+    const failed = stopped.failed[0]
     if (failed) throw failed.reason
+    /**
+     * **호출 전부터 남아 있던 연결도 미완료다.** `stop()` 타임아웃분은 이번 `list` 에 없지만 자식은
+     * 아직 살아 있다 — 여기서 `done` 을 돌려주면 `index.ts` 가 회수 분기를 건너뛴다(검토 hangfix-fix2 차단).
+     */
+    if (!unreclaimed.size) return { outcome: 'done' }
+    const pids = [...new Set([...unreclaimed].flatMap((connection) => connection.ownedPids?.() ?? []))]
+    if (traced) diag(`close:pending pids=${pids.join(',') || '없음'} reclaimed=${unreclaimed.size}`)
+    return { outcome: 'pending', pids }
   }
 }
 

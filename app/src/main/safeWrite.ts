@@ -1,4 +1,6 @@
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename } from 'node:path'
+import { codeOf, diag } from './diagLog'
 
 /**
  * 학생 논문 폴더에 파일을 남기는 **공용 쓰기** (WIN-ONEDRIVE).
@@ -55,8 +57,9 @@ export interface SafeWriteOptions {
 
 export type WriteResult = { ok: true } | { ok: false; error: Error }
 
-const codeOf = (e: unknown): string => (e as NodeJS.ErrnoException)?.code ?? ''
 const asError = (e: unknown): Error => (e instanceof Error ? e : new Error(String(e)))
+/** 진단에 쓰는 파일 이름 — 절대 경로는 CI 산출물로 새어 나간다(검토 RT3 중요). */
+const baseName = (file: string): string => basename(file) || '(이름없음)'
 
 /** main 스레드를 막고 기다린다 — 의존성을 더하지 않으려고 Atomics 로 잔다. */
 function sleepSync(ms: number): void {
@@ -91,12 +94,20 @@ export function writeFileAtomic(file: string, data: string, opts: SafeWriteOptio
   let attempt = 0
   const retry = (e: unknown): boolean => {
     if (!RETRY_CODES.has(codeOf(e)) || attempt >= delays.length) return false
-    sleepSync(delays[attempt++])
+    const wait = delays[attempt++]
+    // 진단: 이 대기는 **main 스레드를 동기로 막는다**(Atomics.wait). 종료 경로에서 돌면 마감이 늦어진다.
+    // `log` 가 아니라 진단 파일로 보낸다 — 시험의 stdout 문구 계약(`safe-write.spec.ts`)을 건드리지 않는다.
+    diag(`safeWrite:retry ${baseName(file)} code=${codeOf(e)} wait=${wait}ms attempt=${attempt}/${delays.length}`)
+    sleepSync(wait)
     return true
   }
   const fail = (e: unknown, note: string): WriteResult => {
     const error = asError(e)
-    log(`[knuaf] 파일을 저장하지 못했어요: ${file} (${codeOf(error) || error.message}) — ${note}`)
+    // 진단에는 **파일 이름과 코드/이름만** 남긴다(검토 RT3 중요). 절대 경로와 `error.message` 는
+    // 논문 폴더·사용자 이름·본문 조각을 실어 왔고, 진단 파일은 CI 산출물로 올라간다.
+    const name = baseName(file)
+    diag(`safeWrite:fail ${name} code=${codeOf(error)} note=${note}`)
+    log(`[knuaf] 파일을 저장하지 못했어요: ${name} (${codeOf(error)}) — ${note}`)
     return { ok: false, error }
   }
 
@@ -105,7 +116,7 @@ export function writeFileAtomic(file: string, data: string, opts: SafeWriteOptio
   const fileComplete = (): boolean => stateOf(file) === 'complete'
   if (tmpState === 'unknown' && !fileComplete()) {
     // `.tmp` 를 읽지 못해 유일한 완성본인지 모른다 — 올리지도 다시 쓰지도 않는다.
-    return fail(new Error(`${tmp} 를 읽지 못했어요`), `완성본일 수 있는 ${tmp} 을 지키려고 이번 저장은 건너뛰었어요`)
+    return fail(new Error(`${tmp} 를 읽지 못했어요`), `완성본일 수 있는 ${baseName(tmp)} 을 지키려고 이번 저장은 건너뛰었어요`)
   }
   if (tmpState === 'complete' && !fileComplete()) {
     let promoted = false
@@ -118,7 +129,7 @@ export function writeFileAtomic(file: string, data: string, opts: SafeWriteOptio
       try { fs.writeFileSync(file, read(tmp, 'utf8'), writeOpts) } catch (e) { last = e }
       promoted = fileComplete()
     }
-    if (!promoted) return fail(last, `완성본 ${tmp} 을 지키려고 이번 저장은 건너뛰었어요`)
+    if (!promoted) return fail(last, `완성본 ${baseName(tmp)} 을 지키려고 이번 저장은 건너뛰었어요`)
   }
 
   // ① 완성본을 `.tmp` 에 만든다. 중간에 멈춰도 대상은 그대로다(이제 대상이 완성본이거나, `.tmp` 가 기록이 아니다).
@@ -130,7 +141,7 @@ export function writeFileAtomic(file: string, data: string, opts: SafeWriteOptio
   // ② 이름 바꾸기로 교체한다. 막히면 완성본은 `.tmp` 에 남는다(동기화 클라이언트가 대상을 쥔 경우).
   for (;;) {
     try { fs.renameSync(tmp, file); return { ok: true } } catch (e) {
-      if (!retry(e)) return fail(e, `최신 내용은 ${tmp} 에 남겼어요`)
+      if (!retry(e)) return fail(e, `최신 내용은 ${baseName(tmp)} 에 남겼어요`)
     }
   }
 }

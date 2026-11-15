@@ -25,7 +25,7 @@
  * (배치 파일은 확장 단계가 달라 `%%` 로 막을 수 있다 — `agent.ts` 의 `batArg` 가 따로 처리한다.)
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 
 export interface WinSpawn {
@@ -98,23 +98,43 @@ export function taskkillPath(env: Record<string, string | undefined> = process.e
  * (윈도우 CI 4차: 잡 정리에서 `Terminate orphan process: node`, busy 시험이 90초 타임아웃).
  * 그래서 윈도우에서는 프로세스 **트리째** 끝낸다 — `taskkill /pid <pid> /T /F`.
  *
- * 인자는 **숫자 pid 뿐**이라 학생 입력이 명령줄로 가지 않는다. 결과를 기다린 뒤 돌아온다
- * (taskkill 은 수십 ms 다). 실행 파일은 **절대 경로**(`taskkillPath`)로 부르고 존재를 확인한
- * 뒤 쓴다 — PATH 가 망가진 기계에서도 멈추기가 확실히 되게. 0/128(없는 프로세스)이 아니면
- * 직접 kill 로 넘어간다. 맥·리눅스는 종전 그대로 `child.kill(signal)` — 동작 불변.
+ * 인자는 **숫자 pid 뿐**이라 학생 입력이 명령줄로 가지 않는다. 실행 파일은 절대 경로
+ * (`taskkillPath`)로 부르고 존재를 확인한 뒤 쓴다 — PATH 가 망가진 기계에서도 멈추기가
+ * 확실히 되게. 0/128(없는 프로세스)이 아니면 직접 kill 로 넘어간다.
+ * 맥·리눅스는 종전 그대로 `child.kill(signal)` — 동작 불변.
+ *
+ * **동기로 기다리지 않는다**(RT3 RT2-02). 예전에는 `spawnSync(timeout 10_000)` 으로 main
+ * 스레드를 최대 10초 막았다 — 그래서 "종료 마감 10초"가 이벤트 루프 안에서 지켜지지 않았고,
+ * 연결마다 두 번씩 불려 종료가 20초씩 밀렸다. 지금은 taskkill 을 띄워 두고 바로 돌아온다.
+ * 죽는지는 `child` 의 `exit`/`close` 로 관측된다(transport 는 `exit` 를 기다린다).
  */
 export function killTree(
   child: { pid?: number; kill: (signal?: NodeJS.Signals) => boolean },
-  signal: NodeJS.Signals = 'SIGTERM'
+  signal: NodeJS.Signals = 'SIGTERM',
+  /**
+   * 시험 전용 이음매 — `winSpawn` 과 같은 모양이다. 기본값은 실제 플랫폼·환경이고,
+   * 시험은 가짜 `taskkill.exe` 로 **동기 블록이 없는지**를 맥에서도 관측한다.
+   */
+  seam: { platform?: NodeJS.Platform; env?: Record<string, string | undefined> } = {}
 ): void {
-  if (process.platform === 'win32' && typeof child.pid === 'number' && child.pid > 0) {
+  const platform = seam.platform ?? process.platform
+  if (platform === 'win32' && typeof child.pid === 'number' && child.pid > 0) {
     try {
-      const exe = taskkillPath(process.env)
+      const exe = taskkillPath(seam.env ?? process.env)
       if (existsSync(exe)) {
-        const r = spawnSync(exe, ['/pid', String(Math.trunc(child.pid)), '/T', '/F'], {
-          windowsHide: true, stdio: 'ignore', timeout: 10_000
+        // stdio 를 열지 않고 unref 한다 — taskkill 핸들이 부모 종료를 붙잡지 않게.
+        const killer = spawn(exe, ['/pid', String(Math.trunc(child.pid)), '/T', '/F'], {
+          windowsHide: true, stdio: 'ignore', shell: false
         })
-        if (r.status === 0 || r.status === 128) return
+        // taskkill 이 거절하면(권한·이미 죽은 pid 외의 실패) 종전의 직접 kill 로 넘어간다.
+        // 성공·128(없는 프로세스)이면 트리는 이미 처리됐다.
+        killer.once('exit', (code) => {
+          if (code === 0 || code === 128) return
+          try { child.kill(signal) } catch { /* already gone */ }
+        })
+        killer.once('error', () => { try { child.kill(signal) } catch { /* already gone */ } })
+        killer.unref()
+        return
       }
     } catch { /* taskkill 이 없거나 실패 — 아래 직접 kill */ }
   }

@@ -101,6 +101,15 @@ export function checkSkillReleaseWorkflow(text) {
   if (!/^\s*version:\s*\$\{\{\s*steps\.reserve\.outputs\.version\s*\}\}\s*$/m.test(text)) {
     throw new Error('skill-release outputs must expose the reserved version')
   }
+  // Publishing a skill release must never take the repository's "Latest" marker: README links
+  // releases/latest to the app installers, and GitHub marks the newest published release Latest by
+  // default, so a skill release published without --latest=false sends students to the skill zip
+  // page instead of the app. `gh release edit --latest=false` is the only form that posts
+  // make_latest=false to the API.
+  const publishRun = runBody(stepBlock(text, '- name: Publish immutable skill assets (no clobber)'))
+  if (!/gh release edit "skill-v\$VERSION" --draft=false --latest=false/.test(publishRun)) {
+    throw new Error('The skill release must publish with --latest=false so releases/latest stays on the app')
+  }
   // Actions cannot open pull requests in this repository; failing that step must leave a person
   // one copy-paste command instead of a silent "released but no channel PR".
   const prIndex = text.indexOf('- uses: peter-evans/create-pull-request@')

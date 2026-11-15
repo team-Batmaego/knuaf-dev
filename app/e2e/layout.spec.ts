@@ -125,6 +125,188 @@ test('마크다운 — 이미지는 그리지 않는다. 앱이 원격 주소를
   expect(html).toContain('생산량 그래프')
 })
 
+// ------------------------------------------------------- 본문 속 HTML 표(병합 칸)
+
+test('HTML 표 — 병합 칸(rowspan·colspan)을 표로 다시 짓는다', () => {
+  const html = renderMarkdown(
+    '표 2. 밀양시 기상 현황(2021~2025년) (출처 : 기상청)\n' +
+    '<table>\n' +
+    '  <caption>밀양시 기상</caption>\n' +
+    '  <thead>\n' +
+    '    <tr><th rowspan="2">구 분</th><th colspan="3">겨울</th></tr>\n' +
+    '    <tr><th>12월</th><th>1월</th><th>2월</th></tr>\n' +
+    '  </thead>\n' +
+    '  <tbody>\n' +
+    '    <tr><th>강우량(mm)</th><td>21.2</td><td>18.4</td><td>20.1</td></tr>\n' +
+    '  </tbody>\n' +
+    '</table>\n' +
+    '(출처 : 기상청)\n'
+  )
+  expect(html).toContain('<table>')
+  expect(html).toContain('<caption>밀양시 기상</caption>')
+  expect(html).toContain('<th rowspan="2">구 분</th>')
+  expect(html).toContain('<th colspan="3">겨울</th>')
+  expect(html).toContain('<td>21.2</td>')
+  // 표 앞뒤 마크다운은 그대로 남는다(제목 줄·출처 줄이 표에 먹히지 않는다).
+  expect(html).toContain('표 2. 밀양시 기상 현황(2021~2025년) (출처 : 기상청)')
+  expect(html).toContain('(출처 : 기상청)')
+  expect(html).not.toContain('&lt;table')
+})
+
+test('HTML 표 — 칸 글자의 표식은 글자 노드로 그대로 남는다 (뷰어 B)', () => {
+  const html = renderMarkdown('<table><tr><td>GGEDITV123abc</td></tr></table>')
+  expect(html).toContain('<td>GGEDITV123abc</td>')
+})
+
+// kordoc 은 칸 글자를 escapeHtml 해 내보낸다(실측: 4.17.1·4.24.66 모두 `R&D` → `R&amp;D`,
+// `p < 0.05` → `p &lt; 0.05`). 그 엔티티를 그대로 두면 화면에 `R&amp;D` 로 보이므로 한 번 되돌린다.
+test('HTML 표 — kordoc 이 이스케이프한 칸 글자는 화면에 원래 글자로 보인다', () => {
+  const html = renderMarkdown(
+    '<table><tr><td>R&amp;D</td><td>a &lt; b</td><td>3&nbsp;개</td></tr></table>'
+  )
+  // 되돌린 뒤 곧바로 다시 이스케이프한다 — 마크업이 아니라 글자다.
+  expect(html).toContain('<td>R&amp;D</td>')
+  expect(html).toContain('<td>a &lt; b</td>')
+  expect(html).toContain('<td>3\u00a0개</td>')
+  expect(html).not.toContain('&amp;amp;')
+  expect(html).not.toContain('&amp;lt;')
+  expect(html).not.toContain('&amp;nbsp;')
+})
+
+test('HTML 표 — 엔티티는 한 번만 되돌린다(두 번 풀지 않는다)', () => {
+  const html = renderMarkdown('<table><tr><td>&amp;lt;b&amp;gt;</td></tr></table>')
+  // `&amp;lt;` → `&lt;` 에서 멈춘다. 화면에는 `&lt;b&gt;` 라는 글자가 그대로 보인다.
+  expect(html).toContain('<td>&amp;lt;b&amp;gt;</td>')
+})
+
+test('HTML 표 — 정해진 엔티티 밖의 &…; 는 글자 그대로 둔다', () => {
+  const html = renderMarkdown(
+    '<table><tr><td>&copy;</td><td>&#65;</td><td>&#x41;</td><td>&#0;</td></tr></table>'
+  )
+  expect(html).toContain('<td>&amp;copy;</td>')  // 모르는 이름은 손대지 않는다
+  expect(html).toContain('<td>A</td>')           // 십진·십육진 숫자 엔티티는 되돌린다
+  expect(html).toContain('<td>A</td>')
+  expect(html).toContain('<td>&amp;#0;</td>')    // 0 은 글자로 남긴다(빈 문자로 만들지 않는다)
+})
+
+test('HTML 표 — 표식은 엔티티 되돌리기에도 안 깨진다 (뷰어 B)', () => {
+  const html = renderMarkdown('<table><tr><td>GGEDITV123abc R&amp;D</td></tr></table>')
+  expect(html).toContain('<td>GGEDITV123abc R&amp;D</td>')
+})
+
+test('HTML 표 — 허용 태그 caption·thead·tbody·tfoot·br 은 그린다', () => {
+  const html = renderMarkdown(
+    '<table><caption>제목</caption><thead><tr><th>가</th></tr></thead>' +
+    '<tbody><tr><td>나<br>다</td></tr></tbody><tfoot><tr><td>합</td></tr></tfoot></table>'
+  )
+  expect(html).toContain('<caption>제목</caption>')
+  expect(html).toContain('<thead>')
+  expect(html).toContain('<td>나<br>다</td>')
+  expect(html).toContain('<tfoot>')
+})
+
+test('HTML 표 — 허용 밖이 하나라도 있으면 블록 통째로 글자 (실패 닫힘)', () => {
+  const attacks = [
+    // 이벤트 속성·style·그 밖의 속성
+    '<table><tr><td onclick="alert(1)">x</td></tr></table>',
+    '<table><tr><td style="color:red">x</td></tr></table>',
+    '<table class="a"><tr><td>x</td></tr></table>',
+    // 스크립트·이미지·링크·허용 밖 태그
+    '<table><tr><td><script>alert(1)</script></td></tr></table>',
+    '<table><tr><td><img src="https://example.com/x.png"></td></tr></table>',
+    '<table><tr><td><a href="https://example.com">x</a></td></tr></table>',
+    '<table><tr><td><div>x</div></td></tr></table>',
+    // 주석
+    '<table><!-- x --><tr><td>x</td></tr></table>',
+    // 병합 칸 값 경계
+    '<table><tr><td colspan="0">x</td></tr></table>',
+    '<table><tr><td colspan="1000">x</td></tr></table>',
+    // 굽은 따옴표 속성값(복사 과정에서 생길 수 있다) — 허용하지 않는다.
+    '<table><tr><td rowspan=“2”>x</td></tr></table>',
+    // 짝이 안 맞는 태그
+    '<table><tr><td>x</td></tr>',
+    '<table><tr><td>x</table>'
+  ]
+  for (const src of attacks) {
+    const html = renderMarkdown(src)
+    expect(html, src).not.toContain('<table')
+    expect(html, src).not.toContain('<td')
+    expect(html, src).toContain('&lt;table')
+  }
+})
+
+test('HTML 표 — 여러 줄 중첩 표는 안쪽까지 블록 통째로 글자 (검토 I-01)', () => {
+  const html = renderMarkdown(
+    '<table>\n' +
+    '<tr><td>\n' +
+    '<table>\n' +
+    '<tr><td>안쪽</td></tr>\n' +
+    '</table>\n' +
+    '</td></tr>\n' +
+    '</table>\n'
+  )
+  expect(html).not.toContain('<table')
+  expect(html).not.toContain('<td')
+  expect(html).toContain('&lt;table')
+  expect(html).toContain('안쪽')
+})
+
+test('HTML 표 — 금지 속성 외곽 표 안의 정상 표도 살아남지 않는다 (검토 I-01)', () => {
+  const html = renderMarkdown(
+    '<table class="a">\n' +
+    '<tr><td>x</td></tr>\n' +
+    '<table>\n' +
+    '<tr><td>안쪽</td></tr>\n' +
+    '</table>\n' +
+    '</table>\n'
+  )
+  expect(html).not.toContain('<table')
+  expect(html).not.toContain('<td')
+  expect(html).toContain('&lt;table')
+  expect(html).toContain('&lt;table class=&quot;a&quot;&gt;')
+})
+
+test('HTML 표 — 거절된 후보의 글자는 기존 문단 경로와 똑같이 그린다 (검토 I-01)', () => {
+  // 뒤에 글자를 붙이면 표 후보가 아니라 문단 경로다 — 두 출력의 본문이 같아야 한다.
+  const rejected = renderMarkdown('<table><tr><td colspan="0">R&amp;D *강조* `코드`</td></tr></table>\n')
+  const paragraph = renderMarkdown('<table><tr><td colspan="0">R&amp;D *강조* `코드`</td></tr></table> 꼬리\n')
+  expect(rejected).not.toContain('<table')
+  expect(paragraph.replace(' 꼬리', '')).toBe(rejected)
+  expect(rejected).toContain('R&amp;D')
+  expect(rejected).not.toContain('R&amp;amp;D')
+  expect(rejected).toContain('<em>강조</em>')
+  expect(rejected).toContain('<code>코드</code>')
+})
+
+test('HTML 표 — 닫히지 않는 시작 줄이 반복돼도 다시 훑지 않는다 (검토 I-02)', () => {
+  const src = '<table>\n'.repeat(16000)
+  const started = performance.now()
+  const html = renderMarkdown(src)
+  const elapsed = performance.now() - started
+  // 기준 코드(81458e3)와 같은 출력: 전부 글자, 표 없음.
+  expect(html).not.toContain('<table')
+  expect(html).toContain('&lt;table')
+  expect(html.split('&lt;table').length - 1).toBe(16000)
+  // 기준 39.7ms, 고치기 전 9,539.3ms(검토 측정). 재탐색이 남으면 여기서 걸린다.
+  expect(elapsed).toBeLessThan(500)
+})
+
+test('HTML 표 — 후보 안 코드 펜스의 닫는 태그를 표 끝으로 쓰지 않는다 (검토 R-01)', () => {
+  const html = renderMarkdown(
+    '<table>\n' +
+    '<tr><td>\n' +
+    '```\n' +
+    '</table>\n' +
+    '```\n' +
+    '뒤 문단\n'
+  )
+  expect(html).not.toContain('<table')
+  expect(html).not.toContain('<td')
+  // 펜스는 코드 블록 그대로다 — `</table>` 은 글자로 남는다.
+  expect(html).toContain('<pre><code>')
+  expect(html).toContain('&lt;/table&gt;')
+})
+
 // ------------------------------------------------------------------ 파일 현재성
 
 test('파일 현재성 — 등록된 것만 말하고, 판정은 stale 하나로 한다', () => {

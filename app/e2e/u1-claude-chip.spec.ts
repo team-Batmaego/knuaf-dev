@@ -221,9 +221,11 @@ test('U1: 존재하지 않는 모델을 보내면 초기화가 어긋났다고 �
   } finally { await r.svc.close() }
 })
 
-test('U1: ultra 이름표와 안내 한 줄이 있다 (F22)', () => {
+test('U1: ultra 이름표는 있고 한도 안내 줄은 없다 (F22, 형님 11-13)', () => {
   expect(MODEL_PICKER.efforts.ultra).toBe('울트라(자동 분담)')
-  expect(MODEL_PICKER.ultraNotice).toContain('한도가 빨리 줄고')
+  // 한도·요금 문구는 학생 화면에서 뺐다 — 다시 생기면 여기서 걸린다.
+  expect('ultraNotice' in MODEL_PICKER).toBe(false)
+  expect('limitNotice' in MODEL_PICKER).toBe(false)
   // 회사 이름이 문구에 박혀 있지 않다 — 칩은 두 회사가 같이 쓴다.
   expect(MODEL_PICKER.modelsTitleFor('Claude')).toBe('Claude 모델')
   expect(MODEL_PICKER.sameConversationFor('Claude')).toContain('Claude')

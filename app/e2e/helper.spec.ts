@@ -3,12 +3,13 @@ import { existsSync, readdirSync, readFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { findExecutable } from '../src/main/agent'
+import { HELPER } from '../src/renderer/src/copy'
 import { launch, navTo, openProject, synthProject } from './helpers'
-import { writeCliShim } from './fixtures/fake-codex'
+import { FAKE_CODEX_CLI, writeCliShim } from './fixtures/fake-codex'
 
 // KNUAF_DRY_LAUNCH=1: the launch script is written but the terminal is not opened.
 // 확장자는 플랫폼이 정한다 — 맥은 `.command`(Terminal), 윈도우는 `.cmd`(배치).
-test('external terminal button installs the skill into the project and writes a launch script (dry run)', async () => {
+test('external terminal button installs the skill into the app skill host and writes a launch script (dry run)', async () => {
   // The chooser only offers Claude when the CLI is actually installed, so this
   // whole flow is a developer-machine test. CI runners have no agent CLI.
   test.skip(findExecutable('claude', process.env) === null, 'claude is not installed on this machine')
@@ -30,9 +31,11 @@ test('external terminal button installs the skill into the project and writes a 
   await claudeBtn.waitFor({ timeout: 30_000 }) // status probe is async (claude --version)
   await claudeBtn.click()
   await expect(sheet.locator('text=터미널에 AI 도우미 실행을 요청했어요')).toBeVisible({ timeout: 30_000 })
-  const skillDir = join(root, '.claude', 'skills', 'knuaf-dev')
+  // Claude 사본은 논문 폴더 밖 앱 자리(§4.2)에 깔린다 — 폴더 `.claude` 는 만들지 않는다.
+  const skillDir = join(userData, 'skill-host', '.claude', 'skills', 'knuaf-dev')
   expect(existsSync(join(skillDir, 'SKILL.md'))).toBe(true)
   expect(existsSync(join(skillDir, 'scripts', 'gg_core.py'))).toBe(true)
+  expect(existsSync(join(root, '.claude'))).toBe(false)
   const launchDir = join(userData, 'launch')
   const win = process.platform === 'win32'
   const scripts = readdirSync(launchDir).filter((f) => f.endsWith(win ? '.cmd' : '.command'))
@@ -53,7 +56,10 @@ test('external terminal button installs the skill into the project and writes a 
  */
 test('Codex 로 열면 성공 안내가 Claude 로그인을 말하지 않는다 (UI-D01, dry run)', async () => {
   const bindir = mkdtempSync(join(tmpdir(), 'kd-bin-'))
-  writeCliShim(bindir, 'codex', 'echo "codex-cli 0.0.0-test"', 'echo codex-cli 0.0.0-test')
+  // 이 가짜는 `--version` 과 app-server 양쪽에 답한다 — 잠금(§4.1-C)이 목록을 읽어야 터미널을 연다.
+  // `--version` 만 답하면 잠금 단계가 '설정을 읽지 못함'으로 거부하고 스크립트가 안 생긴다.
+  const cli = () => `exec "${process.execPath}" "${FAKE_CODEX_CLI}" "$@"`
+  writeCliShim(bindir, 'codex', cli(), `"${process.execPath}" "${FAKE_CODEX_CLI}" %*`)
   const userData = mkdtempSync(join(tmpdir(), 'kd-ud-'))
   const root = synthProject({ withContent: false })
   const { electronApp, page } = await launch({
@@ -69,9 +75,15 @@ test('Codex 로 열면 성공 안내가 Claude 로그인을 말하지 않는다 
     const sheet = page.locator('dialog.sheet[open]').last()
     await expect(sheet).toBeVisible()
     const done = sheet.locator('text=터미널에 AI 도우미 실행을 요청했어요')
-    const codexBtn = sheet.locator('button:has-text("Codex 열기")')
-    await expect(done.or(codexBtn)).toBeVisible({ timeout: 30_000 })
-    if (await codexBtn.isVisible()) await codexBtn.click()
+    // 열기는 **한쪽만 설치돼 있으면 자동으로** 끝난다(`store/project.ts` 의 `openHelper`) — CI 러너처럼
+    // claude 가 없으면 codex 로 바로 열려 성공 안내가 뜬다. 그때 'Codex 열기' 단추는 잠깐 있다가
+    // 안내로 바뀌므로, 보이면 누른다는 판단과 클릭 사이에 단추가 DOM 에서 떨어진다
+    // (맥 CI 43485916574: 'element is not stable' → 'element was detached').
+    // 그래서 단추가 아니라 **어느 갈래로 확정됐는지**를 먼저 기다린다 — 둘 다 있으면 고르는 화면이
+    // 그대로 남고(자동 열기 없음 → 누를 때까지 안 바뀐다), 한쪽만 있으면 안내가 뜬다.
+    const choose = sheet.getByText(HELPER.chooseBody)
+    await expect(done.or(choose)).toBeVisible({ timeout: 30_000 })
+    if (await choose.isVisible()) await sheet.locator('button:has-text("Codex 열기")').click()
     await expect(done).toBeVisible({ timeout: 30_000 })
     await expect(sheet).toContainText('ChatGPT')
     await expect(sheet).toContainText('터미널에 오류가 보이면')

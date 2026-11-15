@@ -277,7 +277,10 @@ jobs:
             app/resources/skill-release/signed/skill-manifest.json \
             app/resources/skill-release/signed/skill-manifest.sig \
             app/resources/skill-release/signed/bundle/skill.json
-          gh release edit "skill-v$VERSION" --draft=false
+          # --latest=false is required: README links to releases/latest for the app installers, and
+          # GitHub marks the newest published release "Latest" by default — publishing a skill
+          # release without the flag sends students to the skill zip page instead of the app.
+          gh release edit "skill-v$VERSION" --draft=false --latest=false
       - name: Prepare channel and pinned-source proposal
         run: |
           cp app/resources/skill-release/signed/channel.json updates/channel.json

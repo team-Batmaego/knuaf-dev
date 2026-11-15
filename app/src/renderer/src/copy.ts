@@ -258,6 +258,13 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '답변이 끝난 뒤 다시 시도해 주세요.',
     kind: 'warning'
   },
+  // agentApi.launch 1층 잠금 거부(설계 §4.1-C) — 제목만 여기서, 학생에게 보일 전문은
+  // 메시지 그대로 HelperSheet 의 '자세히'가 줄바꿈을 살려 보여 준다.
+  agent_tool_lock: {
+    title: '터미널 도우미(Codex)를 열지 않았어요.',
+    action: null,
+    kind: 'error'
+  },
   default: {
     title: '문제가 생겼어요.',
     action: '아래 내용을 확인해 주세요. 반복되면 내 논문에서 도우미에게 알려 주세요.',
@@ -512,6 +519,8 @@ export const CHECK_LABEL: Record<string, string> = {
   rule_location: '학교 규칙의 본문 위치',
   // 재무·문서
   finance_gate: '본문 전 재무 기록',
+  finance_unsupported_notice: '이 전공 재무 자료 안내',
+  finance_blank_copy_notice: '재무 엑셀 빈 사본 안내',
   body_finance_crosscheck: '본문 숫자와 재무 자료 대조',
   document_parse: '문서 읽기',
   output_superseded_by: '더 새로 만든 파일 존재 여부',
@@ -860,8 +869,8 @@ export function connectStateLine(provider: 'codex' | 'claude', state: string): s
 export const CREDIT = {
   line1: APP_NAME,
   line2: 'prod. 특용작물전공 24학번 김대욱 · 산업곤충전공 24학번 이준재',
-  /** 앱(GUI)을 만든 사람. 학번은 넣지 않는다 — 공개 저장소와 배포본에 같이 실린다. */
-  gui: 'GUI: made by 산업곤충전공 이준재',
+  /** 디자인한 사람. 학번은 넣지 않는다 — 공개 저장소와 배포본에 같이 실린다. */
+  gui: 'Design: made by 특용작물전공 김대욱',
   /** 여는 화면의 앱 마크를 화면 낭독기가 읽는 이름. */
   markAlt: APP_NAME
 } as const
@@ -1167,10 +1176,7 @@ export const MODEL_PICKER = {
   connectFirst: 'AI에 연결하면 이 계정에서 쓸 수 있는 모델이 보여요.',
   chooseForDepth: '모델을 고르면 생각 깊이도 바꿀 수 있어요.',
   sameConversationFor: (company: string) => `같은 ${company} 대화에서 다음 메시지부터 적용돼요.`,
-  /** ultra 는 깊이만 올리는 단계가 아니다 — 동봉 설명이 "Maximum reasoning with automatic task delegation"이다. */
-  ultraNotice: '울트라는 Codex가 스스로 담당을 여러 개 띄워요 — 한도가 빨리 줄고, 작업 분담표와 따로 돌아요.',
   reviewNotice: '검토는 새 대화로 하세요. 검토용 새 대화 열기는 아직 지원하지 않아요.',
-  limitNotice: 'Sol 같은 무거운 모델은 구독 한도를 더 빨리 쓸 수 있어요.',
   subscription: '앱은 AI를 팔지 않아요. 내 구독 계정을 써요.'
 }
 
@@ -1385,6 +1391,46 @@ export const TITLEBAR = {
 } as const
 
 // ---------------------------------------------------------------------------
+// 진행 목록 (IMPL-T1 §3-1, 시안 progress-r4 T1)
+// ---------------------------------------------------------------------------
+
+/**
+ * 제목줄 "창업논문 진행" — 도우미 답 안의 진행 목록 덩어리를 읽은 표시.
+ * 앱 5단계(`shared/stage`)는 이제 화면에 이름으로 나오지 않는 내부 판정으로만 남는다.
+ */
+export const PROGRESS = {
+  /** 닫힌 단추 낭독 이름 — open/closed는 StageMenu가 바꾼다. */
+  buttonLabelOpen: '창업논문 진행 보기',
+  buttonLabelClose: '창업논문 진행 닫기',
+  /** 시작 전(한 번도 없음) — 단추 글자. */
+  started: '시작 전',
+  /** 시작 전 펼침 안내. */
+  empty: '도우미가 첫 진행 목록을 쓰면 채워져요',
+  /** 펼침 머리의 제목. */
+  head: '창업논문 진행',
+  /** 펼침 머리 한 줄 — "7단계 중 n단계 · 독립 내용검토 전"의 검토 앞부분. */
+  ofSteps: (n: number) => `7단계 중 ${n}단계`,
+  reviewPending: '독립 내용검토 전',
+  /** 펼침 머리 한 줄 — "{시각} 답 기준". */
+  basis: (when: string) => `${when} 답 기준`,
+  /** "그 뒤" 줄 머리 — 파싱한 실제 문구가 뒤에 온다. */
+  afterHead: '그 뒤',
+  check: '제출 전 점검',
+  /** 낭독 "7단계 중 n단계, {이름}" */
+  readAloud: (n: number, name: string) => `7단계 중 ${n}단계, ${name}`,
+  /** 모두 ✓ — "7/7 워드 검토본 · 다 씀" */
+  allDone: '다 씀',
+  /** uncertain 메모의 펼침 표시 — "확인 필요". */
+  uncertain: '확인 필요',
+  /** 시각 표시 — 오늘(방금 전)은 "오후 3:12", 그 외 "11월 12일 오후 4:05". */
+  timeToday: (h: number, m: number) => `오후 ${h}:${pad2(m)}`,
+  timeTodayAm: (h: number, m: number) => `오전 ${h}:${pad2(m)}`,
+  timeOther: (mo: number, d: number, h: number, m: number, pm: boolean) => `${mo}월 ${d}일 ${pm ? '오후' : '오전'} ${h}:${pad2(m)}`,
+  /** 콘솔 전용 — 사용자 오류 표시는 없다. */
+  invalidLog: (reason: string) => `progress-list: invalid (${reason})`,
+} as const
+
+// ---------------------------------------------------------------------------
 // 종이 칸 (DESIGN §2, 시안 ④~⑯)
 // ---------------------------------------------------------------------------
 
@@ -1412,31 +1458,6 @@ export const PAPER = {
   filesCount: (n: number) => `파일 ${n}`,
   /** 파일에 다시 만들어야 할 것이 있을 때만 옆에 붙는 호박색 점의 이름(낭독용). */
   staleTitle: '다시 만들어야 할 파일이 있어요'
-} as const
-
-/**
- * 다섯 단계 (DESIGN §2, 시안 ⑬) — "지금"은 하나다. 번호 원 스테퍼·퍼센트·등간격 게이지는
- * 쓰지 않는다: 제목줄 한 줄 + 열면 목록.
- *
- * 사실 한 줄은 **이미 아는 것만** 말한다(단계 판정 입력과 같은 것들이다) — 모르는 개수를
- * 지어내지 않는다. 그래서 2단계는 질문 수/장 상태로, 5단계는 한글 마무리 개수로 말한다.
- */
-export const STAGES = {
-  names: ['준비', '인터뷰·장 쓰기', '검토본', '결과물', '제출 점검·마무리'],
-  head: '전체 과정 — 꼭 한 칸씩만 가지는 않아요',
-  fact: {
-    ready: (connected: boolean, hasProject: boolean) =>
-      `${connected ? 'AI 연결됨' : 'AI 연결 안 됨'} · ${hasProject ? '논문 폴더 있음' : '논문 폴더 없음'}`,
-    write: (questions: number, allReady: boolean) =>
-      questions > 0 ? `도우미 질문 ${questions}개가 답을 기다려요`
-        : allReady ? '장 초안을 다 썼어요'
-          : '도우미와 장을 쓰는 중',
-    review: (reviewExport: number | null) =>
-      reviewExport !== null ? `${reviewExport}번째 기록 기준으로 만들었어요` : '아직 안 만들었어요',
-    output: (stale: boolean, hasDocx: boolean) =>
-      stale ? '고친 내용이 파일에 빠져 있어요' : hasDocx ? '논문 파일을 만들었어요' : '아직 안 만들었어요',
-    finish: (n: number) => `한글에서 직접 할 것 ${n}개 · 확인 네 가지`
-  }
 } as const
 
 /**
@@ -1688,4 +1709,28 @@ export const QUESTION_FORM = {
   free: '직접 입력',
   back: '질문창으로 돌아가기',
   send: '보내기'
+} as const
+
+/**
+ * 재무 양식 알림 말풍선(v0.6.4, SKE-08) — 1묶음 때 `NoticeBubble.tsx` 안에 있던 문구를 그대로 옮겼다.
+ * 여기 있는 것은 **껍데기 문구뿐**이다: 알림의 제목·줄·선택지 이름은 알림 파일이 준 글자 그대로 그린다
+ * (앱이 숫자·이유·문장을 조립하지 않는다 — 계약이 둘로 갈린다).
+ */
+export const NOTICE = {
+  detail: '자세히',
+  dismiss: '알림 닫기',
+  more: '외 {n}곳',
+  failed: '선택을 기록하지 못했어요. 잠시 뒤 다시 눌러 주세요.',
+  footnoteAction: '각주 넣어 줘',
+  footnoteNote: '논문에 적을 문장을 입력칸에 채워 드려요.',
+  choiceNote: '계산 방식을 다르게 한 곳은 알려 주셔야 해요.'
+} as const
+
+/**
+ * link (v0.6.4 ⑤): 답변 속 http(s) 주소 단추. 열지 못했을 때만 나오는 한 줄이다 —
+ * 주소가 이상하거나(앱이 열지 않는 형태·사용자 정보 포함) 브라우저가 없을 수 있어,
+ * 원인을 단정하지 않고 주소를 확인해 달라고만 한다(파일 열기 실패 안내와 같은 결).
+ */
+export const CHAT_LINK = {
+  openFailed: '주소를 열지 못했어요. 주소를 확인하거나 브라우저 설정을 확인해 주세요.'
 } as const

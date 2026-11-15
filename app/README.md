@@ -151,7 +151,28 @@ pnpm install
 KNUAF_PYTHON=$(which python3.13) pnpm dev          # stage 호환 게이트 → compose 묶음으로 개발 실행
 pnpm typecheck
 pnpm build && KNUAF_PYTHON=$(which python3.13) pnpm test:e2e   # Playwright-electron 스모크
+node scripts/e2e-shards.mjs --check                # e2e 샤드 묶음표(e2e/shards.json)가 실제 스펙을 다 덮는지
 ```
+
+CI는 e2e를 OS × 샤드로 나눠 돕니다(윈도 5개, 맥 2개). 한 샤드만 로컬에서 돌려 보려면 `node scripts/e2e-shards.mjs windows 3`
+또는 `node scripts/e2e-shards.mjs macos 1`을 씁니다. `e2e/**/*.spec.ts`(하위 폴더 포함)를 새로 추가하면 `--check`가
+실패하므로 그 파일을 `e2e/shards.json`의 한 샤드에 넣어야 합니다(넣지 않으면 CI에서 조용히 안 도는 대신 검사
+단계가 먼저 막습니다). 표에는 `e2e/` 접두와 `.spec.ts` 확장자를 뺀 이름을 적습니다 — `e2e/docx-zip.spec.ts`는
+`docx-zip`, `e2e/sub/foo.spec.ts`는 `sub/foo`입니다.
+
+Electron 시험은 `await electronApp.close()` 대신 `await closeApp(electronApp, log)`로 앱을 닫습니다.
+Playwright의 `close()`는 앱 종료가 아니라 **런치 래퍼 프로세스의 `close` 이벤트**를 무타임아웃으로
+기다리므로(윈도우 래퍼는 `shell: true`의 `cmd.exe`), 래퍼가 안 죽으면 앱이 정상 종료해도 시험이 매달립니다.
+`closeApp`은 상한(기본 20초)을 두고 넘기면 프로세스 트리를 강제 정리하며, 그 사실을 `close:force`로
+`app-log.txt`에 남깁니다. 강제 정리마저 실패하면 `close:force-failed <이유>`를 남기고 그 시험을
+**실패로 드러냅니다**(잔류 프로세스를 통과로 덮지 않음). `close()` 자체의 거절은 `close:rejected`로만
+남기고 시험을 깨뜨리지 않습니다. `close:end`도 이 함수가 어느 갈래에서나 남기므로 `captureAppLog`의
+5초 헬스비트가 워커 종료까지 돌지 않습니다.
+강제 종료는 `killPlan(pid)`이 만드는 **계획**과 `forceKill` 실행기가 나뉘어 있어, `e2e/close-app.spec.ts`는
+실제 `taskkill`·`kill` 없이 명령·pid·옵션(`/T /F`, timeout)과 실패 갈래를 단언합니다. 회귀 시험에서
+실제 프로세스를 건드리지 마세요 — 사설 pid 로 `taskkill`을 돌리면 러너의 무관한 프로세스가 죽습니다.
+브라우저를 실제로 띄우는 시험은 `stubExternal(electronApp)`을 `try` **안에서** 부릅니다(정리 누락 방지,
+기록을 남기지 않으므로 `shellCalls(log)`를 정확 배열로 단언하는 시험과 충돌하지 않습니다).
 
 `pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
 별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
@@ -187,7 +208,7 @@ Electron E2E는 각 실행의 시험 output에 `doctor-<시각>.jsonl`을 남깁
 개별 현재/프로젝트 import·Kordoc·history·마지막 임시 파일 순회 구간의 소요를 request_id·pid로 구분합니다.
 학생 경로·본문·RPC payload·환경변수는 기록하지 않습니다. 끝이 없는 start가 있으면 그 단계가 미완료인 증거이며,
 이 기록만으로 특정 Windows 하위 원인을 미리 단정하지 않습니다. CI 실패 아티팩트에 JSONL이 함께 보존되며,
-Windows는 성공 여부와 관계없이 `doctor-timings-windows` 아티팩트로도 올립니다.
+Windows는 성공 여부와 관계없이 `doctor-timings-windows-<샤드>` 아티팩트로도 올립니다.
 
 `navTo(page, '자료' | '결과물')`는 종이 머리의 `head-materials` / `head-files` 단추와 그 단추의
 팝오버만 대상으로 삼습니다. 열린 자료 목록 안의 **파일 고르기…**도 `/파일/`에 걸리므로,
@@ -304,6 +325,7 @@ node app/scripts/check-app-channel.mjs --channel updates/channel.json
 - `KNUAF_DRY_LAUNCH=1` — 외부 터미널 실행 스크립트를 쓰기만 하고 열지 않습니다(테스트 전용).
 - `KNUAF_LIVE=1` — `e2e/live-*.spec.ts`를 포함해 실행합니다. 실제 Claude/Codex 로그인과 구독 사용량이 필요하므로 기본 실행에서는 제외됩니다.
 - `KNUAF_WINDOW_SHOTS=1` — 실제 창을 맨 앞으로 올려 찍는 macOS 안내서 사진 생성기 `e2e/window-shots.spec.ts`를 함께 돌립니다: `KNUAF_WINDOW_SHOTS=1 pnpm -C app test:e2e`. e2e 창은 기본적으로 화면에 뜨지 않습니다(`KNUAF_E2E_HIDDEN=1` — 창을 눈으로 보려면 `KNUAF_E2E_VISIBLE=1`).
+- `KNUAF_SHOT_DIR=<폴더>` — `e2e/screenshots.spec.ts`가 사진을 쓸 자리. 기본값은 `app/test-results/ui-shots`(git 제외)라 시험 실행이 추적되는 `docs/images`를 덮어쓰지 않습니다. 안내서 사진을 실제로 갱신할 때만 `KNUAF_SHOT_DIR=../docs/images pnpm -C app exec playwright test e2e/screenshots.spec.ts`로 돌립니다(루트 README 「개발」 절).
 - 화면 확인용: `app/e2e/watch-frontmost.sh <기록 파일> [초]`(macOS) — 0.5초 간격으로 화면 맨 앞 앱과 창이 화면에 있는 앱을 기록합니다.
 
 ## 패키징 (Phase 6)
