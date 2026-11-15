@@ -6,7 +6,7 @@ import { expect, test } from '@playwright/test'
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { ClaudeRelayConnection, claudeExecutionAccount, prepareRelayPlugin, removeRelayPlugin, sweepRelayPlugins } from '../src/main/chat/claude'
+import { ClaudeRelayConnection, RELAY_SKILL_PROMPT, SKILL_PROMPT, claudeExecutionAccount, prepareRelayPlugin, removeRelayPlugin, sweepRelayPlugins } from '../src/main/chat/claude'
 import { CodexRelayConnection, codexExecutionAccount, codexThreadParams } from '../src/main/chat/codex'
 import { JobRunner } from '../src/main/chat/jobs'
 import { canonical, relayIsolation, sha256 } from '../src/main/chat/jobs/isolation'
@@ -368,6 +368,38 @@ test('[㉠] Claude 담당 연결이 gateInTurn 을 선언한다', () => {
 })
 
 /**
+ * 담당 Claude 는 주문 글 맨 앞에 **자기 플러그인 이름표**의 스킬 명령을 붙인다(11-14).
+ *
+ * 예전 구조는 러너가 보낸 `/knuaf-dev` 를 정규식으로 `/knuaf:knuaf-dev` 로 **바꿨다**. 그래서
+ * 러너가 글을 바꾸면(예: 다른 슬래시·앞 공백) 조용히 안 바뀌고 스킬이 안 실렸다. 지금은 엔진이
+ * 자기 등록 이름표(`RELAY_SKILL_PROMPT`)를 직접 붙이므로, 슬래시는 **맨 앞에 정확히 한 번** 선다.
+ * 본대화 이름표(`SKILL_PROMPT` = `/.claude:…`)와 다른 값인 것도 함께 잠근다 — 둘은 등록 자리가
+ * 달라 같은 값으로 합치면 한쪽 스킬이 안 뜬다.
+ */
+test('담당 Claude 는 자기 플러그인 이름표로 스킬을 부른다 - 맨 앞에 한 번', async () => {
+  const { root, out, skill } = fixtureRoot('relay-prompt')
+  const appDir = realpathSync(mkdtempSync(join(tmpdir(), 'kd-app-relay-prompt-')))
+  const logFile = join(root, 'claude-query.jsonl'); writeFileSync(logFile, '')
+  const fixture = join(appRoot, 'e2e', 'fixtures', 'fake-claude-query.mjs')
+  const binary = join(root, process.platform === 'win32' ? 'claude.cmd' : 'claude')
+  const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`
+  writeFileSync(binary, process.platform === 'win32'
+    ? `@echo off\r\n"${process.execPath}" "${fixture}" %*\r\n`
+    : `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} "$@"\n`, { mode: 0o755 })
+  const connection = new ClaudeRelayConnection(agentOptions(binary, root, skill, { W1_QUERY_LOG: logFile }),
+    relayRequest(root, out, skill), appDir)
+  try { await connection.runJob('담당 모드: 주문서', recorder().events) } finally { await connection.stop() }
+  const sent = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+  const prompt = sent.filter(e => e.type === 'user').map(e => String(e.message?.content?.[0]?.text ?? e.message?.content ?? '')).at(-1)!
+  expect(prompt.startsWith(`${RELAY_SKILL_PROMPT} `)).toBe(true)
+  // 이름표는 한 번만 선다 — 러너 글이 이미 슬래시를 들고 오면 두 번 서고, 뒤엣것은 죽은 글자다.
+  expect(prompt.split(RELAY_SKILL_PROMPT)).toHaveLength(2)
+  expect(prompt).toContain('담당 모드: 주문서')
+  // 두 이름표는 서로 다른 등록 자리다(본대화 = 앱 스킬 자리, 담당 = 주문 플러그인 매니페스트).
+  expect(RELAY_SKILL_PROMPT).not.toBe(SKILL_PROMPT)
+})
+
+/**
  * §0-5 3 — 담당 이어 하기의 한도 판정도 **구조 신호**만 본다.
  *
  * 예전 `classifyRelayResult` 는 오류 글에 `한도`·`rate limit` 이 있으면 `limit` 으로 닫았다.
@@ -390,7 +422,7 @@ test('relay-limit: 담당 정규식 대신 구조 신호', async () => {
     W1_QUERY_ERROR_TEXT: 'API Error: 429 usage limit · rate limit · quota · 한도 초과'
   }), relayRequest(root, out, skill), appDir)
   try {
-    await expect(connection.runJob('/knuaf-dev 담당 모드: 주문서', recorder().events))
+    await expect(connection.runJob('담당 모드: 주문서', recorder().events))
       .rejects.toMatchObject({ status: 'unknown' })
   } finally { await connection.stop() }
 })

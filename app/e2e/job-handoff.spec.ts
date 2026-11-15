@@ -70,6 +70,12 @@ test('main confirmed limit proposes design model without relay consent, opens on
   expect(f.source.approvedPlan).toEqual(originalPlan)
   expect(f.audits).toMatchObject([{ reason: 'limit', bundleHash: p.bundleHash, newConversationId: p.newConversationId }])
   expect(f.opened[0].firstMessage).toContain('자동 재전송하거나 이미 한 작업을 반복하지 말고')
+  // 슬래시 명령이 없어야 한다 — 이 글은 본대화 `send` 로 가고, 스킬 명령은 엔진이 자기 자리에서
+  // 붙인다(Claude 는 첫 턴에 `SKILL_PROMPT`). 여기에 `/knuaf-dev` 를 박으면 Claude 에서는 같은
+  // 명령이 두 번 서고 Codex 에서는 펼쳐지지 않는 죽은 글자가 된다.
+  expect(f.opened[0].firstMessage.startsWith('재개: ')).toBe(true)
+  // 줄 맨 앞 슬래시 명령 자리만 본다 — 본문 묶음(JSON) 안의 경로에는 `knuaf` 가 들어간다.
+  expect(f.opened[0].firstMessage).not.toMatch(/^\/[\w.:-]+ /m)
 })
 
 for (const reason of ['unknown', 'auth'] as const) test(`main ${reason} never offers continuation`, async () => {

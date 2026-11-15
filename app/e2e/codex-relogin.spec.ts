@@ -115,7 +115,8 @@ test('로그인 응답 직후 도착한 완료 알림도 새 시도의 id에 맞
 
 for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 재로그인과 이전 턴 실패 순서: ${order}`, async () => {
   const dir = scratch(), bin = join(dir, 'bin'), complete = join(dir, 'login-complete'), release = join(dir, 'turn-failure')
-  const env = fakeCodexEnv(bin, { FAKE_CODEX_TURN_FAILURE: 'refresh', FAKE_CODEX_TURN_RELEASE: release, FAKE_CODEX_LOGIN_COMPLETE: complete, FAKE_CODEX_REPLY: replyFile(dir, '완료 후 응답') })
+  const turns = join(dir, 'turn-input.jsonl')
+  const env = fakeCodexEnv(bin, { FAKE_CODEX_TURN_FAILURE: 'refresh', FAKE_CODEX_TURN_RELEASE: release, FAKE_CODEX_LOGIN_COMPLETE: complete, FAKE_CODEX_TURN_INPUT_LOG: turns, FAKE_CODEX_REPLY: replyFile(dir, '완료 후 응답') })
   writeFakeClaude(bin)
   const { electronApp, page, appLog } = await launch({ env, userData: userDataWith(dir, { helper_mode: 'codex-chat' }) })
   const log = captureAppLog(electronApp, appLog)
@@ -134,6 +135,10 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
     await popup.getByRole('button', { name: 'ChatGPT 다시 로그인' }).click()
     await expect(chip).toContainText('로그인 중')
     if (order === 'login-first') {
+      // 서버가 그 턴을 **받은 뒤**에 로그인을 끝낸다. 가짜 서버는 `turn/start` 를 처리하는 순간의
+      // 로그인 상태로 실패 여부를 정하므로, 그 전에 완료 파일을 쓰면 턴이 실패조차 하지 않는다
+      // (지킴이 열거가 턴 시작을 늦추면서 실제로 그 순서가 뒤집혔다 — 시험이 검증하려던 경쟁이 사라진다).
+      await expect.poll(() => existsSync(turns) ? readFileSync(turns, 'utf8') : '').toContain('기다리는 이전 요청')
       writeFileSync(complete, 'complete fake login')
       await expect(chip).toContainText('연결됨', { timeout: 10000 })
     }

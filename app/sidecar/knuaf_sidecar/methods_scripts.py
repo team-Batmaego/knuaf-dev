@@ -261,6 +261,55 @@ def kordoc_ensure(ctx, params):
     return _run(ctx, params, "gg_kordoc.py", argv, timeout_key="kordoc")
 
 
+# --- notices (재무 양식 알림) --------------------------------------------------
+
+# 계약(knuaf.notices/1)이 허용하는 선택 값은 둘뿐이다 — 모르는 값을 그대로 넘기면
+# argparse 가 exit 2 로 끝나 "실행 오류"와 "잘못된 값"이 화면에서 구별되지 않는다.
+NOTICE_CHOICES = ("direct_tell", "footnote")
+
+# 학생에게 보이는 실패 문구. `rejected` 는 도구의 정상 거절(이미 골랐음·정본 개정 충돌 등)이라
+# RPC 오류가 아니라 결과로 돌려준다 — 화면이 고칠 것이 없고, 원인 코드가 그대로 남아야 한다.
+NOTICE_REJECT_TEXT = {
+    "choice_value_invalid": "고를 수 없는 값이에요",
+    "notice_identity_unknown": "이 알림을 찾지 못했어요(이미 지워졌을 수 있어요)",
+    "choice_not_offered": "이 알림은 선택을 받지 않아요",
+    "source_ref_missing": "선택을 적을 자리를 정본에서 찾지 못했어요",
+    "revision_conflict": "그사이 논문 폴더가 바뀌었어요. 화면을 새로 고친 뒤 다시 골라 주세요",
+    "apply_rejected": "정본이 선택을 받아들이지 않았어요",
+}
+
+
+def notices_choose(ctx, params):
+    """`gg_notices.py choose` — 학생 선택을 정본에 적고 알림 파일을 다시 쓴다.
+
+    앱은 정본도 알림 파일도 직접 쓰지 않는다(계약). 값은 화이트리스트로 먼저 막고,
+    도구가 아직 동봉되지 않았으면 조용히 성공한 척하지 않고 한국어 실패를 돌려준다.
+    """
+    identity = params.get("identity")
+    if not isinstance(identity, str) or not identity.strip():
+        raise RpcError("invalid_params", "identity(알림 식별자) 필요")
+    identity = identity.strip()
+    if identity.startswith("-"):
+        # argparse 가 값을 옵션으로 읽는다.
+        raise RpcError("invalid_params", "identity 값이 '-'로 시작할 수 없음")
+    value = params.get("value")
+    if value not in NOTICE_CHOICES:
+        raise RpcError("invalid_params", "value 는 direct_tell 또는 footnote 만 가능")
+    root = _root(params)
+    if not root.is_dir():
+        raise RpcError("invalid_params", "작업 폴더가 없음: %s" % root)
+    if not (_scripts_dir() / "gg_notices.py").is_file():
+        raise RpcError("notices_script_missing", "알림 기록 도구(gg_notices.py)가 이 앱에 없어 선택을 적지 못했어요")
+    # 하위 명령 → 폴더(위치 인자) → 플래그 순서. gg_notices.py 의 `choose` 하위 파서가 그 순서다.
+    envelope = _run(ctx, params, "gg_notices.py", ["choose", str(root), "--identity", identity, "--value", value])
+    if envelope.get("status") == "rejected":
+        data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+        reason = data.get("reason") or "apply_rejected"
+        envelope["ok"] = False
+        envelope["block_reason"] = NOTICE_REJECT_TEXT.get(reason, "선택을 적지 못했어요(%s)" % reason)
+    return envelope
+
+
 def register(server):
     for name, fn, write in (
         ("paper.generate", paper_generate, True),
@@ -281,5 +330,6 @@ def register(server):
         ("deps.ensure", deps_ensure, True),
         ("deps.doctor", deps_doctor, False),
         ("kordoc.ensure", kordoc_ensure, True),
+        ("notices.choose", notices_choose, True),
     ):
         server.register(name, fn, write=write)

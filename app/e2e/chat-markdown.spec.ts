@@ -116,19 +116,23 @@ test('폴더 밖·상위 경로는 단추가 되지 않고 원문 글자가 남�
   expect(html).toContain('위로')
 })
 
-test('http(s) 주소는 앵커를 만들지 않고 글자로 남는다 — 주소도 지우지 않는다', () => {
+test('http(s) 주소는 누를 수 있는 단추가 되고 주소도 함께 보인다 — 앵커는 만들지 않는다', () => {
   const html = painted('[받으세요](https://example.invalid/x.exe)')
+  expect(html).toContain('<button')
+  expect(html).toContain('class="lk chat-md-link"')
   expect(html).not.toContain('<a ')
   expect(html).not.toContain('href')
   expect(html).toContain('받으세요')
   expect(html).toContain('example.invalid')
   // 맨 주소도 링크가 되지 않는다(linkify: false).
   expect(painted('https://example.com')).not.toContain('<a ')
+  expect(painted('https://example.com')).not.toContain('<button')
 })
 
 test('javascript: 같은 다른 스킴은 링크 없이 글자다', () => {
   const html = painted('[a](javascript:alert(1))')
   expect(html).not.toContain('<a ')
+  expect(html).not.toContain('<button')
   expect(html).not.toContain('javascript:alert(1)</button>')
   expect(html).toContain('a')
 })

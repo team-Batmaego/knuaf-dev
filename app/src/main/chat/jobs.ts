@@ -247,7 +247,11 @@ export class JobRunner {
       if (!spec.parent && !this.approved(spec, record.root)) { this.update(record, 'rejected', 'Approved plan changed'); return }
       record.startedAt = new Date().toISOString()
       this.update(record, 'running')
-      await connection.runJob(`/knuaf-dev 담당 모드: ${join(record.root, '.knuaf-gui', 'jobs', `${spec.id}.json`)}`, {
+      // 글에는 슬래시를 넣지 않는다 — 엔진마다 스킬을 붙이는 자리가 다르고(Claude 는 첫 줄
+      // 슬래시 명령, Codex 는 `turn/start.input` 의 skill 항목), 그 차이는 각 엔진이 안다
+      // (`claude.ts` 의 `RELAY_SKILL_PROMPT`, `codex.ts` 의 skill 입력 항목). 러너가 `/knuaf-dev` 를 박아 두면
+      // Codex 글에는 정체불명의 슬래시가 남는다 — 실측: Codex 는 슬래시 명령을 펼치지 않는다.
+      await connection.runJob(`담당 모드: ${join(record.root, '.knuaf-gui', 'jobs', `${spec.id}.json`)}`, {
         message: () => {}, note: () => {}, skill: () => {},
         permission: p => connection.respond(p.id, false),
         session: id => {

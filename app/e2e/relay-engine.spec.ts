@@ -301,7 +301,7 @@ test('실물 Claude CLI 담당: 출력 칸 안만 쓰고 밖은 거절한다', {
     expect(account.account.company).toBe('claude')
     expect((account.account.models ?? []).map(m => m.model)).toContain('sonnet')
 
-    await connection.runJob('/knuaf-dev 담당 모드: 주문서', log.events)
+    await connection.runJob('담당 모드: 주문서', log.events)
     expect(log.of('skill')).toEqual([true])
     expect(log.of('session').length).toBeGreaterThan(0)
     expect(String(log.of('session')[0])).not.toBe('')
@@ -330,7 +330,7 @@ test('실물 Claude CLI 담당: 진행 중 한도가 깨지면 그 자리에서 
   if (!harness) test.skip(true, '동봉 Claude CLI 가 없어 건너뜁니다')
   const { connection, log, close } = harness
   try {
-    await expect(connection.runJob('/knuaf-dev 담당 모드: 주문서', log.events)).rejects.toMatchObject({ status: 'limit' })
+    await expect(connection.runJob('담당 모드: 주문서', log.events)).rejects.toMatchObject({ status: 'limit' })
     expect(log.of('availability')).toContain('limit')
     // 한도로 닫혔으면 토큰·결과를 넘기지 않는다.
     expect(log.of('tokens')).toEqual([])

@@ -19,6 +19,7 @@ function fixture() {
   }
   const plan = planFromRow('both-high'), requests: RelayRequest[] = [], deliveries: { owner: ConversationOwner; result: JobResult }[] = [], diagnostics: object[] = []
   let stops = 0, mainStops = 0, runJobs = 0
+  const runTexts: string[] = []
   let behavior = async (request: RelayRequest, events: JobEvents) => {
     events.session(`session-${request.jobId}`)
     writeFileSync(join(request.cwd, 'result.md'), 'actual result')
@@ -32,7 +33,7 @@ function fixture() {
       return { relayProtocol: 1, status: async () => ({ installed: true, connected: true, version: 'fake', detail: '' }),
         availability: async () => structuredClone(accounts[request.company]), login: async () => {}, respond: () => {},
         run: async () => { throw new Error('Ordinary run must not execute relay') },
-        runJob: async (_text, events) => { runJobs++; return behavior(request, events) }, stop: async () => { stops++ } }
+        runJob: async (text, events) => { runJobs++; runTexts.push(text); return behavior(request, events) }, stop: async () => { stops++ } }
     },
     deliver: async (target: ConversationOwner, result: JobResult) => { deliveries.push({ owner: target, result }) },
     stopMain: async () => { mainStops++ }, diagnostic: (data: object) => { diagnostics.push(data) }, shellSandboxAvailable: true
@@ -43,7 +44,7 @@ function fixture() {
     ...(lane === 'research' ? { research: { research_type: '생산량', questions: [{ id: 'Q1', target: '생산량', acceptance: '공식 통계' }],
       routes: [{ doc: 'research-sources.md', id_or_name: 'KOSIS', url: 'https://kosis.kr/' }], keywords: ['생산량'], output_file: 'result.md' } } : {}),
     outputs: ['result.md'], contractVersion: 'role-v1', company: plan[lane]!.company, model: plan[lane]!.model!, effort: plan[lane]!.effort })
-  return { root, stateDir, accounts, plan, requests, deliveries, diagnostics, options, runner, spec, runJobs: () => runJobs,
+  return { root, stateDir, accounts, plan, requests, deliveries, diagnostics, options, runner, spec, runJobs: () => runJobs, runTexts,
     behavior: (fn: typeof behavior) => { behavior = fn }, accountRead: (fn: typeof accountRead) => { accountRead = fn },
     stops: () => ({ stops, mainStops }) }
 }
@@ -68,6 +69,27 @@ test('serial fresh sessions deliver isolated files without touching thesis or ma
   expect(f.deliveries.map(d => readFileSync(d.result.outputs[0], 'utf8'))).toEqual(['a', 'b'])
   expect(readFileSync(join(f.root, 'project.json'), 'utf8')).toBe('{"original":true}')
   expect(JSON.stringify(f.deliveries)).not.toContain('must not appear')
+})
+
+/**
+ * 주문 글에는 엔진별 스킬 명령을 넣지 않는다(11-14).
+ *
+ * 예전 러너는 `/knuaf-dev 담당 모드: …` 를 보냈고, Claude 담당은 그 글자를 다시
+ * `/knuaf:knuaf-dev` 로 **바꿔** 썼다. 두 엔진이 같은 함수를 타므로 그 글자는 Codex 쪽에
+ * 펼쳐지지 않는 죽은 글자로 남았고, Claude 쪽은 러너와 엔진 두 곳이 스킬 이름을 각자 적는
+ * 구조였다(한쪽만 고치면 스킬이 조용히 안 실린다). 지금은 러너가 엔진 중립 글만 보내고,
+ * 슬래시는 각 엔진이 자기 등록 이름표로 붙인다 — 이 시험이 그 경계를 잠근다.
+ */
+test('주문 글은 엔진 중립이다 - 러너가 스킬 슬래시를 넣지 않는다', async () => {
+  const f = fixture()
+  f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
+  expect(f.runTexts).toHaveLength(1)
+  const text = f.runTexts[0]
+  expect(text).toBe(`담당 모드: ${join(f.root, '.knuaf-gui', 'jobs', 'job-one.json')}`)
+  // 슬래시 명령이 없어야 한다 — 있으면 Codex 글에 그대로 남는다. 경로에 `knuaf` 가 들어가므로
+  // 낱말이 아니라 **줄 맨 앞 슬래시 명령 자리**를 본다(그 자리만 CLI 가 명령으로 읽는다).
+  expect(text.startsWith('/')).toBe(false)
+  expect(text).not.toMatch(/^\/[\w.:-]+ /m)
 })
 
 test('research presence follows the lane and its output file must exactly match an owned output', () => {

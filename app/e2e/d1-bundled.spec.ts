@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { agentApi, bundledAgentDirs, bundledDirs, findExecutable, setAgentPlatformForTest } from '../src/main/agent'
+import { agentApi, bundledAgentDirs, bundledDirs, findExecutable, setAgentPlatformForTest, setTreeAccess } from '../src/main/agent'
 import { ChatService } from '../src/main/chat/service'
 import { ClaudeConnection } from '../src/main/chat/claude'
 import { pathKeyOf } from '../src/main/chat/contracts'
@@ -52,7 +52,7 @@ for (const platform of ['darwin', 'win32'] as const) for (const alsoOnPath of [f
       Object.defineProperty(process, 'defaultApp', { value: false, configurable: true })
       process.env[pathKeyOf(process.env)] = alsoOnPath ? pathEntry : ''
       process.env.HOME = root; process.env.USERPROFILE = root; delete process.env.KNUAF_AGENT_PATH_ONLY
-      const ctx = { home: root, appRoot: join(root, 'app'), isPackaged: true, resourcesPath: resources, supportDir: join(root, 'launch'), dryRun: false, env: process.env, venvPython: () => null, open: async (path: string) => { terminalScripts.push(readFileSync(path, 'utf8')); return '' } }
+      const ctx = { home: root, appRoot: join(root, 'app'), isPackaged: true, resourcesPath: resources, supportDir: join(root, 'launch'), userData: join(root, 'userData'), dryRun: false, env: process.env, venvPython: () => null, open: async (path: string) => { terminalScripts.push(readFileSync(path, 'utf8')); return '' } }
       // Neither bundled provider nor directory calculation is replaced by a test stub.
       expect(bundledDirs(platform)).toEqual(bundledAgentDirs(ctx, platform))
       expect(findExecutable('claude')).toBe(binary)
@@ -82,6 +82,8 @@ for (const platform of ['darwin', 'win32'] as const) for (const alsoOnPath of [f
       Object.defineProperty(process, 'arch', archDescriptor)
       for (const key of Object.keys(process.env)) delete process.env[key]
       for (const [key, value] of Object.entries(env)) if (value !== undefined) process.env[key] = value
+      // 앱 스킬 자리는 읽기 전용으로 잠긴 채 남는다(설계 §4.2) — 폴더가 안 써지면 rmSync 는 ENOTEMPTY 다.
+      setTreeAccess(root, true)
       rmSync(root, { recursive: true, force: true })
     }
   })

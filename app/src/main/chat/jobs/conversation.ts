@@ -317,7 +317,11 @@ export class ConversationHandoff {
       this.persist()
       owner = await this.options.open({ id: p.newConversationId, root: source.root, entry: structuredClone(p.entry), bundlePath: p.bundlePath,
         signal: controller.signal,
-        firstMessage: `/knuaf-dev 재개: 논문 폴더가 정본이며 아래 묶음은 대화 맥락 보조입니다. 끊긴 차례를 자동 재전송하거나 이미 한 작업을 반복하지 말고 폴더 상태를 확인하세요. 첫 답에서 “앞 대화를 이어 받았어요 — {마지막으로 하던 일}”이라고 알리세요.\n${text}` })
+        // 슬래시를 넣지 않는다 — 이 글은 본대화 경로(`send`)로 가고, 스킬 명령은 엔진이 자기
+        // 자리에서 붙인다(Claude 는 첫 턴에 `SKILL_PROMPT`, Codex 는 `turn/start.input` 의 skill
+        // 항목). 여기에 `/knuaf-dev` 를 박으면 Claude 에서는 같은 명령이 두 번 서고,
+        // Codex 에서는 펼쳐지지 않는 죽은 글자가 된다.
+        firstMessage: `재개: 논문 폴더가 정본이며 아래 묶음은 대화 맥락 보조입니다. 끊긴 차례를 자동 재전송하거나 이미 한 작업을 반복하지 말고 폴더 상태를 확인하세요. 첫 답에서 “앞 대화를 이어 받았어요 — {마지막으로 하던 일}”이라고 알리세요.\n${text}` })
       if (!valid()) return null
       // §1-4 ② — **첫 턴이 성공으로 끝난 뒤에만** 소유를 넘긴다. 새 세션은 이 순간 이미 열려
       // 있지만(학생이 산 요청 1번), `finally` 가 그 연결을 닫고 보관을 만들지 않는다.

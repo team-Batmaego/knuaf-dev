@@ -35,12 +35,13 @@ def main(argv=None) -> int:
         sys.stdout.write('{"id": null, "error": {"code": "scripts_missing", "message": "%s"}}\n' % scripts)
         return 2
     sys.path.insert(0, str(scripts))
-    from . import methods_core, methods_scripts
+    from . import methods_core, methods_edit, methods_scripts
     from .rpc import Server
 
     server = Server()
     methods_core.register(server)
     methods_scripts.register(server)
+    methods_edit.register(server)
     server.register("sys.hello", lambda ctx, params: methods_core.sys_hello(ctx, {**params, "interpreter_kind": a.interpreter_kind}))
     server.write({"id": None, "event": "ready", "data": {"scripts_dir": str(scripts), "python": sys.executable}})
     server.serve()

@@ -1,9 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, net, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, systemPreferences } from 'electron'
 import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
 import { probeProjectWritable } from './project-write'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { insideByFileId } from './file-identity'
+// progress (v0.6.4 2단계): 진행 파일 IPC — 새 폴더 `main/progress/`, 채널 접두어 `progress:`.
+import { registerProgressIpc } from './progress'
+// link (v0.6.4 ⑤): 대화 속 http(s) 주소 열기 — 채널 하나(`link:open`), main이 주소를 다시 본다.
+import { registerLinkIpc } from './links'
 // paper-images (v0.6.4 사진 갈래): 종이 칸 그림 — 스킴(`knuaf-img:`) 처리기 하나. electron 값 import 없음.
 import { createPaperImages } from './paper-images'
 import type { PaperImages } from './paper-images'
@@ -13,7 +17,7 @@ import type { ModelChoice, Provider } from '../shared/chat'
 import { canonical } from './chat/jobs/isolation'
 import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
-import { agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
+import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService, type HandoffSeam } from './chat/service'
 import { ClaudeRelayConnection } from './chat/claude'
 import { CodexRelayConnection } from './chat/codex'
@@ -23,12 +27,16 @@ import { laneAccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
 import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
+import { loadGuardKey } from './guard/key'
+import { runtimeFromEnsureEnvelope } from './chat/kordocMcp'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
 import { APP_NAME } from '../shared/name'
 import { hideAppDirs } from './hidden'
 import { projectFolderName } from '../shared/project-folder'
 import { updateConfig } from './update/keys'
+// 302 이동은 전송 계층이 응답으로 돌려주고 허용 검사는 `boundedFetch` 가 한다(`net.fetch` manual 은 취소한다).
+import { netRequestTransport } from './update/netTransport'
 import { SkillStore } from './update/store'
 import { SkillUpdates } from './update/service'
 import { configureSkillSource } from './update/source'
@@ -39,6 +47,8 @@ import { AppHandoff } from './update/handoff'
 import { WindowsUpdateRuntime } from './update/windows'
 import { checkDocxZip } from './docx-zip'
 import { ensureSectionBaseline } from './review-baseline'
+import { readDismissed, readNotices, writeDismissed } from './notices'
+import { CHOICE_VALUES } from '../shared/notice'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -91,6 +101,10 @@ function findNestedProject(root: string): string | null {
  */
 export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages } {
   let currentRoot: string | null = null
+  // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
+  const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
+  // link (v0.6.4 ⑤): 대화의 http(s) 주소 하나를 기본 브라우저로. 검사는 이 모듈 안에서 다시 한다.
+  registerLinkIpc((url) => shell.openExternal(url), ipcMain)
   // paper-images (v0.6.4 사진 갈래): 그림 하나를 읽어 응답한다. 폴더 안 판정은 이 모듈이 다시 한다.
   const images = createPaperImages(() => currentRoot)
   /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
@@ -110,7 +124,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
   configureSkillSource(() => store.resolveSkillSource())
   const updates = new SkillUpdates(store, {
-    config, fetch: (url, init) => net.fetch(url, init),
+    config, fetch: netRequestTransport,
     restartSidecar: () => sidecar.restart(),
     emit: status => win()?.webContents.send('update:status', status)
   })
@@ -153,6 +167,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   ipcMain.handle('rpc', async (_e, method: string, rawParams: Record<string, unknown>, clientId: string) => {
     if (method === 'artifact.preview') return { error: { code: 'invalid_method', message: '미리보기는 preview:read 경로만 사용할 수 있어요.' } }
+    // 선택은 `notices:choose` 만 — generic RPC 는 `params.root` 를 그대로 넘기므로(아래 `root`)
+    // 화면이 고른 폴더와 다른 폴더에 학생 선택을 적을 수 있다. 그 문을 닫는다.
+    if (method === 'notices.choose') return { error: { code: 'invalid_method', message: '알림 선택은 notices:choose 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -219,6 +236,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       // 남아야 메인의 파일 검사 기준과 화면의 현재 폴더가 어긋나지 않는다. 늦게 성공한 옛
       // 요청(그사이 다른 열기가 시작됨)도 기준을 되돌리지 않는다.
       if (seq === openSeq) { currentRoot = root; currentVisit = seq; dependencyGate = { root, visit: seq, phase: 'checking' } }
+      // progress (v0.6.4 2단계): 성공한 전환만 감시 대상을 바꾼다(이전 감시는 닫힌다).
+      if (seq === openSeq) progress.follow(root)
       rememberRecent(root)
       onRecentsChanged()
       // 앱이 만든 작업 폴더는 윈도우 탐색기에서 숨긴다 — 학생에게는 자기 자료만 보이게(hidden.ts).
@@ -550,7 +569,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
-    supportDir: join(app.getPath('userData'), 'launch'), dryRun: process.env.KNUAF_DRY_LAUNCH === '1',
+    supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
+    dryRun: process.env.KNUAF_DRY_LAUNCH === '1',
     open: (p) => shell.openPath(p), venvPython, bundledPython
   })
   ipcMain.handle('agent:status', async (_e, root: string | null) => { try { return { result: await agentApi.status(agentCtx(), root ?? currentRoot) } } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } } })
@@ -569,7 +589,12 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
         return { install, launched }
       })
       return { result: { ...launched, install } }
-    } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } }
+    } catch (error) {
+      // 거부 글은 학생에게 그대로 보이는 문장이다 — `Error: ` 접두사를 붙이지 않는다.
+      if (error instanceof AgentToolLockError) return { error: { code: error.code, message: error.message } }
+      const code = error instanceof UpdateSuspendedError ? error.code : 'internal'
+      return { error: { code, message: String(error) } }
+    }
   })
 
   /**
@@ -631,6 +656,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const chat = new ChatService({
     skillSource: () => skillSource(APP_ROOT, app.isPackaged, process.resourcesPath),
     userData: app.getPath('userData'),
+    // 지킴이 무결성 열쇠(§4.3). OS 보관소(`safeStorage`)를 못 쓰면 `null` — 지킴이는 꺼지고
+    // Codex 연결은 종전 경로 그대로 돈다. 열쇠를 꺼내는 일은 앱 시작 때 한 번뿐이다.
+    guardKey: loadGuardKey(app.getPath('userData'), safeStorage),
     emit: (s) => win()?.webContents.send('chat:snapshot', s),
     openExternal: (url) => shell.openExternal(url),
     // The reverse gate: while the app holds a write transaction, agent sends must wait.
@@ -639,6 +667,17 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       for (const diagnosis of dependencyDiagnoses.values()) if (diagnosis.gate === dependencyGate) return true
       for (const entry of inflight.values()) if (sidecar.isWrite(entry.method)) return true
       return false
+    },
+    // 폴더의 첫 전송에서만 kordoc 런타임을 확인한다(설계 §3.2). 앱은 이 값을 **입력으로만** 받는다 —
+    // 실행 파일 선택은 v0.6.0 ③(런타임 실측)의 몫이다. 여기서는 그 ③이 `kordoc.ensure`를 거칠 때의
+    // 잠정 경로를 봉투에서 그대로 읽는다(`node_path`·`cli.js`·`actual_version`). ③이 Electron 을
+    // Node 로 쓰기로 하면 이 호출에 `node`(그 실행 파일)를 넘기고 `extraEnv` 에
+    // `ELECTRON_RUN_AS_NODE=1` 을 넣는 것으로 바뀐다 — 그때까지 `node_path` 가 없으면 추측하지 않고
+    // 미부착(null)이고, 대화는 MCP 없이 그대로 간다.
+    ensureKordoc: async (root) => {
+      const envelope = await sidecar.call<Envelope>('kordoc.ensure', { root })
+      const node = (envelope.data as { node_path?: unknown } | null | undefined)?.node_path
+      return typeof node === 'string' && node ? runtimeFromEnsureEnvelope(envelope, node) : null
     },
     // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
@@ -750,7 +789,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const handoff = new AppHandoff({ chat, sidecar, windows })
   const appUpdates = new AppUpdates({
     userData: app.getPath('userData'), current: app.getVersion(), platform: process.platform, arch: process.arch,
-    config, fetch: (url, init) => net.fetch(url, init), handoff,
+    config, fetch: netRequestTransport, handoff,
     startInstaller: request => windows.startInstaller(request), quit: () => app.quit(),
     openExternal: url => shell.openExternal(url),
     emit: status => win()?.webContents.send('app-update:status', status)
@@ -926,6 +965,67 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       throw new Error('같은 이름의 폴더가 너무 많아요.')
     } catch (error) {
       return { error: { code: 'create_folder_failed', message: String(error) } }
+    }
+  })
+
+  // 학교 재무 양식 알림 — 읽기·닫기 기억. 알림 파일은 규칙집이 쓰고 앱은 읽기만 한다.
+  // `root` 는 화면이 들고 있는 그 논문 폴더여야 한다(다른 폴더의 알림을 이 화면에 섞지 않는다).
+  ipcMain.handle('notices:read', (_e, root: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    try {
+      return { result: { notices: readNotices(root).notices, dismissed: readDismissed(app.getPath('userData')) } }
+    } catch (error) {
+      return { error: { code: 'notices_read', message: error instanceof Error ? error.message : String(error) } }
+    }
+  })
+  ipcMain.handle('notices:dismiss', (_e, root: unknown, key: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof key !== 'string' || !key) return { error: { code: 'invalid_params', message: '알림 열쇠가 올바르지 않습니다.' } }
+    // 열쇠는 `project_id:notice_identity` 다 — 이 폴더의 열쇠만 닫힌다. 접두를 안 보면 화면(또는
+    // 그 화면을 흉내 내는 쪽)이 다른 논문의 알림을 이 앱의 닫기 기억에 넣어 둘 수 있다.
+    const projectId = peekProject(root).project_id
+    if (!projectId || !key.startsWith(`${projectId}:`)) {
+      return { error: { code: 'project_mismatch', message: '다른 논문의 알림은 닫을 수 없어요.' } }
+    }
+    try {
+      return { result: writeDismissed(app.getPath('userData'), key) }
+    } catch (error) {
+      return { error: { code: 'notices_dismiss', message: error instanceof Error ? error.message : String(error) } }
+    }
+  })
+  /**
+   * 선택 기록 — 화면이 보낸 `(root, identity, value)` 를 **메인이 다시 검사**한 뒤 sidecar 에 넘긴다.
+   * ① 열린 폴더여야 하고 ② 그 `identity` 가 지금 알림 파일의 유효 알림이어야 하며 ③ 값은 계약의 둘뿐이다.
+   * 이 셋을 안 보면 화면이 임의의 identity·폴더로 정본을 고칠 수 있다(선택은 정본 쓰기다).
+   */
+  ipcMain.handle('notices:choose', async (_e, root: unknown, identity: unknown, value: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof identity !== 'string' || !identity.trim()) {
+      return { error: { code: 'invalid_params', message: '알림 식별자가 올바르지 않습니다.' } }
+    }
+    if (!CHOICE_VALUES.includes(value as (typeof CHOICE_VALUES)[number])) {
+      return { error: { code: 'invalid_params', message: '알림 선택 값이 올바르지 않습니다.' } }
+    }
+    // 알림 파일은 규칙집이 쓴다 — 그 파일이 말하는 알림만 선택할 수 있다.
+    let known = false
+    try {
+      known = readNotices(root).notices.some((notice) => notice.key.slice(notice.key.indexOf(':') + 1) === identity)
+    } catch (error) {
+      return { error: { code: 'notices_read', message: error instanceof Error ? error.message : String(error) } }
+    }
+    if (!known) return { error: { code: 'notice_unknown', message: '그 알림을 이 폴더에서 찾지 못했어요.' } }
+    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    try {
+      // 정본·알림 파일 다시 쓰기는 sidecar(규칙집) 몫이다. 앱은 결과 봉투만 그대로 돌려준다.
+      return { result: await sidecar.call('notices.choose', { root, identity, value }) }
+    } catch (error) {
+      return { error: ipcError(error) }
     }
   })
 

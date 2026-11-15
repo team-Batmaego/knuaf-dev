@@ -68,7 +68,7 @@ test('제작자 정보는 첫 화면을 가리지 않고 설정에서 볼 수 �
     await expect(page.getByText('어떤 논문을 쓰고 있어요?')).toBeVisible()
     await page.getByRole('button', { name: '설정' }).first().click()
     await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
-    await expect(page.getByText('GUI: made by 산업곤충전공 이준재')).toBeVisible()
+    await expect(page.getByText('Design: made by 특용작물전공 김대욱')).toBeVisible()
     await expect(page.getByText('prod. 특용작물전공 24학번 김대욱 · 산업곤충전공 24학번 이준재')).toBeVisible()
   } finally { await electronApp.close() }
 })
@@ -84,7 +84,7 @@ test('hard rules hold across screens', async () => {
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })
 
   await expect(page.getByLabel('프로젝트', { exact: true })).toBeVisible()
-  await expect(page.locator('.titlebar .tbtn.now')).toBeVisible()
+  await expect(page.locator('.titlebar .tbtn.stg')).toBeVisible()
 
   // 대화 화면 controls must not ask for JSON/model/path input either (same rule as 도구).
   expect(await page.locator('.chat-pane .tbar-seg, .chat-pane .segmented').count()).toBe(0)
