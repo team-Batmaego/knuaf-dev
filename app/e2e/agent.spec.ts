@@ -427,6 +427,84 @@ test.describe('skill source + version', () => {
 })
 
 test.describe('installSkill', () => {
+  for (const kind of ['claude', 'codex'] as const) {
+    test(`${kind}: installs delegation.json byte-for-byte and refreshes contract-only changes`, () => {
+      const base = mkdtempSync(join(tmpdir(), 'kd-install-delegation-'))
+      try {
+        const origin = join(base, 'bundle')
+        mkdirSync(origin)
+        writeFileSync(join(origin, 'SKILL.md'), '# fixed rules\n')
+        const contract = join(origin, 'delegation.json')
+        const before = '{\n  "jobSchema": 1, "laneRequestSchema": 1, "contractVersion": "role-v1"\n}\n'
+        const after = before.replace('role-v1', 'role-v2')
+        writeFileSync(contract, before)
+        const target = skillTargets(join(base, 'project'), join(base, 'user-data'))[kind]
+        const installed = join(target, 'delegation.json')
+        const previous = skillVersion(origin)
+
+        expect(installSkill(origin, target, previous, origin)).toEqual({ action: 'installed' })
+        expect(readFileSync(installed)).toEqual(readFileSync(contract))
+        expect(skillState(target, previous, origin)).toBe('installed')
+        expect(installSkill(origin, target, previous, origin)).toEqual({ action: 'unchanged' })
+        if (kind === 'claude') {
+          expect(statSync(installed).mode & 0o222).toBe(0)
+          expect(statSync(target).mode & 0o222).toBe(0)
+        }
+
+        // Same-length contract-only edit must invalidate the installed skill.
+        writeFileSync(contract, after)
+        const current = skillVersion(origin)
+        expect(current).not.toBe(previous)
+        expect(skillState(target, current, origin)).toBe('outdated')
+        const result = installSkill(origin, target, current, origin)
+        expect(result.action).toBe('updated')
+        expect(readFileSync(join(result.backup!, 'delegation.json'), 'utf8')).toBe(before)
+        expect(readFileSync(installed)).toEqual(readFileSync(contract))
+        expect(skillState(target, current, origin)).toBe('installed')
+        if (kind === 'claude') {
+          expect(statSync(installed).mode & 0o222).toBe(0)
+          expect(statSync(target).mode & 0o222).toBe(0)
+          expect(statSync(join(result.backup!, 'delegation.json')).mode & 0o222).toBe(0)
+        }
+
+        // A current marker cannot hide a missing contract (e.g. an incomplete old install).
+        if (kind === 'claude') unlockTree(target)
+        rmSync(installed)
+        expect(skillState(target, current, origin)).toBe('outdated')
+        expect(installSkill(origin, target, current, origin).action).toBe('updated')
+        expect(readFileSync(installed)).toEqual(readFileSync(contract))
+      } finally { unlockTree(base); rmSync(base, { recursive: true, force: true }) }
+    })
+
+    test(`${kind}: installs legacy bundles without delegation.json and upgrades when a contract arrives`, () => {
+      const base = mkdtempSync(join(tmpdir(), 'kd-install-legacy-delegation-'))
+      try {
+        const origin = join(base, 'bundle')
+        mkdirSync(origin)
+        writeFileSync(join(origin, 'SKILL.md'), '# legacy rules\n')
+        const target = skillTargets(join(base, 'project'), join(base, 'user-data'))[kind]
+        const installed = join(target, 'delegation.json')
+        const previous = skillVersion(origin)
+
+        expect(installSkill(origin, target, previous, origin)).toEqual({ action: 'installed' })
+        expect(existsSync(installed)).toBe(false)
+        expect(skillState(target, previous, origin)).toBe('installed')
+        expect(installSkill(origin, target, previous, origin)).toEqual({ action: 'unchanged' })
+
+        const contract = join(origin, 'delegation.json')
+        writeFileSync(contract, '{"jobSchema":1,"laneRequestSchema":1,"contractVersion":"role-v1"}\n')
+        const current = skillVersion(origin)
+        expect(current).not.toBe(previous)
+        expect(skillState(target, current, origin)).toBe('outdated')
+        const result = installSkill(origin, target, current, origin)
+        expect(result.action).toBe('updated')
+        expect(existsSync(join(result.backup!, 'delegation.json'))).toBe(false)
+        expect(readFileSync(installed)).toEqual(readFileSync(contract))
+        expect(skillState(target, current, origin)).toBe('installed')
+      } finally { unlockTree(base); rmSync(base, { recursive: true, force: true }) }
+    })
+  }
+
   test('a missing source preserves existing student copies, GUI marker and legacy skill', () => {
     const root = mkdtempSync(join(tmpdir(), 'kd-missing-source-'))
     try {

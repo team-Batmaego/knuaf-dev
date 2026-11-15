@@ -1268,19 +1268,13 @@ export class ChatService {
   }
   /**
    * 설치본의 `delegation.json` — 앱이 실제로 고른 스킬의 선언만 근거로 삼는다.
-   * 설치기는 이 파일을 복사하지 않으므로(agent.ts 의 SKILL_METADATA) 설치본에 없으면
-   * **지금 설치본과 같은 판임을 확인한** 묶음 원본에서 읽는다. 어느 쪽도 아니면 `null`.
+   * 선언 없는 구판이나 누락된 설치본은 `null` — 원본 선언으로 설치본의 기능을 보충하지 않는다.
    * 형식이 다르거나 심링크면 `null`(수집 skip) — 임의 기본값을 만들지 않는다.
    */
   private declaration(root: string, provider: Provider): { path: string; schema: number; contractVersion: string } | null {
     const dir = this.skillDir(root, provider)
     const installed = this.readDeclarationFile(join(dir, 'delegation.json'))
-    if (installed !== undefined) return installed && { ...installed, path: dir }
-    if (!existsSync(join(dir, 'SKILL.md'))) return null
-    const source = this.opts.skillSource()
-    try { if (skillState(dir, skillVersion(source)) !== 'installed') return null } catch { return null }
-    const bundled = this.readDeclarationFile(join(source, 'delegation.json'))
-    return bundled ? { ...bundled, path: dir } : null
+    return installed ? { ...installed, path: dir } : null
   }
   private readDeclarationFile(file: string): { schema: number; contractVersion: string } | null | undefined {
     let text: string
