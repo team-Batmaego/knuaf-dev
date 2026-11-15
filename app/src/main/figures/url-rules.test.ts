@@ -177,3 +177,24 @@ describe('pageQuery — 공용 벡터', () => {
     })
   }
 })
+
+describe('RDA — all pageQuery page/image vectors with third rule kind', () => {
+  const raw = structuredClone(vectors.rules) as { rules: Record<string, unknown>[] }
+  Object.assign(raw, { orgTerms: ['협회'], creditWords: ['제공'], latinOk: [] })
+  for (const item of raw.rules) {
+    if (item.rule !== url.RULE_PAGE_QUERY) continue
+    Object.assign(item, { rule: url.RULE_PAGE_QUERY_ORG, org: '시험기관', orgAliases: ['시험기관'],
+      bodyStart: '<div id="body">', bodyEnd: '<div id="mark">' })
+  }
+  const rules = rulesMod.parseRules(JSON.stringify(raw))
+  for (const [page, expected, memo] of vectors.page) {
+    it(`page: ${memo}`, () => assert.equal(url.selectPageRule(page, rules)?.id ?? null, expected))
+  }
+  for (const [page, image, expected, memo] of vectors.image) {
+    it(`image: ${memo}`, () => {
+      const selected = url.selectPageRule(page, rules)
+      assert.ok(selected)
+      assert.equal(url.isAllowedImage(image, selected, rules).ok, expected)
+    })
+  }
+})

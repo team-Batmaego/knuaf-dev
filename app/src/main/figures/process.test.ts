@@ -615,14 +615,24 @@ describe('decodeBody — 문자셋 (R-3)', () => {
 
 describe('pageQuery — 공용 flow 벡터', () => {
   const rules = rulesMod.parseRules(JSON.stringify(vectors.rules))
+  const thirdFile = structuredClone(vectors.rules) as { rules: Record<string, unknown>[] }
+  Object.assign(thirdFile, { orgTerms: ['협회'], creditWords: ['제공'], latinOk: [] })
+  for (const item of thirdFile.rules) {
+    if (item.rule !== 'page_query_kogl_applies_to_body_images') continue
+    Object.assign(item, { rule: 'page_query_kogl_org_applies_to_body_images', org: '시험기관', orgAliases: ['시험기관'],
+      bodyStart: '<div id="body">', bodyEnd: '<div id="mark">' })
+  }
+  const thirdRules = rulesMod.parseRules(JSON.stringify(thirdFile))
+  for (const [label, flowRules] of [['second', rules], ['third', thirdRules]] as const) {
   for (const [kind, page, image, locations, expected, memo] of vectors.flow) {
-    it(memo, async () => {
-      const h = await harness({ rules: { ...loadedRules, rules } })
+    it(`${label}: ${memo}`, async () => {
+      const h = await harness({ rules: { ...loadedRules, rules: flowRules } })
       const start = kind === 'page' ? page : image!
       // 최종 그림 주소를 페이지에 넣어 실재 대조가 홉 규칙 시험을 가리지 않게 한다.
       let final = new URL(start)
       for (const location of locations) final = new URL(location, final)
-      const html = pageHtml(kind === 'image' ? [final.href] : [])
+      const content = pageHtml(kind === 'image' ? [final.href] : [])
+      const html = label === 'third' ? `<div id="body">${content}<div id="mark">` : content
       const sent: string[] = []
       const transport = hopTransport((hop) => hop < locations.length
         ? { status: 302, location: locations[hop]! }
@@ -661,6 +671,7 @@ describe('pageQuery — 공용 flow 벡터', () => {
       if (!expected && kind === 'page') assert.equal(res.reason, 'page_fetch')
       if (!expected) assert.deepEqual(await readdir(h.paths.store), [])
     })
+  }
   }
 
   it('같은 호스트·겹친 imagePath의 둘째 페이지 항목이 승인·증명까지 간다', async () => {
@@ -886,5 +897,59 @@ describe('P1.1 농사로 철회 경계', () => {
       assert.equal(res.reason, 'rule_missing')
       assert.deepEqual(fetch.calls, [])
     }
+  })
+})
+
+describe('RDA — process storage and comparison boundaries', () => {
+  const page = 'https://www.example.go.kr/board/board.do?k=v'
+  const image = 'https://www.example.go.kr/files/%5b%EA%B0%80%5d_a.png'
+  const final = 'https://www.example.go.kr/files/b.png'
+  const source = { v: 1, orgTerms: ['협회'], creditWords: ['제공'], latinOk: ['AI'], rules: [{
+    id: 'rda-test', host: 'www.example.go.kr', org: '시험기관', pagePath: '^/board/board\\.do$',
+    imagePath: '^/files/.+', rule: 'page_query_kogl_org_applies_to_body_images', pageQuery: { k: { literal: 'v' } },
+    orgAliases: ['시험기관'], bodyStart: '<div id="body">', bodyEnd: '<div id="mark">'
+  }] }
+  const rules = rulesMod.parseRules(JSON.stringify(source))
+  for (const [name, body, redirected, reason] of [
+    ['approved bracket resource', '<div id="body"><img src="/files/[가]_a.png" alt="AI 안내"><div id="mark">', false, 'kogl_type_1'],
+    ['organization hit', '<div id="body"><img src="/files/[가]_a.png" alt="식량과기후 제공시험기관"><div id="mark">', false, 'third_party_org'],
+    ['no body markers', '<img src="/files/[가]_a.png">', false, 'third_party_unknown'],
+    ['request present but redirected final absent', '<div id="body"><img src="/files/[가]_a.png"><div id="mark">', true, 'not_on_page'],
+    ['explicit rights far from image', `<div id="body"><img src="/files/[가]_a.png">${'x'.repeat(1500)}<p>ⓒ 2026</p><div id="mark">`, false, 'third_party_credit']
+  ] as const) {
+    it(name, async () => {
+      const h = await harness({ rules: { ...loadedRules, rules } })
+      const fetch = fakeFetch({ ...okPage(`${body}<p>공공누리 제1유형</p>`, page), [image]: okImage(redirected ? final : image) })
+      let decodes = 0
+      const request = { ...h.request, page, images: [image] }
+      const res = await processMod.processRequest({ request, folder: h.folder }, h.deps({ fetchFn: fetch.fn,
+        decode: async () => { decodes += 1; return { png: PNG, width: 8, height: 8 } } }))
+      const approved = reason === 'kogl_type_1'
+      assert.equal(res.images[0]?.verdict, approved ? 'approved' : reason === 'not_on_page' ? 'rejected' : 'ambiguous')
+      assert.equal(res.images[0]?.reason, reason)
+      assert.deepEqual(fetch.calls, [page, image])
+      assert.equal(res.images[0]?.url, image)
+      assert.equal(res.images[0]?.finalUrl, redirected ? final : image)
+      assert.equal(decodes, approved ? 1 : 0)
+      assert.deepEqual(await readdir(h.paths.store), approved ? [`${storage.sha256Hex(PNG)}.png`] : [])
+      const receipt = JSON.parse((await readFile(h.paths.receipts, 'utf8')).trim())
+      assert.equal(receipt.image.url, image)
+      assert.equal(receipt.image.finalUrl, redirected ? final : image)
+      assert.equal(receipt.image.reason, reason)
+      assert.equal(receipt.image.sha256, approved ? storage.sha256Hex(PNG) : null)
+      assert.deepEqual(await storage.readJson(join(h.paths.res, `${request.id}.res.json`)), res)
+    })
+  }
+  it('comparison equivalence never bypasses the original imagePath check', async () => {
+    const narrow = structuredClone(source)
+    narrow.rules[0]!.imagePath = '^/files/%5B.+'
+    const h = await harness({ rules: { ...loadedRules, rules: rulesMod.parseRules(JSON.stringify(narrow)) } })
+    const html = '<div id="body"><img src="/files/[가]_a.png"><div id="mark"><p>제1유형</p>'
+    const fetch = fakeFetch(okPage(html, page))
+    const res = await processMod.processRequest({ request: { ...h.request, page, images: [image] }, folder: h.folder }, h.deps({ fetchFn: fetch.fn }))
+    assert.equal(res.images[0]?.verdict, 'rejected')
+    assert.equal(res.images[0]?.reason, 'host')
+    assert.deepEqual(fetch.calls, [page])
+    assert.deepEqual(await readdir(h.paths.store), [])
   })
 })

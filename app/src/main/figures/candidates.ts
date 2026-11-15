@@ -1,7 +1,8 @@
 /** P1.1 §4-2. 승인 판정기의 느슨한 태그 정규식과 독립적인 후보 추출. */
 import type { FigureCandidate } from './contract'
-import { imageAllowedByRule, parseHttpsUrl, type FigureRule } from './url-rules'
-import { creditFor } from './verdict'
+import { imageAllowedByRule, parseHttpsUrl, RULE_PAGE_QUERY_ORG, type FigureRule } from './url-rules'
+import { creditFor, hasCreditMark } from './verdict'
+import { bodyRegion, foreignMarkIn } from './org-check'
 
 const INACTIVE: Record<string, true> = {
   script: true, style: true, template: true, noscript: true,
@@ -122,7 +123,9 @@ function maskInactive(html: string): string {
 function candidateUrl(raw: string, base: URL, rule: FigureRule): string | null {
   const value = raw.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').replace(/&amp;/g, '&')
   if (!value || value.length > 2048 || /&(?:#\w+|[A-Za-z][A-Za-z0-9]*);/.test(value)) return null
-  if (/[^A-Za-z0-9\-._~/?=&%:@!$'()*+,;\u0080-\uFFFF]/.test(value) || /%(?![0-9A-Fa-f]{2})/.test(value)) return null
+  const questionAt = value.indexOf('?')
+  if ((questionAt >= 0 && /[\[\]]/.test(value.slice(questionAt + 1))) ||
+    /[^A-Za-z0-9\-._~/?=&%:@!$'()*+,;\[\]\u0080-\uFFFF]/.test(value) || /%(?![0-9A-Fa-f]{2})/.test(value)) return null
   if (/^(?:data|javascript|blob|about):/i.test(value)) return null
   // 두 해석기가 다르게 접는 표기는 원문에서 닫는다(DISPOSITION impl-1 I-01).
   if (/\?(?:#|$)/.test(value)) return null
@@ -142,7 +145,8 @@ function candidateUrl(raw: string, base: URL, rule: FigureRule): string | null {
     const question = value.indexOf('?')
     const query = question >= 0 ? value.slice(question + 1) : url.search.slice(1)
     const encodedQuery = query.replace(/[^\x00-\x7f]+/g, (text) => encodeURI(text))
-    const result = `https://${url.hostname.toLowerCase()}${url.pathname}${question >= 0 || url.search ? `?${encodedQuery}` : ''}`
+    const pathname = url.pathname.replace(/\[/g, '%5B').replace(/\]/g, '%5D')
+    const result = `https://${url.hostname.toLowerCase()}${pathname}${question >= 0 || url.search ? `?${encodedQuery}` : ''}`
     if (result.length > 2048) return null
     const parsed = parseHttpsUrl(result)
     return parsed.ok && imageAllowedByRule(rule, parsed.url) ? result : null
@@ -151,25 +155,36 @@ function candidateUrl(raw: string, base: URL, rule: FigureRule): string | null {
   }
 }
 
-export function extractCandidates(html: string, pageUrl: URL, pageRule: FigureRule): {
-  candidates: FigureCandidate[]
-  candidatesTruncated: boolean
-} {
+/** The P1.1 scanner, with original HTML offsets and no URL or rights filtering. */
+export function* candidateTags(html: string): Generator<{ start: number; end: number; src: string }> {
   const masked = maskInactive(html)
-  const candidates: FigureCandidate[] = []
-  const seen = new Set<string>()
   for (let at = 0; at < masked.length;) {
     if (masked[at] !== '<' || !/[A-Za-z]/.test(masked[at + 1] ?? '')) { at += 1; continue }
     const start = at
     const tag = openingTag(masked, at)
     if (!tag) break
     at = tag.end
-    if (tag.name !== 'img' || !tag.src) continue
+    if (tag.name === 'img' && tag.src) yield { start, end: tag.end, src: tag.src }
+  }
+}
+
+export function extractCandidates(html: string, pageUrl: URL, pageRule: FigureRule): {
+  candidates: FigureCandidate[]
+  candidatesTruncated: boolean
+} {
+  const region = pageRule.rule === RULE_PAGE_QUERY_ORG ? bodyRegion(html, pageRule) : null
+  const bodyCredit = region ? hasCreditMark(region.text) || foreignMarkIn(region.text, pageRule) : true
+  const candidates: FigureCandidate[] = []
+  const seen = new Set<string>()
+  for (const tag of candidateTags(html)) {
+    const { start } = tag
     const url = candidateUrl(tag.src, pageUrl, pageRule)
     if (!url || seen.has(url)) continue
     if (candidates.length === 30) return { candidates, candidatesTruncated: true }
     seen.add(url)
-    const credit = creditFor(html, [{ start, end: tag.end, href: url }], [url])
+    const credit = pageRule.rule === RULE_PAGE_QUERY_ORG
+      ? (!region || start < region.start || tag.end > region.end || bodyCredit ? 'credit' : 'none')
+      : creditFor(html, [{ start, end: tag.end, href: url }], [url])
     candidates.push({ url, credit: credit === 'credit' ? 'credit' : 'none' })
   }
   return { candidates, candidatesTruncated: false }

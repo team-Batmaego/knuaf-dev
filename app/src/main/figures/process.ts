@@ -15,6 +15,7 @@
 import { readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { extractCandidates } from './candidates'
+import { orgReading } from './org-check'
 import {
   figureToken,
   type FigureReceipt,
@@ -29,7 +30,8 @@ import {
   isAllowedImage,
   pageHopAllowed,
   parseHttpsUrl,
-  RULE_PAGE_QUERY,
+  isQueryRule,
+  RULE_PAGE_QUERY_ORG,
   selectPageRule,
   type FigureRule
 } from './url-rules'
@@ -41,6 +43,7 @@ import {
   decide,
   findImageOccurrences,
   readKogl,
+  hasCreditMark,
   type ImageOccurrence,
   type KoglReading,
   type KoglType
@@ -247,14 +250,14 @@ export async function processRequest(input: ProcessInput, deps: ProcessDeps): Pr
   const deadline = now() + REQUEST_TIMEOUT_MS
   const page = await fetchOne(request.page, {
     validate: (url) => {
-      if (pageRule.rule === RULE_PAGE_QUERY) {
+      if (isQueryRule(pageRule.rule)) {
         return url.href === request.page ? { ok: true } : { ok: false, reason: 'outside_rules' }
       }
       const parsed = parseHttpsUrl(url.href)
       if (!parsed.ok) return { ok: false, reason: parsed.reason }
       return pageHopAllowed(pageRule, parsed.url) ? { ok: true } : { ok: false, reason: 'outside_rules' }
     },
-    ...(pageRule.rule === RULE_PAGE_QUERY ? { maxRedirects: 0 } : {}),
+    ...(isQueryRule(pageRule.rule) ? { maxRedirects: 0 } : {}),
     maxBytes: PAGE_MAX_BYTES,
     timeoutMs: Math.min(FILE_TIMEOUT_MS, Math.max(1, deadline - now())),
     headers: { accept: 'text/html,application/xhtml+xml' }
@@ -438,11 +441,16 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
 
   // 설계 §5-1: 페이지에 실재해야 하는 것은 **최종 URL**이다. 리다이렉트 전 URL은 인정하지 않는다(B-3).
   const present = appearsOnPage(job.occurrences, [finalUrl])
-  const credit = creditFor(job.pageHtml, job.occurrences, [finalUrl])
+  let credit = creditFor(job.pageHtml, job.occurrences, [finalUrl])
+  const org = job.pageRule.rule === RULE_PAGE_QUERY_ORG
+    ? orgReading(job.pageHtml, finalUrl, new URL(job.pageUrlHref), job.pageRule)
+    : { reading: 'skip' as const, text: null }
+  if (org.text !== null && hasCreditMark(org.text)) credit = 'credit'
   const verdict = decide({
     rule: { ok: true, ruleId: allowed.rule.id, org: allowed.org },
     present,
     thirdPartyCredit: credit,
+    thirdPartyOrg: org.reading,
     kogl,
     finalUrlAllowed: finalAllowed
   })

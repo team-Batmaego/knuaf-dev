@@ -12,7 +12,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { pathPattern, RULE_LEGACY, RULE_PAGE_QUERY, type FigureRule, type QuerySpec } from './url-rules'
+import { isQueryRule, pathPattern, RULE_LEGACY, RULE_PAGE_QUERY_ORG, type FigureRule, type QuerySpec } from './url-rules'
 
 export interface RulesLoad {
   ok: boolean
@@ -52,15 +52,16 @@ export function parseRules(text: string): FigureRule[] {
   for (const item of list) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue
     const { host, rule } = item as { host?: unknown; rule?: unknown }
-    if (typeof host !== 'string' || (rule !== RULE_LEGACY && rule !== RULE_PAGE_QUERY)) continue
+    if (typeof host !== 'string' || (rule !== RULE_LEGACY && (typeof rule !== 'string' || !isQueryRule(rule)))) continue
     const previous = hostKinds.get(host)
     if (previous && previous !== rule) return []
     hostKinds.set(host, rule)
   }
   const rules: FigureRule[] = []
+  const lists = asOrgLists(raw as Record<string, unknown>)
   const ids = new Set<string>()
   for (const item of list) {
-    const rule = asRule(item)
+    const rule = asRule(item, lists)
     if (!rule) continue
     if (ids.has(rule.id)) return []
     ids.add(rule.id)
@@ -69,7 +70,7 @@ export function parseRules(text: string): FigureRule[] {
   return rules
 }
 
-function asRule(item: unknown): FigureRule | null {
+function asRule(item: unknown, lists: OrgLists | null): FigureRule | null {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null
   const record = item as Record<string, unknown>
   const text = (key: string): string | null => {
@@ -84,14 +85,26 @@ function asRule(item: unknown): FigureRule | null {
   const rule = text('rule')
   if (!id || !host || !org || !pagePath || !imagePath || !rule) return null
   // 모르는 판정 규칙은 조용히 무시한다 — 이름이 다른 규칙을 우리 뜻으로 해석하지 않는다.
-  if (rule !== RULE_LEGACY && rule !== RULE_PAGE_QUERY) return null
+  if (rule !== RULE_LEGACY && !isQueryRule(rule)) return null
   if (!compiles(pagePath) || !compiles(imagePath) || !validHost(host)) return null
   let pageQuery: ReadonlyMap<string, QuerySpec> | undefined
-  if (rule === RULE_PAGE_QUERY) {
+  if (isQueryRule(rule)) {
     const parsed = asPageQuery(record.pageQuery)
     if (!parsed) return null
     pageQuery = parsed
   } else if (Object.hasOwn(record, 'pageQuery')) return null
+  let orgFields: Partial<FigureRule> = {}
+  if (rule === RULE_PAGE_QUERY_ORG) {
+    if (!lists) return null
+    const aliases = stringList(record.orgAliases, 1, 4, 2, 20, hangulCode)
+    if (!aliases || aliases[0] !== org || aliases.some((alias) =>
+      lists.orgTerms.some((term) => alias.includes(term)) || lists.creditWords.some((word) => alias.includes(word)))) return null
+    const start = record.bodyStart
+    const end = record.bodyEnd
+    if (!shapedString(start, 8, 200, markerCode) || !shapedString(end, 8, 200, markerCode) ||
+      start.includes(end) || end.includes(start)) return null
+    orgFields = { ...lists, orgAliases: sortOrgAliases(aliases), bodyStart: start, bodyEnd: end }
+  } else if (['orgAliases', 'bodyStart', 'bodyEnd'].some((key) => Object.hasOwn(record, key))) return null
   return {
     id,
     host,
@@ -101,8 +114,49 @@ function asRule(item: unknown): FigureRule | null {
     rule,
     ...(pageQuery ? { pageQuery } : {}),
     ...(text('evidence') ? { evidence: text('evidence') as string } : {}),
+    ...orgFields,
     ...(text('note') ? { note: text('note') as string } : {})
   }
+}
+
+interface OrgLists {
+  orgTerms: readonly string[]
+  creditWords: readonly string[]
+  latinOk: ReadonlySet<string>
+}
+
+/** Stable sorting preserves the source order for aliases of equal length. */
+export function sortOrgAliases(aliases: readonly string[]): string[] {
+  return [...aliases].sort((a, b) => b.length - a.length)
+}
+
+const hangulCode = (code: number): boolean => code >= 0xac00 && code <= 0xd7a3
+const markerCode = (code: number): boolean => code >= 0x20 && code <= 0x7e
+const acronymCode = (code: number): boolean => code >= 0x41 && code <= 0x5a
+const termCode = (code: number): boolean => (code >= 0x21 && code <= 0x7e) ||
+  (code >= 0x3001 && code <= 0x33ff) || hangulCode(code) || (code >= 0xff01 && code <= 0xff5e)
+
+function shapedString(value: unknown, min: number, max: number, accepts: (code: number) => boolean): value is string {
+  if (typeof value !== 'string' || value.length < min || value.length > max) return false
+  for (let at = 0; at < value.length; at += 1) if (!accepts(value.charCodeAt(at))) return false
+  return true
+}
+
+function stringList(value: unknown, min: number, max: number, minLength: number, maxLength: number,
+  accepts: (code: number) => boolean): string[] | null {
+  if (!Array.isArray(value) || value.length < min || value.length > max) return null
+  if (!value.every((item) => shapedString(item, minLength, maxLength, accepts))) return null
+  return new Set(value).size === value.length ? value as string[] : null
+}
+
+function asOrgLists(raw: Record<string, unknown>): OrgLists | null {
+  const orgTerms = stringList(raw.orgTerms, 1, 300, 1, 40, termCode)
+  // RDA-X1: only enclosed CJK letters/units may be a single-character organization term.
+  if (orgTerms?.some((term) => term.length === 1 &&
+    (term.charCodeAt(0) < 0x3200 || term.charCodeAt(0) > 0x33ff))) return null
+  const creditWords = stringList(raw.creditWords, 1, 40, 2, 20, hangulCode)
+  const latinOk = stringList(raw.latinOk, 0, 300, 2, 20, acronymCode)
+  return orgTerms && creditWords && latinOk ? { orgTerms, creditWords, latinOk: new Set(latinOk) } : null
 }
 
 function compiles(pattern: string): boolean {

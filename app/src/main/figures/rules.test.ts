@@ -190,3 +190,74 @@ describe('pageQuery — 공용 로더 벡터', () => {
     assert.deepEqual(rulesMod.parseRules(text).map((rule) => rule.id), ['nongsaro-curation'])
   })
 })
+
+const orgVectors = JSON.parse((await readFile(new URL('./fixtures/org-vectors.json', import.meta.url), 'utf8'))
+  .replace(/\{\{(.)\*(\d+)\}\}/g, (_all, char: string, count: string) => char.repeat(Number(count)))) as {
+  loadBase: Record<string, unknown> & { rules: Record<string, unknown>[] }
+  load: [Record<string, unknown>, Record<string, unknown>, string[], string][]
+  loadFile: [unknown, string[], string][]
+}
+describe('RDA — shared loader vectors', () => {
+  for (const [top, item, expected, memo] of orgVectors.load) {
+    it(memo, () => {
+      const file = { ...orgVectors.loadBase, ...top }
+      for (const key of Object.keys(top)) if (top[key] === null) delete file[key]
+      const entry = { ...orgVectors.loadBase.rules[0], ...item }
+      for (const key of Object.keys(item)) if (item[key] === null) delete entry[key]
+      file.rules = [entry]
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected)
+    })
+  }
+  for (const [file, expected, memo] of orgVectors.loadFile) {
+    it(memo, () => assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected))
+  }
+  it('aliases are longest first and equal lengths retain source order', () => {
+    assert.deepEqual(rulesMod.sortOrgAliases(['기관', '다른기관', '다른곳', '새기관']), ['다른기관', '다른곳', '새기관', '기관'])
+  })
+  it('RDA-X1 permits single-character orgTerms only in U+3200 through U+33FF', () => {
+    for (const [term, survives] of [['㈜', true], ['㈔', true], ['\u3200', true], ['\u33ff', true],
+      ['\u31ff', false], ['\u3400', false], ['가', false], ['A', false], ['！', false], ['😀', false],
+      ['가나', true], ['가'.repeat(40), true], ['가'.repeat(41), false]] as const) {
+      const file = { ...orgVectors.loadBase, orgTerms: [term] }
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), survives ? ['a'] : [], term)
+    }
+    for (const key of ['creditWords', 'latinOk']) {
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify({ ...orgVectors.loadBase, [key]: ['㈜'] })), [])
+    }
+    const file = { ...orgVectors.loadBase, orgTerms: ['㈜', '㈜'] }
+    assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)), [])
+  })
+  it('list cardinality limits and ASCII marker length boundaries reject only third-kind entries', () => {
+    const base = orgVectors.loadBase
+    const entry = base.rules[0]!
+    for (const [key, count, expected] of [['orgTerms', 300, true], ['orgTerms', 301, false],
+      ['creditWords', 40, true], ['creditWords', 41, false], ['latinOk', 300, true], ['latinOk', 301, false]] as const) {
+      const values = Array.from({ length: count }, (_, index) => key === 'latinOk'
+        ? `A${String.fromCharCode(65 + Math.floor(index / 26), 65 + index % 26)}`
+        : `가${String.fromCharCode(0xac00 + index)}`)
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify({ ...base, [key]: values })).map((rule) => rule.id), expected ? ['a'] : [])
+    }
+    for (const [length, expected] of [[7, false], [8, true], [200, true], [201, false]] as const) {
+      const file = { ...base, rules: [{ ...entry, bodyStart: 's'.repeat(length), bodyEnd: 'e'.repeat(8) }] }
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected ? ['a'] : [])
+    }
+    for (const kind of ['page_kogl_applies_to_body_images', 'page_query_kogl_applies_to_body_images']) {
+      for (const key of ['orgAliases', 'bodyStart', 'bodyEnd']) {
+        const old: Record<string, unknown> = { ...entry, rule: kind }
+        delete old.orgAliases; delete old.bodyStart; delete old.bodyEnd
+        if (kind === 'page_kogl_applies_to_body_images') delete old.pageQuery
+        old[key] = null
+        assert.deepEqual(rulesMod.parseRules(JSON.stringify({ v: 1, rules: [old] })), [])
+      }
+    }
+  })
+  it('actual RDA rule aliases are fixed', { skip: 'RDA rule data and bundled skill pin belong to the lead; enable after registration' }, async () => {
+    const text = await readFile(new URL('../../../resources/skill/references/figure-sources.json', import.meta.url), 'utf8')
+    const raw = JSON.parse(text) as { rules: { id: string; orgAliases: string[] }[] }
+    const rda = raw.rules.filter((rule) => ['rda-infograp', 'rda-cardnews'].includes(rule.id))
+    assert.deepEqual(rda.map((rule) => rule.id), ['rda-infograp', 'rda-cardnews'])
+    for (const rule of rda) assert.deepEqual(rule.orgAliases, ['농촌진흥청', '농진청'])
+    assert.deepEqual(rulesMod.parseRules(text).filter((rule) => rda.some((entry) => entry.id === rule.id)).map((rule) => rule.id),
+      ['rda-infograp', 'rda-cardnews'])
+  })
+})
