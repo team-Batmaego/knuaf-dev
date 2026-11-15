@@ -169,6 +169,14 @@ describe('pageQuery — 공용 로더 벡터', () => {
     for (const item of cases) assert.deepEqual(rulesMod.parseRules(doc([item])), [])
   })
 
+  it('비표준 JSON 상수(NaN·Infinity·-Infinity)가 있으면 파일째 거절한다 — 파이썬과 같은 G1(PQI-01)', () => {
+    const good = JSON.stringify({ v: 1, rules: [vectors.loadBase] })
+    assert.equal(rulesMod.parseRules(good).length, 1)
+    for (const constant of ['NaN', 'Infinity', '-Infinity']) {
+      assert.deepEqual(rulesMod.parseRules(good.slice(0, -1) + ',"extra":' + constant + '}'), [], constant)
+    }
+  })
+
   it('동봉 실제 규칙 파일을 읽어 기대 항목을 확인한다', async (context) => {
     const file = new URL('../../../resources/skill/references/figure-sources.json', import.meta.url)
     let text: string
