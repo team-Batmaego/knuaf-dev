@@ -214,7 +214,7 @@ interface Rig { ask: (name: string, input: unknown) => Promise<any>; cards: any[
  * 계속 허용')을 흉내 내는 값이다. `bundle: false` 는 동봉본을 모르는 옛 호출자다.
  */
 async function rig(
-  boxed: { root: string; userData: string }, opts: { trusted: boolean; bundle?: boolean }
+  boxed: { root: string; userData: string }, opts: { trusted: boolean; bundle?: boolean | string }
 ): Promise<Rig> {
   const claude = claudeModule()
   const cards: any[] = []
@@ -226,7 +226,7 @@ async function rig(
     binary: 'claude', root: boxed.root, skill: join(boxed.root, 'skill'), env: {},
     openExternal: async () => {}, trusted: () => opts.trusted,
     guard: { userData: boxed.userData, folderHash: 'test', key: null },
-    ...(opts.bundle === false ? {} : { skillBundleSource: () => source })
+    ...(opts.bundle === false ? {} : { skillBundleSource: () => typeof opts.bundle === 'string' ? opts.bundle : source })
   })
   // `auth status` 는 자식 프로세스를 띄운다 — 이 시험은 판정 배선만 본다.
   connection.status = async () => ({ installed: true, connected: true, version: null, probe: 'ok', detail: '' })
@@ -342,7 +342,7 @@ test('최종 판정(PowerShell): 사본이 다르면 trusted() 참이어도 카�
   setTreeAccess(target, true)
 })
 
-for (const location of ['', 'references', 'assets']) {
+for (const location of ['', 'references', 'assets', 'scripts/__pycache__', 'scripts/.venv', 'scripts/sub', 'scripts/.DS_Store', 'scripts/cache.pyc']) {
   test(`앱 자리 ${location || '뿌리'}에 끼운 gg_extra.py는 자동 실행 없이 불일치 카드·재설치로 간다`, async () => {
     const { root, userData, target } = installedBox()
     const normal = { command: `python3 "${join(target, 'scripts', 'gg.py').replace(/\\/g, '/')}" status` }
@@ -369,6 +369,12 @@ for (const location of ['', 'references', 'assets']) {
       expect(r.cards[0].title, tool).toContain('규칙 사본')
       r.answer(false)
       expect(plain(await pending), tool).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+      const normalPending = r.ask(tool, normal)
+      await settle(() => r.cards.length > 1)
+      expect(r.cards, `${tool}/normal`).toHaveLength(2)
+      expect(r.cards[1].title, `${tool}/normal`).toContain('원본과 달라요')
+      r.answer(false)
+      expect(plain(await normalPending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
     }
 
     const repaired = installSkill(source, target, version, source)
@@ -409,7 +415,7 @@ test('앱 자리의 알 수 없는 뿌리 폴더도 백업·제거하고 Codex �
   expect(existsSync(skillBackupDir(codex))).toBe(false)
 })
 
-test('동봉 scripts/의 재귀 경로만 실행 예외이며 지문에서 뺀 디렉터리는 자동 허용하지 않는다', () => {
+test('scripts/ 하위 경로는 동봉본과 같아도 trusted에서 따로 묻고 지문 밖 항목은 재설치한다', async () => {
   const { root, userData, host } = box()
   const bundle = join(root, 'test-bundle')
   mkdirSync(join(bundle, 'scripts', 'nested'), { recursive: true })
@@ -418,18 +424,80 @@ test('동봉 scripts/의 재귀 경로만 실행 예외이며 지문에서 뺀 �
   const bundledVersion = skillVersion(bundle)
   installSkill(bundle, host, bundledVersion, bundle)
   const bundled = { command: `python3 "${join(host, 'scripts', 'nested', 'gg_extra.py').replace(/\\/g, '/')}"` }
-  expect(autoAllow(root, 'Bash', bundled, [], userData, bundle)).toBe(true)
+  expect(sameTreeContent(host, bundle)).toBe(true)
+  expect(autoAllow(root, 'Bash', bundled, [], userData, bundle)).toBe(false)
+  for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+    for (const knownBundle of [false, bundle] as const) {
+      for (const trusted of [true, false]) {
+        // 지문이 참인 경우와 hostIntact가 없는 경우 모두 위치 검사는 trusted에 덮이지 않는다.
+        const r = await rig({ root, userData }, { trusted, bundle: knownBundle })
+        const pending = r.ask(tool, bundled)
+        await settle(() => r.cards.length > 0)
+        expect(r.cards, `${tool}/${trusted}/${knownBundle}`).toHaveLength(1)
+        expect(r.cards[0].title).toContain('자동 실행 범위')
+        r.answer(!trusted)
+        expect(plain(await pending)).toEqual(trusted
+          ? { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
+          : { behavior: 'allow', updatedInput: bundled })
+      }
+    }
+  }
 
   if (process.platform !== 'win32') setTreeAccess(host, true)
-  for (const skipped of ['__pycache__', '.venv', '.DS_Store']) {
+  for (const skipped of ['__pycache__', '.venv', '.DS_Store', 'cache.pyc']) {
     const script = join(host, 'scripts', skipped, 'gg_extra.py')
     mkdirSync(dirname(script))
     writeFileSync(script, 'print("NOT_IN_FINGERPRINT")\n')
-    // 이 디렉터리는 지문 대상이 아니므로 실행 예외에서도 제외해야 한다.
-    expect(sameTreeContent(host, bundle), skipped).toBe(true)
+    // 일반 번들 지문은 제외하지만 앱 사본에서는 외부 삽입으로 감지해 다시 깐다.
+    expect(sameTreeContent(host, bundle), skipped).toBe(false)
+    expect(skillState(host, bundledVersion, bundle), skipped).toBe('outdated')
     for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
       const call = { command: `python3 "${script.replace(/\\/g, '/')}"` }
       expect(autoAllow(root, tool, call, [], userData, bundle), `${tool}/${skipped}`).toBe(false)
+    }
+    const repaired = installSkill(bundle, host, bundledVersion, bundle)
+    expect(repaired.action, skipped).toBe('updated')
+    expect(readFileSync(join(repaired.backup!, 'scripts', skipped, 'gg_extra.py'), 'utf-8')).toBe('print("NOT_IN_FINGERPRINT")\n')
+    expect(existsSync(script), skipped).toBe(false)
+    expect(sameTreeContent(host, bundle), skipped).toBe(true)
+    if (process.platform !== 'win32') setTreeAccess(host, true)
+  }
+})
+
+test('앱 사본의 scripts·references·assets 안 캐시 파일은 탐지하되 Codex 사본 계약은 유지한다', async () => {
+  const { root, userData, target } = installedBox()
+  const codex = skillTargets(root, userData).codex
+  installSkill(source, codex, version, source)
+  const normal = { command: `python3 "${join(target, 'scripts', 'gg.py').replace(/\\/g, '/')}" status` }
+  for (const dir of ['scripts', 'references', 'assets']) {
+    for (const filename of ['.DS_Store', 'module.pyc']) {
+      if (process.platform !== 'win32') setTreeAccess(target, true)
+      const relative = join(dir, filename)
+      const file = join(target, relative)
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, 'foreign cache')
+      mkdirSync(join(codex, dir), { recursive: true })
+      writeFileSync(join(codex, relative), 'student cache')
+      expect(sameTreeContent(target, source), relative).toBe(false)
+      expect(skillState(target, version, source), relative).toBe('outdated')
+      expect(autoAllow(root, 'Bash', normal, [], userData, source), relative).toBe(false)
+      for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+        const r = await rig({ root, userData }, { trusted: true })
+        const pending = r.ask(tool, normal)
+        await settle(() => r.cards.length > 0)
+        expect(r.cards, `${tool}/${relative}`).toHaveLength(1)
+        expect(r.cards[0].title).toContain('원본과 달라요')
+        r.answer(false)
+        expect(plain(await pending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+      }
+      const repaired = installSkill(source, target, version, source)
+      expect(repaired.action, relative).toBe('updated')
+      expect(readFileSync(join(repaired.backup!, relative), 'utf-8')).toBe('foreign cache')
+      expect(existsSync(file)).toBe(false)
+      expect(sameTreeContent(target, source)).toBe(true)
+      expect(skillState(codex, version, source)).toBe('installed')
+      expect(installSkill(source, codex, version, source).action).toBe('unchanged')
+      expect(readFileSync(join(codex, relative), 'utf-8')).toBe('student cache')
     }
   }
 })

@@ -833,19 +833,18 @@ function hostScriptInvocation(t: string[], userData?: string): boolean {
   return true
 }
 
-/** 자동 실행 예외는 지문이 덮는 scripts/ 아래만. 다른 자리의 호출은 불일치 카드로 보낸다. */
+/** 자동 실행 예외는 scripts/ 바로 아래만. 동봉 스킬의 실행 진입점은 모두 이 자리에 있다. */
 function hostSkillCall(t: string[], userData?: string): boolean {
   if (!userData || !hostScriptInvocation(t, userData)) return false
   const ops = pathOpsFor(userData)
   const scripts = ops.join(skillHostDir(userData), 'scripts')
   const rel = relIn(ops, scripts, t[1])
-  // installSkill/skillFingerprint가 제외하는 디렉터리 안의 코드는 지문으로 검증되지 않는다.
-  if (!rel || /(^|\/)(__pycache__|\.venv|\.ds_store)(\/|$)/i.test(rel)) return false
-  // scripts/ 안 링크로 뿌리·references/·assets/ 코드를 실행 예외에 끼우지 않는다.
+  if (!rel || rel.includes('/')) return false
+  // scripts/ 바로 아래 링크가 하위 폴더·뿌리·references/·assets/를 가리켜도 자동 실행하지 않는다.
   // 맥에서 윈도 경로를 판정하는 시험처럼 실제 뿌리를 볼 수 없으면 문자열 경계만 쓴다.
   if (!existsSync(scripts)) return true
   const realRel = relIn(ops, realOrSelfDeep(scripts), realOrSelfDeep(t[1]))
-  return !!realRel && !/(^|\/)(__pycache__|\.venv|\.ds_store)(\/|$)/i.test(realRel)
+  return !!realRel && !realRel.includes('/')
 }
 
 /**
@@ -1347,46 +1346,41 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   return false
 }
 
-/**
- * 앱 스킬 자리의 스크립트를 여는 호출인가 — Bash·PowerShell 공통(C-01ⓒ).
- *
- * `hostScriptInvocation`은 호출 모양을 인식한다. 자동 실행은 별도 `hostSkillCall`이 scripts/
- * 아래로 좁히지만, 뿌리·references/·assets/에 끼운 스크립트도 내용 불일치 카드를 거쳐야 한다.
- * 실행 예외의 좁은 조건을 여기 재사용하면 그 파일이 trusted()로 불일치 판정을 건너뛴다.
- *
- * 윈도우 PowerShell 은 `\` 를 구분자로 쓴다(`hostSkillCall` 의 `SKILL_PATH` 는 `/` 만 받는다).
- * 판정 전에 이 조각들만 `/` 로 맞춘다 — 접는 것은 '이게 앱 자리 스크립트인가'를 알아보는
- * 자리뿐이고, 실제 실행에 넘어가는 인자는 손대지 않는다.
- *
- * 해석하지 못한 명령(`safe` 꺼짐)은 여기서 닫지 않는다 — 그건 `hostWriteDecision` 이 맡는다.
- */
-function hostScriptCall(name: string, input: unknown, userData?: string): boolean {
-  if (!userData) return false
+/** 앱 자리 호출은 내용 일치와 실행 위치를 따로 검증한다. 어느 쪽도 trusted로 덮지 않는다. */
+function hostScriptReview(
+  name: string, input: unknown, userData?: string, hostIntact?: () => boolean
+): 'location' | 'content' | null {
+  if (!userData) return null
   const raw = argOf(input, 'command')
-  if (typeof raw !== 'string' || !raw.trim()) return false
-  if (name === 'Bash') {
-    const segs = parseShell(raw)
-    return !!segs?.some((t) => hostScriptInvocation(t, userData))
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  let segs: string[][] | null
+  if (name === 'Bash') segs = parseShell(raw)
+  else if (POWERSHELL_TOOLS[name]) {
+    const parsed = powerShellWords(raw)
+    if (!parsed?.safe || parsed.words.length < 2) return null
+    const [exe, script, ...args] = parsed.words
+    segs = [[exe, script.replace(/\\/g, '/'), ...args]]
+  } else return null
+  if (!segs) return null // 해석 불가 명령은 앞선 hostWriteDecision이 거절한다.
+  let invocation = false
+  for (const t of segs) {
+    if (!hostScriptInvocation(t, userData)) continue
+    invocation = true
+    // 지문이 같거나 동봉본을 모르는 옛 호출자여도 실행 위치 예외 밖이면 한 번은 묻는다.
+    if (!hostSkillCall(t, userData)) return 'location'
   }
-  if (!POWERSHELL_TOOLS[name]) return false
-  const parsed = powerShellWords(raw)
-  if (!parsed?.safe || parsed.words.length < 2) return false
-  const [exe, script, ...args] = parsed.words
-  return hostScriptInvocation([exe, script.replace(/\\/g, '/'), ...args], userData)
+  return invocation && hostIntact && !hostIntact() ? 'content' : null
 }
 
-/**
- * 앱 스킬 사본이 동봉본과 다를 때의 카드 — 걸린 이유가 '경로'가 아니라 '내용'임을 말한다.
- *
- * `describeTool` 은 경로·프로그램으로 이유를 고르므로, 정상 모양의 스킬 호출에는 "폴더 안
- * 일이라고 확인하지 못한 명령"이라는 **사실과 다른** 문장이 붙는다. 앱 자리 이름도 흘리지 않는다.
- */
-function describeHostMismatch(input: unknown): { title: string; detail: string } {
+/** 앱 자리의 내용 불일치와 자동 실행 범위 밖 호출은 이유를 구분해 카드로 보낸다. */
+function describeHostMismatch(input: unknown, reason: 'location' | 'content'): { title: string; detail: string } {
   const raw = argOf(input, 'command')
   const shown = typeof raw === 'string' ? redactForCard(raw) : ''
   return {
-    title: '앱이 깔아 둔 규칙 사본이 원본과 달라요',
-    detail: `${shown}\n\n이 명령은 앱이 관리하는 규칙 사본의 스크립트를 여는 호출이라, 사본 내용이 원본과 같은 동안에만 묻지 않고 통과시켜요. 지금은 내용이 달라서 확인을 받아요. 앱을 다시 시작하면 원본으로 되돌아가요.\n\n무슨 일인지 모르겠으면 거절해 주세요.`
+    title: reason === 'location' ? '앱 규칙 사본의 자동 실행 범위 밖이에요' : '앱이 깔아 둔 규칙 사본이 원본과 달라요',
+    detail: `${shown}\n\n${reason === 'location'
+      ? '이 명령은 앱 규칙 사본의 자동 실행이 허용된 스크립트 위치 밖을 열어요. 폴더를 계속 허용했어도 이 호출은 따로 확인을 받아요.'
+      : '이 명령은 앱이 관리하는 규칙 사본의 스크립트를 여는 호출이라, 사본 내용이 원본과 같은 동안에만 묻지 않고 통과시켜요. 지금은 내용이 달라서 확인을 받아요. 앱을 다시 시작하면 원본으로 되돌아가요.'}\n\n무슨 일인지 모르겠으면 거절해 주세요.`
   }
 }
 
@@ -1561,19 +1555,6 @@ export class ClaudeConnection implements AgentConnection {
     if (!userData || !bundle) return undefined
     let memo: boolean | undefined
     return () => (memo ??= sameTreeContent(skillHostDir(userData), bundle))
-  }
-  /**
-   * 이 호출이 앱 스킬 자리의 스크립트를 여는데 사본 내용이 동봉본과 다른가(C-01ⓒ).
-   *
-   * `autoAllow` 가 같은 조건에서 `false` 를 돌려주지만, 그 값은 호출자에서 `trusted()` 로 덮일
-   * 수 있다. 그래서 **최종 판정에서** 한 번 더 묻는다 — 신뢰 폴더·'묻지 않기'에서도 불일치가
-   * 유지되게 하는 자리가 여기다(검토 Roh R2). 동봉본을 모르면(옛 호출자) 대조할 것이 없으므로
-   * 종전대로 통과시킨다 — 이 판정이 새로 막는 것은 '대조했더니 달랐다'뿐이다.
-   */
-  private hostScriptMismatch(name: string, input: unknown, hostIntact?: () => boolean): boolean {
-    if (!hostIntact) return false
-    if (!hostScriptCall(name, input, this.options.guard?.userData)) return false
-    return !hostIntact()
   }
   /** 권한 카드를 띄우고 학생의 답을 기다린다. 취소(abort)·턴 종료는 거절로 닫는다. */
   private askPermission(
@@ -1899,18 +1880,12 @@ export class ClaudeConnection implements AgentConnection {
         // 앱 스킬 자리 사본 대조는 도구 호출 하나에 **한 번**만 — 두 판정이 같은 값을 쓴다.
         const hostIntact = this.hostIntactCheck()
         if (this.autoAllowed(name, input, hostIntact)) return { behavior: 'allow', updatedInput: input }
-        // 앱 스킬 자리의 스크립트를 여는 호출은 **사본 내용이 동봉본과 같은 동안에만** 카드 없이
-        // 통과한다(C-01ⓒ, 설계 §4.2 "다르면 카드 + 알림"). 이 판정을 `trusted()` **앞**에 두는
-        // 것이 핵심이다 — 뒤에 두면 기본값 '묻지 않기'·'이 폴더는 계속 허용'이 불일치를 덮어
-        // 고쳐진 사본이 조용히 돌아간다(검토 Roh R2 차단). 사본은 앱이 매 전송마다 다시 까는
-        // 학생의 폴더가 아니므로, 신뢰 폴더라도 내용이 다르면 한 번은 묻는다.
-        //
-        // 카드로 보낸다(거절이 아니다). 사본은 다음 전송에서 원본으로 되돌아가므로 학생이 스스로
-        // 고칠 것이 없고, 도우미가 그 스크립트로 논문 작업을 하려던 참일 수 있다 — 설계 §4.2 가
-        // 적은 그대로 "다르면 카드 + 알림"이다.
-        if (this.hostScriptMismatch(name, input, hostIntact)) {
+        // 앱 자리의 내용 불일치뿐 아니라 자동 실행 위치 밖 호출도 trusted()보다 먼저 묻는다.
+        // autoAllow=false만으로는 부족하다 — 지문이 같아도 아래 trusted 통로로 열리면 안 된다.
+        const hostReview = hostScriptReview(name, input, this.options.guard?.userData, hostIntact)
+        if (hostReview) {
           const id = randomUUID()
-          const allowed = await this.askPermission(id, options.signal, events, describeHostMismatch(input))
+          const allowed = await this.askPermission(id, options.signal, events, describeHostMismatch(input, hostReview))
           return allowed
             ? { behavior: 'allow', updatedInput: input }
             : { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }

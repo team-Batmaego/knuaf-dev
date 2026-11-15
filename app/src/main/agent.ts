@@ -277,16 +277,23 @@ export function skillSource(appRoot: string, isPackaged: boolean, resourcesPath:
 const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json']
 
 /** Walk `abs`, collecting "rel/path:sha256(content)" for the files installSkill copies. */
-function skillFingerprint(abs: string, rel: string, out: string[]): void {
+function skillFingerprint(abs: string, rel: string, out: string[], strictHost: boolean): void {
   if (!existsSync(abs)) return
   for (const name of readdirSync(abs)) {
     const child = join(abs, name)
-    if (!copyFilter(child)) continue
+    if (!copyFilter(child)) {
+      // 앱 실행은 PYTHONDONTWRITEBYTECODE=1이다. 설치가 빼는 캐시·가상환경은 정상 사본에 없다.
+      if (strictHost) throw new Error('앱 스킬 사본에 설치하지 않은 항목이 있음')
+      continue
+    }
     try {
       const st = statSync(child)
-      if (st.isDirectory()) skillFingerprint(child, `${rel}/${name}`, out)
+      if (st.isDirectory()) skillFingerprint(child, `${rel}/${name}`, out, strictHost)
       else if (st.isFile()) out.push(`${rel}/${name}:${createHash('sha256').update(readFileSync(child)).digest('hex')}`)
-    } catch { /* vanished between readdir and stat */ }
+    } catch (error) {
+      if (strictHost) throw error
+      // 일반 번들·Codex 지문은 기존처럼 순회 중 사라진 항목을 건너뛴다.
+    }
   }
 }
 
@@ -304,12 +311,12 @@ export function skillVersion(source: string): string {
 }
 
 /** `skillVersion` 의 전체 값 — 두 사본을 대조할 때 12자 절단 전에 비교한다. */
-function skillDigest(source: string): string {
+function skillDigest(source: string, strictHost = false): string {
   const h = createHash('sha256')
   const skillMd = join(source, 'SKILL.md')
   h.update(existsSync(skillMd) ? readFileSync(skillMd) : Buffer.alloc(0))
   const entries: string[] = []
-  for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries)
+  for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries, strictHost)
   for (const name of SKILL_METADATA) {
     const file = join(source, name)
     if (existsSync(file)) entries.push(`${name}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`)
@@ -329,9 +336,11 @@ function skillDigest(source: string): string {
  */
 export function sameTreeContent(a: string, b: string): boolean {
   try {
-    return (!isSkillHostPath(a) || readdirSync(a).every((name) => HOST_ROOT_ENTRIES.has(name)))
-      && (!isSkillHostPath(b) || readdirSync(b).every((name) => HOST_ROOT_ENTRIES.has(name)))
-      && skillDigest(a) === skillDigest(b)
+    const hostA = isSkillHostPath(a)
+    const hostB = isSkillHostPath(b)
+    return (!hostA || readdirSync(a).every((name) => HOST_ROOT_ENTRIES.has(name)))
+      && (!hostB || readdirSync(b).every((name) => HOST_ROOT_ENTRIES.has(name)))
+      && skillDigest(a, hostA) === skillDigest(b, hostB)
   } catch { return false }
 }
 
