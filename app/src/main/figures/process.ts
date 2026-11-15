@@ -445,7 +445,9 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
   const org = job.pageRule.rule === RULE_PAGE_QUERY_ORG
     ? orgReading(job.pageHtml, finalUrl, new URL(job.pageUrlHref), job.pageRule)
     : { reading: 'skip' as const, text: null }
-  if (org.text !== null && hasCreditMark(org.text)) credit = 'credit'
+  // 설계 §3-3 순서: 근처 권리 표기 → 구역 unknown → 구역 전체 권리 표기.
+  // 구역을 못 정했으면(unknown) 그 구역 글의 표기는 순서상 뒤라 여기서 합치지 않는다.
+  if (org.reading !== 'unknown' && org.text !== null && hasCreditMark(org.text)) credit = 'credit'
   const verdict = decide({
     rule: { ok: true, ruleId: allowed.rule.id, org: allowed.org },
     present,

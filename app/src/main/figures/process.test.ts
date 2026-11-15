@@ -914,6 +914,7 @@ describe('RDA — process storage and comparison boundaries', () => {
     ['approved bracket resource', '<div id="body"><img src="/files/[가]_a.png" alt="AI 안내"><div id="mark">', false, 'kogl_type_1'],
     ['organization hit', '<div id="body"><img src="/files/[가]_a.png" alt="식량과기후 제공시험기관"><div id="mark">', false, 'third_party_org'],
     ['no body markers', '<img src="/files/[가]_a.png">', false, 'third_party_unknown'],
+    ['image outside body with rights only inside', `<img src="/files/[가]_a.png"><div id="body">${'x'.repeat(1500)}<p>ⓒ 2026</p><div id="mark">`, false, 'third_party_unknown'],
     ['request present but redirected final absent', '<div id="body"><img src="/files/[가]_a.png"><div id="mark">', true, 'not_on_page'],
     ['explicit rights far from image', `<div id="body"><img src="/files/[가]_a.png">${'x'.repeat(1500)}<p>ⓒ 2026</p><div id="mark">`, false, 'third_party_credit']
   ] as const) {
