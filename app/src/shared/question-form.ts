@@ -28,7 +28,7 @@ export function parseQuestionForm(text: string): ParsedForm | null {
     if (!line.trim()) continue
     const numbered = line.match(/^\s*(\d+)([.)])\s*(.*)$/)
     if (numbered) {
-      if (ended || numbered[2] !== '.' || Number(numbered[1]) !== fields.length + 1 || fields.length === 6) return null
+      if (ended || Number(numbered[1]) !== fields.length + 1 || fields.length === 6) return null
       const content = numbered[3].replace(/\*\*|__/g, '')
       const variant = content.match(/^([^():—]+?)\s*(?:\(([^()]*)\))?\s+—\s+(.+)$/)
       const label = variant ? null : content.match(/^([^()]+?)(?:\s*\(([^()]*)\)|:\s+(.+))?\s*$/)

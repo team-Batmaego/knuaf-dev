@@ -34,7 +34,13 @@ test('윈도우 기본 계획의 같은 줄 설명과 예시를 분리한다', (
   expect(form.fields[1].example).toBe('예: 전북 완주군. 미정이면 "미정"')
   expect(form.fields[2].description).toBe('자기자본과 대출 예정액을 나눠 적어주세요')
   expect(form.fields[2].example).toContain('예: 자기자본 5천만 원')
-  expect(parseQuestionForm(text.replace('2. **', '2) **'))).toBeNull()
+  expect(parseQuestionForm(text.replace('2. **', '2) **'))?.fields.map(f => f.label)).toEqual(form.fields.map(f => f.label))
+})
+
+test('번호 구두점이 달라도 두 칸 질문은 같은 형식으로 읽는다', () => {
+  const dotted = parseQuestionForm(Q)
+  const parenthesized = parseQuestionForm(Q.replace('2. 자금', '2) 자금'))
+  expect(parenthesized?.fields.map(field => field.label)).toEqual(dotted?.fields.map(field => field.label))
 })
 
 test('윈도우 화면 인용을 참고한 금액 질문 변형과 칸 설명 분리', () => {

@@ -24,11 +24,10 @@ export const STEP_NAMES: readonly string[] = [
 // 정규식 — IMPL-T1 §3-2 그대로. 굵게 **·__를 걷은 줄에 적용한다.
 // ---------------------------------------------------------------------------
 
-const TITLE = /^\s*창업논문 진행 목록\s*·\s*(\d+)단계 중\s*([1-7])(?:\s*[–~-]\s*([1-7]))?단계/
-// 단일 줄: 기호 번호 '단계 이름' [— 메모]   ← 실기록 "▶ 1 자료·전공 확인 — …"
-const STEP_ONE = /^\s*([✓▶○])\s*([1-7])\s+([^\d—\s][^—]*?)\s*(?:—\s*(.*))?$/
-// 범위 줄: 기호 a[–b]단계 [남음|끝남] [— 메모]   ← 실기록 "○ 3–7단계 남음"
-const STEP_RANGE = /^\s*([✓▶○])\s*([1-7])(?:\s*[–~-]\s*([1-7]))?단계(?:\s*(남음|끝남))?\s*(?:—\s*(.*))?$/
+const TITLE = /^\s*창업논문 진행 목록\s*[·:：-]\s*(\d+)단계 중\s*([1-7])(?:\s*[–~-]\s*([1-7]))?단계/
+const STEP_ONE = /^\s*([✓▶○])\s*([1-7])[.)]?\s+([^\d—–:\s][^—–:]*?)\s*(?:(?:—|–|:|：|-)\s*(.*))?$/
+// 범위 줄: 기호 a[–b]단계 [남음|끝남] [— 메모]
+const STEP_RANGE = /^\s*([✓▶○])\s*([1-7](?:\s*[·,]\s*[1-7])*(?:\s*[–~-]\s*[1-7])?)단계(?:\s*(남음|끝남))?\s*(?:(?:—|–|:|：|-)\s*(.*))?$/
 const FLAG = /^\s*⚑\s*(.+)$/
 const AFTER = /^\s*그 뒤\s*[:：]\s*(.+)$/
 
@@ -137,14 +136,17 @@ function parseOneBlock(lines: string[], t: number): OneBlockParse | null {
     const l = lines[i]
     let m: RegExpMatchArray | null
     if ((m = l.match(STEP_RANGE))) {
-      const [, sym, a, b, word, note] = m
+      const [, sym, ranges, word, note] = m
       if (word === '남음' && sym !== '○') return null
       if (word === '끝남' && sym !== '✓') return null
-      const from = Number(a)
-      const to = Number(b ?? a)
-      if (to < from) return null
-      for (let n = from; n <= to; n++) {
-        if (state[n] !== undefined) return null // 겹침
+      const numbers: number[] = []
+      for (const part of ranges.split(/[·,]/)) {
+        const [a, b] = part.trim().split(/\s*[–~-]\s*/).map(Number)
+        if (b !== undefined && b < a) return null
+        for (let n = a; n <= (b ?? a); n++) numbers.push(n)
+      }
+      for (const n of numbers) {
+        if (state[n] !== undefined) return null
         state[n] = SYM_TO_STATE[sym]
         if (note !== undefined) notes[n] = note
       }
@@ -154,10 +156,12 @@ function parseOneBlock(lines: string[], t: number): OneBlockParse | null {
     if ((m = l.match(STEP_ONE))) {
       const [, sym, n, name, note] = m
       const idx = Number(n)
-      if (normName(name) !== normName(STEP_NAMES[idx - 1])) return null
+      const cleanName = name.replace(/\s+(?:끝|완료)$/, '').trim()
+      const equivalent = idx === 4 && cleanName === '본문 초안' ? '본문 Ⅰ~Ⅵ 초안' : cleanName
+      if (normName(equivalent) !== normName(STEP_NAMES[idx - 1])) return null
       if (state[idx] !== undefined) return null
       state[idx] = SYM_TO_STATE[sym]
-      if (note !== undefined) notes[idx] = note
+      if (note !== undefined) notes[idx] = note.trim()
       end = i
       continue
     }
@@ -178,10 +182,10 @@ function parseOneBlock(lines: string[], t: number): OneBlockParse | null {
   // 유효 조건 ①: 범위를 펼쳐 1..7이 빠짐없이 한 번씩 정해진다.
   for (let n = 1; n <= 7; n++) if (state[n] === undefined) return null
   const nowList = [1, 2, 3, 4, 5, 6, 7].filter((n) => state[n] === 'now')
+  if (nowList.length === 1 && (nowList[0] !== title[0] || nowList[0] !== title[1])) return null
+  if (nowList.length > 1 && nowList[0] !== title[0]) return null
   // 유효 조건 ②: ▶ 하나 이상이거나 모두 ✓.
-  if (nowList.length === 0 && ![1, 2, 3, 4, 5, 6, 7].every((n) => state[n] === 'done')) return null
-  // 유효 조건 ③: 제목 [a–b]가 ▶ 최소~최대와 같다(모두 ✓이면 비교하지 않음).
-  if (nowList.length > 0 && (nowList[0] !== title[0] || nowList[nowList.length - 1] !== title[1])) return null
+  // Explicit ▶ rows are the source of truth; prose title ranges can lag them.
   const steps: ProgressStep[] = [1, 2, 3, 4, 5, 6, 7].map((n) => {
     const step: ProgressStep = { n, state: state[n]! }
     if (notes[n] !== undefined) step.note = notes[n]
