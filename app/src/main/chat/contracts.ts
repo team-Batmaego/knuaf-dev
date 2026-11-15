@@ -133,6 +133,10 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   // 스킬 스크립트가 논문 폴더에 `__pycache__` 를 남기지 않게 한다(설계 §4.1). 같은 값이
   // 터미널 스크립트(`agent.ts`)와 `query()` 옵션(`claude.ts`)에도 있다 — 세 경로가 같은 선.
   env.PYTHONDONTWRITEBYTECODE = '1'
+  // 도우미의 Bash 도구가 앞 호출의 `cd` 를 다음 호출로 이어 가지 않게 한다 — 매 명령 뒤 논문
+  // 폴더로 돌아간다. 지킴이(claude.ts)는 상대경로를 늘 논문 폴더 기준으로 판정하므로, 작업 폴더가
+  // 호출 사이에 이어지면 판정과 실제 위치가 어긋난다(검토 FIX4 J1). 판정 쪽도 따로 막는다(parseShell).
+  env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = '1'
   // Finder 로 띄운 앱은 셸의 PATH 를 물려받지 않는다 — /usr/bin:/bin:/usr/sbin:/sbin 뿐이다.
   // codex 는 `#!/usr/bin/env node` 스크립트라 그 PATH 로는 셔뱅이 죽고
   // "env: node: No such file or directory" 만 남는다(claude 는 네이티브라 멀쩡했다).

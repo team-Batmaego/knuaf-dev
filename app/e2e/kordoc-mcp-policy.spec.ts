@@ -6,7 +6,7 @@
  * 학생 파일·전역 설정(`~/.claude`·`~/.codex`)은 건드리지 않는다.
  */
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -49,6 +49,18 @@ function fixture() {
 }
 
 const f = fixture()
+// 파일시스템이 유니코드 이름을 정규화하는가 — APFS(맥)는 NFD 로 만든 파일을 NFC 이름으로도
+// 열어 주고, NTFS(윈도)·ext4 는 다른 이름으로 본다. 제품은 없는 이름을 다른 이름으로 추측해
+// 바꾸지 않으므로(`kordocMcp.ts:245–246`: realpath 실패 = 거절) 정규화하지 않는 쪽에서
+// "NFD 파일의 NFC 이름" 은 정말 없는 파일이다 — 그 거절이 맞는 동작이다(CI 실패는 기대가 틀렸던 것).
+const fsFoldsNfcNfd = existsSync(f.nfcOfNfd)
+test.beforeAll(() => {
+  // 판정 자체를 두 CI 운영체제에서 못 박는다 — 아래 단언이 조용히 뒤집히지 않게(맥 APFS = 접음,
+  // 윈도 NTFS = 안 접음). 그 밖의 운영체제는 CI 에 없으므로 파일시스템 판정만 따른다.
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    expect(fsFoldsNfcNfd, `${process.platform} 파일시스템의 유니코드 이름 정규화`).toBe(process.platform === 'darwin')
+  }
+})
 const singlePathTools = READ_TOOLS.filter((t) => t !== 'compare_documents' && t !== 'lint_document' && t !== 'agency_pack_info')
 
 test('E1: 읽기 도구 7개 — 폴더 안·밖·링크 양방향·없음·한글·인자형', () => {
@@ -60,7 +72,8 @@ test('E1: 읽기 도구 7개 — 폴더 안·밖·링크 양방향·없음·한�
     expect(policy({ file_path: f.linkIn }), `${tool} 밖 링크→안`).toEqual(allow)
     expect(policy({ file_path: f.missing }), `${tool} 없음`).toEqual(deny(DENY_OUTSIDE_ROOT))
     expect(policy({ file_path: f.nfdFile }), `${tool} NFD`).toEqual(allow)
-    expect(policy({ file_path: f.nfcOfNfd }), `${tool} NFD파일을 NFC로`).toEqual(allow)
+    // 맥(APFS): NFC 이름이 같은 파일로 해석된다 → 허용. 윈도(NTFS): 없는 이름이다 → 거절이 맞다.
+    expect(policy({ file_path: f.nfcOfNfd }), `${tool} NFD파일을 NFC로`).toEqual(fsFoldsNfcNfd ? allow : deny(DENY_OUTSIDE_ROOT))
     // 인자 형태 — 비었거나 문자열이 아니거나 아예 없으면 거절(허용 못 하면 닫힌다).
     expect(policy({}), `${tool} 인자 없음`).toEqual(deny(DENY_OUTSIDE_ROOT))
     expect(policy({ file_path: '' }), `${tool} 빈 문자열`).toEqual(deny(DENY_OUTSIDE_ROOT))
@@ -72,7 +85,9 @@ test('E1: 읽기 도구 7개 — 폴더 안·밖·링크 양방향·없음·한�
 
 test('E1: compare_documents — file_path_a·b 둘 다 폴더 안이어야 허용', () => {
   const policy = (input: unknown) => mcpPolicy(f.root, 'mcp__kordoc__compare_documents', input)
-  expect(policy({ file_path_a: f.insideFile, file_path_b: f.nfcOfNfd })).toEqual(allow)
+  expect(policy({ file_path_a: f.insideFile, file_path_b: f.nfdFile })).toEqual(allow)
+  // NFC 이름은 파일시스템이 정규화할 때만 같은 파일이다 — 윈도에서는 없는 이름이라 거절.
+  expect(policy({ file_path_a: f.insideFile, file_path_b: f.nfcOfNfd })).toEqual(fsFoldsNfcNfd ? allow : deny(DENY_OUTSIDE_ROOT))
   expect(policy({ file_path_a: f.outsideFile, file_path_b: f.insideFile })).toEqual(deny(DENY_OUTSIDE_ROOT))
   expect(policy({ file_path_a: f.insideFile, file_path_b: f.outsideFile })).toEqual(deny(DENY_OUTSIDE_ROOT))
   expect(policy({ file_path_a: f.linkOut, file_path_b: f.insideFile })).toEqual(deny(DENY_OUTSIDE_ROOT))
@@ -124,6 +139,8 @@ test('E1: insideRootReal — realpath 기준 판정과 NFC 정규화', () => {
   expect(insideRootReal(f.root, f.linkIn)).toBe(true)
   expect(insideRootReal(f.root, f.missing)).toBe(false)
   expect(insideRootReal(f.root, f.nfdFile)).toBe(true)
+  // NFC 이름은 파일시스템이 정규화할 때만 존재한다 — 정규화하지 않는 쪽(윈도 NTFS)에선 없는 파일.
+  expect(insideRootReal(f.root, f.nfcOfNfd)).toBe(fsFoldsNfcNfd)
   expect(insideRootReal(f.root, '')).toBe(false)
   expect(insideRootReal(f.root, undefined)).toBe(false)
   expect(insideRootReal(f.root, 7)).toBe(false)

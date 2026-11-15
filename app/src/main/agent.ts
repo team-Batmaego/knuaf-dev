@@ -278,16 +278,25 @@ export function skillSource(appRoot: string, isPackaged: boolean, resourcesPath:
 const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json', 'delegation.json']
 
 /** Walk `abs`, collecting "rel/path:sha256(content)" for the files installSkill copies. */
-function skillFingerprint(abs: string, rel: string, out: string[]): void {
+function skillFingerprint(abs: string, rel: string, out: string[], strictHost: boolean): void {
   if (!existsSync(abs)) return
+  if (strictHost && lstatSync(abs).isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
   for (const name of readdirSync(abs)) {
     const child = join(abs, name)
-    if (!copyFilter(child)) continue
+    if (!copyFilter(child)) {
+      // 앱 실행은 PYTHONDONTWRITEBYTECODE=1이다. 설치가 빼는 캐시·가상환경은 정상 사본에 없다.
+      if (strictHost) throw new Error('앱 스킬 사본에 설치하지 않은 항목이 있음')
+      continue
+    }
     try {
-      const st = statSync(child)
-      if (st.isDirectory()) skillFingerprint(child, `${rel}/${name}`, out)
+      const st = strictHost ? lstatSync(child) : statSync(child)
+      if (strictHost && st.isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
+      if (st.isDirectory()) skillFingerprint(child, `${rel}/${name}`, out, strictHost)
       else if (st.isFile()) out.push(`${rel}/${name}:${createHash('sha256').update(readFileSync(child)).digest('hex')}`)
-    } catch { /* vanished between readdir and stat */ }
+    } catch (error) {
+      if (strictHost) throw error
+      // 일반 번들·Codex 지문은 기존처럼 순회 중 사라진 항목을 건너뛴다.
+    }
   }
 }
 
@@ -305,14 +314,16 @@ export function skillVersion(source: string): string {
 }
 
 /** `skillVersion` 의 전체 값 — 두 사본을 대조할 때 12자 절단 전에 비교한다. */
-function skillDigest(source: string): string {
+function skillDigest(source: string, strictHost = false): string {
   const h = createHash('sha256')
   const skillMd = join(source, 'SKILL.md')
+  if (strictHost && lstatSync(skillMd).isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
   h.update(existsSync(skillMd) ? readFileSync(skillMd) : Buffer.alloc(0))
   const entries: string[] = []
-  for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries)
+  for (const dir of ['references', 'scripts', 'assets']) skillFingerprint(join(source, dir), dir, entries, strictHost)
   for (const name of SKILL_METADATA) {
     const file = join(source, name)
+    if (strictHost && existsSync(file) && lstatSync(file).isSymbolicLink()) throw new Error('앱 스킬 사본에 링크가 있음')
     if (existsSync(file)) entries.push(`${name}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`)
   }
   entries.sort()
@@ -325,11 +336,17 @@ function skillDigest(source: string): string {
  * 설치본 무결성의 근거가 못 된다 — 동봉본과 파일 내용을 그대로 대조한다.
  *
  * 대상은 스킬이 실제로 싣는 것과 같은 집합이다(`SKILL.md` + `references`/`scripts`/`assets` +
- * 판 metadata). 뿌리에 학생이 둔 다른 파일(`student-note.txt` 등)은 양쪽 모두에서 빠지므로
- * 재설치를 부르지 않는다. 읽기 실패(권한·사라짐)는 불일치로 닫는다.
+ * 판 metadata). Codex 폴더 사본에 학생이 둔 뿌리 파일은 제외하지만, 앱 스킬 자리에는
+ * 설치기가 싣지 않는 항목을 허용하지 않는다. 읽기 실패(권한·사라짐)는 불일치로 닫는다.
  */
 export function sameTreeContent(a: string, b: string): boolean {
-  try { return skillDigest(a) === skillDigest(b) } catch { return false }
+  try {
+    const hostA = isSkillHostPath(a)
+    const hostB = isSkillHostPath(b)
+    return (!hostA || readdirSync(a).every((name) => HOST_ROOT_ENTRIES.has(name)))
+      && (!hostB || readdirSync(b).every((name) => HOST_ROOT_ENTRIES.has(name)))
+      && skillDigest(a, hostA) === skillDigest(b, hostB)
+  } catch { return false }
 }
 
 // ---------------------------------------------------------------- 4. targets + state
@@ -337,6 +354,9 @@ export function sameTreeContent(a: string, b: string): boolean {
 export const VERSION_FILE = '.knuaf-dev-version'
 
 export const SKILL_NAME = 'knuaf-dev'
+
+/** installSkill이 스킬 뿌리에 쓰는 항목만 허용한다. 설치 표식·백업은 이 뿌리 밖이다. */
+const HOST_ROOT_ENTRIES = new Set(['SKILL.md', 'references', 'scripts', 'assets', ...SKILL_METADATA, VERSION_FILE])
 
 /**
  * 이름이 바뀌기 전의 스킬 폴더 이름. 학생 작업폴더에 이미 깔려 있던 것을 그대로 두면
