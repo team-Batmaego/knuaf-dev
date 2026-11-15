@@ -697,6 +697,44 @@ test('A6 cd 거절은 이유와 다시 하는 법을 알려 주고, cd 없이 �
     expect(plain(await r.ask('Bash', retry))).toEqual({ behavior: 'allow', updatedInput: retry })
     expect(r.cards).toHaveLength(0)
   }
+  // 예외 하나: 논문 폴더 **자체**로 옮기는 cd 는 cwd 가 root 그대로라 종전처럼 판정한다(도우미의 환경 점검 꼴).
+  const toRoot = { command: `cd "${root}" && cat sub/notes.md` }
+  expect(autoAllow(root, 'Bash', toRoot, [], userData, source)).toBe(true)
+  expect(hostWriteDecision(root, 'Bash', toRoot, userData)).toBeNull()
+  // root 를 거쳐 하위 폴더로 한 번 더 옮기면 다시 판정 불가다.
+  expect(autoAllow(root, 'Bash', { command: `cd "${root}" && cd sub && cat notes.md` }, [], userData, source)).toBe(false)
+})
+
+test('A7 cd 예외는 논문 폴더 자체뿐 — 하위 폴더·상위·링크 너머로 옮긴 뒤 쓰기는 trusted와 무관하게 거절한다', async () => {
+  const { root, userData, target } = installedBox()
+  mkdirSync(join(root, 'sub'), { recursive: true })
+  symlinkSync(target, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+  const outside = mkdtempSync(join(tmpdir(), 'kd-cd-out-'))
+  symlinkSync(outside, join(root, 'outlink'), process.platform === 'win32' ? 'junction' : 'dir')
+  const mutants = [
+    'cd sub && touch new.md',                              // 하위 폴더 && 쓰기
+    'cd alias && touch scripts/gg_new.py',                 // 링크 → 앱 자리 && 쓰기
+    'cd alias/scripts && python3 gg.py',                   // 링크 → 앱 자리 && 실행
+    'cd outlink && touch pwn.md',                          // 링크 → 폴더 밖 && 쓰기
+    'cd .. && touch pwn.md',                               // 상위 && 쓰기
+    `cd "${root}/sub" && touch new.md`,                    // 절대경로라도 root 자체가 아니면
+    `cd "${root}/.." && touch pwn.md`,
+    `cd "${root}" && cd alias && touch scripts/gg_new.py`, // root 를 거친 두 번째 cd
+    'cd && touch pwn.md',                                  // 인자 없는 cd = 홈
+  ]
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    for (const command of mutants) {
+      const call = { command }
+      expect(autoAllow(root, 'Bash', call, [], userData, source), command).toBe(false)
+      const out = plain(await r.ask('Bash', call))
+      expect(out, `${trusted}/${command}`).toMatchObject({ behavior: 'deny' })
+    }
+    expect(r.cards).toHaveLength(0)
+  }
+  expect(existsSync(join(root, 'sub', 'new.md'))).toBe(false)
+  expect(existsSync(join(target, 'scripts', 'gg_new.py'))).toBe(false)
+  expect(sameTreeContent(target, source)).toBe(true)
 })
 
 test('A6 B5: 같은 합성 사본에서 잠금 풀기→복사→상대 실행 연쇄는 두 trusted 설정 모두 막힌다', async () => {

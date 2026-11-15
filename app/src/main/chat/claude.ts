@@ -474,7 +474,15 @@ function exeName(word: string): string {
  * - 실행 자리의 `*`·`?`·`[`. 셸이 파일 이름으로 펼친다(`/opt/homebrew/bin/cl?ude`).
  * 따옴표 안의 `;`·`|`·`&` 는 글자다(`rg "claude|codex" notes.md` 는 한 조각).
  */
-function parseShell(raw: string): string[][] | null {
+/** `cd <root>` 꼴인가 — 대상(링크 해소)이 논문 폴더 자체일 때만. root 를 모르면 아니다. */
+function cdToRoot(t: string[], root?: string): boolean {
+  if (!root || t.length !== 2 || exeName(t[0]) !== 'cd') return false
+  const ops = pathOpsFor(root)
+  const real = (p: string): string => { try { return realpathSync.native(p) } catch { return p } }
+  const a = real(ops.resolve(root, t[1])), b = real(ops.resolve(root))
+  return ops === win32 ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+function parseShell(raw: string, root?: string): string[][] | null {
   // 따옴표 안의 윈도우 경로 구분자(\)만 슬래시로 바꿔 읽는다.
   // 따옴표 안의 이스케이프(\\"·\\$·\\`)와 따옴표 밖의 `\`는 셸이 다르게 읽으므로 판정 불가다.
   // 단, .py 로 끝나는 따옴표 토큰은 정규화를 생략한다 — FIXCHECK3는 역슬래시 표기 스킬 호출을
@@ -519,7 +527,9 @@ function parseShell(raw: string): string[][] | null {
   endSeg()
   if (exeMixed || segs.some((t) => /[*?[]/.test(t[0]))) return null
   // 여러 조각 사이의 cwd 변화는 추적하지 않는다. 뒤 상대경로를 처음 root로 오인하지 않는다.
-  if (segs.length > 1 && segs.some((t) => ['cd', 'pushd', 'popd'].includes(exeName(t[0])))) return null
+  // 예외는 논문 폴더 **자체**로 옮기는 `cd "<root>"` 하나 — 도우미가 실제로 보내는 환경 점검 꼴이고
+  // (chat.spec '여러 조각을 이어 붙인 명령'), 옮긴 뒤 cwd 가 root 그대로라 뒤 조각 판정이 맞다.
+  if (segs.length > 1 && segs.some((t) => ['cd', 'pushd', 'popd'].includes(exeName(t[0])) && !cdToRoot(t, root))) return null
   return segs
 }
 
@@ -806,7 +816,7 @@ function powerShellSkillCall(root: string, raw: string, userData?: string): bool
 function isSkillCommand(root: string, input: unknown, userData?: string): boolean {
   const raw = (input as { command?: unknown })?.command
   if (typeof raw !== 'string' || !raw.trim()) return false
-  const segs = parseShell(raw)
+  const segs = parseShell(raw, root)
   return !!segs?.length && segs.every((t) => segmentReason(t) === null
     && (hostSkillCall(root, t, userData)
       || ((!looksLikePath(t[0], pathOpsFor(root) === win32 ? 'win32' : 'darwin')
@@ -1268,7 +1278,7 @@ function describeTool(name: string, input: unknown, root: string): { title: stri
     // 카드에 보여 줄 사본에서만 비밀값을 가린다. **판정은 아래 원문(`cmd`)으로** 한다 —
     // 가린 글자로 조각을 나누면 경로 판정이 달라진다(검토 FIX2: 카드 표시만 고친다).
     const shown = redactForCard(cmd)
-    const segs = parseShell(cmd)
+    const segs = parseShell(cmd, root)
     if (segs === null) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${shown}\n\n변수나 기호가 섞여 있어 무엇을 건드릴지 앱이 미리 알 수 없어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
     const out = bashOutside(root, segs)
     if (out.length) return { title: '논문 폴더 밖의 파일을 건드리려고 해요', detail: `${shown}\n\n폴더 밖: ${out.join(', ')}\n\n논문 폴더 안이 아니에요. 의도한 일이 아니면 거절해 주세요.` }
@@ -1350,7 +1360,7 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   }
   if (name === 'Bash') {
     const raw = argOf(input, 'command')
-    const segs = typeof raw === 'string' ? parseShell(raw) : null
+    const segs = typeof raw === 'string' ? parseShell(raw, root) : null
     // 셸로 보호 경로를 쓰는 길(`tee .claude/settings.local.json`)도 카드로 돌린다.
     if (segs?.some((t) => touchesProtected(root, t, userData))) return false
     if (!isSkillCommand(root, input, userData)) return false
@@ -1373,7 +1383,7 @@ function hostScriptReview(
   const raw = argOf(input, 'command')
   if (typeof raw !== 'string' || !raw.trim()) return null
   let segs: string[][] | null
-  if (name === 'Bash') segs = parseShell(raw)
+  if (name === 'Bash') segs = parseShell(raw, root)
   else if (POWERSHELL_TOOLS[name]) {
     const parsed = powerShellWords(raw)
     if (!parsed?.safe) return null
@@ -1461,7 +1471,7 @@ export function hostWriteDecision(
   const raw = argOf(input, 'command')
   if (typeof raw !== 'string' || !raw.trim()) return null
   let segs: string[][] | null
-  if (name === 'Bash') segs = parseShell(raw)
+  if (name === 'Bash') segs = parseShell(raw, root)
   else {
     const parsed = powerShellWords(raw)
     segs = parsed?.safe && parsed.words.length ? [parsed.words.map((word) => word.replace(/\\/g, '/'))] : null
