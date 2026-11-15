@@ -721,6 +721,8 @@ test('A7 cd 예외는 논문 폴더 자체뿐 — 하위 폴더·상위·링크 
     `cd "${root}/.." && touch pwn.md`,
     `cd "${root}" && cd alias && touch scripts/gg_new.py`, // root 를 거친 두 번째 cd
     'cd && touch pwn.md',                                  // 인자 없는 cd = 홈
+    // J1: 혼자 쓴 cd 도 닫는다 — 다음 호출로 작업 폴더가 이어지면 판정 기준(root)과 어긋난다.
+    'cd sub', 'cd alias', 'cd outlink', 'cd ..', 'pushd sub', `cd "${root}/sub"`,
   ]
   for (const trusted of [true, false]) {
     const r = await rig({ root, userData }, { trusted })

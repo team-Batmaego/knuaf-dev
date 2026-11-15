@@ -526,10 +526,12 @@ function parseShell(raw: string, root?: string): string[][] | null {
   }
   endSeg()
   if (exeMixed || segs.some((t) => /[*?[]/.test(t[0]))) return null
-  // 여러 조각 사이의 cwd 변화는 추적하지 않는다. 뒤 상대경로를 처음 root로 오인하지 않는다.
+  // cwd 변화는 추적하지 않는다. 같은 명령의 뒤 조각뿐 아니라 **다음 호출**의 상대경로도 판정은
+  // 논문 폴더 기준이므로, 혼자 쓴 `cd sub` 도 판정 불가로 닫는다(검토 FIX4 J1 — Bash 도구가
+  // 작업 폴더를 호출 사이에 이어 갈 수 있다. 환경변수로도 끄지만 그것에만 기대지 않는다).
   // 예외는 논문 폴더 **자체**로 옮기는 `cd "<root>"` 하나 — 도우미가 실제로 보내는 환경 점검 꼴이고
-  // (chat.spec '여러 조각을 이어 붙인 명령'), 옮긴 뒤 cwd 가 root 그대로라 뒤 조각 판정이 맞다.
-  if (segs.length > 1 && segs.some((t) => ['cd', 'pushd', 'popd'].includes(exeName(t[0])) && !cdToRoot(t, root))) return null
+  // (chat.spec '여러 조각을 이어 붙인 명령'), 옮긴 뒤 cwd 가 root 그대로라 판정이 맞다.
+  if (segs.some((t) => ['cd', 'pushd', 'popd'].includes(exeName(t[0])) && !cdToRoot(t, root))) return null
   return segs
 }
 
