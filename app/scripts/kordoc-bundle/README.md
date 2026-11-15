@@ -142,14 +142,22 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
 
 ## 실측값
 
-11-10 실험실(`lab/make-payload.sh`, OCR 제외)에서 나온 값 — 이 스크립트로 다시 만들어 대조할 기준선이다.
+이 스크립트로 만든 결과(11-15, node v24.22.3 · zlib 1.3.2.1-motley · pnpm 12.18.0):
 
-| 대상 | tgz | 풀림 | 비고 |
-|---|---|---|---|
-| darwin-arm64 | 40.0 MiB | 115.5 MB | T2(OCR 없음) |
-| win32-x64 | 43.8 MiB | 127.7 MB | T2(OCR 없음) |
+| 대상 | tgz | 풀림 | 파일 수 | sha256 |
+|---|---|---|---|---|
+| darwin-arm64 | 40.42 MiB | 115.42 MiB | 4390 | `02e57a8844694db1335eee5b5df7e1956a6fd7d790d266443f99d5b079aed804` |
+| darwin-x64 | 41.95 MiB | 122.43 MiB | 4390 | `a65ef4f32cc55f4d15af6f4dcf186e9cb034f85333bb1c6ab9e1ca759281be91` |
+| win32-x64 | 43.26 MiB | 127.57 MiB | 4388 | `385b62644f6dd13fc0b8fcc35aa235aa4f0601600390a46cbc8b29ab601b78f7` |
 
-`cli.js` sha256 은 맥·윈도 tarball 이 같다: `f755b0bc4ee860622066f30200e188481501d25969e2e38bcf79e9d2b4897a5c`.
+세 대상 모두 두 번씩 빌드해 같은 해시가 나왔다(재현 확인). 값은 만든 도구 판에 묶인다 —
+위 `tooling` 이 다르면 해시도 달라질 수 있다.
+
+11-10 실험실(`lab/make-payload.sh`, OCR 제외) 기준선: darwin-arm64 40.0 MiB / 115.5 MB,
+win32-x64 43.8 MiB / 127.7 MB — 같은 대역이다.
+
+`cli.js` sha256 은 맥·윈도 tarball 이 같다: `f755b0bc4ee860622066f30200e188481501d25969e2e38bcf79e9d2b4897a5c`
+(`mcp.js` 는 `ed675ba09018de9149414526d0a890aaad4c94410a392c68cb1dae0d241ba456`).
 
 ## 경계
 
