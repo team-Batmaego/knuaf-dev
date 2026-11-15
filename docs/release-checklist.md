@@ -42,3 +42,6 @@
 - [ ] `skill-release`가 `publish` 잡에서 오래 대기하면 `skill-release` 환경 승인 화면을 확인한다. 승인 전에는 릴리스·갈래가 만들어지지 않는다.
 - [ ] `publish` 로그에 "채널 PR 자동 생성 실패"가 있으면 실행 요약부터 읽는다. `skill-channel-update`는 재사용되는 갈래라 이름만으로 이번 판이 push됐다고 보면 안 된다. 요약은 원격 갈래의 `updates/channel.json`·`app/skill-source.json` blob SHA를 이번 제안과 비교해 알려 준다: (a) 같으면 릴리스·갈래는 이번 판으로 끝났고 PR만 없으므로 `gh pr create --head skill-channel-update --base main`을 사람이 실행한다. (b) 다르면 이전 제안이 남은 것이므로 갈래에 이번 판이 반영됐는지 먼저 확인하고, 아니면 옛 갈래를 보관·삭제한 뒤 릴리스 자산을 확인하고 새 실행으로 다시 시도한다. (c) 조회 실패(403·503·통신 오류)면 존재·부재를 단정하지 말고 저장소 상태를 직접 확인하며, 갈래 부재가 확인된 경우에만 릴리스만 공개된 것으로 보고 새 실행으로 다시 시도한다(같은 판 재사용 금지).
 - [ ] `updates/channel.json`은 앱·스킬이 한 파일을 공유하므로 쪼개지 않는다. 이미 배포된 앱 0.6.1·0.6.2가 이 경로만 읽기 때문이다. 두 채널 PR을 동시에 열지 않는다.
+
+## 6. 릴리스 공개와 "Latest" 표시
+- [ ] 앱 릴리스(`v*`, `release.yml` 초안)를 공개할 때는 사람이 `gh release edit <tag> --draft=false --latest`로 공개해 Latest를 앱에 붙인다. 스킬 릴리스(`skill-v*`)는 워크플로가 `--latest=false`로 공개하며 손으로 다시 공개하지 않는다 — README의 설치본 링크 3곳이 `releases/latest`를 쓰므로, 스킬 릴리스가 Latest를 가져가면 학생이 설치본 대신 규칙집 zip 페이지로 간다(2026-11-13 `skill-v1.0.4`). 공개 뒤 `gh api repos/{owner}/{repo}/releases/latest --jq .tag_name`으로 반환된 태그가 설치 자산을 포함한 앱 릴리스(`v<버전>`)인지 확인한다. 잘못된 태그라면 정상 앱 릴리스 태그를 별도로 확인한 후 `gh release edit <정상-앱-태그> --latest`로 Latest를 복구한다. 조회된 스킬 릴리스 태그에 `--latest`를 실행하지 않는다. 복구 후 API 결과를 다시 확인하고 원인을 기록한다.
