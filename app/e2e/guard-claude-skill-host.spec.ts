@@ -20,7 +20,7 @@ import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import {
-  buildLaunchScript, installSkill, setTreeAccess, skillBackupDir, skillSource, skillState, skillTargets, skillVersion,
+  buildLaunchScript, installSkill, sameTreeContent, setTreeAccess, skillBackupDir, skillSource, skillState, skillTargets, skillVersion,
   VERSION_FILE
 } from '../src/main/agent'
 import {
@@ -142,11 +142,13 @@ test('자동 실행은 설치본 내용이 동봉본과 같을 때만 — 변조
 
   installSkill(source, target, version, source)
   expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
-  // 동봉본에 없는 뿌리 파일은 지문 대상이 아니다 — 스킬 밖에 둔 학생 파일은 재설치를 부르지 않는다.
-  setTreeAccess(target, true)
-  writeFileSync(join(target, 'student-note.txt'), 'preserve me')
-  expect(skillState(target, version, source)).toBe('installed')
-  expect(installSkill(source, target, version, source).action).toBe('unchanged')
+  // Codex 폴더 사본의 학생 메모는 기존처럼 재설치·백업을 부르지 않는다.
+  const codex = skillTargets(root, userData).codex
+  installSkill(source, codex, version, source)
+  writeFileSync(join(codex, 'student-note.txt'), 'preserve me')
+  expect(skillState(codex, version, source)).toBe('installed')
+  expect(installSkill(source, codex, version, source).action).toBe('unchanged')
+  expect(readFileSync(join(codex, 'student-note.txt'), 'utf-8')).toBe('preserve me')
   expect(autoAllow(root, 'Bash', call, [], userData, source)).toBe(true)
   setTreeAccess(target, true)
 })
@@ -338,6 +340,98 @@ test('최종 판정(PowerShell): 사본이 다르면 trusted() 참이어도 카�
   ask.answer(true)
   expect(plain(await allowed)).toEqual({ behavior: 'allow', updatedInput: call })
   setTreeAccess(target, true)
+})
+
+for (const location of ['', 'references', 'assets']) {
+  test(`앱 자리 ${location || '뿌리'}에 끼운 gg_extra.py는 자동 실행 없이 불일치 카드·재설치로 간다`, async () => {
+    const { root, userData, target } = installedBox()
+    const normal = { command: `python3 "${join(target, 'scripts', 'gg.py').replace(/\\/g, '/')}" status` }
+    expect(autoAllow(root, 'Bash', normal, [], userData, source)).toBe(true)
+    if (process.platform !== 'win32') setTreeAccess(target, true)
+    const injected = join(target, location, 'gg_extra.py')
+    mkdirSync(dirname(injected), { recursive: true })
+    writeFileSync(injected, 'print("UNTRUSTED_PAYLOAD")\n')
+    expect(sameTreeContent(target, source), location).toBe(false)
+    expect(skillState(target, version, source), location).toBe('outdated')
+    // 정상 동봉 스크립트도 사본이 달라진 동안에는 자동 실행하지 않는다.
+    expect(autoAllow(root, 'Bash', normal, [], userData, source), location).toBe(false)
+
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      const call = { command: `python3 "${injected.replace(/\\/g, '/')}"` }
+      // 동봉본을 모르는 옛 호출자도 scripts/ 밖은 자동 실행 예외가 아니다.
+      expect(autoAllow(root, tool, call, [], userData), `${tool}/legacy`).toBe(false)
+      expect(autoAllow(root, tool, call, [], userData, source), tool).toBe(false)
+      expect(hostWriteDecision(root, tool, call, userData), tool).toBeNull()
+      const r = await rig({ root, userData }, { trusted: true })
+      const pending = r.ask(tool, call)
+      await settle(() => r.cards.length > 0)
+      expect(r.cards, tool).toHaveLength(1)
+      expect(r.cards[0].title, tool).toContain('규칙 사본')
+      r.answer(false)
+      expect(plain(await pending), tool).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+    }
+
+    const repaired = installSkill(source, target, version, source)
+    expect(repaired.action).toBe('updated')
+    expect(readFileSync(join(repaired.backup!, location, 'gg_extra.py'), 'utf-8')).toBe('print("UNTRUSTED_PAYLOAD")\n')
+    expect(existsSync(injected)).toBe(false)
+    expect(sameTreeContent(target, source)).toBe(true)
+    expect(skillState(target, version, source)).toBe('installed')
+    expect(autoAllow(root, 'Bash', normal, [], userData, source)).toBe(true)
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      const r = await rig({ root, userData }, { trusted: true })
+      expect(plain(await r.ask(tool, normal)), tool).toEqual({ behavior: 'allow', updatedInput: normal })
+      expect(r.cards, tool).toHaveLength(0)
+    }
+  })
+}
+
+test('앱 자리의 알 수 없는 뿌리 폴더도 백업·제거하고 Codex 학생 파일은 그대로 둔다', () => {
+  const { root, userData, target } = installedBox()
+  if (process.platform !== 'win32') setTreeAccess(target, true)
+  const foreign = join(target, 'student-files', 'memo.txt')
+  mkdirSync(dirname(foreign))
+  writeFileSync(foreign, 'preserve in backup')
+  expect(skillState(target, version, source)).toBe('outdated')
+  const repaired = installSkill(source, target, version, source)
+  expect(repaired.action).toBe('updated')
+  expect(readFileSync(join(repaired.backup!, 'student-files', 'memo.txt'), 'utf-8')).toBe('preserve in backup')
+  expect(existsSync(join(target, 'student-files'))).toBe(false)
+  expect(skillState(target, version, source)).toBe('installed')
+
+  const codex = skillTargets(root, userData).codex
+  installSkill(source, codex, version, source)
+  mkdirSync(join(codex, 'student-files'))
+  writeFileSync(join(codex, 'student-files', 'memo.txt'), 'keep in place')
+  expect(skillState(codex, version, source)).toBe('installed')
+  expect(installSkill(source, codex, version, source).action).toBe('unchanged')
+  expect(readFileSync(join(codex, 'student-files', 'memo.txt'), 'utf-8')).toBe('keep in place')
+  expect(existsSync(skillBackupDir(codex))).toBe(false)
+})
+
+test('동봉 scripts/의 재귀 경로만 실행 예외이며 지문에서 뺀 디렉터리는 자동 허용하지 않는다', () => {
+  const { root, userData, host } = box()
+  const bundle = join(root, 'test-bundle')
+  mkdirSync(join(bundle, 'scripts', 'nested'), { recursive: true })
+  writeFileSync(join(bundle, 'SKILL.md'), '# test bundle\n')
+  writeFileSync(join(bundle, 'scripts', 'nested', 'gg_extra.py'), 'print("BUNDLED")\n')
+  const bundledVersion = skillVersion(bundle)
+  installSkill(bundle, host, bundledVersion, bundle)
+  const bundled = { command: `python3 "${join(host, 'scripts', 'nested', 'gg_extra.py').replace(/\\/g, '/')}"` }
+  expect(autoAllow(root, 'Bash', bundled, [], userData, bundle)).toBe(true)
+
+  if (process.platform !== 'win32') setTreeAccess(host, true)
+  for (const skipped of ['__pycache__', '.venv', '.DS_Store']) {
+    const script = join(host, 'scripts', skipped, 'gg_extra.py')
+    mkdirSync(dirname(script))
+    writeFileSync(script, 'print("NOT_IN_FINGERPRINT")\n')
+    // 이 디렉터리는 지문 대상이 아니므로 실행 예외에서도 제외해야 한다.
+    expect(sameTreeContent(host, bundle), skipped).toBe(true)
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      const call = { command: `python3 "${script.replace(/\\/g, '/')}"` }
+      expect(autoAllow(root, tool, call, [], userData, bundle), `${tool}/${skipped}`).toBe(false)
+    }
+  }
 })
 
 test('짧은 이름 ABCDEF~1: 실제 설치본의 Bash·PowerShell 실행을 쓰기로 오인하지 않는다', async () => {

@@ -812,14 +812,14 @@ function argsHitHost(args: string[], userData?: string): boolean {
 }
 
 /**
- * 앱 스킬 자리(논문 폴더 밖)의 스크립트를 인터프리터로 여는 호출인가(설계 §4.2-1).
+ * 앱 스킬 자리의 스크립트를 인터프리터로 여는 호출인가(내용 불일치 카드·쓰기 예외용).
  *
  * 스킬이 폴더 밖으로 나갔으므로 `argsInRoot` 만으로는 모든 스킬 실행이 카드가 된다.
  * 인정 범위는 **스크립트 하나 + 그 스크립트의 인자**까지다. 인자 어딘가에 앱 스킬 자리
  * 경로가 또 나오면(예: 스크립트에게 자기 사본을 쓰라고 넘기는 경우) 인정하지 않는다 —
  * 읽기·실행만 예외이고 쓰기는 아니다(`hostWriteDecision` 이 한 번 더 막는다).
  */
-function hostSkillCall(t: string[], userData?: string): boolean {
+function hostScriptInvocation(t: string[], userData?: string): boolean {
   const [exe, script, ...args] = t
   if (!exe || !script) return false
   if (!INTERPRETERS.test(exeName(exe))) return false
@@ -831,6 +831,21 @@ function hostSkillCall(t: string[], userData?: string): boolean {
     for (const piece of argPathPieces(a)) if (isSkillHostPath(piece, userData)) return false
   }
   return true
+}
+
+/** 자동 실행 예외는 지문이 덮는 scripts/ 아래만. 다른 자리의 호출은 불일치 카드로 보낸다. */
+function hostSkillCall(t: string[], userData?: string): boolean {
+  if (!userData || !hostScriptInvocation(t, userData)) return false
+  const ops = pathOpsFor(userData)
+  const scripts = ops.join(skillHostDir(userData), 'scripts')
+  const rel = relIn(ops, scripts, t[1])
+  // installSkill/skillFingerprint가 제외하는 디렉터리 안의 코드는 지문으로 검증되지 않는다.
+  if (!rel || /(^|\/)(__pycache__|\.venv|\.ds_store)(\/|$)/i.test(rel)) return false
+  // scripts/ 안 링크로 뿌리·references/·assets/ 코드를 실행 예외에 끼우지 않는다.
+  // 맥에서 윈도 경로를 판정하는 시험처럼 실제 뿌리를 볼 수 없으면 문자열 경계만 쓴다.
+  if (!existsSync(scripts)) return true
+  const realRel = relIn(ops, realOrSelfDeep(scripts), realOrSelfDeep(t[1]))
+  return !!realRel && !/(^|\/)(__pycache__|\.venv|\.ds_store)(\/|$)/i.test(realRel)
 }
 
 /**
@@ -1335,11 +1350,9 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
 /**
  * 앱 스킬 자리의 스크립트를 여는 호출인가 — Bash·PowerShell 공통(C-01ⓒ).
  *
- * `hostSkillCall` 은 낱말 배열을 받는 판정기다. Bash 는 그대로 쓰고, PowerShell 은 같은 꼴
- * (인터프리터 + 앱 자리 스크립트 + 그 밖 인자)을 낱말 배열로 만들어 **같은 판정기**에 넣는다.
- * 갈래마다 판정기를 따로 두면 한쪽만 지문 대조를 거치는 구멍이 생긴다 — 실제로
- * `powerShellSkillCall` 은 폴더 안 사본만 인정해, 앱 자리(폴더 밖) 스크립트를 여는 호출은
- * 판정 자체를 못 받고 있었다.
+ * `hostScriptInvocation`은 호출 모양을 인식한다. 자동 실행은 별도 `hostSkillCall`이 scripts/
+ * 아래로 좁히지만, 뿌리·references/·assets/에 끼운 스크립트도 내용 불일치 카드를 거쳐야 한다.
+ * 실행 예외의 좁은 조건을 여기 재사용하면 그 파일이 trusted()로 불일치 판정을 건너뛴다.
  *
  * 윈도우 PowerShell 은 `\` 를 구분자로 쓴다(`hostSkillCall` 의 `SKILL_PATH` 는 `/` 만 받는다).
  * 판정 전에 이 조각들만 `/` 로 맞춘다 — 접는 것은 '이게 앱 자리 스크립트인가'를 알아보는
@@ -1353,13 +1366,13 @@ function hostScriptCall(name: string, input: unknown, userData?: string): boolea
   if (typeof raw !== 'string' || !raw.trim()) return false
   if (name === 'Bash') {
     const segs = parseShell(raw)
-    return !!segs?.some((t) => hostSkillCall(t, userData))
+    return !!segs?.some((t) => hostScriptInvocation(t, userData))
   }
   if (!POWERSHELL_TOOLS[name]) return false
   const parsed = powerShellWords(raw)
   if (!parsed?.safe || parsed.words.length < 2) return false
   const [exe, script, ...args] = parsed.words
-  return hostSkillCall([exe, script.replace(/\\/g, '/'), ...args], userData)
+  return hostScriptInvocation([exe, script.replace(/\\/g, '/'), ...args], userData)
 }
 
 /**
@@ -1439,8 +1452,8 @@ export function hostWriteDecision(
   }
   if (!segs) return { behavior: 'deny' as const, message: UNPARSEABLE_SHELL_COPY }
   for (const t of segs) {
-    // 스크립트 호출 자체가 인정되는 모양이면 그 조각은 통과(읽기·실행 예외).
-    if (hostSkillCall(t, userData)) continue
+    // 인터프리터 호출 자체를 쓰기로 오인하지 않는다. 자동 실행 범위·내용 대조는 별도 판정한다.
+    if (hostScriptInvocation(t, userData)) continue
     for (const a of t.slice(1)) {
       for (const piece of argPathPieces(a)) {
         if (isSkillHostPath(piece, userData)) return deny(piece)

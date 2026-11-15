@@ -324,11 +324,15 @@ function skillDigest(source: string): string {
  * 설치본 무결성의 근거가 못 된다 — 동봉본과 파일 내용을 그대로 대조한다.
  *
  * 대상은 스킬이 실제로 싣는 것과 같은 집합이다(`SKILL.md` + `references`/`scripts`/`assets` +
- * 판 metadata). 뿌리에 학생이 둔 다른 파일(`student-note.txt` 등)은 양쪽 모두에서 빠지므로
- * 재설치를 부르지 않는다. 읽기 실패(권한·사라짐)는 불일치로 닫는다.
+ * 판 metadata). Codex 폴더 사본에 학생이 둔 뿌리 파일은 제외하지만, 앱 스킬 자리에는
+ * 설치기가 싣지 않는 항목을 허용하지 않는다. 읽기 실패(권한·사라짐)는 불일치로 닫는다.
  */
 export function sameTreeContent(a: string, b: string): boolean {
-  try { return skillDigest(a) === skillDigest(b) } catch { return false }
+  try {
+    return (!isSkillHostPath(a) || readdirSync(a).every((name) => HOST_ROOT_ENTRIES.has(name)))
+      && (!isSkillHostPath(b) || readdirSync(b).every((name) => HOST_ROOT_ENTRIES.has(name)))
+      && skillDigest(a) === skillDigest(b)
+  } catch { return false }
 }
 
 // ---------------------------------------------------------------- 4. targets + state
@@ -336,6 +340,9 @@ export function sameTreeContent(a: string, b: string): boolean {
 export const VERSION_FILE = '.knuaf-dev-version'
 
 export const SKILL_NAME = 'knuaf-dev'
+
+/** installSkill이 스킬 뿌리에 쓰는 항목만 허용한다. 설치 표식·백업은 이 뿌리 밖이다. */
+const HOST_ROOT_ENTRIES = new Set(['SKILL.md', 'references', 'scripts', 'assets', ...SKILL_METADATA, VERSION_FILE])
 
 /**
  * 이름이 바뀌기 전의 스킬 폴더 이름. 학생 작업폴더에 이미 깔려 있던 것을 그대로 두면
