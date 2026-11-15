@@ -77,6 +77,14 @@ const { READ_TOOLS, WRITE_TOOLS, DENY_FOREIGN_MCP, DENY_NOT_READ, DENY_OUTSIDE_R
  */
 const DISALLOWED_SUBAGENT_TOOLS = ['Agent', 'Task', 'Workflow', 'Skill']
 
+/**
+ * kordoc 쓰기 도구 12개를 제품 상수(`WRITE_TOOLS`)와 따로 고정한다. 기대값을 제품 상수로만
+ * 만들면 제품 목록이 줄 때 실제값과 기대값이 함께 줄어 시험이 통과해 버린다(roh200 I-01).
+ */
+const KORDOC_WRITE_TOOLS = ['fill_form', 'extract_tables', 'place_seal', 'add_memo',
+  'patch_document', 'redact_document', 'render_document', 'crop_regions', 'extract_profile',
+  'generate_document', 'build_agency_pack', 'convert_to_hwpx']
+
 /** 논문 폴더 하나 + 그 밖의 폴더 하나. root 는 realpath 기준으로만 비교된다. */
 function fixtures(tag) {
   const base = tempDir(tag)
@@ -164,9 +172,11 @@ test('E2: spec 이 있으면 mcpServers·strictMcpConfig·disallowedTools·지�
   assert.equal(options.mcpServers.kordoc.timeout, mcp.CLAUDE_MCP_TIMEOUT_MS)
   assert.equal(options.strictMcpConfig, true)
   // 지킴이 잠금(하위 담당 4개)이 **앞**, kordoc 쓰기 12개가 **뒤** — 두 잠금은 합집합이다(01ce608).
-  // 개수만 세면 어느 쪽이 사라져도 통과하므로 순서와 원소를 그대로 고정한다.
+  // 기대값은 시험 안에 따로 고정한 이름으로 만든다 — 제품 목록이 줄거나 바뀌면 깨진다.
+  assert.deepEqual(plain(WRITE_TOOLS), KORDOC_WRITE_TOOLS)
   assert.deepEqual(plain(options.disallowedTools), [...DISALLOWED_SUBAGENT_TOOLS,
-    ...WRITE_TOOLS.map((tool) => `${MCP_TOOL_PREFIX}${tool}`)])
+    ...KORDOC_WRITE_TOOLS.map((tool) => `${MCP_TOOL_PREFIX}${tool}`)])
+  assert.equal(options.disallowedTools.length, 16)
   assert.ok(options.systemPrompt.append.includes(MCP_DOC_READ_INSTRUCTION))
   assert.ok(!options.systemPrompt.append.includes(LEGACY_DOC_READ_INSTRUCTION))
   // OCR 규약(설계 §3.6 밖, 책임자 결정): 생략 호출이 PDF마다 ~1 GiB·30초라 미요청은 `ocr:false` 고정.
