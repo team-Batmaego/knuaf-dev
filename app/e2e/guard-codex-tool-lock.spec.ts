@@ -62,8 +62,94 @@ function configRead(opts: {
   return { config: { mcp_servers: opts.servers ?? {}, plugins: opts.plugins ?? {} }, layers }
 }
 
-/** `plugin/installed` 은 `{data:[…]}` 한 장. */
-const installed = (ids: string[]) => ({ data: ids, nextCursor: null })
+/** 0.164/0.169 실응답: marketplaces 아래 plugins, 페이지 커서 없음. */
+const installed = (ids: string[]) => ({
+  marketplaces: [{ name: 'test-market', path: null, plugins: ids.map((id) => ({ id, installed: true, enabled: true })) }],
+  marketplaceLoadErrors: []
+})
+
+test('v065 여러 마켓의 설치·켜진 플러그인을 합치고 중복과 미설치는 가른다', async () => {
+  const f = fakeRpc({
+    'config/read': () => configRead({ plugins: { 'configured@m': { enabled: true } } }),
+    'plugin/installed': () => ({
+      marketplaces: [
+        { name: 'local', path: '/redacted/marketplace.json', plugins: [
+          { id: 'documents@openai-primary-runtime', installed: true, enabled: true },
+          { id: 'off@m', installed: true, enabled: false }
+        ] },
+        { name: 'remote', path: null, plugins: [
+          { id: 'documents@openai-primary-runtime', installed: true, enabled: true },
+          { id: 'on@m', installed: false, enabled: true },
+          { id: 'catalog-only@m', installed: false, enabled: false }
+        ] }
+      ], marketplaceLoadErrors: []
+    })
+  })
+  const out = expectOk(await appThread(f))
+  if (out.form !== 'app-thread') throw new Error('앱 스레드가 아니에요')
+  expect(out.config.plugins).toEqual(Object.fromEntries(
+    ['configured@m', 'documents@openai-primary-runtime', 'off@m', 'on@m'].map((id) => [id, { enabled: false }])
+  ))
+  expect(f.calls.filter((c) => c.method === 'plugin/installed')).toEqual([{ method: 'plugin/installed', params: {} }])
+})
+
+test('v065 깨끗한 Codex의 빈 marketplaces 응답은 앱·터미널 모두 통과한다', async () => {
+  for (const run of [appThread, terminal]) {
+    const f = fakeRpc({
+      'config/read': () => configRead({}),
+      'plugin/installed': () => ({ marketplaces: [], marketplaceLoadErrors: [] })
+    })
+    expectOk(await run(f))
+  }
+})
+
+for (const [label, response] of Object.entries({
+  'legacy-data': { data: [] },
+  'missing-marketplaces': { marketplaceLoadErrors: [] },
+  'null-marketplaces': { marketplaces: null, marketplaceLoadErrors: [] },
+  'missing-errors': { marketplaces: [] },
+  'null-errors': { marketplaces: [], marketplaceLoadErrors: null },
+  'null-market': { marketplaces: [null], marketplaceLoadErrors: [] },
+  'missing-plugins': { marketplaces: [{}], marketplaceLoadErrors: [] },
+  'null-plugins': { marketplaces: [{ plugins: null }], marketplaceLoadErrors: [] },
+  ...Object.fromEntries([
+    null, {}, 'p', { id: '', installed: true, enabled: true },
+    { id: 'p', enabled: true }, { id: 'p', installed: true },
+    { id: 'p', installed: 'true', enabled: true }, { id: 'p', installed: true, enabled: null }
+  ].map((row, i) => [`bad-row-${i}`, { marketplaces: [{ plugins: [row] }], marketplaceLoadErrors: [] }]))
+})) {
+  test(`v065 알 수 없는 plugin/installed 모양은 빈 목록으로 삼키지 않는다: ${label}`, async () => {
+    const f = fakeRpc({ 'config/read': () => configRead({}), 'plugin/installed': () => response })
+    expectFail(await appThread(f), 'list-shape')
+    expect(f.methods()).not.toContain('mcpServerStatus/list')
+  })
+}
+
+test('v065 마켓 로드 오류로 목록이 불완전하면 앱·터미널을 열지 않는다', async () => {
+  for (const run of [appThread, terminal]) {
+    const f = fakeRpc({
+      'config/read': () => configRead({}),
+      'plugin/installed': () => ({ marketplaces: [], marketplaceLoadErrors: [{ message: 'private diagnostic' }] })
+    })
+    const out = expectFail(await run(f), 'enumeration-failed')
+    expect(out.studentCopy).not.toContain('private diagnostic')
+    expect(f.methods()).not.toContain('mcpServerStatus/list')
+  }
+})
+
+test('v065 터미널은 @ id 를 맨키로 끄고 -c 파싱을 바꾸는 이름은 거부한다', async () => {
+  const f = fakeRpc({
+    'config/read': () => configRead({}),
+    'plugin/installed': () => installed(['documents@openai-primary-runtime'])
+  })
+  const out = expectOk(await terminal(f))
+  if (out.form !== 'terminal') throw new Error('터미널이 아니에요')
+  expect(out.args).toContain('plugins.documents@openai-primary-runtime.enabled=false')
+  for (const id of ['a=b', 'a b', 'a"b', "a'b", 'a\\b', 'a\nb']) {
+    const bad = fakeRpc({ 'config/read': () => configRead({}), 'plugin/installed': () => installed([id]) })
+    expectFail(await terminal(bad), 'uncancellable')
+  }
+})
 /** `mcpServerStatus/list` 한 장. */
 const status = (rows: unknown[]) => ({ data: rows, nextCursor: null })
 const disabled = (name: string) => ({ name, runtimeStatus: 'disabled' })
@@ -305,7 +391,7 @@ test('§10-20 터미널: 사용자 층에 command 가 있는 이름만 -c 로 �
   })
   const out = expectOk(await terminal(f))
   if (out.form !== 'terminal') throw new Error('터미널이 아니에요')
-  expect(out.args).toEqual(['-c', 'mcp_servers.keep.enabled=false', '-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false'])
+  expect(out.args).toEqual(['-c', 'mcp_servers.keep.enabled=false', '-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false', '-c', 'features.plugins=false'])
   expect(out.lockedNames).toEqual(['keep'])
 })
 
@@ -369,7 +455,7 @@ test('§10-20 터미널: 유효값이 이미 꺼진 이름은 거부 사유가 �
   })
   const out = expectOk(await terminal(f))
   if (out.form !== 'terminal') throw new Error('터미널이 아니에요')
-  expect(out.args).toEqual(['-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false'])
+  expect(out.args).toEqual(['-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false', '-c', 'features.plugins=false'])
 })
 
 test('§10-20 터미널: 설치 목록에만 있는 플러그인도 -c 로 끈다(맨키)', async () => {
@@ -379,7 +465,7 @@ test('§10-20 터미널: 설치 목록에만 있는 플러그인도 -c 로 끈�
   })
   const out = expectOk(await terminal(f))
   if (out.form !== 'terminal') throw new Error('터미널이 아니에요')
-  expect(out.args).toEqual(['-c', 'plugins.remote-plugin.enabled=false', '-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false'])
+  expect(out.args).toEqual(['-c', 'plugins.remote-plugin.enabled=false', '-c', 'project_doc_max_bytes=0', '-c', 'features.apps=false', '-c', 'features.plugins=false'])
   // 따옴표 키는 새 키만 만들고 조용히 안 꺼진다(2차 ③).
   expect(out.args.join(' ')).not.toContain('"')
 })
@@ -538,7 +624,7 @@ test('I-01 plugins 가 배열이면 거부다', async () => {
 test('I-01 plugin/installed 행이 null·빈 객체면 건너뛰지 않고 거부한다', async () => {
   const f = fakeRpc({
     'config/read': () => ({ config: { mcp_servers: {}, plugins: {} }, layers: [] }),
-    'plugin/installed': () => ({ data: [null, {}], nextCursor: null })
+    'plugin/installed': () => ({ marketplaces: [{ plugins: [null, {}] }], marketplaceLoadErrors: [] })
   })
   expectFail(await appThread(f), 'list-shape')
 })
@@ -555,12 +641,12 @@ test('I-01 앱 스레드 경로에서도 plugins 가 null 이면 거부한다', 
 test('I-01 앱 스레드 경로에서 설치 행이 모양을 갖추지 못하면 거부한다', async () => {
   const f = fakeRpc({
     'config/read': () => configRead({ servers: {}, plugins: {} }),
-    'plugin/installed': () => ({ data: [{}], nextCursor: null })
+    'plugin/installed': () => ({ marketplaces: [{ plugins: [{}] }], marketplaceLoadErrors: [] })
   })
   expectFail(await appThread(f), 'list-shape')
 })
 
-test('I-01 대조군: 키가 없는 병합 설정과 문자열 설치 id 는 종전대로 통과한다', async () => {
+test('I-01 대조군: 키가 없는 병합 설정과 설치 플러그인 행은 통과한다', async () => {
   const f = fakeRpc({
     'config/read': () => ({ config: {}, layers: [] }),
     'plugin/installed': () => installed(['p1'])
@@ -572,7 +658,7 @@ test('I-01 대조군: 키가 없는 병합 설정과 문자열 설치 id 는 종
   expect(out.config.plugins).toEqual({ p1: { enabled: false } })
 })
 
-test('I-01 대조군: 문자열 설치 id 목록은 그대로 읽는다', async () => {
+test('I-01 대조군: 설치 플러그인 행을 빠짐없이 읽는다', async () => {
   const f = fakeRpc({
     'config/read': () => configRead({ servers: {}, plugins: {} }),
     'plugin/installed': () => installed(['p1', 'p2'])
