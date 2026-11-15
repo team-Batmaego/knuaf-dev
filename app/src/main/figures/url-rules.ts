@@ -11,6 +11,11 @@
 
 export const RULE_LEGACY = 'page_kogl_applies_to_body_images'
 export const RULE_PAGE_QUERY = 'page_query_kogl_applies_to_body_images'
+export const RULE_PAGE_QUERY_ORG = 'page_query_kogl_org_applies_to_body_images'
+
+export function isQueryRule(rule: string): boolean {
+  return rule === RULE_PAGE_QUERY || rule === RULE_PAGE_QUERY_ORG
+}
 
 export type QuerySpec =
   | { kind: 'literal'; value: string }
@@ -29,6 +34,12 @@ export interface FigureRule {
   rule: string
   pageQuery?: ReadonlyMap<string, QuerySpec>
   evidence?: string
+  orgAliases?: readonly string[]
+  bodyStart?: string
+  bodyEnd?: string
+  orgTerms?: readonly string[]
+  creditWords?: readonly string[]
+  latinOk?: ReadonlySet<string>
   note?: string
 }
 
@@ -115,7 +126,7 @@ export function selectPageRule(raw: string, rules: readonly FigureRule[]): Figur
   const strict = strictPage(raw)
   let legacy: ParsedUrl | undefined
   for (const rule of rules) {
-    if (rule.rule === RULE_PAGE_QUERY) {
+    if (isQueryRule(rule.rule)) {
       if (strict && strict.host === rule.host && matchesPath(rule.pagePath, strict.path) && matchesQuery(rule, strict.query)) {
         return rule
       }
@@ -134,7 +145,7 @@ export function pageHopAllowed(rule: FigureRule, url: URL): boolean {
 
 /** 그림은 페이지에서 고른 항목의 imagePath만 본다. 그림 쿼리는 검사하지 않는다. */
 export function imageAllowedByRule(rule: FigureRule, url: URL): boolean {
-  return (rule.rule === RULE_LEGACY || rule.rule === RULE_PAGE_QUERY) &&
+  return (rule.rule === RULE_LEGACY || isQueryRule(rule.rule)) &&
     normalizedHost(url.hostname) === rule.host && matchesPath(rule.imagePath, url.pathname)
 }
 

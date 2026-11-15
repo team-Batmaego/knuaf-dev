@@ -1,6 +1,7 @@
 import type * as candidatesTypes from './candidates'
 import type * as contractTypes from './contract'
 import type * as urlRulesTypes from './url-rules'
+import type * as rulesTypes from './rules'
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -42,4 +43,30 @@ describe('extractCandidates — shared P1.1 vectors', () => {
       assert.doesNotMatch(JSON.stringify(found), /이전 지시|사이트 지시|\u202e|😀/)
     })
   }
+})
+
+// Static imports resolve before registerHooks, so load app modules only after hook registration.
+const orgRules = await import(new URL('./rules.ts', import.meta.url).href) as typeof rulesTypes
+const orgVectors = JSON.parse((await readFile(new URL('./fixtures/org-vectors.json', import.meta.url), 'utf8'))
+  .replace(/\{\{(.)\*(\d+)\}\}/g, (_all, char: string, count: string) => char.repeat(Number(count)))) as {
+  pageUrl: string
+  rules: unknown
+  candidate: [string, { url: string; credit: 'none' | 'credit' }[], string][]
+}
+describe('RDA — shared candidate vectors', () => {
+  const [rule] = orgRules.parseRules(JSON.stringify(orgVectors.rules))
+  assert.ok(rule)
+  for (const [template, expected, memo] of orgVectors.candidate) {
+    it(memo, () => {
+      const html = template.replaceAll('{B}', rule.bodyStart!).replaceAll('{M}', rule.bodyEnd!)
+      assert.deepEqual(extractCandidates(html, new URL(orgVectors.pageUrl), rule), {
+        candidates: expected, candidatesTruncated: false
+      })
+    })
+  }
+  it('explicit credit anywhere in the body marks all candidates, even far away', () => {
+    const html = `${rule.bodyStart}<img src="/files/a.png">${'x'.repeat(1500)}<p>ⓒ 2026</p>${rule.bodyEnd}`
+    assert.deepEqual(extractCandidates(html, new URL(orgVectors.pageUrl), rule).candidates,
+      [{ url: 'https://www.example.go.kr/files/a.png', credit: 'credit' }])
+  })
 })

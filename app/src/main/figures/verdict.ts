@@ -64,6 +64,11 @@ export function readKogl(html: string): KoglReading {
 
 const CREDIT_RE = /(사진\s*제공|이미지\s*제공|자료\s*제공|출처\s*[:：]|ⓒ|\(c\)\s*\d{4}|copyright)/i
 
+/** The same explicit-rights vocabulary is reused for the entire new-rule body. */
+export function hasCreditMark(text: string): boolean {
+  return CREDIT_RE.test(text)
+}
+
 /** 페이지 HTML에서 찾은 그림 하나 — 푼 URL과 그 태그의 원문 자리. */
 export interface ImageOccurrence {
   /** `<img`/`<a` 가 시작하는 원문 위치. 제3자 표기 창의 기준점이다. */
@@ -118,6 +123,9 @@ function urlOf(value: string): URL | null {
   try {
     const url = new URL(value)
     url.hash = ''
+    // Comparison keys only: never feed these spellings into GET, path rules, or receipts (I03).
+    url.pathname = url.pathname.replace(/\[/g, '%5B').replace(/\]/g, '%5D').replace(/%[0-9a-fA-F]{2}/g, (part) => part.toUpperCase())
+    url.search = url.search.replace(/%[0-9a-fA-F]{2}/g, (part) => part.toUpperCase())
     return url
   } catch {
     return null
@@ -172,6 +180,7 @@ export interface VerdictInput {
   present: boolean
   /** 그림 태그 자리의 제3자 표기. `unknown`은 기준 태그를 못 정했다는 뜻 — 승인하지 않는다. */
   thirdPartyCredit: CreditReading
+  thirdPartyOrg: 'skip' | 'none' | 'hit' | 'unknown'
   kogl: KoglReading
   /** 리다이렉트 사슬에 규칙 밖 호스트가 있었는가(받기 단계에서 이미 거절되지만 판정에도 남긴다). */
   finalUrlAllowed: boolean
@@ -203,6 +212,8 @@ export function decide(input: VerdictInput): Verdict {
   // 기준 태그를 못 정했으면 표기 유무를 모른다 — 모르는 것을 "없음"으로 읽지 않는다(B-2).
   if (input.thirdPartyCredit === 'unknown') return { ...base, verdict: 'ambiguous', reason: 'third_party_unknown' }
   if (input.thirdPartyCredit === 'credit') return { ...base, verdict: 'ambiguous', reason: 'third_party_credit' }
+  if (input.thirdPartyOrg === 'unknown') return { ...base, verdict: 'ambiguous', reason: 'third_party_unknown' }
+  if (input.thirdPartyOrg === 'hit') return { ...base, verdict: 'ambiguous', reason: 'third_party_org' }
   if (input.kogl.problem !== 'ok' || input.kogl.type === null) {
     return { ...base, verdict: 'ambiguous', reason: `kogl_${input.kogl.problem}` }
   }
