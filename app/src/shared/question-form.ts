@@ -28,7 +28,8 @@ export function parseQuestionForm(text: string): ParsedForm | null {
     if (!line.trim()) continue
     const numbered = line.match(/^\s*(\d+)([.)])\s*(.*)$/)
     if (numbered) {
-      if (ended || Number(numbered[1]) !== fields.length + 1 || fields.length === 6) return null
+      // `)`는 선택지와 입력 칸을 구별할 수 없다. 혼합 목록도 일부만 폼으로 만들지 않는다.
+      if (numbered[2] !== '.' || ended || Number(numbered[1]) !== fields.length + 1 || fields.length === 6) return null
       const content = numbered[3].replace(/\*\*|__/g, '')
       const variant = content.match(/^([^():—]+?)\s*(?:\(([^()]*)\))?\s+—\s+(.+)$/)
       const label = variant ? null : content.match(/^([^()]+?)(?:\s*\(([^()]*)\)|:\s+(.+))?\s*$/)

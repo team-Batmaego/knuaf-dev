@@ -84,8 +84,8 @@ export interface FormFold { spans: FoldSpan[]; count: number }
 
 /** `[Qn] 제목` — `question-form.ts` 가 읽는 머리 줄과 같은 모양(굵게 표시는 걷어 낸다). */
 const HEADER = /^\s*\[Q\d+(?:-\d+)?\]\s*\S/
-/** `question-form.ts` 와 같은 규칙 — **마침표만** 인정한다(`2)` 는 파서가 거부한다). */
-const FIELD = /^\s*(\d+)\.\s*\S/
+/** `)`도 감지해 목록 전체를 거부한다 — 일부 칸만 접어 선택 의미를 바꾸지 않는다. */
+const FIELD = /^\s*(\d+)([.)])\s*\S/
 
 /** 이어진 줄 번호들을 `{start,end}` 구간으로 묶는다. */
 function coalesce(lines: number[]): FoldSpan[] {
@@ -122,7 +122,7 @@ export function formFold(text: string): FormFold | null {
     if (HEADER.test(line)) return null
     const numbered = line.match(FIELD)
     if (numbered) {
-      if (ended || numbered[1] !== String(fields + 1) || fields === 6) return null
+      if (numbered[2] !== '.' || ended || numbered[1] !== String(fields + 1) || fields === 6) return null
       fields++
       inField = true
       hide.push(i)

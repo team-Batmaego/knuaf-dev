@@ -21,11 +21,11 @@ export const STEP_NAMES: readonly string[] = [
 ]
 
 // ---------------------------------------------------------------------------
-// 정규식 — IMPL-T1 §3-2 그대로. 굵게 **·__를 걷은 줄에 적용한다.
+// 정규식 — 굵게 **·__를 걷고, 이름 내부 범위와 메모 구분을 구별한다.
 // ---------------------------------------------------------------------------
 
 const TITLE = /^\s*창업논문 진행 목록\s*[·:：-]\s*(\d+)단계 중\s*([1-7])(?:\s*[–~-]\s*([1-7]))?단계/
-const STEP_ONE = /^\s*([✓▶○])\s*([1-7])[.)]?\s+([^\d—–:\s][^—–:]*?)\s*(?:(?:—|–|:|：|-)\s*(.*))?$/
+const STEP_ONE = /^\s*([✓▶○])\s*([1-7])[.)]?\s+([^\d—:：\s][^—:：]*?)\s*(?:(?:—|:|：|\s+[–-]\s+)\s*(.*))?$/
 // 범위 줄: 기호 a[–b]단계 [남음|끝남] [— 메모]
 const STEP_RANGE = /^\s*([✓▶○])\s*([1-7](?:\s*[·,]\s*[1-7])*(?:\s*[–~-]\s*[1-7])?)단계(?:\s*(남음|끝남))?\s*(?:(?:—|–|:|：|-)\s*(.*))?$/
 const FLAG = /^\s*⚑\s*(.+)$/
@@ -156,7 +156,9 @@ function parseOneBlock(lines: string[], t: number): OneBlockParse | null {
     if ((m = l.match(STEP_ONE))) {
       const [, sym, n, name, note] = m
       const idx = Number(n)
-      const cleanName = name.replace(/\s+(?:끝|완료)$/, '').trim()
+      const completed = /\s+(?:끝|완료)$/.test(name)
+      if (completed && sym !== '✓') return null
+      const cleanName = completed ? name.replace(/\s+(?:끝|완료)$/, '').trim() : name.trim()
       const equivalent = idx === 4 && cleanName === '본문 초안' ? '본문 Ⅰ~Ⅵ 초안' : cleanName
       if (normName(equivalent) !== normName(STEP_NAMES[idx - 1])) return null
       if (state[idx] !== undefined) return null
@@ -185,7 +187,8 @@ function parseOneBlock(lines: string[], t: number): OneBlockParse | null {
   if (nowList.length === 1 && (nowList[0] !== title[0] || nowList[0] !== title[1])) return null
   if (nowList.length > 1 && nowList[0] !== title[0]) return null
   // 유효 조건 ②: ▶ 하나 이상이거나 모두 ✓.
-  // Explicit ▶ rows are the source of truth; prose title ranges can lag them.
+  if (nowList.length === 0 && !state.slice(1).every((s) => s === 'done')) return null
+  // 여러 ▶가 있으면 제목 상한 대신 명시된 ▶ 중 최대를 표시한다.
   const steps: ProgressStep[] = [1, 2, 3, 4, 5, 6, 7].map((n) => {
     const step: ProgressStep = { n, state: state[n]! }
     if (notes[n] !== undefined) step.note = notes[n]
