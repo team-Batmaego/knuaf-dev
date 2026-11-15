@@ -1,16 +1,16 @@
 {
   "schema": 1,
   "app": {
-    "latest": "0.6.3",
-    "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.3",
+    "latest": "0.6.4",
+    "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.6.4",
     "win32-x64": {
-      "manifest": "eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYtYXBwIiwidmVyc2lvbiI6IjAuNi4zIiwicGxhdGZvcm0iOiJ3aW4zMi14NjQiLCJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vdGVhbS1CYXRtYWVnby9rbnVhZi1kZXYvcmVsZWFzZXMvZG93bmxvYWQvdjAuNi4zL2tudWFmLWRldi0wLjYuMy14NjQuZXhlIiwic2l6ZSI6MzU1MTQ4Mjg3LCJzaGEyNTYiOiJhOTg2ODI1M2I1ZGZjMmZkMWQxZGI3NmIyMGFmYWIyM2M1ZTM2ODE4OTUzZGY2NzBlMzIwZDYwOTlmM2Q0ZjZhIn0=",
-      "sig": "93KeYfetnxJEm9cpcKshJJGd09MrHVe3nmQpdPzgo7zShxKfVzp2K8grdupCvJTU8DWORbV+0OclsfhVXrIdCw==",
-      "version": "0.6.3",
+      "manifest": "eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYtYXBwIiwidmVyc2lvbiI6IjAuNi40IiwicGxhdGZvcm0iOiJ3aW4zMi14NjQiLCJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vdGVhbS1CYXRtYWVnby9rbnVhZi1kZXYvcmVsZWFzZXMvZG93bmxvYWQvdjAuNi40L2tudWFmLWRldi0wLjYuNC14NjQuZXhlIiwic2l6ZSI6MzU1NDIyMTAzLCJzaGEyNTYiOiJjZGE0OGVkNmZlNGU5NmI0MTI4NjY2ZTk3MTc4MGU2OTFjNTAwMWFjMmRmZDgxMzVlZTM5MmYzNmFjMWY4NzM0In0=",
+      "sig": "YjnkahCM+XT445XENjSy6J9EiY1nsu+bBXm2UDK6l8Pftz6x8BTcB/Vud7u2imVSGFgqJ0fKG6Sd5wLXaj4oCA==",
+      "version": "0.6.4",
       "platform": "win32-x64",
-      "url": "https://github.com/team-Batmaego/knuaf-dev/releases/download/v0.6.3/knuaf-dev-0.6.3-x64.exe",
-      "size": 355148287,
-      "sha256": "a9868253b5dfc2fd1d1db76b20afab23c5e36818953df670e320d6099f3d4f6a"
+      "url": "https://github.com/team-Batmaego/knuaf-dev/releases/download/v0.6.4/knuaf-dev-0.6.4-x64.exe",
+      "size": 355422103,
+      "sha256": "cda48ed6fe4e96b4128666e971780e691c5001ac2dfd8135ee392f36ac1f8734"
     }
   },
   "skill": {
