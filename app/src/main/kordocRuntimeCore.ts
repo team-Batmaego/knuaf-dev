@@ -14,7 +14,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import { KORDOC_INSTALL_DIR_RE, STAMP, stampState } from './runtimeStore'
 import type { Stamp } from './runtimeStore'
@@ -408,17 +408,17 @@ export interface Lock { path: string; token: string }
  */
 export function isLockStale(text: string, now: number, pidAlive: (pid: number) => boolean, beatAt: number | null): boolean {
   let parsed: unknown
+  const incompleteIsStale = beatAt !== null && now - beatAt > LOCK_STALE_MS
   try {
     parsed = JSON.parse(text)
   } catch {
-    return true
+    return incompleteIsStale
   }
-  if (!parsed || typeof parsed !== 'object') return true
-  const { pid } = parsed as Record<string, unknown>
-  if (typeof pid !== 'number') return true
+  if (!parsed || typeof parsed !== 'object') return incompleteIsStale
+  const { pid, token } = parsed as Record<string, unknown>
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || typeof token !== 'string' || !token) return incompleteIsStale
   if (!pidAlive(pid)) return true
-  if (beatAt === null) return true
-  return now - beatAt > LOCK_STALE_MS
+  return incompleteIsStale
 }
 
 function readLock(path: string): { token: string } | null {
@@ -437,35 +437,89 @@ export function lockHeld(lock: Lock): boolean {
   return readLock(lock.path)?.token === lock.token
 }
 
-/**
- * `<뿌리>/.lock` 을 배타 생성(`wx`). 못 쥐면 `null` — 설치는 "다른 쪽이 하는 중", 정리는 건너뛴다.
- * 쥔 뒤에는 `startLockBeat` 로 맥박을 뛰게 한다.
- */
+interface LockSnapshot { text: string; dev: number; ino: number; beatAt: number }
+
+/** 같은 열린 파일에서 소유자와 지문을 읽는다. 경로가 도중 교체돼도 서로 다른 세대를 섞지 않는다. */
+function lockSnapshot(path: string): LockSnapshot | null {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const text = readFileSync(fd, 'utf8')
+    const stat = fstatSync(fd)
+    return { text, dev: stat.dev, ino: stat.ino, beatAt: stat.mtimeMs }
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/** 같은 잠금 세대의 회수·해제를 직렬화한다. claim도 완성한 JSON을 배타 게시한다. */
+function detachLock(path: string, observed: LockSnapshot, mayDetach: (current: LockSnapshot) => boolean): boolean {
+  const claimBase = `${path}-claim-${observed.dev}-${observed.ino}`
+  let claim = claimBase
+  const pending = `${claimBase}-${randomUUID()}`
+  const claimBody = JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: randomUUID() })
+  let owned = false
+  try {
+    writeFileSync(pending, claimBody, { flag: 'wx' })
+    // 죽은 claim은 다음 배타 슬롯으로 넘긴다. 옛 슬롯을 지우면 늦은 회수자가 새 claim을
+    // rename할 수 있으므로 증거를 남긴다. 모든 경쟁자는 같은 다음 슬롯에서 경합한다.
+    for (let generation = 0; ; generation++) {
+      claim = `${claimBase}-${generation}`
+      try { linkSync(pending, claim); owned = true; break } catch { /* 소유자 확인 */ }
+      const abandoned = lockSnapshot(claim)
+      if (!abandoned) return false
+      let owner: { pid?: number; startedAt?: number }
+      try { owner = JSON.parse(abandoned.text) } catch { return false }
+      if (!owner || !Number.isInteger(owner.pid) || owner.pid! <= 0 || typeof owner.startedAt !== 'number' || Date.now() - owner.startedAt <= 10 * 60 * 1000) return false
+      try { process.kill(owner.pid!, 0); return false } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false
+      }
+    }
+    const current = lockSnapshot(path)
+    if (!current || current.dev !== observed.dev || current.ino !== observed.ino || current.text !== observed.text || !mayDetach(current)) return false
+    const detached = `${path}-retired-${randomUUID()}`
+    renameSync(path, detached)
+    const moved = lockSnapshot(detached)
+    if (!moved || moved.dev !== observed.dev || moved.ino !== observed.ino || moved.text !== observed.text) {
+      try { linkSync(detached, path) } catch { /* 새 소유자를 덮지 않는다 */ }
+      return false
+    }
+    try { rmSync(detached) } catch { /* 격리된 옛 세대 */ }
+    return true
+  } catch {
+    return false
+  } finally {
+    if (owned) {
+      try { if (readFileSync(claim, 'utf8') === claimBody) rmSync(claim) } catch { /* 다음에 죽은 claim 회수 */ }
+    }
+    try { rmSync(pending, { force: true }) } catch { /* 개인 임시 파일 */ }
+  }
+}
+
+/** 완성한 소유자 JSON을 hard link로 배타 게시한다. .lock에 빈 JSON 생성창이 없다. */
 export function acquireLock(root: string, now: number, pidAlive: (pid: number) => boolean): Lock | null {
   const path = join(root, LOCK)
   const token = randomUUID()
-  const body = JSON.stringify({ token, pid: process.pid, startedAt: now })
+  const pending = `${path}-pending-${token}`
   try {
-    writeFileSync(path, body, { encoding: 'utf-8', flag: 'wx' })
-    return { path, token }
-  } catch {
-    // 이미 있다 — 낡았으면 지우고 한 번 더.
-  }
-  let existing = ''
-  let beatAt: number | null = null
-  try {
-    existing = readFileSync(path, 'utf-8')
-    beatAt = statSync(path).mtimeMs
-  } catch {
-    return null
-  }
-  if (!isLockStale(existing, now, pidAlive, beatAt)) return null
-  try { rmSync(path, { force: true }) } catch { return null }
-  try {
-    writeFileSync(path, body, { encoding: 'utf-8', flag: 'wx' })
-    return { path, token }
+    writeFileSync(pending, JSON.stringify({ token, pid: process.pid, startedAt: now }), { encoding: 'utf-8', flag: 'wx' })
+    try {
+      linkSync(pending, path)
+      return { path, token }
+    } catch { /* 이미 있으면 관찰한 그 세대만 회수한다 */ }
+    const observed = lockSnapshot(path)
+    if (!observed || !isLockStale(observed.text, now, pidAlive, observed.beatAt)) return null
+    if (!detachLock(path, observed, (current) => isLockStale(current.text, now, pidAlive, current.beatAt))) return null
+    try {
+      linkSync(pending, path)
+      return { path, token }
+    } catch { return null }
   } catch {
     return null
+  } finally {
+    try { rmSync(pending, { force: true }) } catch { /* 미게시 개인 임시 파일 */ }
   }
 }
 
@@ -485,8 +539,9 @@ export function startLockBeat(lock: Lock, beatMs = LOCK_BEAT_MS): () => void {
 /** 놓을 때 — `token` 이 내 것일 때만 지운다. 아니면(누가 넘겨받았다) 손대지 않는다(§4.6). */
 export function releaseLock(lock: Lock | null): void {
   if (!lock) return
-  if (!lockHeld(lock)) return
-  try { rmSync(lock.path, { force: true }) } catch { /* 다음 시작에 낡은 잠금으로 넘겨받는다 */ }
+  const observed = lockSnapshot(lock.path)
+  if (!observed || readLock(lock.path)?.token !== lock.token) return
+  detachLock(lock.path, observed, () => readLock(lock.path)?.token === lock.token)
 }
 
 export interface CleanupDeps {

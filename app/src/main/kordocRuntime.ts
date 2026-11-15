@@ -14,7 +14,7 @@
  */
 import { app, net } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import type { KordocRuntime } from './chat/kordocMcp'
 import { diag } from './diagLog'
@@ -126,7 +126,8 @@ function pidAlive(pid: number): boolean {
  * 실제 한 파일을 만들어 본다. 인자는 배열 그대로 넘긴다(`shell: false`).
  */
 function smoke(execPath: string, dir: string, cli: string, signal?: AbortSignal): Promise<void> {
-  const box = join(dir, '.smoke')
+  let box: string
+  try { box = mkdtempSync(join(dir, '.s-')) } catch (error) { return Promise.reject(error) }
   const input = join(box, 'in.md')
   const output = join(box, 'out.hwpx')
   const { promise, resolve: done, reject } = Promise.withResolvers<void>()
@@ -152,7 +153,7 @@ function smoke(execPath: string, dir: string, cli: string, signal?: AbortSignal)
   const cancel = (): void => stop(new Error('kordoc 확인 실행 취소'))
   const timer = setTimeout(() => stop(new Error('kordoc 확인 실행 시간 초과')), SMOKE_TIMEOUT_MS)
   try {
-    mkdirSync(box, { recursive: true })
+    // mkdtemp로 만든 이 검증의 폴더만 쓰고 정리한다(다른 프로세스와 공유하지 않음).
     writeFileSync(input, '# 확인\n\n한 줄.\n', 'utf-8')
   } catch (error) {
     finish(error instanceof Error ? error : new Error(String(error)))

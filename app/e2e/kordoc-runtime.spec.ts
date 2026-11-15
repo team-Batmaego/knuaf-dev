@@ -4,10 +4,10 @@
 // 경로·시계·내려받기·압축 풀기·돌려 보기·여유 공간은 모두 인자로 갈아 끼운다.
 // Electron 다리도 같은 VM 로더로 호출한다. 네트워크·자식은 격리하되 시작 작업과 종료 순서는 실제 코드를 쓴다.
 import { expect, test } from '@playwright/test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -645,7 +645,8 @@ test('잠금: 맥박이 5분 넘게 멎거나 pid 가 죽었으면 넘겨받는�
   expect(isLockStale(text, NOW, () => true, NOW)).toBe(false)
   expect(isLockStale(text, NOW, () => true, NOW - 6 * 60 * 1000)).toBe(true)
   expect(isLockStale(text, NOW, () => false, NOW)).toBe(true)
-  expect(isLockStale('{ not json', NOW, () => true, NOW)).toBe(true)
+  expect(isLockStale('{ not json', NOW, () => true, NOW)).toBe(false)
+  expect(isLockStale('{ not json', NOW, () => true, NOW - 6 * 60 * 1000)).toBe(true)
 
   const root = tmpRoot()
   writeFileSync(join(root, '.lock'), JSON.stringify({ token: 'x', pid: 4242, startedAt: 0 }), 'utf-8')
@@ -738,7 +739,8 @@ test('smoke: 시간 초과·취소는 자식 close 뒤 정리하고, 빈 산출�
     let settled = false
     const result = adapter.testSmoke('/fake/electron', root, join(root, CLI), abort.signal)
       .then(() => { settled = true; return 'ok' }, (error: Error) => { settled = true; return error.message })
-    const box = join(root, '.smoke')
+    const box = dirname(args[4])
+    expect(box.startsWith(join(root, '.s-'))).toBe(true)
     expect(args).toEqual(['-r', join(root, SHIM_NAME), join(root, CLI), 'generate', join(box, 'in.md'), '-o', join(box, 'out.hwpx')])
     if (mode === 'timeout') timeout!()
     if (mode === 'cancel') abort.abort()
@@ -781,4 +783,168 @@ test('설치: 취소는 진행 중인 자식이 끝날 때까지 폴더를 지�
   closed.resolve()
   await expect(result).rejects.toMatchObject({ code: 'runtime_cancelled' })
   expect(existsSync(join(root, installDirName(TARGET_SHA, NOW)))).toBe(false)
+})
+
+/** 실제 자식에서 동일 코어/다리 소스를 실행한다. TS 변환 산출물은 실행 전용 임시 폴더뿐이다. */
+function processFixture(): string {
+  const root = tmpRoot('kd-process-')
+  for (const name of ['runtimeStore', 'kordocRuntimeCore', 'kordocRuntime']) {
+    const source = readFileSync(join(__dirname, `../src/main/${name}.ts`), 'utf8')
+    writeFileSync(join(root, `${name}.js`), transpileModule(source, {
+      compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+    }).outputText + (name === 'kordocRuntime' ? '\nexports.testSmoke = smoke;\n' : ''))
+  }
+  return root
+}
+
+interface ProcessHarness { child: ChildProcess; next: () => Promise<unknown>; done: Promise<void> }
+function childHarness(modules: string, body: string, data: Record<string, unknown> = {}): ProcessHarness {
+  const child = spawn(process.execPath, ['-e', `
+    const fs = require('node:fs'), path = require('node:path');
+    const core = require(process.env.KD_MODULES + '/kordocRuntimeCore.js');
+    const data = JSON.parse(process.env.KD_DATA);
+    const send = value => process.send(value);
+    const next = () => { const p = Promise.withResolvers(); process.once('message', p.resolve); return p.promise; };
+    const alive = pid => { try { process.kill(pid, 0); return true } catch (e) { return e.code !== 'ESRCH' } };
+    (async () => { ${body} })().then(() => process.disconnect(), error => { console.error(error); process.exitCode = 1; process.disconnect(); });
+  `], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'], env: { ...process.env, KD_MODULES: modules, KD_DATA: JSON.stringify(data) } })
+  const queue: unknown[] = []
+  const waiters: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = []
+  let stderr = ''
+  child.stderr!.on('data', (chunk) => { stderr += String(chunk) })
+  child.on('message', (value) => { const waiter = waiters.shift(); if (waiter) waiter.resolve(value); else queue.push(value) })
+  const exit = Promise.withResolvers<void>()
+  child.on('error', exit.reject)
+  child.on('close', (code) => {
+    if (code === 0) exit.resolve()
+    else exit.reject(new Error(`child exit ${code}: ${stderr}`))
+    for (const waiter of waiters.splice(0)) waiter.reject(new Error(`child closed before message: ${stderr}`))
+  })
+  // 실패 중 teardown에서도 거절이 누출되지 않는다.
+  void exit.promise.catch(() => {})
+  return {
+    child,
+    next: () => {
+      const result = Promise.withResolvers<unknown>()
+      if (queue.length) result.resolve(queue.shift())
+      else waiters.push(result)
+      return result.promise
+    },
+    done: exit.promise
+  }
+}
+
+test('다중 프로세스: 생성 중 빈 잠금은 회수하지 않고 기록한 소유자를 보존한다', async () => {
+  const modules = processFixture(), root = tmpRoot()
+  const writer = childHarness(modules, `
+    const file = path.join(data.root, '.lock');
+    const fd = fs.openSync(file, 'wx');
+    send('created'); await next();
+    fs.writeFileSync(fd, JSON.stringify({ token: 'writer', pid: process.pid, startedAt: Date.now() }));
+    fs.closeSync(fd); send('written'); await next();
+  `, { root })
+  let contender: ProcessHarness | undefined
+  try {
+    expect(await writer.next()).toBe('created')
+    contender = childHarness(modules, `send(core.acquireLock(data.root, Date.now(), alive));`, { root })
+    expect(await contender.next()).toBeNull()
+    await contender.done
+    writer.child.send('write')
+    expect(await writer.next()).toBe('written')
+    expect(JSON.parse(readFileSync(join(root, '.lock'), 'utf8')).token).toBe('writer')
+    writer.child.send('finish')
+    await writer.done
+  } finally { writer.child.kill(); contender?.child.kill() }
+})
+
+test('다중 프로세스: 같은 낡은 잠금을 본 회수자 둘 중 하나만 진입한다', async () => {
+  const modules = processFixture(), root = tmpRoot()
+  writeFileSync(join(root, '.lock'), JSON.stringify({ token: 'dead', pid: 99999999, startedAt: 0 }))
+  const gate = join(root, 'race-go')
+  const racers = [0, 1].map(() => childHarness(modules, `
+    let observed = false;
+    const lock = core.acquireLock(data.root, Date.now(), pid => {
+      if (!observed && pid === 99999999) {
+        observed = true; send('observed');
+        const deadline = Date.now() + 10000;
+        const wait = new Int32Array(new SharedArrayBuffer(4));
+        while (!fs.existsSync(data.gate)) {
+          if (Date.now() > deadline) throw Error('race barrier timeout');
+          Atomics.wait(wait, 0, 0, 5);
+        }
+      }
+      return alive(pid);
+    });
+    send(lock); await next();
+    if (lock) core.releaseLock(lock);
+  `, { root, gate }))
+  try {
+    expect(await Promise.all(racers.map((h) => h.next()))).toEqual(['observed', 'observed'])
+    writeFileSync(gate, '')
+    const results = await Promise.all(racers.map((h) => h.next())) as Array<{ token: string } | null>
+    expect(results.filter(Boolean)).toHaveLength(1)
+    expect(JSON.parse(readFileSync(join(root, '.lock'), 'utf8')).token).toBe(results.find(Boolean)!.token)
+    for (const h of racers) h.child.send('finish')
+    await Promise.all(racers.map((h) => h.done))
+  } finally { for (const h of racers) h.child.kill() }
+})
+
+test('다중 프로세스: 죽은 오래된 claim만 넘겨받고 살아 있는 claim은 보존한다', async () => {
+  const modules = processFixture()
+  for (const live of [false, true]) {
+    const root = tmpRoot(), file = join(root, '.lock')
+    writeFileSync(file, JSON.stringify({ token: 'dead', pid: 99999999, startedAt: 0 }))
+    const stat = statSync(file), claim = `${file}-claim-${stat.dev}-${stat.ino}-0`
+    const owner = childHarness(modules, `send(process.pid); await next();`)
+    try {
+      const pid = await owner.next() as number
+      if (!live) { owner.child.send('exit'); await owner.done }
+      const body = JSON.stringify({ pid, startedAt: Date.now() - 11 * 60 * 1000, token: 'claim-owner' })
+      writeFileSync(claim, body)
+      const contender = childHarness(modules, `const lock = core.acquireLock(data.root, Date.now(), alive); send(lock); await next(); if (lock) core.releaseLock(lock);`, { root })
+      try {
+        const lock = await contender.next()
+        expect(Boolean(lock)).toBe(!live)
+        expect(readFileSync(claim, 'utf8')).toBe(body)
+        contender.child.send('finish'); await contender.done
+      } finally { contender.child.kill() }
+      if (live) { owner.child.send('finish'); await owner.done }
+    } finally { owner.child.kill() }
+  }
+})
+
+test('다중 프로세스: 한 검증의 정리가 다른 검증을 지우거나 정상 설치를 retired로 만들지 않는다', async () => {
+  const modules = processFixture(), root = tmpRoot(), spec = specOf()
+  const dir = makeInstall(root, installDirName(TARGET_SHA, 1000), spec)
+  const body = `
+    const module = { exports: {} };
+    const script = fs.readFileSync(process.env.KD_MODULES + '/kordocRuntime.js', 'utf8');
+    const realRequire = require('node:module').createRequire(process.env.KD_MODULES + '/kordocRuntime.js');
+    const dependencies = { electron: { app: { isPackaged: false }, net: {} }, './runtime': {}, './runtimeDownload': {}, './diagLog': { diag() {} },
+      'node:child_process': { spawn: (_exe, args) => {
+        const child = Object.assign(new (require('node:events').EventEmitter)(), { stderr: new (require('node:events').EventEmitter)() });
+        send({ input: args[4], output: args[6] });
+        next().then(() => { fs.readFileSync(args[4]); fs.writeFileSync(args[6], 'hwpx'); child.emit('close', 0); });
+        return child;
+      } }
+    };
+    new Function('require','module','exports','__dirname', script)(name => Object.hasOwn(dependencies,name) ? dependencies[name] : realRequire(name), module, module.exports, process.env.KD_MODULES);
+    const ok = await core.verifyKordocDir({ dir: data.dir, spec: data.spec, targetKey: data.key,
+      target: data.spec.targets[data.key], execPath: process.execPath, ledger: core.createVerifyLedger(), now: Date.now, smoke: module.exports.testSmoke });
+    send(ok);
+  `
+  const workers = [0, 1].map(() => childHarness(modules, body, { dir, spec, key: TARGET_KEY }))
+  try {
+    const paths = await Promise.all(workers.map((h) => h.next())) as Array<{ input: string; output: string }>
+    expect(dirname(paths[0].input)).not.toBe(dirname(paths[1].input))
+    workers[0].child.send('finish')
+    expect(await workers[0].next()).toBe(true)
+    await workers[0].done
+    expect(existsSync(paths[1].input)).toBe(true)
+    expect(existsSync(dirname(paths[0].input))).toBe(false)
+    workers[1].child.send('finish')
+    expect(await workers[1].next()).toBe(true)
+    await workers[1].done
+    expect(existsSync(join(dir, RETIRED))).toBe(false)
+  } finally { for (const h of workers) h.child.kill() }
 })
