@@ -156,8 +156,12 @@ test('E2: spec 이 있으면 mcpServers·strictMcpConfig·disallowedTools·지�
   assert.equal(options.mcpServers.kordoc.type, 'stdio')
   assert.equal(options.mcpServers.kordoc.timeout, mcp.CLAUDE_MCP_TIMEOUT_MS)
   assert.equal(options.strictMcpConfig, true)
-  assert.deepEqual(plain(options.disallowedTools), plain(WRITE_TOOLS.map((tool) => `${MCP_TOOL_PREFIX}${tool}`)))
-  assert.equal(options.disallowedTools.length, 12)
+  // 도우미(서브에이전트) 금지 4개는 MCP 와 무관하게 늘 붙고(c59c16c), 그 뒤에 MCP 쓰기 12개가 온다.
+  assert.deepEqual(plain(options.disallowedTools), [
+    'Agent', 'Task', 'Workflow', 'Skill',
+    ...WRITE_TOOLS.map((tool) => `${MCP_TOOL_PREFIX}${tool}`)
+  ])
+  assert.equal(options.disallowedTools.length, 16)
   assert.ok(options.systemPrompt.append.includes(MCP_DOC_READ_INSTRUCTION))
   assert.ok(!options.systemPrompt.append.includes(LEGACY_DOC_READ_INSTRUCTION))
   // OCR 규약(설계 §3.6 밖, 책임자 결정): 생략 호출이 PDF마다 ~1 GiB·30초라 미요청은 `ocr:false` 고정.
@@ -171,7 +175,8 @@ test('E2: spec 이 없으면 MCP 키가 없고 기존 지시문 그대로다', a
   const { options } = await captureClaudeRun({ root, spec: null })
 
   assert.equal(options.mcpServers, undefined)
-  assert.equal(options.disallowedTools, undefined)
+  // MCP 가 없어도 도우미 금지는 남는다(제품 결정 c59c16c) — 0 이 아니라 기본 4개다.
+  assert.deepEqual(plain(options.disallowedTools), ['Agent', 'Task', 'Workflow', 'Skill'])
   // strictMcpConfig 는 MCP 이전부터 있던 리터럴이다 — 이 변경이 만들거나 없애지 않았다.
   assert.equal(options.strictMcpConfig, true)
   assert.ok(options.systemPrompt.append.includes(LEGACY_DOC_READ_INSTRUCTION))
@@ -182,7 +187,9 @@ test('E2: canUseTool 은 trusted() 보다 먼저 mcp 정책을 본다', async (t
   t.after(() => { queryDouble = null })
   const { root, outside, insideFile, outsideFile } = fixtures('e2-policy')
   // 폴더 안 심볼릭 링크가 밖을 가리키는 경우 — 문자열 비교로는 걸러지지 않는다.
-  symlinkSync(outside, join(root, 'link'))
+  // 윈도 기본 심볼릭 링크는 관리자 권한이 필요해 러너에서 못 만든다 — 정션은 권한 없이 되고
+  // realpath 도 대상 경로로 풀리므로 같은 탈출을 그대로 시험한다.
+  symlinkSync(outside, join(root, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
   const { options } = await captureClaudeRun({ root, spec: specFor(root), trusted: () => true })
   const canUseTool = options.canUseTool
   const signal = new AbortController().signal
@@ -264,9 +271,12 @@ test('E3: spawnArgs 는 app-server 바로 앞에 -c 블록을 끼우고, 없으�
   const spec = specFor(root)
   const block = mcp.codexMcpArgs(spec)
 
-  assert.deepEqual(plain(connection.spawnArgs()), ['app-server'])
+  // 기동 인자에는 늘 `-c project_doc_max_bytes=0` 이 붙는다(설계 §4.1-E, 01ce608).
+  const base = plain(codex.serverArgsFor({ HOME: home }))
+  assert.deepEqual(base, ['-c', 'project_doc_max_bytes=0', 'app-server'])
+  assert.deepEqual(plain(connection.spawnArgs()), base)
   connection.mcpSpec = spec
-  assert.deepEqual(plain(connection.spawnArgs()), plain([...block, 'app-server']))
+  assert.deepEqual(plain(connection.spawnArgs()), plain([...base.slice(0, -1), ...block, 'app-server']))
   // 옛 CLI 의 `--listen stdio://` 재시도가 뒤에 붙어도 -c 블록은 subcommand 앞에 남는다.
   connection.serverArgs = ['--listen', 'stdio://', 'app-server']
   assert.deepEqual(plain(connection.spawnArgs()), plain(['--listen', 'stdio://', ...block, 'app-server']))
@@ -359,6 +369,10 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
           if (failVerify) throw new Error('MCP 서버가 떠오르지 않았어요')
           const off = rpc.threadConfig?.mcp_servers?.kordoc?.enabled === false && !lockIgnored
           if (!userKordoc) {
+            // 사용자 층에 kordoc 이 없으면 이 프로세스가 띄우지 않은 한 목록에도 없다. 인자로 꽂혔는지로
+            // 가른다 — 첫 프로세스(§3.3 검증)는 꽂혀 있어 `connected`, 재시도 프로세스는 아니다.
+            const injected = Array.isArray(rpc.argv) && rpc.argv.join(' ').includes('mcp_servers.kordoc')
+            if (!injected) return { data: [] }
             return { data: [{ runtimeStatus: 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }] }
           }
           // 잠갔으면 프로세스가 뜨지 않는다 — 목록에는 `disabled` 로만 남는다(실측 fix1-filter).
@@ -458,7 +472,8 @@ test('E8: 검증이 실패하면 MCP 를 끄고 한 번 다시 돌아 턴이 끝
   // kordoc 이 없으므로 잠글 이름도, 확인할 상태도 없다 — 그래도 턴은 정상으로 돈다.
   assert.equal(rpcs[1].log.includes('config/read'), true)
   assert.equal(rpcs[1].threadConfig, undefined, '설정에 없는 이름은 잠금 키를 만들지 않는다')
-  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), false, '잠글 이름이 없으면 상태 조회도 없다')
+  // 잠글 이름이 없어도 상태 목록은 **한 번** 본다(검토 R-1). 살아 있는 kordoc 이 없으므로 통과한다.
+  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), true, '이름이 없어도 한 번은 본다')
   assert.ok(rpcs[1].log.includes('turn/start'))
 })
 
@@ -501,6 +516,7 @@ test('M2-R1-02: turn/start 응답을 기다리는 동안에도 setMcpSpec 은 �
   rpcFactory = (binary, argv, cwd, env) => {
     const log = []
     held = fakeRpc({ root, skill, failVerify: false, failSkills: false, log, holdTurnStart: true })
+    held.argv = argv
     held.log = log
     return held
   }
