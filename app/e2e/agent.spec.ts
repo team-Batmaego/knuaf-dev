@@ -982,9 +982,9 @@ test.describe('buildLaunchScript', () => {
     expect(s).toContain(`-c '${cfg}'`)
 
     // app-server 스폰에도 같은 오버라이드 — -c 는 subcommand 앞의 루트 인자다.
-    expect(serverArgsFor({ HOME: home })).toEqual(['-c', cfg, '-c', 'project_doc_max_bytes=0', 'app-server'])
+    expect(serverArgsFor({ HOME: home })).toEqual(['-c', cfg, '-c', 'project_doc_max_bytes=0', '-c', 'features.plugins=false', 'app-server'])
     // 폴더 `AGENTS.md` 차단은 전역 사본 유무와 무관하게 늘 붙는다(설계 §4.1-E).
-    expect(serverArgsFor({ HOME: join(mkdtempSync(join(tmpdir(), 'kd-home-')), 'none') })).toEqual(['-c', 'project_doc_max_bytes=0', 'app-server'])
+    expect(serverArgsFor({ HOME: join(mkdtempSync(join(tmpdir(), 'kd-home-')), 'none') })).toEqual(['-c', 'project_doc_max_bytes=0', '-c', 'features.plugins=false', 'app-server'])
     // ~/.agents/skills 도 스캔 대상 — 두 사본이 함께 있으면 둘 다 끈다.
     mkdirSync(join(home, '.agents', 'skills', 'knuaf-dev'), { recursive: true })
     writeFileSync(join(home, '.agents', 'skills', 'knuaf-dev', 'SKILL.md'), '# old\n')
@@ -1153,7 +1153,8 @@ test.describe('agentApi', () => {
     }
     expect(script).toContain('project_doc_max_bytes=0')
     expect(script).toContain('features.apps=false')
-    // Apps 는 언제나 마지막이다 — 앞의 이름 잠금과 섞이지 않는다.
+    expect(script).toContain('features.plugins=false')
+    // Apps·플러그인 기능 차단은 이름별 잠금 뒤에 온다.
     expect(script.indexOf('features.apps=false')).toBeGreaterThan(script.indexOf('mcp_servers.ext.enabled=false'))
     // 열거는 앱 연결이 아니라 **이 호출이 띄운** 서버로 했다(설계 §4.1-C 1번).
     const methods = readLog(log).map((e) => e.method)
