@@ -16,7 +16,7 @@ import { CLAUDE_AUTH_COPY } from '../../shared/copy'
 import { tokenRecord, claudeTokens } from './jobs/tokens'
 import { appendTokenRecord } from './jobs/token-log'
 import { claudeMcpOptions, mcpPolicy, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, type KordocMcpSpec } from './kordocMcp'
-import { isSkillHostPath, skillHostDir, skillHostRoot } from '../guard/scope'
+import { isInside, isSkillHostPath, skillHostDir, skillHostRoot } from '../guard/scope'
 
 export class ClaudeAuthenticationError extends Error {
   constructor() { super(CLAUDE_AUTH_COPY.required) }
@@ -518,6 +518,8 @@ function parseShell(raw: string): string[][] | null {
   }
   endSeg()
   if (exeMixed || segs.some((t) => /[*?[]/.test(t[0]))) return null
+  // 여러 조각 사이의 cwd 변화는 추적하지 않는다. 뒤 상대경로를 처음 root로 오인하지 않는다.
+  if (segs.length > 1 && segs.some((t) => ['cd', 'pushd', 'popd'].includes(exeName(t[0])))) return null
   return segs
 }
 
@@ -599,11 +601,13 @@ function pathOpsFor(root: string): typeof posix {
 }
 
 /** 도구의 cwd는 논문 폴더다. 원문·존재하는 조상까지 푼 링크 대상을 같은 앱 자리 경계로 본다. */
-function isHostTarget(root: string, value: string, userData?: string): boolean {
+function isHostTarget(root: string, value: string, userData?: string, includeAncestor = false): boolean {
   if (!userData || !value) return false
   const ops = pathOpsFor(root)
   const absolute = ops.resolve(root, value)
-  return isSkillHostPath(ops === win32 ? absolute.replace(/\\/g, '/') : absolute, userData)
+  const target = ops === win32 ? absolute.replace(/\\/g, '/') : absolute
+  return isSkillHostPath(target, userData)
+    || (includeAncestor && isInside(realOrSelfDeep(target), realOrSelfDeep(skillHostRoot(userData))))
 }
 
 /**
@@ -773,7 +777,7 @@ function powerShellSkillCall(root: string, raw: string, userData?: string): bool
   // 폴더 안 .claude 별칭도 실제 앱 사본이면 로컬 스킬 예외·지문 검사를 건너뛰지 않는다.
   if (argsHitHost(root, words, userData)) return false
   const [exe, script, ...args] = words
-  if (!INTERPRETERS.test(exeName(exe))) return false
+  if (!/^python3?(\.\d+)?$/.test(exeName(exe))) return false
   const ops = pathOpsFor(root)
   if (!isSkillScript(ops, root, script)) return false
   for (const a of args) {
@@ -805,7 +809,9 @@ function isSkillCommand(root: string, input: unknown, userData?: string): boolea
   const segs = parseShell(raw)
   return !!segs?.length && segs.every((t) => segmentReason(t) === null
     && (hostSkillCall(root, t, userData)
-      || (argsInRoot(root, t.slice(1)) && !argsHitHost(root, t, userData))))
+      || ((!looksLikePath(t[0], pathOpsFor(root) === win32 ? 'win32' : 'darwin')
+        || relInReal(pathOpsFor(root), root, t[0]).every((rel) => rel !== null))
+        && argsInRoot(root, t.slice(1)) && !argsHitHost(root, t, userData))))
 }
 
 /**
@@ -838,7 +844,7 @@ function hostScriptInvocation(root: string, t: string[], userData?: string): boo
 function hostSkillCall(root: string, t: string[], userData?: string): boolean {
   if (!userData || !hostScriptInvocation(root, t, userData)) return false
   const [exe, script, ...args] = t
-  if (!script || !INTERPRETERS.test(exeName(exe)) || isHostTarget(root, exe, userData)) return false
+  if (!script || !/^python3?(\.\d+)?$/.test(exeName(exe)) || isHostTarget(root, exe, userData)) return false
   const ops = pathOpsFor(userData)
   // 원문이 앱 자리 절대경로인 인터프리터 호출만 자동 실행한다. 상대경로·링크 별칭은 카드다.
   if (!ops.isAbsolute(script) || script.includes('..') || args.some((a) => a.includes('..'))) return false
@@ -1321,6 +1327,8 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   const keys = PATH_TOOLS[name]
   if (keys) {
     const values = keys.map((k) => argOf(input, k))
+    // 파일 도구의 ~ 확장 규칙은 공급자마다 다르다. 홈 경로는 명시적 절대경로로만 받는다.
+    if (values.some((v) => typeof v === 'string' && v.startsWith('~'))) return false
     if (!values.every(ok)) return false
     // 폴더 안이어도 권한 파일은 묻는다 — 도우미가 자기 권한을 스스로 넓히는 통로를 막는다.
     if (!READ_ONLY_TOOLS[name]) {
@@ -1333,7 +1341,12 @@ export function autoAllow(root: string, name: string, input: unknown, allowed: s
   if (POWERSHELL_TOOLS[name]) {
     const raw = argOf(input, 'command')
     // PowerShell 은 Bash 파서로 판정하지 않는다(문법이 다르다). 확실히 아는 꼴 하나만 통과.
-    return typeof raw === 'string' && powerShellSkillCall(root, raw, userData)
+    if (typeof raw !== 'string') return false
+    const parsed = powerShellWords(raw)
+    if (!parsed?.safe) return false
+    const words = parsed.words.map((word) => word.replace(/\\/g, '/'))
+    if (hostSkillCall(root, words, userData)) return bundleSource === undefined || hostContentIntact()
+    return powerShellSkillCall(root, raw, userData)
   }
   if (name === 'Bash') {
     const raw = argOf(input, 'command')
@@ -1415,8 +1428,9 @@ function realOrSelf(p: string): string {
  * 덮어쓸 수 있다(검토 Roh C-01ⓐ) — 모르면 닫는다.
  */
 const UNPARSEABLE_SHELL_COPY =
-  '앱이 이 명령의 뜻을 확인하지 못했어요. 리다이렉트(>)·변수($)·백틱·서브셸이 들어간 명령은 '
-  + '앱이 관리하는 자리를 건드릴 수 있어 실행하지 않았어요. 파일을 고치려면 앱의 편집 도구를 써 주세요.'
+  '앱이 이 명령의 뜻을 확인하지 못했어요. 리다이렉트(>)·변수($)·백틱·서브셸이 들어가거나 '
+  + '`cd`로 폴더를 옮긴 뒤 이어 실행하는 명령은 앱이 관리하는 자리를 건드릴 수 있어 실행하지 않았어요. '
+  + '`cd` 없이 경로를 붙여 한 번에 다시 실행하거나(예: `python3 sub/analysis.py`), 파일을 고치려면 앱의 편집 도구를 써 주세요.'
 
 /**
  * 앱 스킬 자리(플러그인 뿌리)에 **쓰려는** 시도인가(설계 §4.2-1). 있으면 카드 없이 거절한다.
@@ -1436,6 +1450,9 @@ export function hostWriteDecision(
     if (READ_ONLY_TOOLS[name]) return null
     for (const k of keys) {
       const v = argOf(input, k)
+      if (typeof v === 'string' && v.startsWith('~')) {
+        return { behavior: 'deny', message: '앱이 홈 경로(~)의 대상을 확인하지 못했어요. 파일의 절대경로를 사용해 주세요.' }
+      }
       if (typeof v === 'string' && isHostTarget(root, v, userData)) return deny(v)
     }
     return null
@@ -1455,7 +1472,7 @@ export function hostWriteDecision(
     if (hostScriptInvocation(root, t, userData)) continue
     for (const a of t) {
       for (const piece of argPathPieces(a)) {
-        if (isHostTarget(root, piece, userData)) return deny(piece)
+        if (isHostTarget(root, piece, userData, exeName(t[0]) === 'ln')) return deny(piece)
       }
     }
   }

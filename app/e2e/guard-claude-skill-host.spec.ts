@@ -13,7 +13,7 @@
 import { expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync
+  chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -305,23 +305,15 @@ test('최종 판정(PowerShell): 사본이 다르면 trusted() 참이어도 카�
   const script = join(skillHostDir(userData), 'scripts', 'gg.py').replace(/\\/g, '/')
   const call = { command: `python.exe "${script}" status` }
 
-  // 대조군 — 내용이 같으면 오늘과 한 글자도 다르지 않다.
-  //
-  // '묻지 않기'(trusted 참)는 자동 허용이다. '매번 묻기'는 **평범한 카드**다 —
-  // `autoAllow` 의 PowerShell 갈래는 폴더 안 `.claude/skills/` 만 인정하므로(위 시험
-  // 'PowerShell 스킬 호출은 맥 Bash 와 같은 기준으로'), 옮겨 간 앱 자리 스크립트는
-  // 원래부터 카드였다. 이 시험이 잠그는 것은 그 카드가 **불일치 카드로 바뀌었는가**다.
+  // I2: 지문이 같은 앱 자리의 Python 진입점은 trusted 설정과 무관하게 자동 허용한다.
   const intact = await rig({ root, userData }, { trusted: true })
   expect(plain(await intact.ask('PowerShell', call))).toEqual({ behavior: 'allow', updatedInput: call })
   expect(intact.cards).toHaveLength(0)
 
   const intactAsk = await rig({ root, userData }, { trusted: false })
-  const intactPending = intactAsk.ask('PowerShell', call)
-  await settle(() => intactAsk.cards.length > 0)
-  expect(intactAsk.cards, 'intact/trusted=false').toHaveLength(1)
-  expect(intactAsk.cards[0].title, 'intact/trusted=false').not.toContain('규칙 사본')
-  intactAsk.answer(false)
-  expect(plain(await intactPending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+  expect(autoAllow(root, 'PowerShell', call, [], userData, source)).toBe(true)
+  expect(plain(await intactAsk.ask('PowerShell', call))).toEqual({ behavior: 'allow', updatedInput: call })
+  expect(intactAsk.cards, 'intact/trusted=false').toHaveLength(0)
 
   tamper(target)
 
@@ -519,7 +511,9 @@ test('SWEEP C02–C07·C23·C30: 직접 실행·상대 링크·상위 경로는 
     ['C06-relative-file-link', 'python3 gg_link.py'],
     ['C07-root-relative', `python3 ${q(relative(root, py))}`],
     ['C23-host-as-executable', `${q(injected)} status`],
-    ['C30-relative-local-skill-alias', 'python3 .claude/skills/knuaf-dev/scripts/gg.py']
+    ['C30-relative-local-skill-alias', 'python3 .claude/skills/knuaf-dev/scripts/gg.py'],
+    ['N01-direct-relative-alias', 'alias/scripts/gg_extra.py'],
+    ['N15-dotdot-direct', q(relative(root, injected))]
   ]
   for (const changed of [false, true]) {
     if (changed) {
@@ -652,6 +646,151 @@ test('SWEEP F07·F08: 바이트가 같아도 앱 스크립트·scripts 디렉터
   }
 })
 
+test('A6 B2·B4·B6·I1: cwd 변경·쓰기 명령·상대 출력·앱 자리 조상 링크는 즉시 거절한다', async () => {
+  const { root, userData, target } = installedBox()
+  symlinkSync(target, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+  const script = join(target, 'scripts', 'gg.py').replace(/\\/g, '/')
+  const rel = relative(root, target).replace(/\\/g, '/')
+  const hostParent = relative(root, join(userData, 'skill-host')).replace(/\\/g, '/')
+  const commands = [
+    'cd alias/scripts && python3 gg_extra.py',
+    'cp notes.md alias/scripts/gg.py', 'rm alias/scripts/gg_extra.py',
+    'chmod u+w alias/scripts/gg.py', 'mkdir alias/scripts/sub',
+    'sed -i.bak s/x/y/ alias/scripts/gg.py', 'ln -s notes.md alias/scripts/gg_lnk.py',
+    `touch "${rel}/scripts/gg_new.py"`, `cp notes.md "${rel}/scripts/gg_new.py"`,
+    `ln -s "${rel}" alias2`, `ln -s "${hostParent}" alias2`,
+    `python3 "${script}" alias/scripts/gg_new.py`,
+    `python3 "${script}" --out=alias/scripts/gg_new.py`
+  ]
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      for (const command of commands) {
+        const call = { command }
+        expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${command}`).toBe(false)
+        const out = plain(await r.ask(tool, call))
+        expect(out, `${tool}/${trusted}/${command}`).toMatchObject({ behavior: 'deny' })
+        expect(out.message).toMatch(/앱이 관리하는 자리|앱이 이 명령/)
+      }
+    }
+    expect(r.cards).toHaveLength(0)
+  }
+  expect(sameTreeContent(target, source)).toBe(true)
+  expect(existsSync(join(root, 'alias2'))).toBe(false)
+})
+
+test('A6 cd 거절은 이유와 다시 하는 법을 알려 주고, cd 없이 다시 부르면 폴더 안 일로 통과한다', async () => {
+  const { root, userData } = installedBox()
+  mkdirSync(join(root, 'sub'), { recursive: true })
+  writeFileSync(join(root, 'sub', 'notes.md'), '# n\n')
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    // 학생 폴더 안 평범한 하위 폴더라도 cd 가 섞이면 판정 불가로 거절 — 카드 없이, 다시 하는 법을 담아.
+    const denied = plain(await r.ask('Bash', { command: 'cd sub && cat notes.md' }))
+    expect(denied).toMatchObject({ behavior: 'deny' })
+    expect(denied.message).toContain('cd')
+    expect(denied.message).toContain('경로를 붙여')
+    expect(r.cards).toHaveLength(0)
+    // 도우미가 안내대로 cd 없이 다시 부르면 폴더 안 읽기 명령이라 카드 없이 통과한다.
+    const retry = { command: 'cat sub/notes.md' }
+    expect(autoAllow(root, 'Bash', retry, [], userData, source)).toBe(true)
+    expect(plain(await r.ask('Bash', retry))).toEqual({ behavior: 'allow', updatedInput: retry })
+    expect(r.cards).toHaveLength(0)
+  }
+})
+
+test('A6 B5: 같은 합성 사본에서 잠금 풀기→복사→상대 실행 연쇄는 두 trusted 설정 모두 막힌다', async () => {
+  for (const trusted of [true, false]) {
+    const { root, userData, target } = installedBox()
+    symlinkSync(target, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+    const notes = join(root, 'notes.py')
+    const payload = join(target, 'scripts', 'gg_extra.py')
+    writeFileSync(notes, 'print("SWEEP2_CHAIN_PAYLOAD")\n')
+    const r = await rig({ root, userData }, { trusted })
+    const decisions: unknown[] = []
+    const first = await r.ask('Bash', { command: 'chmod u+w alias/scripts' })
+    decisions.push(plain(first))
+    if (first.behavior === 'allow') chmodSync(join(target, 'scripts'), 0o755)
+    const second = await r.ask('Bash', { command: 'cp notes.py alias/scripts/gg_extra.py' })
+    decisions.push(plain(second))
+    if (second.behavior === 'allow') cpSync(notes, payload)
+    const before = r.cards.length
+    const pending = r.ask('Bash', { command: 'python3 alias/scripts/gg_extra.py' })
+    await settle(() => r.cards.length > before)
+    expect(r.cards).toHaveLength(before + 1)
+    expect(r.cards[before].title).toContain('자동 실행 범위')
+    r.answer(false)
+    decisions.push(plain(await pending))
+    expect(decisions).toEqual([
+      expect.objectContaining({ behavior: 'deny', message: expect.stringContaining('앱이 관리하는 자리') }),
+      expect.objectContaining({ behavior: 'deny', message: expect.stringContaining('앱이 관리하는 자리') }),
+      { behavior: 'deny', message: '사용자가 허용하지 않았습니다.' }
+    ])
+    expect(existsSync(payload)).toBe(false)
+    expect(sameTreeContent(target, source)).toBe(true)
+  }
+})
+
+test('A6 I2·R3·R5: 정상 Python은 세 셸에서 카드 없이, 다른 인터프리터는 앱 전용 카드로 간다', async () => {
+  const { root, userData, target } = installedBox()
+  const script = join(target, 'scripts', 'gg.py').replace(/\\/g, '/')
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+      const call = { command: `python3 "${script}" status` }
+      expect(autoAllow(root, tool, call, [], userData, source)).toBe(true)
+      expect(plain(await r.ask(tool, call))).toEqual({ behavior: 'allow', updatedInput: call })
+      for (const interpreter of ['sh', 'bash', 'node']) {
+        const other = { command: `${interpreter} "${script}"` }
+        expect(autoAllow(root, tool, other, [], userData, source)).toBe(false)
+        const before = r.cards.length
+        const pending = r.ask(tool, other)
+        await settle(() => r.cards.length > before)
+        expect(r.cards).toHaveLength(before + 1)
+        expect(r.cards[before].title).toContain('앱 규칙 사본의 자동 실행 범위')
+        r.answer(false)
+        expect(plain(await pending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+      }
+    }
+  }
+})
+
+test('A6 I3: 경로로 부른 폴더 밖 실행 파일만 자동 허용에서 빼고 PATH 이름 계약은 유지한다', async () => {
+  const { root, userData } = box()
+  const outside = join(dirname(root), 'outside-tool.sh')
+  writeFileSync(outside, '#!/bin/sh\necho SWEEP2_OUTSIDE\n')
+  symlinkSync(outside, join(root, 'outside-link'), 'file')
+  const r = await rig({ root, userData }, { trusted: false })
+  for (const command of [`"${outside.replace(/\\/g, '/')}"`, './outside-link']) {
+    const call = { command }
+    expect(autoAllow(root, 'Bash', call, [], userData)).toBe(false)
+    const before = r.cards.length
+    const pending = r.ask('Bash', call)
+    await settle(() => r.cards.length > before)
+    expect(r.cards).toHaveLength(before + 1)
+    r.answer(false)
+    expect(plain(await pending)).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+  }
+  expect(autoAllow(root, 'Bash', { command: 'echo hello' }, [], userData)).toBe(true)
+  expect(autoAllow(root, 'Bash', { command: 'python3 --version' }, [], userData)).toBe(true)
+  expect(hostWriteDecision(root, 'Bash', { command: 'git status' }, userData)).toBeNull()
+})
+
+test('A6 I4: 파일 도구의 홈 축약 경로는 추측하지 않고 trusted 전에 절대경로를 요구한다', async () => {
+  const { root, userData } = box()
+  for (const trusted of [true, false]) {
+    const r = await rig({ root, userData }, { trusted })
+    for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+      for (const path of ['~/user-data/skill-host/.claude/skills/knuaf-dev/scripts/gg.py', '~\\user-data\\skill-host\\.claude\\skills\\knuaf-dev\\scripts\\gg.py']) {
+        const call = tool === 'NotebookEdit' ? { notebook_path: path } : { file_path: path }
+        expect(autoAllow(root, tool, call, [], userData)).toBe(false)
+        expect(plain(await r.ask(tool, call))).toMatchObject({ behavior: 'deny', message: expect.stringContaining('절대경로') })
+      }
+    }
+    expect(r.cards).toHaveLength(0)
+  }
+})
+
 test('짧은 이름 ABCDEF~1: 실제 설치본의 Bash·PowerShell 실행을 쓰기로 오인하지 않는다', async () => {
   const { root, userData, host } = box(join('ABCDEF~1', 'AppData', 'Roaming', 'knuaf-dev'))
   installSkill(source, host, version)
@@ -664,8 +803,8 @@ test('짧은 이름 ABCDEF~1: 실제 설치본의 Bash·PowerShell 실행을 쓰
     for (const quote of ['"', "'"]) {
       const call = { command: `python.exe ${quote}${script}${quote} status` }
       expect(hostWriteDecision(root, tool, call, userData), `${tool}/${quote}`).toBeNull()
-      // PowerShell 앱 자리 실행은 종전처럼 trusted 또는 평범한 카드로 허용한다.
-      expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${quote}`).toBe(tool === 'Bash')
+      // Bash와 PowerShell 모두 같은 앱 자리·내용 검사를 통과해야 자동 실행한다.
+      expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${quote}`).toBe(true)
       expect(plain(await r.ask(tool, call)), `${tool}/${quote}`).toEqual({ behavior: 'allow', updatedInput: call })
     }
     expect(r.cards, tool).toHaveLength(0)
