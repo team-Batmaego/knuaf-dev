@@ -13,7 +13,7 @@
 import { expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -35,11 +35,11 @@ const source = skillSource(appRoot, false, '/nonexistent')
 const version = skillVersion(source)
 
 const made: string[] = []
-function box(): { root: string; userData: string; host: string } {
+function box(userPath = 'user-data'): { root: string; userData: string; host: string } {
   const base = mkdtempSync(join(tmpdir(), 'kd-skill-host-'))
   made.push(base)
   const root = join(base, '논문 폴더')
-  const userData = join(base, 'user-data')
+  const userData = join(base, userPath)
   mkdirSync(root, { recursive: true })
   return { root, userData, host: skillHostDir(userData) }
 }
@@ -340,22 +340,145 @@ test('최종 판정(PowerShell): 사본이 다르면 trusted() 참이어도 카�
   setTreeAccess(target, true)
 })
 
+test('짧은 이름 ABCDEF~1: 실제 설치본의 Bash·PowerShell 실행을 쓰기로 오인하지 않는다', async () => {
+  const { root, userData, host } = box(join('ABCDEF~1', 'AppData', 'Roaming', 'knuaf-dev'))
+  installSkill(source, host, version)
+  const script = join(host, 'scripts', 'gg.py').replace(/\\/g, '/')
+  expect(existsSync(script)).toBe(true)
+  expect(skillState(host, version, source)).toBe('installed')
+
+  for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+    const r = await rig({ root, userData }, { trusted: true })
+    for (const quote of ['"', "'"]) {
+      const call = { command: `python.exe ${quote}${script}${quote} status` }
+      expect(hostWriteDecision(root, tool, call, userData), `${tool}/${quote}`).toBeNull()
+      // PowerShell 앱 자리 실행은 종전처럼 trusted 또는 평범한 카드로 허용한다.
+      expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${quote}`).toBe(tool === 'Bash')
+      expect(plain(await r.ask(tool, call)), `${tool}/${quote}`).toEqual({ behavior: 'allow', updatedInput: call })
+    }
+    expect(r.cards, tool).toHaveLength(0)
+
+    const output = join(host, 'SKILL.md').replace(/\\/g, '/')
+    const writeCall = { command: `python.exe "${script}" --out "${output}"` }
+    expect(hostWriteDecision(root, tool, writeCall, userData), tool).toMatchObject({ behavior: 'deny' })
+    expect(autoAllow(root, tool, writeCall, [], userData, source), tool).toBe(false)
+  }
+})
+
+test('낱말 중간·따옴표 안 리터럴 ~는 Bash·PowerShell 경로에서 글자다', () => {
+  const root = 'C:/Users/ABCDEF~1/paper'
+  const userData = 'C:/Users/ABCDEF~1/AppData/Roaming/knuaf-dev'
+  const script = `${userData}/skill-host/.claude/skills/knuaf-dev/scripts/gg.py`
+  for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+    for (const path of [script, `"${script}"`, `'${script}'`]) {
+      const call = { command: `python.exe ${path} status` }
+      expect(hostWriteDecision(root, tool, call, userData), `${tool}/${path}`).toBeNull()
+      if (tool === 'Bash') expect(autoAllow(root, tool, call, [], userData), path).toBe(true)
+    }
+    const localScript = `${root}/.claude/skills/knuaf-dev/scripts/gg.py`
+    if (tool !== 'Bash') expect(autoAllow(root, tool, { command: `python.exe "${localScript}" status` }), tool).toBe(true)
+    for (const command of ['echo "~/x"', "echo '~user/x'", 'echo ABCDEF~1', 'echo "~"']) {
+      expect(hostWriteDecision(root, tool, { command }, userData), `${tool}/${command}`).toBeNull()
+    }
+  }
+})
+
+test('홈으로 펼쳐지는 ~와 모호한 인용·이스케이프는 짧은 이름 자리에서도 trusted보다 먼저 거절한다', async () => {
+  const { root, userData, host } = box(join('ABCDEF~1', 'AppData', 'Roaming', 'knuaf-dev'))
+  installSkill(source, host, version)
+  const script = join(host, 'scripts', 'gg.py').replace(/\\/g, '/')
+  const bash = [
+    'cat ~', 'cat ~/x', 'cat ~user', 'cat ~user/x', 'a=~/x', 'PATH=x:~/y',
+    'echo ok;~', 'echo ok|~', 'echo ok||~', 'echo ok&&~',
+    'cat "~/x', "cat '~user/x", String.raw`cat \~`, String.raw`cat "x\" ~/x`,
+    `python.exe "${script}" ~/x`, `python.exe "${script}" a=~/x`, `python.exe "${script}" PATH=x:~/y`
+  ]
+  const powershell = [
+    'Get-Content ~', 'Get-Content ~/x', String.raw`Get-Content ~\x`, 'Get-Content ~user',
+    'Get-Content "~/x', "Get-Content '~/x", 'Get-Content `~',
+    `python.exe "${script}" ~`, `python.exe "${script}" ~/x`, `python.exe "${script}" ~\\x`
+  ]
+  for (const tool of ['Bash', 'PowerShell', 'pwsh']) {
+    const r = await rig({ root, userData }, { trusted: true })
+    for (const command of tool === 'Bash' ? bash : powershell) {
+      const call = { command }
+      const denied = hostWriteDecision(root, tool, call, userData)
+      expect(denied, `${tool}/${command}`).toMatchObject({ behavior: 'deny' })
+      expect(denied!.message, command).not.toContain(userData)
+      expect(denied!.message, command).not.toContain('skill-host')
+      expect(autoAllow(root, tool, call, [], userData, source), `${tool}/${command}`).toBe(false)
+      expect(plain(await r.ask(tool, call)), `${tool}/${command}`).toEqual(denied)
+    }
+    expect(r.cards, tool).toHaveLength(0)
+  }
+})
+
 test('설치 뒤 앱 자리는 읽기 전용이고 다시 깐 뒤에도 다시 잠긴다', () => {
   const { root, userData, host } = box()
   const target = skillTargets(root, userData).claude
   installSkill(source, target, version)
   expect(statSync(target).mode & 0o222).toBe(0)
-  expect(statSync(target).mode & 0o555).toBe(0o555)
+  if (process.platform !== 'win32') expect(statSync(target).mode & 0o555).toBe(0o555)
   expect(statSync(join(target, 'SKILL.md')).mode & 0o222).toBe(0)
   expect(statSync(join(target, 'scripts')).mode & 0o222).toBe(0)
 
   // 잠긴 사본은 그냥 덮어쓸 수 없다 — 이 실패가 잠금이 실제로 걸렸다는 증거다.
   expect(() => writeFileSync(join(target, 'SKILL.md'), '# student edit\n')).toThrow(/EACCES|EPERM/)
 
-  // 셸로 직접 덮어쓰려 해도 막힌다 — 판정(hostWriteDecision)을 못 거치는 경로(리다이렉트)의
-  // 마지막 그물이 이 잠금이다.
-  expect(() => execFileSync('sh', ['-c', `echo pwn > ${JSON.stringify(join(target, 'SKILL.md'))}`], { stdio: 'pipe' })).toThrow()
+  if (process.platform === 'win32') {
+    // 윈도 파일 잠금은 보조(생성·이름 바꾸기 못 막음), 변조는 내용 지문 대조로 감지 — icacls 강화는 v0.6.5.
+    const file = join(target, 'SKILL.md').replace(/'/g, "''")
+    expect(() => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `$ErrorActionPreference = 'Stop'; [IO.File]::WriteAllText('${file}', 'pwn')`
+    ], { stdio: 'pipe' })).toThrow()
+  } else {
+    // 셸로 직접 덮어쓰려 해도 막힌다 — 판정(hostWriteDecision)을 못 거치는 경로(리다이렉트)의
+    // 마지막 그물이 이 잠금이다.
+    expect(() => execFileSync('sh', ['-c', `echo pwn > ${JSON.stringify(join(target, 'SKILL.md'))}`], { stdio: 'pipe' })).toThrow()
+  }
   expect(readFileSync(join(target, 'SKILL.md'), 'utf-8')).not.toContain('pwn')
+
+  const script = join(target, 'scripts', 'gg.py').replace(/\\/g, '/')
+  const call = { command: `python3 "${script}" status` }
+  for (const mutation of ['create', 'rename', 'replace']) {
+    expect(skillState(target, version, source), mutation).toBe('installed')
+    expect(autoAllow(root, 'Bash', call, [], userData, source), mutation).toBe(true)
+    // POSIX에서는 잠금을 풀어 같은 지문 경계를 시험한다. 윈도에서는 잠긴 채 세 조작을 한다.
+    if (process.platform !== 'win32') setTreeAccess(target, true)
+    if (mutation === 'create') {
+      const added = join(target, 'references', 'student-added.md')
+      writeFileSync(added, '# added payload\n')
+      expect(readFileSync(added, 'utf-8')).toBe('# added payload\n')
+    } else if (mutation === 'rename') {
+      const renamed = join(target, 'scripts', 'gg_renamed.py')
+      renameSync(join(target, 'scripts', 'gg.py'), renamed)
+      expect(existsSync(join(target, 'scripts', 'gg.py'))).toBe(false)
+      expect(existsSync(renamed)).toBe(true)
+    } else {
+      const replacement = join(root, 'replacement.md')
+      const destination = join(target, 'SKILL.md')
+      writeFileSync(replacement, '# replacement payload\n')
+      if (process.platform === 'win32') {
+        execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+          `Move-Item -LiteralPath '${replacement.replace(/'/g, "''")}' -Destination '${destination.replace(/'/g, "''")}' -Force -ErrorAction Stop`
+        ], { stdio: 'pipe' })
+      } else renameSync(replacement, destination)
+      expect(existsSync(replacement)).toBe(false)
+      expect(readFileSync(destination, 'utf-8')).toBe('# replacement payload\n')
+    }
+    // 판 표시는 그대로여도 파일 생성·이름·내용 변경을 각각 잡아 실행을 자동 허용하지 않는다.
+    expect(skillState(target, version), mutation).toBe('installed')
+    expect(skillState(target, version, source), mutation).toBe('outdated')
+    expect(autoAllow(root, 'Bash', call, [], userData, source), mutation).toBe(false)
+    expect(installSkill(source, target, version, source).action, mutation).toBe('updated')
+    expect(skillState(target, version, source), mutation).toBe('installed')
+    expect(autoAllow(root, 'Bash', call, [], userData, source), mutation).toBe(true)
+    expect(statSync(target).mode & 0o222, mutation).toBe(0)
+    if (process.platform !== 'win32') expect(statSync(target).mode & 0o555, mutation).toBe(0o555)
+    expect(statSync(join(target, 'SKILL.md')).mode & 0o222, mutation).toBe(0)
+    expect(statSync(join(target, 'scripts')).mode & 0o222, mutation).toBe(0)
+    expect(() => writeFileSync(join(target, 'SKILL.md'), '# student edit\n'), mutation).toThrow(/EACCES|EPERM/)
+  }
 
   // Codex 사본(폴더 안)은 잠그지 않는다 — 학생·다른 도구가 손댈 수 있어야 한다.
   const codex = skillTargets(root, userData).codex

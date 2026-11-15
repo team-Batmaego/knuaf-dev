@@ -341,8 +341,14 @@ const BENIGN_REDIR = /\s*(?:2>&1|&?>\s*\/dev\/null|2>\s*\/dev\/null)/g
  * `cat ~/.ssh/id_rsa` 가 resolve(root, "~/.ssh/id_rsa") = root + "/~/.ssh/id_rsa" 로
  * 접혀 "폴더 안"이 되고, cat 은 읽기 전용 목록에 있으므로 묻지도 않고 통과했다.
  * 펼침은 셸이 하고 판정은 앱이 하니, 펼쳐지는 기호는 전부 판정 불가로 둔다.
+ *
+ * `~` 만은 자리에 따라 다르다 — 셸이 펼치는 것은 **낱말 맨 앞**(`~/…`·`~user/…`)과 할당
+ * 자리(`=~`·`:~`)뿐이고, 따옴표 안이나 낱말 중간의 `~` 는 그냥 글자다. 윈도우 짧은 이름
+ * (`C:/Users/ABCDEF~1/…`)이 바로 낱말 중간의 `~` 인데, 일괄 금지로 두면 정상 스킬 실행이
+ * "해석 불가"로 거절됐다(검토 Astra R1). 그래서 `~` 는 정규식에서 빼고 `parseShell` 의
+ * 낱말 해석 안에서 펼쳐지는 자리만 닫는다 — `cat ~/.ssh/id_rsa` 는 종전대로 판정 불가다.
  */
-const SHELL_UNJUDGEABLE = /[`<>(){}$~]/
+const SHELL_UNJUDGEABLE = /[`<>(){}$]/
 /**
  * 카드에 보이는 도구 이름의 쉬운 말(v0.6.2). 내부 도구명이 그대로 보이지 않게 한다.
  * 여기 없는 도구는 `도우미가 도구 이름을 쓰려고 해요` 형태로 번역을 못 한 채 보인다.
@@ -387,8 +393,13 @@ const SKILL_SCRIPT = /(^|[\\/])(gg|gg_[a-z_]+|build_docx|show_research|merge_sec
  * 예외는 맨 앞의 윈도우 드라이브 접두 `X:/` 하나다. 지시문이 따옴표 절대경로를 쓰라고 하므로
  * 윈도우에서는 `"C:/Users/…/scripts/gg.py"` 로 온다. 이 접두는 셸이 펼치지 않고 옵션으로
  * 바뀌지도 않는다. 다른 자리의 `:`, `C:` 뒤 `\`, 슬래시 없는 `C:foo` 는 계속 묻는다.
+ *
+ * `~` 도 같은 이유로 넣는다 — 윈도우 8.3 짧은 이름(`C:/Users/ABCDEF~1/…`)의 `~` 는 낱말
+ * 중간의 글자이고, 이 경로는 지시문이 따옴표로 감싸 넘긴다. 펼쳐지는 자리의 `~` 는
+ * `parseShell`(Bash)·`powerShellWords`(PowerShell)가 낱말을 읽으며 이미 닫으므로,
+ * 여기까지 온 `~` 는 글자뿐이다.
  */
-const SKILL_PATH = /^(?:[A-Za-z]:\/)?[A-Za-z0-9\p{Script=Hangul} ._\-/]+$/u
+const SKILL_PATH = /^(?:[A-Za-z]:\/)?[A-Za-z0-9\p{Script=Hangul} ._\-/~]+$/u
 /**
  * 따로 도는 AI 프로그램들. 셸로 띄우면 학생 화면에 보이지 않고 멈출 수도 없으며,
  * 이 대화의 승인·쿼터·로그인 확인을 건너뛴다. 경로가 전부 폴더 안이어도 묻는다.
@@ -497,6 +508,9 @@ function parseShell(raw: string): string[][] | null {
     else if (c === ';') endSeg()
     else if (c === '|') { endSeg(); if (norm[i + 1] === '|') i++ }
     else if (c === '&') { if (norm[i + 1] !== '&') return null; endSeg(); i++ }
+    // 따옴표 구간은 위에서 통째로 읽는다. 별도 스캐너 없이 같은 낱말·이스케이프 해석을 쓴다.
+    // `=~`·`:~` 는 할당의 홈 확장일 수 있으므로 보수적으로 닫는다.
+    else if (c === '~' && (word === null || /[=:]/.test(norm[i - 1] ?? ''))) return null
     else {
       if (word === null || /["']/.test(norm[i - 1] ?? '')) parts++
       word = (word ?? '') + c
@@ -714,8 +728,16 @@ function powerShellWords(raw: string): { words: string[]; safe: boolean } | null
       continue
     }
     if (/\s/.test(c)) { end(); continue }
-    // 판정 불가 기호: 백틱·`$`·`;`·`|`·`&`·리다이렉트·괄호·`@`·`~`·`#`(주석)·`,`(배열).
-    if (/[`$;|&<>(){}@~#,]/u.test(c)) { end(); safe = false; continue }
+    // `~` 는 낱말 **맨 앞**에서만 펼쳐진다(PowerShell 의 공급자 홈). 낱말 중간의 `~` 는 글자다 —
+    // 윈도우 8.3 짧은 이름(`C:/Users/RUNNER~1/…`)이 그 꼴이고, 일괄 금지로 두면 정상 스킬
+    // 실행이 거절됐다(검토 Astra R1).
+    if (c === '~') {
+      if (word === null) safe = false
+      word = (word ?? '') + c
+      continue
+    }
+    // 판정 불가 기호: 백틱·`$`·`;`·`|`·`&`·리다이렉트·괄호·`@`·`#`(주석)·`,`(배열).
+    if (/[`$;|&<>(){}@#,]/u.test(c)) { end(); safe = false; continue }
     word = (word ?? '') + c
   }
   end()
