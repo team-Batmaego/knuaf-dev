@@ -138,6 +138,63 @@ test('§10-23 ⓐ 열거 결과가 thread/start 의 config 로 실리고, 턴 �
   expect(loadCodexThreads(s.guard)).toEqual({ 't-fake': { fingerprint: FOREIGN_FINGERPRINT, turns: ['u-1'] } })
 })
 
+test('v065 설치 플러그인 실응답은 잠금 config 로 전달된 뒤에만 턴을 연다', async () => {
+  const id = 'documents@openai-primary-runtime'
+  const s = scene('marketplace', {
+    FAKE_CODEX_PLUGIN_INSTALLED: JSON.stringify({
+      marketplaces: [{ name: 'openai-primary-runtime', path: null, plugins: [{ id, installed: true, enabled: true }] }],
+      marketplaceLoadErrors: []
+    })
+  })
+  const conn = connection(s)
+  try { await conn.run('첫 메시지', undefined, s.events) } finally { await conn.stop() }
+  const requests = s.requests()
+  const start = liveLoads(requests, 'thread/start')[0]
+  expect(start.params.config).toMatchObject({ plugins: { [id]: { enabled: false } } })
+  expect(requests.findIndex((r) => r.method === 'plugin/installed')).toBeLessThan(requests.indexOf(start))
+  expect(requests.findIndex((r) => r.method === 'turn/start')).toBeGreaterThan(requests.indexOf(start))
+})
+
+test('v065 불완전한 마켓 목록은 학생 글을 유지하고 세부 사유는 비밀값 없이 로그에 남긴다', async () => {
+  const s = scene('marketplace-error', {
+    FAKE_CODEX_PLUGIN_INSTALLED: JSON.stringify({ marketplaces: [], marketplaceLoadErrors: [{ message: 'PRIVATE_MARKET_ERROR' }] })
+  })
+  const log = join(s.base, 'app.log')
+  const previous = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = log
+  const conn = connection(s)
+  try {
+    await expect(conn.run('PRIVATE_STUDENT_MESSAGE', undefined, s.events)).rejects.toThrow('Codex 설정의 외부 도구를 끄지 못했어요')
+  } finally {
+    await conn.stop()
+    if (previous === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = previous
+  }
+  expect(s.requests().some((r) => r.method === 'thread/start' || r.method === 'turn/start')).toBe(false)
+  const diagnostic = readFileSync(log, 'utf8')
+  expect(diagnostic).toContain('stage=plugin-installed reason=marketplace-load-errors count=1')
+  expect(diagnostic).toContain('stage=plan reason=enumeration-failed')
+  expect(diagnostic).not.toContain('PRIVATE_MARKET_ERROR')
+  expect(diagnostic).not.toContain('PRIVATE_STUDENT_MESSAGE')
+})
+
+for (const pluginRow of [
+  { enabled: true, pluginId: 'foreign@market' },
+  { enabled: false, pluginId: 'foreign@market' },
+  { enabled: true }
+]) test(`v065 startup 뒤 플러그인 스킬 또는 식별 불명 행이 남으면 턴을 열지 않는다 ${JSON.stringify(pluginRow)}`, async () => {
+  const s = scene('plugin-skill')
+  s.env.FAKE_CODEX_SKILLS_LIST = JSON.stringify({ data: [{ skills: [
+    { path: join(s.skill, 'SKILL.md'), enabled: true, pluginId: null },
+    { path: join(s.base, 'foreign', 'SKILL.md'), ...pluginRow }
+  ] }] })
+  const conn = connection(s)
+  try {
+    await expect(conn.run('전송 금지', undefined, s.events)).rejects.toThrow('Codex 설정의 외부 도구를 끄지 못했어요')
+  } finally { await conn.stop() }
+  expect(s.requests().some((r) => r.method === 'turn/start')).toBe(false)
+})
+
 test('§10-23 ⓑ 앱이 열지 않은 턴이 섞인 대화는 잠김에 이르러도 턴을 열지 않고 새 대화로 바뀐다', async () => {
   const s = scene('polluted', {
     FAKE_CODEX_CONFIG_READ: FOREIGN_CONFIG,
