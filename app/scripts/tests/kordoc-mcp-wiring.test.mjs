@@ -271,9 +271,9 @@ test('E3: spawnArgs 는 app-server 바로 앞에 -c 블록을 끼우고, 없으�
   const spec = specFor(root)
   const block = mcp.codexMcpArgs(spec)
 
-  // 기동 인자에는 늘 `-c project_doc_max_bytes=0` 이 붙는다(설계 §4.1-E, 01ce608).
+  // 기동 인자는 논문 폴더 지시문과 플러그인 스킬을 프로세스 전체에서 끈다.
   const base = plain(codex.serverArgsFor({ HOME: home }))
-  assert.deepEqual(base, ['-c', 'project_doc_max_bytes=0', 'app-server'])
+  assert.deepEqual(base, ['-c', 'project_doc_max_bytes=0', '-c', 'features.plugins=false', 'app-server'])
   assert.deepEqual(plain(connection.spawnArgs()), base)
   connection.mcpSpec = spec
   assert.deepEqual(plain(connection.spawnArgs()), plain([...base.slice(0, -1), ...block, 'app-server']))
