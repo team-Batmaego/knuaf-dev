@@ -12,7 +12,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { pathPattern, type FigureRule } from './url-rules'
+import { pathPattern, RULE_LEGACY, RULE_PAGE_QUERY, type FigureRule, type QuerySpec } from './url-rules'
 
 export interface RulesLoad {
   ok: boolean
@@ -21,8 +21,6 @@ export interface RulesLoad {
   source: string | null
   problem: 'missing' | 'broken' | null
 }
-
-const RULE_KIND = 'page_kogl_applies_to_body_images'
 
 /** 검증된 판 루트에서 규칙집을 읽는다. */
 export async function loadRules(skillSource: string | null): Promise<RulesLoad> {
@@ -38,7 +36,7 @@ export async function loadRules(skillSource: string | null): Promise<RulesLoad> 
   return { ok: true, rules, source: path, problem: null }
 }
 
-/** 규칙집 JSON 본문을 규칙 목록으로 좁힌다. 잘못된 항목은 **그 항목만** 버린다. */
+/** 파일 계약 위반은 전부 거절, 항목 계약 위반은 해당 항목만 버린다(G1~G5, I1~I7). */
 export function parseRules(text: string): FigureRule[] {
   let raw: unknown
   try {
@@ -47,12 +45,26 @@ export function parseRules(text: string): FigureRule[] {
     return []
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
-  const list = "rules" in raw ? raw.rules : null
-  if (!Array.isArray(list)) return []
+  if (!('v' in raw) || raw.v !== 1 || !('rules' in raw) || !Array.isArray(raw.rules)) return []
+  const list = raw.rules
+  // 항목 검사보다 먼저 센다. 잘못된 새 항목도 옛 항목으로 우회할 수 없어야 한다(G5).
+  const hostKinds = new Map<string, string>()
+  for (const item of list) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const { host, rule } = item as { host?: unknown; rule?: unknown }
+    if (typeof host !== 'string' || (rule !== RULE_LEGACY && rule !== RULE_PAGE_QUERY)) continue
+    const previous = hostKinds.get(host)
+    if (previous && previous !== rule) return []
+    hostKinds.set(host, rule)
+  }
   const rules: FigureRule[] = []
+  const ids = new Set<string>()
   for (const item of list) {
     const rule = asRule(item)
-    if (rule) rules.push(rule)
+    if (!rule) continue
+    if (ids.has(rule.id)) return []
+    ids.add(rule.id)
+    rules.push(rule)
   }
   return rules
 }
@@ -72,11 +84,14 @@ function asRule(item: unknown): FigureRule | null {
   const rule = text('rule')
   if (!id || !host || !org || !pagePath || !imagePath || !rule) return null
   // 모르는 판정 규칙은 조용히 무시한다 — 이름이 다른 규칙을 우리 뜻으로 해석하지 않는다.
-  if (rule !== RULE_KIND) return null
-  // 깨진 정규식도 그 항목만 버린다(넓히지 않는다).
-  if (!compiles(pagePath) || !compiles(imagePath)) return null
-  const hostLooksValid = !host.includes('/') && !host.includes('@') && !host.includes(':')
-  if (!hostLooksValid) return null
+  if (rule !== RULE_LEGACY && rule !== RULE_PAGE_QUERY) return null
+  if (!compiles(pagePath) || !compiles(imagePath) || !validHost(host)) return null
+  let pageQuery: ReadonlyMap<string, QuerySpec> | undefined
+  if (rule === RULE_PAGE_QUERY) {
+    const parsed = asPageQuery(record.pageQuery)
+    if (!parsed) return null
+    pageQuery = parsed
+  } else if (Object.hasOwn(record, 'pageQuery')) return null
   return {
     id,
     host,
@@ -84,6 +99,7 @@ function asRule(item: unknown): FigureRule | null {
     pagePath,
     imagePath,
     rule,
+    ...(pageQuery ? { pageQuery } : {}),
     ...(text('evidence') ? { evidence: text('evidence') as string } : {}),
     ...(text('note') ? { note: text('note') as string } : {})
   }
@@ -96,4 +112,44 @@ function compiles(pattern: string): boolean {
   } catch {
     return false
   }
+}
+
+
+function validHost(host: string): boolean {
+  if (host.length > 253) return false
+  const labels = host.split('.')
+  if (labels.length < 2 || labels[labels.length - 1]!.length < 2 || /[^a-z]/.test(labels[labels.length - 1]!)) return false
+  return labels.every((label) => label.length >= 1 && label.length <= 63 &&
+    !/[^a-z0-9-]/.test(label) && !label.startsWith('-') && !label.endsWith('-') && !label.startsWith('xn--'))
+}
+
+function validLiteral(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 1 && value.length <= 64 && !/[^A-Za-z0-9._~-]/.test(value)
+}
+
+function asPageQuery(value: unknown): ReadonlyMap<string, QuerySpec> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const entries = value as Record<string, unknown>
+  const names = Object.keys(entries)
+  if (names.length < 1 || names.length > 8) return null
+  const result = new Map<string, QuerySpec>()
+  for (const name of names) {
+    if (name.length < 1 || name.length > 64 || /[^A-Za-z0-9_.-]/.test(name)) return null
+    const spec = entries[name]
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null
+    const fields = spec as { literal?: unknown; digits?: unknown; enum?: unknown }
+    const keys = Object.keys(spec)
+    if (keys.length !== 1) return null
+    if (keys[0] === 'literal' && validLiteral(fields.literal)) {
+      result.set(name, { kind: 'literal', value: fields.literal })
+    } else if (keys[0] === 'digits' && fields.digits === true) {
+      result.set(name, { kind: 'digits' })
+    } else if (keys[0] === 'enum' && Array.isArray(fields.enum)) {
+      if (fields.enum.length < 1 || fields.enum.length > 8 || !fields.enum.every(validLiteral)) return null
+      const values = new Set<string>(fields.enum)
+      if (values.size !== fields.enum.length) return null
+      result.set(name, { kind: 'enum', values })
+    } else return null
+  }
+  return result
 }
