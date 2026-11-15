@@ -265,6 +265,54 @@ test('§4.1-D 앱이 붙인 kordoc 은 끄지 않고, 학생 층에 같은 이�
   expect(out.kordocCollision).toBeNull()
 })
 
+for (const student of [false, true]) test(`v066 app-owned kordoc may be absent from thread status (student MCP=${student})`, async () => {
+  // Mac 0.169: data:[]; G0 0.164: only node_repl disabled. Process status
+  // lists kordoc separately, but cannot prove this thread's student MCP cutoff.
+  const f = fakeRpc({
+    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, ...(student ? { node_repl: { command: 'node' } } : {}) } }),
+    'plugin/installed': () => installed([]),
+    'mcpServerStatus/list': () => status(student ? [{ name: 'node_repl', runtimeStatus: 'disabled', tools: {}, resources: [], resourceTemplates: [], authStatus: 'unsupported' }] : []),
+    'app/list': () => status([])
+  })
+  const req = { root: '/tmp/kd-lock-root', form: 'app-thread' as const, injected: [{ name: MCP_SERVER_NAME }], rpc: f.rpc, retry: { sleep: noSleep } }
+  const planned = await appThreadLockPlan(req)
+  if (!planned.ok) throw new Error('plan refused')
+  expect(planned.plan.kordocAttached).toBe(true)
+  expect(await appThreadLockVerify({ ...req, check: { threadId: 'real-shape', instructionSources: [] } }, planned.plan)).toEqual({ ok: true })
+})
+
+for (const collision of [false, true]) test(`v066 absent kordoc row is still refused when student-owned (collision=${collision})`, async () => {
+  const f = fakeRpc({
+    'config/read': () => configRead({ servers: { kordoc: { command: 'node' } }, layers: { user: { kordoc: { command: 'student' } } } }),
+    'plugin/installed': () => installed([]),
+    'mcpServerStatus/list': () => status([])
+  })
+  const out = expectFail(await appThread(f, { injected: collision ? [{ name: MCP_SERVER_NAME }] : [] }), 'result-check')
+  expect(out.remaining).toEqual(['kordoc'])
+})
+
+test('v066 app-owned kordoc absence never excuses another missing student MCP', async () => {
+  const f = fakeRpc({
+    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, node_repl: { command: 'node' } } }),
+    'plugin/installed': () => installed([]),
+    'mcpServerStatus/list': () => status([])
+  })
+  const out = expectFail(await appThread(f, { injected: [{ name: MCP_SERVER_NAME }] }), 'result-check')
+  expect(out.remaining).toEqual(['node_repl'])
+})
+
+test('v066 app-owned kordoc absence does not bypass Apps or instruction checks', async () => {
+  for (const bad of ['apps', 'instructions']) {
+    const f = fakeRpc({
+      'config/read': () => configRead({ servers: { kordoc: { command: 'node' } } }),
+      'plugin/installed': () => installed([]),
+      'mcpServerStatus/list': () => status([]),
+      'app/list': () => status(bad === 'apps' ? [{ id: 'foreign' }] : [])
+    })
+    expectFail(await appThread(f, { injected: [{ name: MCP_SERVER_NAME }], ...(bad === 'instructions' ? { check: { threadId: 't-1', instructionSources: null } } : {}) }), 'result-check')
+  }
+})
+
 test('§4.1-D 학생 층에 같은 이름의 kordoc 이 있으면 끄고 알린다', async () => {
   const f = fakeRpc({
     'config/read': () => configRead({ servers: { kordoc: { command: 'node' } }, layers: { user: { kordoc: { command: 'student' } } } }),

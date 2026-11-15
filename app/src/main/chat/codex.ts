@@ -265,7 +265,13 @@ export class CodexConnection implements AgentConnection {
               return { ok: false, detail: 'plugin-skills' }
             }
           }
-          if (!out.ok) diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length}`)
+          if (!out.ok) {
+            // Exact product names only: kordocMcp.MCP_SERVER_NAME and bundled Codex's node_repl
+            // (scripts/fetch-codex.mjs). Even short user names can contain secrets or personal data.
+            let userMcp = 0
+            const names = out.remaining.map((name) => name === MCP_SERVER_NAME || name === 'node_repl' ? name : `user-mcp-${++userMcp}`)
+            diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length} names=${JSON.stringify(names)}`)
+          }
           return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
           diag(`codex-lock stage=verify code=${codeOf(e)}`)
