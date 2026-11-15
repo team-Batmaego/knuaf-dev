@@ -20,13 +20,13 @@
  * 그 결과가 이전 폴더가 아니라 **지금 폴더**의 res 칸에 남는다(계약: res는 앱 저장소, 폴더 무관).
  */
 
-import { readdir, realpath } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { FigureRes } from './contract'
 import { readRequestFile } from './request-file'
 import { beginTurn as writeTurn, endTurn as clearTurn } from './turn'
 import { loadRules } from './rules'
-import { processRequest, type FetchFn, type TurnGate, type WriteSeam } from './process'
+import { processRequest, type FetchFn, type TurnGate, type TurnLease, type WriteSeam } from './process'
 import type { ImageDecoder } from './reencode-window'
 import { figurePaths, folderHash, prepareHome, writeJsonNew } from './storage'
 import { recordStudentMessage as fillChoiceSheets } from './choices'
@@ -50,6 +50,14 @@ export interface FigureChannelOptions {
    * 있다고 보고 요청을 집는다 — 그 요청이 `endTurn()`이 돌아온 뒤 산출물을 만드는지 본다(R-6 남은 경로).
    */
   clearTurn?: (path: string) => Promise<void>
+  /** 안전한 요청 읽기 대역(시험). 기본은 readRequestFile. */
+  readRequest?: typeof readRequestFile
+  /** 시험 관찰 전용. 기다리거나 처리 결과·게이트 판단을 바꾸지 않는다. */
+  observe?: {
+    ready?(): void
+    requestFinished?(id: string, error: unknown): void
+    turnDraining?(turnId: string, activeWrites: number): void
+  }
   now?: () => number
   scanMs?: number
   ttlMs?: number
@@ -107,6 +115,18 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
   const ready: Promise<void> = prepareHome(paths).then(async () => {
     const first = await heartbeat.first
     if (!first.ok) throw first.error
+    // done은 나중에 place가 읽는다. 오래된 거절 일반 파일만 앱 시작 때 정리한다.
+    for (const name of await readdir(paths.res)) {
+      if (!/^[A-Za-z0-9_-]{8,64}\.res\.json$/.test(name)) continue
+      const path = join(paths.res, name)
+      try {
+        const stat = await lstat(path)
+        if (!stat.isFile() || stat.mtimeMs >= now() - 24 * 60 * 60 * 1000) continue
+        const value: unknown = JSON.parse(await readFile(path, 'utf8'))
+        if (value && typeof value === 'object' && 'status' in value && value.status === 'rejected') await unlink(path)
+      } catch { /* 실패한 정리는 다음 실행에 맡긴다. 통로를 끄지 않는다. */ }
+    }
+    options.observe?.ready?.()
   })
 
   /**
@@ -150,6 +170,15 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
    */
   let generation = 0
   let closed = true
+  let used = 0
+  let rejected = 0
+  let closedRejected = 0
+  // 죽은 그림 요청의 기존 cancelled 결과도 실행당 상한 안에서 남긴다.
+  const noteClosedReject = (): boolean => {
+    if (closedRejected >= 24) return false
+    closedRejected += 1
+    return true
+  }
   let activeWrites = 0
   let drained: (() => void)[] = []
   const onDrained = (done: () => void): void => {
@@ -158,14 +187,27 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
   }
   const gate: TurnGate = {
     begin() {
-      if (closed) return { live: () => false, open: () => null }
+      if (closed) return {
+        live: () => false, open: () => null, reserve: () => false, noteReject: noteClosedReject
+      }
       // 이 요청의 세대값을 지금 잡는다 — 아래 첫 await 뒤에 잡으면 그 사이 `endTurn`을 놓친다.
       const gen = generation
       return {
-        live: () => gen === generation,
+        live: () => gen === generation && !closed,
+        reserve: () => {
+          if (gen !== generation || closed || used >= 6) return false
+          used += 1
+          return true
+        },
+        noteReject: () => {
+          if (gen !== generation || closed) return noteClosedReject()
+          if (rejected >= 24) return false
+          rejected += 1
+          return true
+        },
         // 확인과 등록을 한 틱에 한다 — `await` 사이에 `endTurn`이 끼면 등록을 놓쳐 `endTurn`이 먼저 돌아간다.
         open: () => {
-          if (gen !== generation) return null
+          if (gen !== generation || closed) return null
           activeWrites += 1
           let released = false
           return () => {
@@ -183,31 +225,52 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
   }
 
   /** 처리하지 못한 요청도 결과를 남긴다 — 안 남기면 도우미가 60초를 다 기다린다. */
-  const closeRejected = async (id: string, reason: string): Promise<void> => {
-    // 이미 결과가 있으면 **덮지 않는다** — 배타 생성이 검사와 쓰기를 한 번에 한다(I-1). 감시자의 `seen`은
-    // 실행마다 새로 만들어지므로, 재시작 뒤 옛 요청 파일이 만료로 보여도 그때 남긴 `done`을 `expired`로
-    // 바꾸면 학생은 결과를 잃는다.
-    const res: FigureRes = { v: 1, id, status: 'rejected', reason, slot: '', needsChoice: false, images: [] }
-    await writeJsonNew(join(paths.res, `${id}.res.json`), res)
+  const closeRejected = async (id: string, reason: string, listLease?: TurnLease): Promise<void> => {
+    // 목록으로 식별한 handler 거절도 요청 시작 세대의 쓰기 구간 안에서만 닫는다(B-02).
+    const release = listLease?.open()
+    if (listLease && !release) return
+    try {
+      if (!(listLease ?? gate.begin()).noteReject()) return
+      // 배타 생성: 과거 done/거절 결과를 절대 덮지 않는다.
+      const res: FigureRes = { v: 1, id, status: 'rejected', reason, slot: '', needsChoice: false, images: [] }
+      await writeJsonNew(join(paths.res, `${id}.res.json`), res)
+    } finally {
+      release?.()
+    }
   }
 
-  const makeHandler = (folder: string) => async (item: FoundRequest): Promise<void> => {
+  const handleRequest = (folder: string) => async (item: FoundRequest): Promise<void> => {
+    // 읽는 동안 endTurn/beginTurn이 지나가도 그 요청의 세대를 새로 잡지 않는다.
+    const lease = gate.begin()
+    const read = await (options.readRequest ?? readRequestFile)(item.path)
+    let listing = false
+    if (read.ok) {
+      if (read.parse.ok) listing = read.parse.request.images.length === 0
+      else {
+        // 모양 검사 실패라도 안전하게 읽은 JSON의 빈 images는 목록으로 식별할 수 있다.
+        try {
+          const raw: unknown = JSON.parse(read.raw)
+          listing = !!raw && typeof raw === 'object' && !Array.isArray(raw) &&
+            'images' in raw && Array.isArray(raw.images) && raw.images.length === 0
+        } catch { /* 읽을 수 없는 요청은 기존 거절 정책을 유지한다. */ }
+      }
+    }
+    const listLease = listing ? lease : undefined
     if (item.expired) {
-      await closeRejected(item.id, 'expired')
+      await closeRejected(item.id, 'expired', listLease)
       return
     }
-    const read = await readRequestFile(item.path)
     if (!read.ok) {
-      await closeRejected(item.id, read.reason === 'too_big' ? 'limit' : 'invalid')
+      await closeRejected(item.id, read.reason === 'too_big' ? 'limit' : 'invalid', listLease)
       return
     }
     if (!read.parse.ok) {
-      await closeRejected(item.id, 'invalid')
+      await closeRejected(item.id, 'invalid', listLease)
       return
     }
     // 파일 이름과 본문 id가 다르면 어느 쪽이 정본인지 알 수 없다 — 아무것도 받지 않고 닫는다(R-5).
     if (read.parse.request.id !== item.id) {
-      await closeRejected(item.id, 'invalid')
+      await closeRejected(item.id, 'invalid', listLease)
       return
     }
     await processRequest({ request: read.parse.request, folder }, {
@@ -216,9 +279,26 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
       decode: options.decode,
       fetchFn: options.fetchFn,
       write: options.write,
-      gate,
+      gate: listing ? { begin: () => lease } : gate,
       now
     })
+  }
+
+  const makeHandler = (folder: string): ((item: FoundRequest) => Promise<void>) => {
+    const handle = handleRequest(folder)
+    if (!options.observe?.requestFinished) return handle
+    return async (item) => {
+      let failure: unknown
+      try {
+        await handle(item)
+      } catch (error) {
+        failure = error
+        throw error
+      } finally {
+        // 결과 파일을 쓰지 않는 취소·거절 예산 초과도 실제 처리 완료로 관찰한다.
+        options.observe?.requestFinished?.(item.id, failure)
+      }
+    }
   }
 
   /**
@@ -277,6 +357,8 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
         if (ownerTurnId !== turnId) return
         // 세대값을 올림과 **같은 틱에** 게이트를 연다(사이에 await 없음) — 앞 턴의 lease 를 끊는다.
         generation += 1
+        used = 0
+        rejected = 0
         closed = false
       })
       // 턴이 시작되면 그 폴더의 감시자가 필요하다 — 다음 박자를 안 기다린다.
@@ -298,6 +380,7 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
       closed = true
       const { promise: drainDone, resolve: drainResolve } = Promise.withResolvers<void>()
       onDrained(drainResolve)
+      options.observe?.turnDraining?.(turnId, activeWrites)
       await drainDone
       // 지우기는 사슬 안에서, **소유권 확인과 같은 틱에** 한다(I-01 남은 경계). 확인을 사슬 밖에서 하면
       // 확인~지우기 사이에 새 `beginTurn` 의 쓰기가 끼어 들어 그 파일을 지운다(실측 재현).
