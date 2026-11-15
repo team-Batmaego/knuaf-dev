@@ -477,6 +477,9 @@ function exeName(word: string): string {
 /** `cd <root>` 꼴인가 — 대상(링크 해소)이 논문 폴더 자체일 때만. root 를 모르면 아니다. */
 function cdToRoot(t: string[], root?: string): boolean {
   if (!root || t.length !== 2 || exeName(t[0]) !== 'cd') return false
+  // `..` 조각이 있으면 예외에서 뺀다 — `cd alias/..` 는 논리 cd 로는 root 지만, 셸이 물리 모드
+  // (`set -P`)면 링크 대상의 부모로 간다. 판정은 셸 설정을 모른다(검토 FIX5 K1).
+  if (t[1].split(/[\\/]/).includes('..')) return false
   const ops = pathOpsFor(root)
   const real = (p: string): string => { try { return realpathSync.native(p) } catch { return p } }
   const a = real(ops.resolve(root, t[1])), b = real(ops.resolve(root))

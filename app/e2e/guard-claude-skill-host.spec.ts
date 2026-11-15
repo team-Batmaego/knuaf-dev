@@ -723,6 +723,8 @@ test('A7 cd 예외는 논문 폴더 자체뿐 — 하위 폴더·상위·링크 
     'cd && touch pwn.md',                                  // 인자 없는 cd = 홈
     // J1: 혼자 쓴 cd 도 닫는다 — 다음 호출로 작업 폴더가 이어지면 판정 기준(root)과 어긋난다.
     'cd sub', 'cd alias', 'cd outlink', 'cd ..', 'pushd sub', `cd "${root}/sub"`,
+    // K1: 논리 cd 로는 root 라도 `..` 를 거치면 예외 아님(물리 모드 셸이면 링크 대상의 부모).
+    'cd alias/.. && touch pwn.md', 'cd sub/.. && cat notes.md',
   ]
   for (const trusted of [true, false]) {
     const r = await rig({ root, userData }, { trusted })
