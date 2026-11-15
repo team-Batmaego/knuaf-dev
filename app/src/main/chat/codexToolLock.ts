@@ -6,11 +6,15 @@
  *     런타임 상태(`mcpServerStatus/list`·`app/list`·`instructionSources`)로 대조한다.
  *   - `terminal` — 터미널 스크립트. 스레드가 없으므로 **`-c`** 로 넘기되, 끌 수 있다고 확인된
  *     것만 지목하고 하나라도 못 끄면 **실행을 거부**한다(스크립트도 만들지 않는다).
+ * 플러그인 capability 는 스레드 config만으로 차단되지 않는다(0.164/0.169).
+ * 앱 startup과 터미널은 features.plugins=false도 넘긴다. 앱은 startup 뒤 cwd의
+ * skills/list에서 pluginId=null인 행만 확인한다(codex.ts). 이름별 config는 이중 방어다.
  *
  * 원칙
  *   - 학생 `~/.codex/config.toml` 은 읽기만 한다(쓰지 않는다).
  *   - 열거는 `config/read`(layers 포함)·`plugin/installed` 둘뿐이고, 둘 다 MCP 를 기동하지 않는다.
- *   - 목록 읽기는 '커서 없는 응답이 끝' 규칙을 따른다. 형식 이상·상한 도달은 빈 목록이 아니라 실패다.
+ *   - MCP/Apps 목록은 커서를 끝까지 읽고 plugin/installed는 marketplaces 한 응답을 읽는다.
+ *     형식 이상·마켓 로드 실패·페이지 상한은 빈 목록이 아니라 실패다.
  *   - 앱 스레드 `mcp_servers` 에는 `config/read` 의 유효 키만 넣는다 — 플러그인이 딸고 오는 이름을
  *     넣으면 기동이 `invalid transport` 로 죽는다(실측 ⓙ).
  */
@@ -19,6 +23,7 @@ import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, sep } from 'node:path'
 import { MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
+import { codeOf, diag } from '../diagLog'
 
 /** 목록 한 번에 받는 장 수 상한. 상한에 닿았는데 커서가 남으면 실패다(설계 '목록 읽기 규칙'). */
 export const LIST_PAGE_CAP = 50
@@ -270,17 +275,36 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
     }
   }
 
-  const installed = await readPages<unknown>(req.rpc, 'plugin/installed', {}, (res) => listAt(res, 'data'))
-  if (!installed.ok) return { ok: false, reason: installed.reason }
+  // 0.164/0.169: plugin/installed is one unpaginated marketplace response, not {data}.
+  let installed: unknown
+  try {
+    installed = await req.rpc.request('plugin/installed', {})
+  } catch (error) {
+    diag(`codex-lock stage=plugin-installed reason=enumeration-failed code=${codeOf(error)}`)
+    return { ok: false, reason: 'enumeration-failed' }
+  }
+  const response = asRecord(installed)
+  if (!Array.isArray(response?.marketplaces) || !Array.isArray(response?.marketplaceLoadErrors)) {
+    diag('codex-lock stage=plugin-installed reason=list-shape')
+    return { ok: false, reason: 'list-shape' }
+  }
+  // A failed marketplace can hide installed IDs. Without a complete inventory, do not open a turn.
+  if (response.marketplaceLoadErrors.length) {
+    diag(`codex-lock stage=plugin-installed reason=marketplace-load-errors count=${response.marketplaceLoadErrors.length}`)
+    return { ok: false, reason: 'enumeration-failed' }
+  }
   const ids: string[] = []
-  for (const item of installed.items) {
-    if (typeof item === 'string' && item) { ids.push(item); continue }
-    const rec = asRecord(item)
-    const id = typeof rec?.id === 'string' ? rec.id : typeof rec?.pluginId === 'string' ? rec.pluginId : ''
-    // 설치 행이 문자열도 표도 아니거나 id 가 없으면(`null`·`{}`) 건너뛰지 않고 닫는다(I-01).
-    // 건너뛰면 그 플러그인의 이름을 모른 채 잠금 목록을 만든다 — 모르는 것은 통과가 아니다.
-    if (!rec || !id) return { ok: false, reason: 'list-shape' }
-    ids.push(id)
+  for (const item of response.marketplaces) {
+    const marketplace = asRecord(item)
+    if (!Array.isArray(marketplace?.plugins)) return { ok: false, reason: 'list-shape' }
+    for (const plugin of marketplace.plugins) {
+      const row = asRecord(plugin)
+      if (typeof row?.id !== 'string' || !row.id.trim() || typeof row.installed !== 'boolean' || typeof row.enabled !== 'boolean') {
+        return { ok: false, reason: 'list-shape' }
+      }
+      // Lock installed plugins even when already disabled; enabled-only rows must not be missed either.
+      if (row.installed || row.enabled) ids.push(row.id)
+    }
   }
   return { ok: true, value: { servers, plugins, layers, installed: ids } }
 }
@@ -328,8 +352,9 @@ function planTerminal(req: ToolLockRequest, enumeration: Enumeration): { ok: tru
   for (const id of new Set<string>([...Object.keys(enumeration.plugins), ...enumeration.installed])) {
     if (!id) continue
     if (asRecord(enumeration.plugins[id])?.enabled === false) continue
-    if (id.includes('.')) {
-      details.push({ name: id, reason: '이름에 점(.)이 든 플러그인', method: methodPlugin(id) })
+    // Codex splits -c keys itself: @ works, but dots/equals/quotes/whitespace change the target.
+    if (!/^[A-Za-z0-9_@-]+$/.test(id)) {
+      details.push({ name: id, reason: id.includes('.') ? '이름에 점(.)이 든 플러그인' : '설정 인자로 안전하게 끌 수 없는 이름의 플러그인', method: methodPlugin(id) })
       continue
     }
     args.push('-c', `plugins.${id}.enabled=false`)
@@ -340,6 +365,8 @@ function planTerminal(req: ToolLockRequest, enumeration: Enumeration): { ok: tru
   args.push('-c', 'project_doc_max_bytes=0')
   // Apps 는 항상 끈다 — 효과는 실측 ②, 키 수용은 세 판 모두 확인(I-03).
   args.push('-c', 'features.apps=false')
+  // thread config와 달리 startup feature switch는 플러그인 스킬 로딩도 차단한다.
+  args.push('-c', 'features.plugins=false')
 
   if (details.length) return { ok: false, details }
   return { ok: true, args, lockedNames, lockedPlugins }
