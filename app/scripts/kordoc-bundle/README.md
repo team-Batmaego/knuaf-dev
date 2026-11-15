@@ -30,9 +30,19 @@ node app/scripts/kordoc-bundle/bundle.mjs --verify
 설치에는 `pnpm` 이 필요하고 네트워크를 쓴다(CI·릴리스 담당만 실행).
 
 pnpm 은 PATH 에서 찾아 **첫 바이트를 보고** 띄운다: 셔뱅 있음·ELF·Mach-O·PE 면 그대로 실행하고,
-shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 `cmd.exe /d /s /c` 로 감싼다.
+shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 `cmd.exe /d /s /v:off /c "…"` 로 감싼다.
 이유: pnpm 11 이 까는 전역 셔틀(`~/.npm-global/bin/pnpm`)이 shebang 없는 `sh` 스크립트라
-`spawn` 이 `ENOEXEC` 으로 죽는다(11-15 실측). 인자는 배열로 넘기므로 셸 인용 문제가 없다.
+`spawn` 이 `ENOEXEC` 으로 죽는다(11-15 실측).
+
+- **pnpm 판 하한은 없다.** 11-15 에 설치 전에 죽던 원인은 pnpm 판이 아니라 `--no-frozen-lockfile`
+  플래그였다(pnpm 10.32·11.25 가 `Unknown option` 으로 거절). 그 플래그를 빼서 원인을 없앴고,
+  지금은 설치 전에 `pnpm --version` 이 도는지만 확인한다(못 도는 실행기를 몇 분 뒤에 만나지 않게).
+  pnpm 10·11 에서 이 스크립트 전체가 도는지는 **아직 실측이 없다** — 릴리스는 12.18.0 실측.
+- 윈도 인용은 우리가 한다. `cmd /c` 뒤 문자열에는 `%` 를 **큰따옴표로도** 막을 수 없다(환경변수로
+  먼저 확장된다). 그래서 `%` 가 든 인자는 조용히 틀리는 대신 **거절**한다. `!` 는 `/v:off` 로 끄고
+  같은 이유로 감싼다. 그 밖의 문자는 cmd 문법 문자일 때만 감싼다(`--os=win32` 를 감싸면 pnpm 이
+  플래그를 못 읽는다).
+- 인자는 POSIX·윈도 모두 배열로 넘긴다(윈도만 `windowsVerbatimArguments` + 우리 인용).
 
 ## 계약 — 이 스크립트가 지키는 것
 
@@ -49,7 +59,10 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
 3. **OCR 제외.** `onnxruntime-node` · `@huggingface/*` 를 담지 않는다.
    대신 이미지 스캔 PDF 는 텍스트가 0자로 나온다 → 앱이 그 경고를 받으면 `ocr:true` 로 재시도하는
    경로를 따로 둔다(덩어리 자체는 OCR 을 못 한다).
-4. **재현 가능.** 같은 입력이면 같은 tgz sha256. 아래 "형식"이 그 근거다.
+4. **tgz 결정성.** **같은 설치 트리 → 같은 tgz sha256.** 아래 "형식"이 그 근거다.
+   설치 자체(어떤 트리가 깔리나)는 여기서 보장하지 않는다 — kordoc 의 전이 의존성은 범위로 적혀
+   있어 registry 해석이 바뀌면 같은 도구 판에서도 다른 트리가 나올 수 있다(11-15 Roh 검토 I-03).
+   릴리스는 이 스크립트가 낸 명세의 해시를 계약으로 쓰므로 배포 경로는 그대로 성립한다.
    설치 뒤 `node_modules` 루트의 **점(.) 항목을 전부 지운다** — pnpm 이 남기는
    `.pnpm-workspace-state-v1.json` 에 임시 폴더 절대경로와 나노초 시각이 박혀 실행마다 해시가
    갈리기 때문이다(11-15 실측). npm 패키지 이름은 점으로 시작할 수 없으므로 점 항목은 전부
@@ -118,13 +131,17 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
       "packages": { "kordoc": "4.17.1", "…": "…" },
       "cli": { "path": "node_modules/kordoc/dist/cli.js", "sha256": "…" },
       "kordocVersion": "4.17.1",
-      "mcp": { "path": "node_modules/kordoc/dist/mcp.js", "sha256": "…" }
+      "mcp": { "path": "node_modules/kordoc/dist/mcp.js", "sha256": "…" },
+      "tooling": { "node": "v22.x", "zlib": "1.3.x", "pnpm": "12.x" }
     }
   }
 }
 ```
 
 - `targets` 는 대상 이름 오름차순. 부분 빌드(`--target` 하나)는 다른 대상 기록을 **지우지 않는다**.
+- `tooling` 은 **대상마다** 따로 적는다. 부분 빌드에서 한 대상만 다시 만들면 그 대상의 `tooling` 만
+  새 판으로 바뀌고, 나머지는 만들 당시의 판으로 남는다 — 최상위 `tooling` 만 갱신하면 "이 tgz 를
+  어떤 도구로 만들었나"가 거짓이 된다(11-15 Roh 검토 R-01). 최상위 값은 이번 실행의 참고값이다.
 - `bytes`·`sha256`·`unpackedBytes`·`files` 는 산출물에서 계산한 실측값이다(손으로 적지 않는다).
 - 앱은 내려받은 tgz 의 `bytes`·`sha256` 을 대조하고, 푼 뒤 `cli.sha256` 을 다시 확인한다.
 - 명세에는 **계약 필드만** 들어간다. 빌드 진단(`workDir`·`ignoredBuilds`·항목 수)은 화면·로그에만

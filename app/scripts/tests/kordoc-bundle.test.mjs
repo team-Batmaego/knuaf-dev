@@ -10,7 +10,8 @@
 // (네트워크가 필요해서 이 시험에 넣지 않는다).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -38,6 +39,7 @@ import {
   pnpmSpawnPlan,
   pruneNodeModules,
   quoteCmdArg,
+  readPnpmVersion,
   resolveCommand,
   targetFileName,
   targetRecord,
@@ -453,9 +455,27 @@ test('윈도 .cmd 는 cmd.exe 로 띄우고 인자를 cmd 문법으로 감싼다
   })
   assert.equal(plan.file, 'C:\\Windows\\system32\\cmd.exe')
   assert.equal(plan.verbatim, true)
-  assert.deepEqual(plan.args.slice(0, 3), ['/d', '/s', '/c'])
-  // 임시 폴더 경로에는 공백·특수문자가 없다 → 셔틀 경로는 그대로, 공백 있는 경로만 감싼다.
-  assert.match(plan.args[3], /pnpm\.cmd add --os=win32 "C:\\a b\\x"$/)
+  // 스위치 순서는 코드 계약 그대로: /d /s /v:off /c (모두 /c 앞이면 cmd 가 받는다).
+  assert.deepEqual(plan.args.slice(0, 4), ['/d', '/s', '/v:off', '/c'])
+  // /s 는 첫·끝 따옴표만 벗긴다 → 바깥 전체 인용을 벗긴 안쪽이 cmd 가 실제로 받는 명령줄이다.
+  const line = plan.args[4]
+  assert.match(line, /^".*"$/)
+  assert.equal(line.slice(1, -1), `${cmd} add --os=win32 "C:\\a b\\x"`)
+})
+
+test('공백 있는 pnpm.cmd 경로는 안쪽에서 따옴표로 감싼다', () => {
+  // 셔틀 경로에 공백이 있으면(예: `C:\Program Files\…`) 안쪽 인용이 없을 때 cmd 가 첫 낱말에서 끊는다.
+  const dir = join(tempDir('space parent'), 'bin dir')
+  mkdirSync(dir, { recursive: true })
+  const cmd = join(dir, 'pnpm.cmd')
+  writeFileSync(cmd, '@ECHO off\r\n')
+  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.17.1'], {
+    env: { PATH: dir, ComSpec: 'cmd.exe' },
+    platform: 'win32',
+  })
+  const line = plan.args[4]
+  assert.match(line, /^".*"$/)
+  assert.equal(line.slice(1, -1), `"${cmd}" add kordoc@4.17.1`)
 })
 
 test('quoteCmdArg 는 공백·특수문자가 없으면 그대로 둔다', () => {
@@ -476,4 +496,141 @@ test('pnpm 이 PATH 에 없으면 설치를 시작하지 않고 던진다', () =
     () => installTarget(work, planTarget('darwin-arm64'), { env: { PATH: dir } }),
     /pnpm 을 PATH 에서 찾지 못했다/,
   )
+})
+
+// ------------------------------------------------------------------ 검토 지적 회귀 (11-15 Roh)
+
+test('cmd 인용은 % 를 조용히 넘기지 않고 거절한다', () => {
+  // % 는 큰따옴표로 막을 수 없다(명령줄에서 환경변수로 먼저 확장된다). 그래서 거절이 계약이다.
+  assert.throws(() => quoteCmdArg('C:\\Users\\a%20b\\x'), /% 를 넣을 수 없다/)
+  const dir = tempDir('pct')
+  writeFileSync(join(dir, 'pnpm.cmd'), '@ECHO off\r\n')
+  assert.throws(
+    () =>
+      pnpmSpawnPlan('pnpm', ['add', 'C:\\%TEMP%\\x'], {
+        env: { PATH: dir, ComSpec: 'cmd.exe' },
+        platform: 'win32',
+      }),
+    /% 를 넣을 수 없다/,
+  )
+  // 지연 확장 문자는 감싸서 넘긴다(우리는 /v:off 로도 끈다 — 벨트와 멜빵).
+  assert.equal(quoteCmdArg('a!b'), '"a!b"')
+})
+
+test('윈도 명령줄은 /v:off 로 띄우고 전체를 한 번 더 감싼다', () => {
+  const dir = tempDir('cmdshell')
+  const cmd = join(dir, 'pnpm.cmd')
+  writeFileSync(cmd, '@ECHO off\r\n')
+  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.17.1'], {
+    env: { PATH: dir, ComSpec: 'cmd.exe' },
+    platform: 'win32',
+  })
+  assert.deepEqual(plan.args.slice(0, 4), ['/d', '/s', '/v:off', '/c'])
+  // /s 는 첫·끝 따옴표만 벗긴다 → 안쪽 인용이 살아남으려면 전체를 감싸야 한다.
+  assert.match(plan.args[4], /^".*"$/)
+})
+
+test('못 도는 pnpm 은 설치 전에 드러난다', () => {
+  // 11-15 에 설치 전에 죽던 원인은 플래그였고 그 플래그는 뺐다. 그래서 판 하한은 두지 않는다.
+  // 대신 "실행기가 도는가"는 설치 전에 확인한다 — 원인을 한 줄로 보여 주기 위해서다.
+  const dir = tempDir('pnpm-broken')
+  makeExecutable(dir, 'pnpm', '#!/bin/sh\necho boom >&2\nexit 3\n')
+  const env = { ...process.env, PATH: dir }
+  assert.throws(() => readPnpmVersion('pnpm', { env, platform: 'linux' }), /pnpm --version 이 실패했다/)
+  const work = tempDir('pnpm-broken-work')
+  assert.throws(
+    () => installTarget(work, planTarget('darwin-arm64'), { pnpm: 'pnpm', env }),
+    /pnpm --version 이 실패했다/,
+  )
+  // 도는 pnpm 이면 판을 돌려준다(하한 판정 없음).
+  const okDir = tempDir('pnpm-ok')
+  makeExecutable(okDir, 'pnpm', '#!/bin/sh\necho 11.25.0\n')
+  assert.equal(readPnpmVersion('pnpm', { env: { PATH: okDir }, platform: 'linux' }), '11.25.0')
+})
+
+test('설치 인자에 pnpm 10·11 이 거절하는 --no-frozen-lockfile 이 없다', () => {
+  // 이 플래그는 pnpm 10.32·11.25 에서 `Unknown option` 으로 설치 전에 죽었다(11-15 실측).
+  const dir = tempDir('install-args')
+  makeExecutable(
+    dir,
+    'pnpm',
+    '#!/bin/sh\nif [ "$1" = "--version" ]; then echo 12.18.0; exit 0; fi\necho "$@" > "$PNPM_ARGS_OUT"\nexit 1\n',
+  )
+  const out = join(dir, 'args.txt')
+  const work = tempDir('install-args-work')
+  let error = null
+  try {
+    installTarget(work, planTarget('darwin-arm64'), { env: { ...process.env, PATH: dir, PNPM_ARGS_OUT: out } })
+  } catch (caught) {
+    error = caught
+  }
+  assert.ok(error, 'cli.js 가 없으니 실패해야 한다')
+  const seen = readFileSync(out, 'utf8')
+  assert.equal(seen.includes('frozen-lockfile'), false, seen)
+  assert.match(seen, /--config\.node-linker=hoisted/)
+  assert.match(seen, /--os=darwin/)
+})
+
+test('@napi-rs/canvas 래퍼가 계획에 있고 빠지면 verify 가 잡는다', () => {
+  // pdfjs-dist 는 렌더할 때 require('@napi-rs/canvas') 를 한다. --no-optional 설치라
+  // 선택 의존성으로는 들어오지 않는다 → 계획에 직접 넣고, 없으면 실패해야 한다(I-01).
+  for (const target of Object.keys(TARGETS)) {
+    assert.equal(planTarget(target).dependencies['@napi-rs/canvas'], '0.1.100')
+  }
+  const plan = planTarget('darwin-arm64')
+  const files = {
+    'package.json': JSON.stringify({ name: 'kordoc-bundle', private: true }),
+    'node_modules/kordoc/package.json': JSON.stringify({ version: KORDOC_VERSION }),
+    'node_modules/kordoc/dist/cli.js': 'fake-cli',
+    'node_modules/kordoc/dist/mcp.js': 'fake-mcp',
+  }
+  // 래퍼를 뺀 채 나머지 필수 패키지는 다 넣는다 → 문제는 래퍼 하나뿐이어야 한다.
+  for (const [name, version] of Object.entries(plan.dependencies)) {
+    if (name === 'kordoc' || name === '@napi-rs/canvas') continue
+    files[`node_modules/${name}/package.json`] = JSON.stringify({ name, version })
+  }
+  const problems = verifyTarGz(packTreeGzip(makeTree('no-canvas-wrapper', files)), 'darwin-arm64')
+  assert.equal(problems.filter((p) => p.includes('@napi-rs/canvas')).length, 1, problems.join('\n'))
+  assert.ok(
+    problems.some((p) => p.includes('필수 패키지가 없다 — @napi-rs/canvas')),
+    problems.join('\n'),
+  )
+})
+
+test('풀어 놓은 트리에서 @napi-rs/canvas 가 해석된다(전역 모듈 없이)', () => {
+  // 검사가 "package.json 이 있다"만 보는 게 아니라 실제 탐색이 성립하는지 잠근다.
+  const root = makeTree('canvas-resolve', {
+    'package.json': '{"name":"kordoc-bundle"}\n',
+    'node_modules/@napi-rs/canvas/package.json': JSON.stringify({
+      name: '@napi-rs/canvas',
+      version: '0.1.100',
+      main: 'index.js',
+    }),
+    'node_modules/@napi-rs/canvas/index.js': 'module.exports = require("@napi-rs/canvas-darwin-arm64")\n',
+    'node_modules/@napi-rs/canvas-darwin-arm64/package.json': JSON.stringify({
+      name: '@napi-rs/canvas-darwin-arm64',
+      version: '0.1.100',
+      main: 'index.js',
+    }),
+    'node_modules/@napi-rs/canvas-darwin-arm64/index.js': 'module.exports = { createCanvas() {} }\n',
+  })
+  const require = createRequire(join(root, 'package.json'))
+  // 맥 /var 는 /private/var 심볼릭 링크다 → 양쪽을 realpath 로 맞춘 뒤 비교한다(11-15 실측 실패).
+  assert.equal(
+    realpathSync(require.resolve('@napi-rs/canvas')),
+    realpathSync(join(root, 'node_modules', '@napi-rs', 'canvas', 'index.js')),
+  )
+  assert.equal(typeof require('@napi-rs/canvas').createCanvas, 'function')
+})
+
+test('명세는 대상마다 그 대상을 만든 도구 판을 적는다', () => {
+  const outDir = tempDir('manifest-tooling')
+  const record = (target, tooling) =>
+    targetRecord({ target, tgz: Buffer.from('x'), entries: [], tooling })
+  writeManifest(outDir, [record('darwin-arm64', { pnpm: '12.18.0' })], { tooling: { pnpm: '12.18.0' } })
+  // 부분 빌드: 다른 대상을 다시 만들면 그 대상의 tooling 만 바뀐다.
+  const manifest = writeManifest(outDir, [record('win32-x64', { pnpm: '13.0.0' })], { tooling: { pnpm: '13.0.0' } })
+  assert.equal(manifest.targets['darwin-arm64'].tooling.pnpm, '12.18.0')
+  assert.equal(manifest.targets['win32-x64'].tooling.pnpm, '13.0.0')
+  assert.equal(manifest.tooling.pnpm, '13.0.0')
 })

@@ -8,8 +8,11 @@
 //   2) 대상 고정 — darwin-arm64 / darwin-x64 / win32-x64. 한 덩어리에 다른 판 바이너리가
 //      섞이면 윈도 설치본이 깨진다(11-10 실측). 섞이면 verify 가 실패한다.
 //   3) OCR 제외 — onnxruntime-node·@huggingface 를 담지 않는다.
-//   4) 재현 가능 — 같은 입력이면 같은 sha256. tar 헤더(mtime·uid·gid·순서)를 고정하고
-//      gzip 헤더를 직접 조립한다(tar.mjs).
+//   4) 재현 가능 — **같은 설치 트리 → 같은 tgz** 바이트. tar 헤더(mtime·uid·gid·순서)를 고정하고
+//      gzip 헤더를 직접 조립한다(tar.mjs). 설치 자체의 재현성은 여기서 보장하지 않는다:
+//      kordoc 전이 의존성(zod·jszip·MCP SDK, sharp 의 semver 등)은 범위로 적혀 있어 registry
+//      해석이 바뀌면 같은 소스·같은 도구 판에서도 다른 트리가 나올 수 있다. 릴리스는 이 스크립트가
+//      낸 명세의 해시로 고정되므로 그 계약은 유지된다(11-15 Roh 검토 I-03).
 //
 // 사용(저장소 루트):
 //   node app/scripts/kordoc-bundle/bundle.mjs                     # 세 대상 전부
@@ -54,6 +57,11 @@ export const BASE_DEPENDENCIES = {
   'pdfjs-dist': '4.10.38',
   sharp: '0.35.5',
   '@hyzyla/pdfium': '2.1.13',
+  // pdfjs-dist 가 페이지 렌더에 쓰는 래퍼. 선택 의존성이라 `--no-optional` 설치에서 빠지고,
+  // 그러면 `require('@napi-rs/canvas')` 가 MODULE_NOT_FOUND 로 죽는다(11-15 Roh 검토 I-01).
+  // 대상별 네이티브 패키지(@napi-rs/canvas-<판>)만으로는 이 래퍼 탐색이 성립하지 않는다.
+  // 여기 적으면 verify 의 "필수 패키지" 대조가 자동으로 함께 본다.
+  '@napi-rs/canvas': '0.1.100',
 }
 
 /**
@@ -181,12 +189,26 @@ export function resolveCommand(name, { env = process.env, platform = process.pla
   return null
 }
 
-/** cmd.exe 에 넘길 인자 하나를 감싼다(따옴표·`&`·`^` 같은 cmd 문법에서 살아남게). */
+/**
+ * cmd.exe 에 넘길 인자 하나를 감싼다. **규칙**(Microsoft `cmd` 문서 + C 런타임 인자 해석):
+ *   - 공백·`"`·`&`·`|`·`<`·`>`·`^`·`(`·`)` 가 있으면 큰따옴표로 감싼다. 큰따옴표 안에서는
+ *     이 문자들이 cmd 문법이 아니라 글자다.
+ *   - 큰따옴표는 `""` 로 두 번 써서 넘긴다(따옴표 안의 `""` 는 인자 하나의 `"` 로 풀린다).
+ *   - `!` 는 지연 확장이 켜져 있으면 먹는다. 우리는 `/v:off` 로 띄우지만, 그 플래그가 없는
+ *     경로(사람이 손으로 복사한 줄)에서도 안전하도록 감싼다 — 벨트와 멜빵.
+ *   - `%` 는 **큰따옴표로 막을 수 없다**. 명령줄에서 `%` 는 배치 파일과 달리 `%%` 로도
+ *     이스케이프되지 않고 `%NAME%` 이 환경변수로 먼저 확장된다. 그래서 `%` 가 든 인자는
+ *     조용히 틀리는 대신 **거절한다**(11-15 Roh 검토 I-02). 그런 경로는 cmd 를 거치지 않는
+ *     방식(임시 .bat)이 필요하고, 그건 실기기 회차에서 다룬다.
+ */
 export function quoteCmdArg(arg) {
+  if (arg.includes('%')) {
+    throw new Error(`cmd 명령줄에는 % 를 넣을 수 없다(환경변수로 확장된다): ${arg}`)
+  }
   if (arg === '') return '""'
-  // cmd 가 문법으로 먹는 문자만 감싼다. `=`·`,`·`;`·`!` 는 cmd 에서 평범한 문자다 —
+  // cmd 가 문법으로 먹는 문자만 감싼다. `=`·`,`·`;` 는 cmd 에서 평범한 문자다 —
   // 이걸로 감싸면 `--os=win32` 가 `"--os=win32"` 가 되어 pnpm 이 플래그를 못 읽는다(11-15 실패).
-  if (!/[\s"&|<>^()%]/.test(arg)) return arg
+  if (!/[\s"&|<>^()!]/.test(arg)) return arg
   return `"${arg.replace(/"/g, '""')}"`
 }
 
@@ -194,6 +216,12 @@ export function quoteCmdArg(arg) {
  * `pnpm add` 를 어떻게 띄울지 정한다. 돌려주는 값은 spawnSync 에 그대로 넘긴다.
  * 텍스트 스크립트(셔뱅 없음)면 POSIX 에서는 `sh`, 윈도에서는 `cmd.exe` 로 감싼다 — 인자는
  * 각각 따로 넘겨 셸 인용 문제를 만들지 않는다(윈도 cmd 만 예외로 인용을 우리가 한다).
+ *
+ * 윈도 모양: `cmd /d /s /v:off /c "<전체 명령줄>"`.
+ *   - `/s` 는 `/c` 뒤 문자열의 **첫·끝 따옴표만** 벗기고 나머지를 그대로 쓰라는 뜻이다.
+ *     그래서 전체를 한 번 더 감싼다 — 안쪽 인용은 손대지 않고 살아남는다.
+ *   - `/v:off` 는 지연 확장(`!`)을 끈다. 켜져 있으면 `!` 가 든 인자가 먹힌다.
+ *   - `/d` 는 AutoRun 레지스트리 스크립트를 건너뛴다(사용자 환경에 따라 명령이 변형되는 것 방지).
  */
 export function pnpmSpawnPlan(pnpm, args, { env = process.env, platform = process.platform } = {}) {
   const resolved = resolveCommand(pnpm, { env, platform })
@@ -202,9 +230,34 @@ export function pnpmSpawnPlan(pnpm, args, { env = process.env, platform = proces
   if (platform === 'win32') {
     const comspec = env.ComSpec ?? env.COMSPEC ?? 'cmd.exe'
     const line = [resolved, ...args].map(quoteCmdArg).join(' ')
-    return { file: comspec, args: ['/d', '/s', '/c', line], verbatim: true }
+    return { file: comspec, args: ['/d', '/s', '/v:off', '/c', `"${line}"`], verbatim: true }
   }
   return { file: '/bin/sh', args: [resolved, ...args] }
+}
+
+/**
+ * 설치 전에 pnpm 이 실제로 도는지 확인하고 판 문자열을 돌려준다.
+ * 판 하한은 두지 않는다 — 11-15 에 설치 전에 죽던 원인은 **플래그**(`--no-frozen-lockfile`)였고
+ * 그 플래그를 뺐으므로, 10·11 이 이제 도는지는 실측이 없다. 근거 없는 하한을 걸면 멀쩡한
+ * 개발 기계를 막는다. 대신 도는지 자체는 여기서 확인한다(못 도는 pnpm 을 몇 분짜리 설치
+ * 실패로 만나지 않게, 그리고 원인을 한 줄로 보여 주게).
+ */
+export function readPnpmVersion(pnpm, { env = process.env, platform = process.platform } = {}) {
+  const spawn = pnpmSpawnPlan(pnpm, ['--version'], { env, platform })
+  const result = spawnSync(spawn.file, spawn.args, {
+    encoding: 'utf8',
+    env,
+    maxBuffer: 1024 * 1024,
+    ...(spawn.verbatim ? { windowsVerbatimArguments: true } : {}),
+  })
+  if (result.error) {
+    throw new Error(`pnpm 을 띄우지 못했다(${spawn.file}): ${result.error.message}`)
+  }
+  const raw = `${result.stdout || ''}${result.stderr || ''}`.trim().split('\n').pop() ?? ''
+  if (result.status !== 0 || raw === '') {
+    throw new Error(`pnpm --version 이 실패했다(exit ${result.status}, 출력: ${raw || '없음'})`)
+  }
+  return raw
 }
 
 /**
@@ -214,6 +267,8 @@ export function pnpmSpawnPlan(pnpm, args, { env = process.env, platform = proces
  *   --no-optional                 → 타 플랫폼 선택 의존성 유입 차단(플랫폼 패키지는 직접 지정).
  */
 export function installTarget(workDir, plan, { pnpm = 'pnpm', storeDir, env = process.env } = {}) {
+  // 먼저 pnpm 이 실제로 도는지 본다 — 못 도는 실행기를 설치 단계에서 몇 분 뒤에 만나지 않게.
+  readPnpmVersion(pnpm, { env })
   writeWorkPackage(workDir, plan)
   const specs = Object.entries(plan.dependencies).map(([name, version]) => `${name}@${version}`)
   const args = [
@@ -223,7 +278,9 @@ export function installTarget(workDir, plan, { pnpm = 'pnpm', storeDir, env = pr
     '--no-optional',
     `--os=${plan.os}`,
     `--cpu=${plan.cpu}`,
-    '--no-frozen-lockfile',
+    // `--no-frozen-lockfile` 은 넣지 않는다: `add` 는 정의상 lockfile 을 갱신하고, pnpm 10·11 은
+    // 이 플래그를 `Unknown option` 으로 거절해 **설치 전에** 죽는다(11-15 Roh 검토 R-02 실측).
+    // 빈 작업 폴더에 lockfile 이 없으므로 잠금 상태가 될 일도 없다.
     // package.json 에 정확한 판을 적는다(기본은 `^` 범위) — 명세의 dependencies 와 같아진다.
     '--save-exact',
     ...(storeDir ? [`--store-dir`, storeDir] : []),
@@ -376,7 +433,7 @@ export function verifyTarGz(buffer, target) {
 
 // ------------------------------------------------------------------ 명세
 
-export function targetRecord({ target, tgz, entries, cliSha256, mcpSha256, kordocVersion }) {
+export function targetRecord({ target, tgz, entries, cliSha256, mcpSha256, kordocVersion, tooling }) {
   const plan = planTarget(target)
   return {
     target,
@@ -389,22 +446,19 @@ export function targetRecord({ target, tgz, entries, cliSha256, mcpSha256, kordo
     cli: { path: 'node_modules/kordoc/dist/cli.js', sha256: cliSha256 ?? CLI_SHA256 },
     kordocVersion: kordocVersion ?? KORDOC_VERSION,
     ...(mcpSha256 ? { mcp: { path: 'node_modules/kordoc/dist/mcp.js', sha256: mcpSha256 } } : {}),
+    // 대상마다 자기 몫의 도구 판을 들고 다닌다 — 부분 빌드에서 한 대상을 다시 만들면
+    // 그 대상만 새 도구 판으로 바뀌고, 나머지 대상의 기록은 만들 때의 판으로 남는다
+    // (11-15 Roh 검토 R-01). 최상위 tooling 은 "이번 실행의 도구"라 참고용이다.
+    ...(tooling ? { tooling } : {}),
   }
 }
 
 function toolingRecord({ env = process.env } = {}) {
   let pnpm = 'unknown'
   try {
-    const spawn = pnpmSpawnPlan('pnpm', ['--version'], { env })
-    const result = spawnSync(spawn.file, spawn.args, {
-      encoding: 'utf8',
-      env,
-      maxBuffer: 1024 * 1024,
-      ...(spawn.verbatim ? { windowsVerbatimArguments: true } : {}),
-    })
-    if (result.status === 0) pnpm = (result.stdout || '').trim()
+    pnpm = readPnpmVersion('pnpm', { env })
   } catch {
-    // pnpm 이 PATH 에 없다 — 명세에는 unknown 으로 남기고 빌드는 계속한다(설치 단계가 먼저 실패한다).
+    // pnpm 이 없다/못 돈다 — 명세에는 unknown 으로 남기고 빌드는 계속한다(설치 단계가 먼저 실패한다).
   }
   return {
     node: process.version,
@@ -452,7 +506,7 @@ function assertOwnWorkDir(workDir) {
  * 한 대상: 빈 작업 폴더 → 설치 → 정리 → tgz → 검사.
  * 빈 폴더에서 시작하는 이유는 결정성이다(이전 설치 잔재가 섞이지 않게).
  */
-export function buildTarget(target, { outDir, workRoot, storeDir, keepWork = false, force = false } = {}) {
+export function buildTarget(target, { outDir, workRoot, storeDir, keepWork = false, force = false, tooling } = {}) {
   const plan = planTarget(target)
   const out = resolve(outDir ?? DEFAULT_OUT)
   const file = join(out, plan.file)
@@ -476,7 +530,7 @@ export function buildTarget(target, { outDir, workRoot, storeDir, keepWork = fal
     const cliSha256 = sha256Hex(readFileSync(join(workDir, 'node_modules', 'kordoc', 'dist', 'cli.js')))
     const mcpPath = join(workDir, 'node_modules', 'kordoc', 'dist', 'mcp.js')
     const mcpSha256 = existsSync(mcpPath) ? sha256Hex(readFileSync(mcpPath)) : undefined
-    const record = targetRecord({ target, tgz, entries, cliSha256, mcpSha256 })
+    const record = targetRecord({ target, tgz, entries, cliSha256, mcpSha256, tooling })
 
     mkdirSync(out, { recursive: true })
     writeFileSync(file, tgz)
@@ -592,6 +646,8 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   const records = []
+  // 도구 판은 실행당 한 번만 잰다(대상 3개 × pnpm 호출을 줄인다).
+  const tooling = toolingRecord()
   for (const target of options.targets) {
     const { record, ignoredBuilds, workDir, recorded } = buildTarget(target, {
       outDir,
@@ -599,6 +655,7 @@ export function main(argv = process.argv.slice(2)) {
       storeDir: options.storeDir,
       keepWork: options.keepWork,
       force: options.force,
+      tooling,
     })
     records.push(record)
     const mib = (bytes) => (bytes / 1024 / 1024).toFixed(1)
@@ -607,7 +664,7 @@ export function main(argv = process.argv.slice(2)) {
     if (options.keepWork) console.log(`  작업 폴더: ${workDir} (${recorded} 항목 수집)`)
     if (ignoredBuilds) console.log('  (pnpm 이 빌드 스크립트 무시로 exit≠0 — 설치 자체는 끝났다)')
   }
-  const manifest = writeManifest(outDir, records)
+  const manifest = writeManifest(outDir, records, { tooling })
   console.log(`명세: ${join(outDir, MANIFEST_NAME)} (대상 ${Object.keys(manifest.targets).length})`)
   return 0
 }
