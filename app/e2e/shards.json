@@ -168,7 +168,8 @@
       "update",
       "update-poll",
       "kordoc-mcp-codex",
-      "kordoc-mcp-wiring"
+      "kordoc-mcp-wiring",
+      "kordoc-runtime"
     ]
   ],
   "macos": [
@@ -334,7 +335,8 @@
       "guard-key",
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
-      "kordoc-mcp-wiring"
+      "kordoc-mcp-wiring",
+      "kordoc-runtime"
     ]
   ]
 }

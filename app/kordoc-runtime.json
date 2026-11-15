@@ -1,0 +1,27 @@
+{
+  "release": "kordoc-bundle-1",
+  "version": "4.17.1",
+  "cli": "node_modules/kordoc/dist/cli.js",
+  "cliSha256": "f755b0bc4ee860622066f30200e188481501d25969e2e38bcf79e9d2b4897a5c",
+  "mcpSha256": "ed675ba09018de9149414526d0a890aaad4c94410a392c68cb1dae0d241ba456",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "file": "kordoc-darwin-arm64.tgz",
+      "sha256": "9da367a9891f2984d39763a87285ef0550c0bc84cf73715abd1cf53e748a003b",
+      "size": 42416751,
+      "unpackedSize": 121152162
+    },
+    "x86_64-apple-darwin": {
+      "file": "kordoc-darwin-x64.tgz",
+      "sha256": "24ed2d4c1dd6c883ff357723a1c42446faa0ba808437c0a98a79cdbe7c783e2e",
+      "size": 44028689,
+      "unpackedSize": 128497754
+    },
+    "x86_64-pc-windows-msvc": {
+      "file": "kordoc-win32-x64.tgz",
+      "sha256": "d60c73c25afe2e4f73165ef9fd1f5976d291bcadd1cdc42514ea1f97b213af9f",
+      "size": 45389101,
+      "unpackedSize": 133893945
+    }
+  }
+}
