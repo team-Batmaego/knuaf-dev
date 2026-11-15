@@ -278,7 +278,9 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.docs_only != 'true'
-      - run: node --test scripts/tests/app-release.test.mjs scripts/tests/ci-sharding.test.mjs scripts/tests/skill-staging.test.mjs
+      # 앱 스크립트 단위 시험 목록은 `package.json` 의 `test:scripts` 한 곳에만 있다 — 여기서 파일을
+      # 직접 나열하면 새 시험을 저 목록에만 더하고 CI 에는 안 더하는 구멍이 다시 생긴다.
+      - run: pnpm test:scripts
         if: needs.changes.outputs.docs_only != 'true'
       - run: node scripts/tests/check-skill-workflow.mjs
         if: needs.changes.outputs.docs_only != 'true'
@@ -327,8 +329,16 @@ jobs:
       # tests `existsSync(KNUAF_PYTHON)` in choosePython, so a bare name is ignored and it falls
       # back to a PATH python; narrow-PATH specs (those that plant a fake codex) would then hit
       # macOS' stock 3.9.6 and fail project:open. On Windows the interpreter is python.exe.
+      # 윈도 e2e 도 PR 에서 돈다. 예전에는 `70c3a31`(perf/ci-light)이 PR 벽시계를 줄이려고 윈도
+      # e2e 를 PR 에서 뺐고, 그 대가로 **PR 초록 = 윈도 초록이 아니게 됐다** — v0.6.4 에서 같은 트리가
+      # PR CI 에선 초록, main push CI 에선 윈도 e2e 11건 빨강이었고 머지로 main 까지 갔다
+      # (2026-11-14-v064-release/CI-RED-MAIN.md). 필수 체크 `app (windows-latest)` 는 이 단계가
+      # 건너뛰어져도 초록이므로 그 구멍은 요약 다리로도 못 막는다 — 유일한 자리는 여기다.
+      # 대가(추정): 윈도 샤드 5개가 각자 e2e 를 도므로 PR 마다 러너 분이 늘고 벽시계도 는다. 실제 값은
+      # 이 변경이 들어간 첫 PR 의 샤드 로그에서 읽어 REPORT 에 적는다 — 여기 박아 두면 낡는다.
+      # 이 맞바꿈을 되돌리려면 이 줄만 고치지 말고 `ci-sharding.test.mjs` 의 잠금 시험부터 본다.
       - name: e2e (${{ matrix.os }}, ${{ matrix.shard }})
-        if: needs.changes.outputs.docs_only != 'true' && (runner.os != 'Windows' || github.event_name != 'pull_request')
+        if: needs.changes.outputs.docs_only != 'true'
         run: node scripts/e2e-shards.mjs ${{ runner.os == 'Windows' && 'windows' || 'macos' }} ${{ matrix.shard }}
         env:
           KNUAF_PYTHON: ${{ runner.os == 'Windows' && format('{0}\\python.exe', env.pythonLocation) || format('{0}/bin/python', env.pythonLocation) }}

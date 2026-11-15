@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { coverageProblems, placementHints, readManifest, specFiles } from '../e2e-shards.mjs'
@@ -109,6 +109,46 @@ test('e2e 전에 Playwright 발견 대조를 OS 마다 한 번 돈다', () => {
   )
   const checks = app.match(/--verify-discovery/g)?.length ?? 0
   assert.equal(checks, 1, `발견 대조가 ${checks}곳이다 — 다리마다 돌면 같은 검사가 7번이다`)
+})
+
+test('e2e 는 PR 과 push 에서 똑같이 돈다 — 윈도를 PR 에서 빼지 않는다', () => {
+  // 잠그는 사고(2026-11-15, v0.6.4): `70c3a31` 이 PR 벽시계를 줄이려고 윈도 e2e 를 PR 에서 뺐고,
+  // 그래서 같은 트리가 PR CI 에선 초록, main push CI 에선 윈도 e2e 11건 빨강이었다. 필수 체크
+  // `app (windows-latest)` 는 건너뛴 단계도 초록으로 세므로 그 구멍은 요약 다리로도 안 잡힌다.
+  // 단계 조건이 다시 이벤트·OS 로 갈리면 여기서 빨개진다.
+  const app = must('app').body.join('\n')
+  const step = /- name: e2e \(\$\{\{ matrix\.os \}\}, \$\{\{ matrix\.shard \}\}\)\n([\s\S]*?)\n      - /.exec(app)
+  assert.ok(step, 'e2e 단계를 찾지 못했다')
+  const condition = /^        if: (.+)$/m.exec(step[1])?.[1]
+  assert.ok(condition, 'e2e 단계에 if: 가 없다')
+  assert.doesNotMatch(condition, /event_name/, `e2e 조건이 이벤트로 갈린다: ${condition}`)
+  assert.doesNotMatch(condition, /runner\.os/, `e2e 조건이 OS 로 갈린다: ${condition}`)
+  // 윈도 다리가 실제로 e2e 를 부르는지도 본다 — 조건이 아니라 스텝 자체가 사라져도 초록이 되면 안 된다.
+  assert.match(step[1], /run: node scripts\/e2e-shards\.mjs \$\{\{ runner\.os == 'Windows' && 'windows' \|\| 'macos' \}\}/)
+  const windowsShards = [...app.matchAll(/^ {10}- os: windows-latest$/gm)].length
+  assert.ok(windowsShards >= 1, '윈도 다리가 없다')
+})
+
+test('앱 스크립트 시험 목록은 package.json 한 곳에 있고 CI 가 그것을 부른다', () => {
+  // 두 곳에 목록을 두면 한쪽에만 더한 시험이 조용히 안 돈다 — `kordoc-mcp-wiring.test.mjs` 가
+  // 실제로 그렇게 CI 밖에 있었다(v0.6.4, t3d 발견).
+  const app = must('app').body.join('\n')
+  assert.match(app, /- run: pnpm test:scripts\n\s+if: needs\.changes\.outputs\.docs_only != 'true'/, 'CI 가 package.json 의 시험 목록을 부른다')
+  const scripts = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../package.json'), 'utf8')).scripts
+  const listed = String(scripts['test:scripts'] ?? '').split(/\s+/).filter(part => part.endsWith('.test.mjs'))
+  assert.ok(listed.length >= 4, `test:scripts 에 시험이 ${listed.length}개뿐이다`)
+  for (const file of listed) {
+    assert.ok(existsSync(resolve(import.meta.dirname, '../..', file)), `test:scripts 가 없는 파일을 부른다: ${file}`)
+  }
+  // 이 디렉터리의 `*.test.mjs` 는 전부 목록에 있어야 한다 — 새 시험을 만들어 두고 등록을 잊는 것이
+  // 원래 사고였다. skill-release·skill-security 는 `skill-release.yml` 이 직접 부른다(여기 넣으면
+  // 매 PR 마다 두 번 돈다). `kordoc-bundle` 은 아직 아무도 안 부른다 — 넣지 못한 이유는 Windows
+  // 이식성이다(`#!/bin/sh` 스크립트를 만들어 spawn 하는 시험이 있어 윈도 러너에서 빨개진다).
+  // 그러니 이 줄은 '면제'가 아니라 '아직 안 부르는 시험' 표시다. 옮길 때 이 줄에서도 빼야 한다.
+  const elsewhere = new Set(['skill-release.test.mjs', 'skill-security.test.mjs', 'kordoc-bundle.test.mjs'])
+  const actual = readdirSync(join(import.meta.dirname)).filter(name => name.endsWith('.test.mjs'))
+  const missing = actual.filter(name => !elsewhere.has(name) && !listed.some(file => file.endsWith(`/${name}`)))
+  assert.deepEqual(missing, [], `test:scripts 에 없는 시험: ${missing.join(', ')}`)
 })
 
 test('요약 다리는 저장소 내용을 읽지 않는다', () => {
