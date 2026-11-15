@@ -19,6 +19,7 @@ import { skillSource } from '../src/main/agent'
 import { attachFailureNote } from '../src/main/chat/kordocMcpRegistry'
 import type { KordocMcpSpec, KordocRuntime } from '../src/main/chat/kordocMcp'
 import type { AgentConnection } from '../src/main/chat/contracts'
+import type { ChatSnapshot } from '../src/shared/chat'
 
 const appRoot = resolve(__dirname, '..')
 const source = skillSource(appRoot, false, '/nonexistent')
@@ -144,6 +145,66 @@ test('M1: 확인 실패는 전송을 막지 않는다 — null 1회 + 안내 1�
   expect(s.messages.filter((m) => m.role === 'system'), '안내는 폴더당 1회').toHaveLength(1)
   await svc.close()
 })
+
+for (const reopen of [false, true]) {
+  test(`M1: ${reopen ? '다시 연' : '첫'} 연결의 비동기 null 해제가 끝난 뒤에만 답변을 받는다`, async () => {
+    const a = freshRoot(`reset-a-${reopen}`)
+    const b = freshRoot(`reset-b-${reopen}`)
+    const root = reopen ? join(base, 'reset-current') : a
+    if (reopen) symlinkSync(a, root, 'dir')
+    let runtime: KordocRuntime | null = reopen ? runtimeFixture() : null
+    const broken = recorder()
+    const safe = recorder()
+    const resetting = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let resetDone = false
+    safe.connection.setMcpSpec = async (spec) => {
+      safe.specs.push(spec)
+      resetting.resolve()
+      await release.promise
+      resetDone = true
+    }
+    safe.connection.run = async (_text, _session, events) => {
+      safe.runs++
+      if (!resetDone) throw new Error('AI 연결이 종료됐어요')
+      events.message('reply', '첫 답변입니다')
+    }
+    const made = reopen ? [broken, safe] : [safe]
+    const svc = service(safe.connection, {
+      ensureKordoc: async () => runtime,
+      connectionFactory: () => made.shift()!.connection
+    })
+    let sending: Promise<ChatSnapshot> | undefined
+    try {
+      if (reopen) {
+        await svc.send(root, 'codex', 'A 폴더 질문', 'req-a')
+        await settled(svc, root)
+        unlinkSync(root)
+        symlinkSync(b, root, 'dir')
+        runtime = null
+        broken.connection.setMcpSpec = async () => { throw new Error('옛 연결 해제 실패') }
+      }
+      sending = svc.send(root, 'codex', '첫 질문', 'req-reset')
+      await resetting.promise
+      // 현재 이벤트 루프까지 열어 run 이 해제보다 먼저 시작되는 경합을 드러낸다.
+      const tick = Promise.withResolvers<void>()
+      setImmediate(tick.resolve)
+      await tick.promise
+      expect(safe.runs, 'RPC 정리가 진행 중인 연결에는 턴을 열지 않는다').toBe(0)
+      release.resolve()
+      await sending
+      const snapshot = await settled(svc, root)
+      expect(snapshot.state).toBe('idle')
+      expect(snapshot.messages.filter((message) => message.role === 'assistant').map((message) => message.text))
+        .toEqual(['첫 답변입니다'])
+      expect(safe.specs).toEqual([null])
+    } finally {
+      release.resolve()
+      await sending?.catch(() => {})
+      await svc.close()
+    }
+  })
+}
 
 test('M1: ensure 가 던져도 대화는 가고, 이유 없는 일반 안내 한 줄만 남는다', async () => {
   const root = freshRoot('예외')
