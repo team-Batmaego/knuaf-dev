@@ -265,7 +265,11 @@ export class CodexConnection implements AgentConnection {
               return { ok: false, detail: 'plugin-skills' }
             }
           }
-          if (!out.ok) diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length}`)
+          if (!out.ok) {
+            // Server identifiers only: never log paths, emails, control chars or token-sized values.
+            const names = out.remaining.map((name) => /^[a-z][a-z0-9_.-]{0,30}$/i.test(name) ? name : '<redacted>')
+            diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length} names=${JSON.stringify(names)}`)
+          }
           return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
           diag(`codex-lock stage=verify code=${codeOf(e)}`)

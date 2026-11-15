@@ -178,6 +178,29 @@ test('v065 불완전한 마켓 목록은 학생 글을 유지하고 세부 사�
   expect(diagnostic).not.toContain('PRIVATE_STUDENT_MESSAGE')
 })
 
+test('v066 refusal diagnostics identify MCP names but redact paths, emails and credential-shaped names', async () => {
+  const names = ['kordoc', 'node_repl', '/private/student-paper', 'student@example.invalid', 'token=PRIVATE_SECRET', 'A'.repeat(40)]
+  const s = scene('refusal-names', {
+    FAKE_CODEX_CONFIG_READ: JSON.stringify({ config: { mcp_servers: Object.fromEntries(names.map((name) => [name, { command: 'node' }])), plugins: {} }, layers: [] }),
+    FAKE_CODEX_MCP_STATUS: JSON.stringify(names.map((name) => ({ name, runtimeStatus: 'connected' })))
+  })
+  const log = join(s.base, 'app.log')
+  const previous = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = log
+  const conn = connection(s)
+  try {
+    await expect(conn.run('PRIVATE_STUDENT_MESSAGE', undefined, s.events)).rejects.toThrow('Codex 설정의 외부 도구를 끄지 못했어요')
+  } finally {
+    await conn.stop()
+    if (previous === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = previous
+  }
+  expect(s.requests().some((r) => r.method === 'turn/start')).toBe(false)
+  const diagnostic = readFileSync(log, 'utf8')
+  expect(diagnostic).toContain('remaining=6 names=["kordoc","node_repl","<redacted>","<redacted>","<redacted>","<redacted>"]')
+  for (const secret of [...names.slice(2), 'PRIVATE_STUDENT_MESSAGE']) expect(diagnostic).not.toContain(secret)
+})
+
 for (const pluginRow of [
   { enabled: true, pluginId: 'foreign@market' },
   { enabled: false, pluginId: 'foreign@market' },
