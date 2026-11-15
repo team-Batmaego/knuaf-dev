@@ -63,6 +63,10 @@ function pathOf(env: NodeJS.ProcessEnv): string {
 // ~/.claude/CLAUDE.md의 @import가 외부 경로를 가리키면 학생에게 영어 보안 프롬프트
 // ("Allow external CLAUDE.md file imports?")가 뜬다 — 앱이 띄우는 도우미의 환경에서는
 // 메모리 파일을 아예 읽지 않는다. 스킬(.claude/skills/knuaf-dev) 탐색과는 무관하다.
+test('subscriptionEnv 는 Bash 작업 폴더를 매 명령 뒤 논문 폴더로 되돌린다(FIX4 J1)', () => {
+  expect(subscriptionEnv().CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR).toBe('1')
+})
+
 test('subscriptionEnv puts the agent bin dirs on PATH', () => {
   // Finder 로 띄운 앱의 PATH 는 /usr/bin:/bin:/usr/sbin:/sbin 뿐이다. codex 는
   // `#!/usr/bin/env node` 스크립트라 그 PATH 로는 셔뱅이 죽고 학생은
