@@ -143,6 +143,7 @@ async function makeChannel(
     fetchFn?: processTypes.FetchFn
     write?: processTypes.WriteSeam
     clearTurn?: (path: string) => Promise<void>
+    readRequest?: indexTypes.FigureChannelOptions['readRequest']
     turnDraining?: (turnId: string, activeWrites: number) => void
     now?: () => number
   } = {}
@@ -191,6 +192,7 @@ async function makeChannel(
     fetchFn: over.fetchFn ?? fetchFn,
     write: over.write,
     clearTurn: over.clearTurn,
+    readRequest: over.readRequest,
     scanMs: 5,
     ttlMs: 60_000,
     now: over.now ?? (() => 0),
@@ -976,5 +978,78 @@ describe('P1.1 거절 파일 보존 경계', () => {
       assert.equal(await readFile(other, 'utf8'), '{"status":"rejected"}')
       assert.equal((await readdir(c.paths.res)).includes('req-linked-reject.res.json'), true)
     } finally { await channel.stop() }
+  })
+})
+
+describe('P1.1 B-02 handler 앞 목록 거절', () => {
+  for (const active of [false, true]) {
+    it(`${active ? '살아 있는' : '종료한'} 턴의 만료·id 불일치·모양 오류 목록`, async () => {
+      let calls = 0
+      const c = await makeChannel({ now: () => TEST_NOW, fetchFn: async () => { calls += 1; return okPage } })
+      try {
+        await c.channel.beginTurn(c.folder, 'turn-1')
+        if (!active) await c.channel.endTurn('turn-1')
+        const cases = [
+          ['req-expired-list', {}, 'expired', new Date(TEST_NOW - 120_000)],
+          ['req-mismatch-list', { id: 'req-other-body' }, 'invalid', new Date(TEST_NOW)],
+          ['req-invalid-list', { extra: true }, 'invalid', new Date(TEST_NOW)]
+        ] as const
+        for (const [id, over, reason, at] of cases) {
+          await putRequest(c.folder, id, over, 'turn-1', [], at)
+          await c.finished(id)
+          const res = await readRes(c.resPath(id))
+          if (active) assert.equal(res?.reason, reason)
+          else assert.equal(res, null)
+        }
+        assert.equal(calls, 0)
+        assert.equal(await readRes(c.resPath('req-other-body')), null)
+        assert.equal((await readdir(c.paths.res)).length, active ? 3 : 0)
+      } finally { await c.channel.stop() }
+    })
+  }
+
+  for (const mismatch of [false, true]) {
+  it(`목록 읽기 중 턴 종료 뒤 옛 세대는 쓰지 않는다: ${mismatch ? 'handler 거절' : '정상 본문'}`, async () => {
+    const entered = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    const c = await makeChannel({ readRequest: async (path) => {
+      const read = await requestFile.readRequestFile(path)
+      entered.resolve()
+      await resume.promise
+      return read
+    } })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      await putRequest(c.folder, 'req-read-list', mismatch ? { id: 'req-other-body' } : {}, 'turn-1', [])
+      await keepAliveUntil(entered.promise)
+      await c.channel.endTurn('turn-1')
+      await c.channel.beginTurn(c.folder, 'turn-2')
+      resume.resolve()
+      await c.finished('req-read-list')
+      assert.deepEqual(await readdir(c.paths.res), [])
+    } finally { resume.resolve(); await c.channel.stop() }
+  })
+  }
+
+  it('목록 아닌 그림·읽을 수 없는 요청의 기존 닫힌 거절과 배타 생성은 유지', async () => {
+    const c = await makeChannel({ now: () => TEST_NOW })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      const preserved = { v: 1, id: 'req-preserved-list', status: 'done', slot: '3.2', needsChoice: false, images: [] }
+      await storage.writeJson(c.resPath('req-preserved-list'), preserved)
+      await putRequest(c.folder, 'req-preserved-list', {}, 'turn-1', [], new Date(TEST_NOW - 120_000))
+      await c.finished('req-preserved-list')
+      assert.deepEqual(await readRes(c.resPath('req-preserved-list')), preserved)
+      await c.channel.endTurn('turn-1')
+      await putRequest(c.folder, 'req-expired-image', {}, 'turn-1', [IMAGE_URL], new Date(TEST_NOW - 120_000))
+      const invalidPath = requestFile.requestFile(c.folder, 'req-unreadable')
+      await storage.writeAtomic(`${invalidPath}.pending`, 'not json')
+      const fresh = new Date(TEST_NOW)
+      await utimes(`${invalidPath}.pending`, fresh, fresh)
+      await rename(`${invalidPath}.pending`, invalidPath)
+      await Promise.all([c.finished('req-expired-image'), c.finished('req-unreadable')])
+      assert.equal((await readRes(c.resPath('req-expired-image')))?.reason, 'expired')
+      assert.equal((await readRes(c.resPath('req-unreadable')))?.reason, 'invalid')
+    } finally { await c.channel.stop() }
   })
 })

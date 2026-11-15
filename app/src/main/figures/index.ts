@@ -26,7 +26,7 @@ import type { FigureRes } from './contract'
 import { readRequestFile } from './request-file'
 import { beginTurn as writeTurn, endTurn as clearTurn } from './turn'
 import { loadRules } from './rules'
-import { processRequest, type FetchFn, type TurnGate, type WriteSeam } from './process'
+import { processRequest, type FetchFn, type TurnGate, type TurnLease, type WriteSeam } from './process'
 import type { ImageDecoder } from './reencode-window'
 import { figurePaths, folderHash, prepareHome, writeJsonNew } from './storage'
 import { recordStudentMessage as fillChoiceSheets } from './choices'
@@ -50,6 +50,8 @@ export interface FigureChannelOptions {
    * 있다고 보고 요청을 집는다 — 그 요청이 `endTurn()`이 돌아온 뒤 산출물을 만드는지 본다(R-6 남은 경로).
    */
   clearTurn?: (path: string) => Promise<void>
+  /** 안전한 요청 읽기 대역(시험). 기본은 readRequestFile. */
+  readRequest?: typeof readRequestFile
   /** 시험 관찰 전용. 기다리거나 처리 결과·게이트 판단을 바꾸지 않는다. */
   observe?: {
     ready?(): void
@@ -223,32 +225,52 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
   }
 
   /** 처리하지 못한 요청도 결과를 남긴다 — 안 남기면 도우미가 60초를 다 기다린다. */
-  const closeRejected = async (id: string, reason: string): Promise<void> => {
-    if (!gate.begin().noteReject()) return
-    // 이미 결과가 있으면 **덮지 않는다** — 배타 생성이 검사와 쓰기를 한 번에 한다(I-1). 감시자의 `seen`은
-    // 실행마다 새로 만들어지므로, 재시작 뒤 옛 요청 파일이 만료로 보여도 그때 남긴 `done`을 `expired`로
-    // 바꾸면 학생은 결과를 잃는다.
-    const res: FigureRes = { v: 1, id, status: 'rejected', reason, slot: '', needsChoice: false, images: [] }
-    await writeJsonNew(join(paths.res, `${id}.res.json`), res)
+  const closeRejected = async (id: string, reason: string, listLease?: TurnLease): Promise<void> => {
+    // 목록으로 식별한 handler 거절도 요청 시작 세대의 쓰기 구간 안에서만 닫는다(B-02).
+    const release = listLease?.open()
+    if (listLease && !release) return
+    try {
+      if (!(listLease ?? gate.begin()).noteReject()) return
+      // 배타 생성: 과거 done/거절 결과를 절대 덮지 않는다.
+      const res: FigureRes = { v: 1, id, status: 'rejected', reason, slot: '', needsChoice: false, images: [] }
+      await writeJsonNew(join(paths.res, `${id}.res.json`), res)
+    } finally {
+      release?.()
+    }
   }
 
   const handleRequest = (folder: string) => async (item: FoundRequest): Promise<void> => {
+    // 읽는 동안 endTurn/beginTurn이 지나가도 그 요청의 세대를 새로 잡지 않는다.
+    const lease = gate.begin()
+    const read = await (options.readRequest ?? readRequestFile)(item.path)
+    let listing = false
+    if (read.ok) {
+      if (read.parse.ok) listing = read.parse.request.images.length === 0
+      else {
+        // 모양 검사 실패라도 안전하게 읽은 JSON의 빈 images는 목록으로 식별할 수 있다.
+        try {
+          const raw: unknown = JSON.parse(read.raw)
+          listing = !!raw && typeof raw === 'object' && !Array.isArray(raw) &&
+            'images' in raw && Array.isArray(raw.images) && raw.images.length === 0
+        } catch { /* 읽을 수 없는 요청은 기존 거절 정책을 유지한다. */ }
+      }
+    }
+    const listLease = listing ? lease : undefined
     if (item.expired) {
-      await closeRejected(item.id, 'expired')
+      await closeRejected(item.id, 'expired', listLease)
       return
     }
-    const read = await readRequestFile(item.path)
     if (!read.ok) {
-      await closeRejected(item.id, read.reason === 'too_big' ? 'limit' : 'invalid')
+      await closeRejected(item.id, read.reason === 'too_big' ? 'limit' : 'invalid', listLease)
       return
     }
     if (!read.parse.ok) {
-      await closeRejected(item.id, 'invalid')
+      await closeRejected(item.id, 'invalid', listLease)
       return
     }
     // 파일 이름과 본문 id가 다르면 어느 쪽이 정본인지 알 수 없다 — 아무것도 받지 않고 닫는다(R-5).
     if (read.parse.request.id !== item.id) {
-      await closeRejected(item.id, 'invalid')
+      await closeRejected(item.id, 'invalid', listLease)
       return
     }
     await processRequest({ request: read.parse.request, folder }, {
@@ -257,7 +279,7 @@ export function startFigureChannel(options: FigureChannelOptions): FigureChannel
       decode: options.decode,
       fetchFn: options.fetchFn,
       write: options.write,
-      gate,
+      gate: listing ? { begin: () => lease } : gate,
       now
     })
   }

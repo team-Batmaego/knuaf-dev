@@ -124,8 +124,12 @@ function candidateUrl(raw: string, base: URL, rule: FigureRule): string | null {
   if (!value || value.length > 2048 || /&(?:#\w+|[A-Za-z][A-Za-z0-9]*);/.test(value)) return null
   if (/[^A-Za-z0-9\-._~/?=&%:@!$'()*+,;\u0080-\uFFFF]/.test(value) || /%(?![0-9A-Fa-f]{2})/.test(value)) return null
   if (/^(?:data|javascript|blob|about):/i.test(value)) return null
-  const absolute = /^(?:[A-Za-z][A-Za-z0-9+.-]*:|\/\/)/.test(value)
-  if (absolute && value.split('?')[0]!.split('/').some((part) => part === '.' || part === '..')) return null
+  // 두 해석기가 다르게 접는 표기는 원문에서 닫는다(DISPOSITION impl-1 I-01).
+  if (/\?(?:#|$)/.test(value)) return null
+  const path = value.split(/[?#]/, 1)[0]!
+    .replace(/^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/[^/]*/, '')
+  if (path.includes('//')) return null
+  if (path.split('/').some((part) => /^(?:\.|%2e){1,2}$/i.test(part))) return null
   // URL은 기본 포트와 유니코드 호스트를 지워 버린다. 지우기 전에 원문 권한부를 검사한다.
   const authority = /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/([^/?]*)/.exec(value)?.[1]
   if (authority !== undefined && (!authority || /[^\x00-\x7f]|[:@]/.test(authority))) return null
