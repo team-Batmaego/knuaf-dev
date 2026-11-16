@@ -4,9 +4,6 @@ import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 
 const APP_BRANCH = /^app-channel-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/
-// Node's default stdout buffer is 1 MiB and a paginated pull-request list can exceed it; the limit
-// is a single constant so diagnostics always print the value in force.
-export const MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 const CHANNEL_HEADS = name => name === 'skill-channel-update' || name.startsWith('app-channel-')
 
 const COMMIT = /^[a-f0-9]{40}$/
@@ -73,18 +70,38 @@ export function assertNoPendingChannelUpdates(openPullRequests, branchComparison
   return { conflicts: blocking }
 }
 
-export function run(command, args, label) {
-  try {
-    return execFileSync(command, args, { encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES }).trim()
-  } catch (error) {
-    if (!label) throw error
-    // ENOBUFS here means the limit, not a GitHub failure; name the branch, the command and the
-    // configured limit so the fix is a one-line change and the next failure is self-describing.
-    const reason = error instanceof Error ? error.message : String(error)
-    const limit = `${MAX_OUTPUT_BYTES / 1024 / 1024} MiB`
-    throw new Error(`${label} failed while running \`${command} ${args.join(' ')}\` ` +
-      `(maxBuffer ${limit}): ${reason}`)
-  }
+// execFileSync's default ceiling is 1 MB and it kills the child with ENOBUFS past that. The
+// compare payload is the whole diff between a channel head and main: `app-channel-v0.6.1` came
+// back at 1.5 MB, so the guard died before it judged anything. Only two fields are read here —
+// the open PR head refs and each compare status — so gh narrows the response with --jq, and the
+// ceiling stays far above any reply that survives that narrowing.
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+export function runCommand(command, args) {
+  return execFileSync(command, args, { encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES }).trim()
+}
+
+// `run` is injected so tests can drive the whole read without a live GitHub or a stubbed PATH.
+export function readChannelState({ repository, pendingNewRelease = true, run = runCommand }) {
+  const heads = run('gh', ['api', '--paginate', `repos/${repository}/pulls?state=open&per_page=100`, '--jq', '.[] | .head.ref // empty'])
+  const pullRequests = heads ? heads.split('\n').map(line => line.trim()).filter(Boolean) : []
+
+  const mainRef = run('git', ['ls-remote', 'origin', 'refs/heads/main'])
+  const mainSha = /^([a-f0-9]{40})\trefs\/heads\/main$/.exec(mainRef)?.[1]
+  if (!mainSha) throw new Error('Could not resolve main commit')
+
+  const refs = run('git', ['ls-remote', '--heads', 'origin', 'refs/heads/app-channel-*', 'refs/heads/skill-channel-update'])
+  const branches = refs ? refs.split('\n').map(line => {
+    const [sha, ref] = line.split('\t')
+    const name = ref?.replace(/^refs\/heads\//, '')
+    if (!COMMIT.test(sha ?? '') || !name || !CHANNEL_HEADS(name)) throw new Error('Unexpected channel branch reference; stop for review')
+    // `.status // empty` prints nothing when GitHub sends no status, so the value stays undefined
+    // and the conflict message reads exactly as it did when the whole compare body was parsed —
+    // an unknown status blocks instead of silently passing.
+    return { name, status: run('gh', ['api', `repos/${repository}/compare/${sha}...${mainSha}`, '--jq', '.status // empty']) || undefined, sha }
+  }) : []
+
+  return assertNoPendingChannelUpdates(pullRequests, branches, { pendingNewRelease })
 }
 
 function main() {
@@ -97,27 +114,9 @@ function main() {
   }
   const pendingNewRelease = rawPending !== 'false'
 
-  const pages = JSON.parse(run('gh', ['api', '--paginate', '--slurp', `repos/${repository}/pulls?state=open&per_page=100`],
-    'Open pull request list'))
-  const pullRequests = pages.flat().map(pr => pr.head?.ref).filter(name => typeof name === 'string')
-
-  const mainRef = run('git', ['ls-remote', 'origin', 'refs/heads/main'])
-  const mainSha = /^([a-f0-9]{40})\trefs\/heads\/main$/.exec(mainRef)?.[1]
-  if (!mainSha) throw new Error('Could not resolve main commit')
-
-  const refs = run('git', ['ls-remote', '--heads', 'origin', 'refs/heads/app-channel-*', 'refs/heads/skill-channel-update'])
-  const branches = refs ? refs.split('\n').map(line => {
-    const [sha, ref] = line.split('\t')
-    const name = ref?.replace(/^refs\/heads\//, '')
-    if (!/^[a-f0-9]{40}$/.test(sha) || !name || !CHANNEL_HEADS(name)) throw new Error('Unexpected channel branch reference; stop for review')
-    const comparison = JSON.parse(run('gh', ['api', `repos/${repository}/compare/${sha}...${mainSha}`],
-      `Channel branch comparison for ${name}`))
-    return { name, status: comparison.status, sha }
-  }) : []
-
   let conflicts
   try {
-    ({ conflicts } = assertNoPendingChannelUpdates(pullRequests, branches, { pendingNewRelease }))
+    ({ conflicts } = readChannelState({ repository, pendingNewRelease }))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (process.env.GITHUB_STEP_SUMMARY) {

@@ -982,9 +982,9 @@ test.describe('buildLaunchScript', () => {
     expect(s).toContain(`-c '${cfg}'`)
 
     // app-server 스폰에도 같은 오버라이드 — -c 는 subcommand 앞의 루트 인자다.
-    expect(serverArgsFor({ HOME: home })).toEqual(['-c', cfg, '-c', 'project_doc_max_bytes=0', 'app-server'])
+    expect(serverArgsFor({ HOME: home })).toEqual(['-c', cfg, '-c', 'project_doc_max_bytes=0', '-c', 'features.plugins=false', 'app-server'])
     // 폴더 `AGENTS.md` 차단은 전역 사본 유무와 무관하게 늘 붙는다(설계 §4.1-E).
-    expect(serverArgsFor({ HOME: join(mkdtempSync(join(tmpdir(), 'kd-home-')), 'none') })).toEqual(['-c', 'project_doc_max_bytes=0', 'app-server'])
+    expect(serverArgsFor({ HOME: join(mkdtempSync(join(tmpdir(), 'kd-home-')), 'none') })).toEqual(['-c', 'project_doc_max_bytes=0', '-c', 'features.plugins=false', 'app-server'])
     // ~/.agents/skills 도 스캔 대상 — 두 사본이 함께 있으면 둘 다 끈다.
     mkdirSync(join(home, '.agents', 'skills', 'knuaf-dev'), { recursive: true })
     writeFileSync(join(home, '.agents', 'skills', 'knuaf-dev', 'SKILL.md'), '# old\n')
@@ -1006,8 +1006,15 @@ test.describe('launch', () => {
     const body = readFileSync(r.scriptPath, 'utf-8')
     if (win) {
       // 윈도우에는 POSIX 실행 비트가 없다 — 실행물을 정하는 것은 확장자다(위 단언).
-      expect(body).toContain('"--setting-sources="')
-      expect(body).toContain('"--strict-mcp-config"')
+      // 인자는 cmd 메타문자라 `^"` 로 한 층만 막힌다: 실행물이 `.cmd` shim 이 아니므로
+      // (`/opt/homebrew/bin/claude`) 두 번째 층이 붙으면 CLI 가 `^` 를 인자로 받는다.
+      expect(body).toContain('^"--setting-sources=^"')
+      expect(body).toContain('^"--strict-mcp-config^"')
+      expect(body).toContain('^"--disallowedTools=AskUserQuestion^"')
+      expect(body).toContain('^"시작하기^"')
+      // 두 층이면 CLI 가 `^` 를 인자로 받는다 — 실행 줄에만 걸어 둔다(다른 줄은 배치 문법).
+      const execLine = body.split('\r\n').find((l) => l.includes('--setting-sources='))!
+      expect(execLine).not.toContain('^^')
     } else {
       expect(statSync(r.scriptPath).mode & 0o111).toBeTruthy()
       expect(body).toContain(`exec '/opt/homebrew/bin/claude' --setting-sources= --strict-mcp-config '--disallowedTools=AskUserQuestion' '시작하기'`)
@@ -1128,13 +1135,26 @@ test.describe('agentApi', () => {
     expect(r.scriptPath.startsWith(ctx.supportDir)).toBe(true)
     expect(opened, 'dry-run 인데 open 을 불렀다').toEqual([])
     if (process.platform === 'win32') {
-      expect(script).toContain('^"mcp_servers.ext.enabled=false^"')
+      // 실행 줄의 escaping 층은 실행물 종류가 정한다(`agent.ts:581–593`): `.exe` 네이티브는
+      // cmd 가 한 번만 읽어 한 층(`^"…^"`), `.cmd`/`.bat` npm shim 은 `%*` 로 다시 읽혀 두 층
+      // (`^^^"…^^^"`). 시험이 띄우는 실행물은 기계에 있는 것(`findExecutable` 결과)이므로
+      // 층수를 고정하지 않고 그 줄에 적힌 실행물에서 유도해 잠근다.
+      const execLine = script.split('\r\n').find((l) => l.includes('mcp_servers.ext.enabled=false'))!
+      // 실행물 토큰은 줄 맨 앞이다 — 그 확장자가 escaping 층수를 정한다.
+      const shim = /\.(cmd|bat)(\s|"|$)/i.test(execLine.slice(0, execLine.indexOf('^"')))
+      // 이 시험의 가짜 `codex` 는 윈도에서 `.cmd` shim 이다(`fixtures/fake-codex.ts`) — 두 층이어야 한다.
+      expect(shim, '가짜 codex 가 .cmd shim 이 아니다').toBe(true)
+      const layer = shim ? '^^^' : '^'
+      for (const token of ['mcp_servers.ext.enabled=false', 'project_doc_max_bytes=0', 'features.apps=false']) {
+        expect(execLine).toContain(`${layer}"${token}${layer}"`)
+      }
     } else {
       expect(script).toContain(`'-c' 'mcp_servers.ext.enabled=false'`)
     }
     expect(script).toContain('project_doc_max_bytes=0')
     expect(script).toContain('features.apps=false')
-    // Apps 는 언제나 마지막이다 — 앞의 이름 잠금과 섞이지 않는다.
+    expect(script).toContain('features.plugins=false')
+    // Apps·플러그인 기능 차단은 이름별 잠금 뒤에 온다.
     expect(script.indexOf('features.apps=false')).toBeGreaterThan(script.indexOf('mcp_servers.ext.enabled=false'))
     // 열거는 앱 연결이 아니라 **이 호출이 띄운** 서버로 했다(설계 §4.1-C 1번).
     const methods = readLog(log).map((e) => e.method)

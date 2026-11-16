@@ -10,7 +10,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, openProject, setWindowWidth, splitReady, synthProject } from './helpers'
+import { launch, openProject, setWindowWidth, splitReady, synthProject, withoutProgressFile } from './helpers'
 import { fakeCodexEnv, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 import { REAL_STEP2, REAL_STEP4, REAL_STEP11 } from './fixtures/progress-real-v061'
 
@@ -47,6 +47,7 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
   writeFakeClaude(bin)
   const root = synthProject()
+  withoutProgressFile(root)
   // Claude 대화: 4단계(REAL_STEP11보다 뒤 단계인 실제 4단계 목록)를 심는다.
   const STEP4_TEXT = [
     '**창업논문 진행 목록** · 7단계 중 4단계 진행 중 · 독립 내용검토 전 (논문은 아직 완성 전)',
@@ -146,6 +147,7 @@ test('U-newreply 같은 내용 새 답(새 id·20:02) — 저장 시각 갱신, 
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
   writeFakeClaude(bin)
   const root = synthProject()
+  withoutProgressFile(root)
   const STEP4_TEXT = [
     '**창업논문 진행 목록** · 7단계 중 4단계 진행 중 · 독립 내용검토 전 (논문은 아직 완성 전)',
     '✓ 1–3단계 끝남 — 전공·계획·근거',
@@ -237,6 +239,7 @@ const titlebar = (page: Page) => page.locator('.titlebar .tbtn.stg')
 test('U1 실기록 모양 — 제목줄 "2/7 계획 인터뷰"', async () => {
   const dir = scratch()
   const root = synthProject()
+  withoutProgressFile(root)
   seedReal(root)
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
@@ -268,6 +271,7 @@ test('U1 실기록 모양 — 제목줄 "2/7 계획 인터뷰"', async () => {
 test('U7 대화 없음 — "시작 전", 펼치면 안내 + [제출 전 점검]', async () => {
   const dir = scratch()
   const root = synthProject()
+  withoutProgressFile(root)
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
     await openProject(page, root, splitReady)
@@ -289,6 +293,7 @@ test('U7 대화 없음 — "시작 전", 펼치면 안내 + [제출 전 점검]'
 test('U8 펼침 — "그 뒤" 실제 문구와 [제출 전 점검]이 점검 창을 연다', async () => {
   const dir = scratch()
   const root = synthProject()
+  withoutProgressFile(root)
   seedReal(root)
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
@@ -322,6 +327,7 @@ test('U8 펼침 — "그 뒤" 실제 문구와 [제출 전 점검]이 점검 창
 test('U2 목록 없는 답 뒤에도 제목줄 그대로', async () => {
   const dir = scratch()
   const root = synthProject()
+  withoutProgressFile(root)
   const messages = [
     { id: 'u0', role: 'user', text: '시작하기', at: at(0), delivery: 'sent' },
     { id: 'm11', role: 'assistant', text: REAL_STEP11, at: at(1) },
@@ -343,6 +349,7 @@ test('U2 목록 없는 답 뒤에도 제목줄 그대로', async () => {
 test('U10 좁은 창 1,024 / 900 — 단추가 [대화 | 내 논문]과 겹치지 않는다', async () => {
   const dir = scratch()
   const root = synthProject()
+  withoutProgressFile(root)
   seedReal(root)
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
@@ -371,6 +378,7 @@ test('U10 좁은 창 1,024 / 900 — 단추가 [대화 | 내 논문]과 겹치�
 test('U8-small 작은 창(높이 720) — [제출 전 점검]이 펼침 안에 늘 보인다', async () => {
   const dir = scratch()
   const root = synthProject()
+  withoutProgressFile(root)
   seedReal(root)
   const { electronApp, page } = await launch({ env: fakeCodexEnv(`${dir}/bin`, { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
@@ -421,6 +429,7 @@ test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
   writeFakeClaude(bin)
   const root = synthProject()
+  withoutProgressFile(root)
   const STEP4_TEXT = [
     '**창업논문 진행 목록** · 7단계 중 4단계 진행 중 · 독립 내용검토 전 (논문은 아직 완성 전)',
     '✓ 1–3단계 끝남 — 전공·계획·근거',

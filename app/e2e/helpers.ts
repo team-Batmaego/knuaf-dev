@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -44,6 +44,11 @@ export function synthProject(opts: { withContent?: boolean; financeGate?: boolea
   const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
   if (a.status !== 0) throw new Error(a.stdout + a.stderr)
   return root
+}
+
+/** Keep conversation-based progress tests independent of sidecars written by newer skills. */
+export function withoutProgressFile(root: string): void {
+  rmSync(join(root, '.knuaf-progress.json'), { force: true })
 }
 
 /** A test selection with claim-backed evidence, not a production default. */

@@ -126,6 +126,57 @@ const closedLost = new Set<string>()
  */
 const turnOf = new Map<string, Set<string>>()
 
+/**
+ * 마지막으로 **저장에 성공한** 개정 번호(논문별).
+ *
+ * 왜 필요한가: `status.revision` 은 `refresh()` 의 읽기 응답이 돌아와야 오른다. 앞 저장의 응답은
+ * 이미 왔는데 그 읽기가 아직이면 화면은 옛 개정을 들고 있고, 그 사이에 누른 다음 저장 — 같은 낱말
+ * `같이 고치기` 가 바로 그 자리다 — 이 옛 `expected_revision` 으로 나가 sidecar 가 `stale_view` 로
+ * 거절한다. 성공한 고침 한 줄 바로 아래에 "그사이 글이 바뀌었어요"가 뜨고 원고는 안 바뀐다.
+ *
+ * 왜 안전한가: sidecar 는 `p["revision"] != expected_revision` 이면 **어느 쪽이든** 거절한다
+ * (`methods_edit.py` `_commit`). 기억한 값이 실제보다 크면 그대로 거절되고(보호 유지), 같으면
+ * 그것은 **우리가 방금 만든 개정**이라 덮어쓸 남의 글이 없다. 그사이 도우미가 정말 바꿨다면
+ * 개정이 더 올라가 있어 여전히 거절되고, 파일이 밖에서 바뀌었으면 `_Manuscript` 의
+ * `draft_unregistered` 가 막는다. 즉 이 값은 **저장 응답이 알려 준 개정만** 기억한다.
+ *
+ * 갱신은 **단조**다(검토 R1 노트 B) — 응답 순서가 뒤집혀 늦게 온 응답(옛 개정)이 새 기억을 덮지
+ * 않는다. 덮이면 다음 저장이 옛 번호로 나가 헛되이 거절된다(덮어쓰기는 아니지만 학생 눈에는
+ * 같은 거절 줄이다).
+ */
+let committed: { root: string | null; revision: number } = { root: null, revision: 0 }
+
+/**
+ * 우리가 방금 저장해 만든 절별 본문 지문 — 다음 저장의 `expected_draft_hash` 후보(논문별).
+ *
+ * `sections` 의 `draft_hash` 도 읽기 응답이 돌아와야 오른다. 그 사이에 같은 장을 또 고치면 옛
+ * 지문으로 나가 `_Manuscript` 가 `stale_view` 로 거절한다 — 개정 대조와 **같은 경합의 다른 검사**다
+ * (`methods_edit.py:356`). 저장 응답이 알려 준 지문만 기억한다(그 개정의 정본은 우리 것이다).
+ *
+ * `revision` 은 그 지문이 정본이던 개정이다. 화면이 든 개정이 그것보다 **뒤**면 화면이 아직 앞
+ * 저장을 못 따라온 것이므로 기억한 지문을 쓰고, **같거나 앞서면** 화면이 이미 그 글을 읽은 쪽이므로
+ * 화면의 지문을 그대로 쓴다 — 도우미가 고친 뒤의 정상 고침을 막지 않는다.
+ *
+ * 이쪽도 **단조**다 — 늦게 온 응답이 더 새 지문을 옛 지문으로 되돌리면 같은 거절이 되풀이된다.
+ */
+const ownHashes = new Map<string, { root: string; hash: string; revision: number }>()
+
+/**
+ * 그 절에 이 저장이 보낼 지문.
+ *
+ * `screenRevision` 은 **화면이 든** 개정이다(올려 보낼 값이 아니다). 화면이 우리 저장이 만든 개정보다
+ * 뒤처져 있으면 그 화면의 지문도 그 저장 **전**의 것이므로 기억한 지문으로 바꾼다. 화면이 그 개정과
+ * 같거나 앞서면 화면이 이미 새 글을 읽은 쪽이므로 그대로 쓴다 — 도우미가 고친 뒤의 정상 고침을
+ * 막지 않고, 우리가 다른 장을 저장해 개정만 올라간 경우에도 헛되이 거절되지 않는다.
+ */
+function expectedHashOf(root: string, sectionId: string, screenHash: string | null | undefined, screenRevision: number): string | null | undefined {
+  // 호출자가 지문을 안 보냈으면(묶음이 그렇다) 우리도 안 보낸다 — 없던 검사를 새로 걸지 않는다.
+  if (screenHash == null) return screenHash
+  const own = ownHashes.get(sectionId)
+  if (!own || own.root !== root) return screenHash
+  return screenRevision < own.revision ? own.hash : screenHash
+}
+
 /** 읽어 온 행들에 이번 세션의 화면 닫힘을 입힌다 — 서버는 유실 행을 영영 `pending` 으로 준다. */
 function closeLocally(rows: EditRow[]): EditRow[] {
   if (closedLost.size === 0) return rows
@@ -145,6 +196,10 @@ export const useEdits = create<EditState>((set, get) => ({
     // 다른 논문의 턴·유실 표시를 들고 가지 않는다 — 그 논문의 행에 다른 턴을 닫으려 들면
     // 엉뚱한 건이 `answered` 가 된다.
     turnOf.clear(); closedLost.clear()
+    // 폴더를 다시 열면 개정은 새로 읽는다 — 같은 자리에 논문을 새로 만들면(개정 0) 옛 기억이
+    // 오히려 저장을 거절시킨다.
+    committed = { root: null, revision: 0 }
+    ownHashes.clear()
     set((s) => ({
       rows: [], notices: [], error: null, loading: false, root: null, available: null,
       // 논문이 바뀌었다 — 도는 읽기의 응답은 이제 이 화면의 것이 아니다.
@@ -170,20 +225,47 @@ export const useEdits = create<EditState>((set, get) => ({
   },
 
   save: async (root, params) => {
+    // 화면이 들고 있는 개정은 `refresh()` 응답이 돌아와야 오른다. 방금 성공한 저장이 알려 준
+    // 개정이 더 크면 그쪽을 쓴다 — 안 그러면 그 사이에 누른 다음 저장이 옛 번호로 나가 거절된다.
+    // 기억한 값이 실제보다 크면 sidecar 가 그대로 거절하므로 stale 보호는 약해지지 않는다.
+    // 기억은 **같은 폴더**일 때만 쓴다 — 폴더를 바꾸면 개정은 논문마다 따로 센다.
+    const expected = committed.root === root ? Math.max(params.expected_revision, committed.revision) : params.expected_revision
     try {
       const result = params.kind === 'one'
         ? await rpc.editSection(root, {
-          id: params.id, expected_revision: params.expected_revision,
-          expected_draft_hash: params.expected_draft_hash ?? null,
+          id: params.id, expected_revision: expected,
+          expected_draft_hash: expectedHashOf(root, params.id, params.expected_draft_hash, params.expected_revision) ?? null,
           before_block: params.before_block, after_block: params.after_block
         })
         : await rpc.editBatch(root, {
-          expected_revision: params.expected_revision,
+          expected_revision: expected,
           edits: params.edits.map((e) => ({
             section_id: e.section_id, before_block: e.before_block, after_block: e.after_block,
-            expected_draft_hash: e.expected_draft_hash ?? null
+            expected_draft_hash: expectedHashOf(root, e.section_id, e.expected_draft_hash, params.expected_revision) ?? null
           }))
         })
+      // 이 개정은 우리가 방금 만들었다 — 다음 저장은 최소 이 번호로 나가야 한다. 응답이 개정을
+      // 안 알려 주는 옛 sidecar 면 `undefined` 라 여기서 아무것도 기억하지 않는다(그때는 지금처럼).
+      // 개정은 논문마다 따로 센다 — 다른 논문의 번호와 견주지 않고 그 논문 것으로 갈아 끼운다.
+      // 갱신은 **단조**다: 늦게 온 응답(옛 개정)이 새 기억을 덮지 않는다.
+      if (Number.isInteger(result.revision) && (committed.root !== root || result.revision > committed.revision)) {
+        committed = { root, revision: result.revision }
+      }
+      // 그 개정의 정본은 우리가 쓴 것이다 — 화면이 그 지문을 읽어 오기 전에 또 고쳐도 옛 지문으로
+      // 나가 거절되지 않게 여기에 적어 둔다. 절마다 온 `draft_hashes`(§4-5-8 05)를 쓰고, 그것이
+      // 없는 옛 sidecar·되풀이 응답이면 한 건짜리 `draft_hash` 로 대신한다.
+      if (Number.isInteger(result.revision)) {
+        const hashes: Record<string, string> = { ...(result.draft_hashes ?? {}) }
+        if (params.kind === 'one' && !(params.id in hashes) && typeof result.draft_hash === 'string') {
+          hashes[params.id] = result.draft_hash
+        }
+        for (const [sid, hash] of Object.entries(hashes)) {
+          // 이쪽도 단조 — 같은 논문의 더 새 개정이 이미 적힌 지문을 옛 응답이 덮지 않는다.
+          const prev = ownHashes.get(sid)
+          const same = prev !== undefined && prev.root === root
+          if (!same || result.revision >= prev.revision) ownHashes.set(sid, { root, hash, revision: result.revision })
+        }
+      }
       if (get().available === null) set({ available: true })
       void get().load(root)
       return { ok: true, result }

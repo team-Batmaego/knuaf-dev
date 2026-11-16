@@ -14,6 +14,7 @@
  */
 
 import { codexThreadRow, loadCodexThreads, saveCodexThreads, type CodexThreadRow, type ThreadStore } from '../guard/store'
+import { diag } from '../diagLog'
 
 /** 적재 호출의 전송. `codex.ts` 가 실제 app-server 로, 시험이 가짜로 채운다. */
 export interface LoadTransport {
@@ -312,6 +313,7 @@ async function runAcquire(
         reply = { ok: false, kind: 'error', message: (e as Error)?.message ?? String(e) }
       }
       if (!reply.ok) {
+        diag(`codex-lock stage=start-new attempt=${attempt + 1} kind=${reply.kind}`)
         await restart()
         continue
       }
@@ -320,6 +322,7 @@ async function runAcquire(
       table.clearPending()
       const verified = await transport.verify(reply.threadId, reply.instructionSources)
       if (!verified.ok) {
+        diag(`codex-lock stage=start-new-verify attempt=${attempt + 1} failed=true`)
         // id 는 불명인 채로 남긴다 — 같은 프로세스에서 그 id 로 resume 하는 길은 `restart` 뿐이다.
         await restart()
         continue
@@ -385,6 +388,7 @@ async function runAcquire(
     if (checkId !== sessionId) table.markUnknown(checkId)
     const verified = await transport.verify(checkId, reply.instructionSources)
     if (!verified.ok) {
+      diag(`codex-lock stage=resume-verify attempt=${attempt + 1} failed=true`)
       if (wasLocked) table.demote(sessionId)
       else table.markUnknown(sessionId)
       await restart()

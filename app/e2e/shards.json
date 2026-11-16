@@ -31,6 +31,7 @@
       "userdata",
       "win-feedback",
       "win-reqa-layout",
+      "guard-codex-marketplace",
       "guard-codex-connection",
       "kordoc-mcp-lifecycle"
     ],
@@ -170,7 +171,8 @@
       "update",
       "update-poll",
       "kordoc-mcp-codex",
-      "kordoc-mcp-wiring"
+      "kordoc-mcp-wiring",
+      "kordoc-runtime"
     ]
   ],
   "macos": [
@@ -250,6 +252,7 @@
       "edits-store",
       "recheck-screen",
       "viewer-edit",
+      "guard-codex-marketplace",
       "guard-codex-connection",
       "guard-codex-tool-lock",
       "kordoc-mcp-codex",
@@ -338,6 +341,7 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
+      "kordoc-runtime",
       "figure-wiring"
     ]
   ]
