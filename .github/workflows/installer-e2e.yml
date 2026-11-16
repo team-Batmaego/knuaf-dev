@@ -79,8 +79,8 @@ jobs:
           echo "installed: $target"
           echo "KNUAF_INSTALLED_APP=$target" >> "$GITHUB_ENV"
 
-      # 복사본이 dmg 안의 봉인 그대로인지 — 한글 파일명이 dmg 볼륨(HFS+)에서 NFD 로 바뀌어
-      # 봉인이 깨진 적이 있다(electron-builder.yml 의 extraResources 주석). 그 회귀를 여기서 잡는다.
+      # 복사본이 dmg 안의 봉인 그대로인지 — HFS+는 스킬의 NFC 한글 파일명을 NFD로 바꿔
+      # 봉인을 깨뜨린다. electron-builder.yml의 dmg.filesystem: APFS가 그 이름을 보존해야 한다.
       - name: 설치본 무결성(codesign 봉인)
         run: |
           set -euo pipefail
