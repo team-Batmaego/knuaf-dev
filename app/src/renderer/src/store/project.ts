@@ -217,6 +217,7 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  * 앱을 켠 직후 첫 읽기에서는 아무 일도 알리지 않는다.
  */
 let sectionHashes: Record<string, string> | null = null
+let sectionHashesRoot: string | null = null
 /**
  * 학생이 **방금 직접 고친** 절과 그때 저장한 지문. 다음 읽기 한 번만 '바뀐 절'에서 뺀다.
  *
@@ -359,7 +360,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 한 절이고 그 절의 지문을 받았으면 그 지문으로 기억한다(가장 정확한 기준).
     if (draftHash && ids.length === 1) {
       ownEdited.set(ids[0], draftHash)
-      if (sectionHashes !== null) sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
+      if (sectionHashes !== null && sectionHashesRoot === get().root) sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
       return
     }
     // 지문을 모르면(묶음 응답의 `draft_hash` 는 첫 절 것뿐) **기억하지 않는다** — 절 ID 만으로
@@ -376,7 +377,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     try {
       const rows = await rpc.sections(root)
       if (!mine()) return
-      const prev = sectionHashes
+      const prev = sectionHashesRoot === root ? sectionHashes : null
       // 내가 방금 고친 절은 이번 읽기에서 '도우미가 바꾼 절'이 아니다 — 한 번만 건너뛴다.
       // 내가 저장한 그 지문과 **같을 때만** '내 변경'이다 — 다르면 도우미가 그사이 다시 썼다.
       const justMine = new Map(ownEdited)
@@ -405,6 +406,7 @@ export const useProject = create<ProjectState>((set, get) => ({
       }
       if (!mine()) return
       sectionHashes = Object.fromEntries(rows.map((r) => [r.id, r.draft_hash]))
+      sectionHashesRoot = root
       set((s) => ({ sections: rows, events: [...s.events, ...events].slice(-20), foldNotice: s.foldNotice || (s.paperClosed && events.length > 0) }))
       // 장이 0개일 때만 학교 차례 상태를 묻는다(CONTRACT-A4 §2) — 새 타이머를 만들지 않고 이
       // 재조회 흐름에 얹는다. 목록을 먼저 올린 뒤에 묻는다: 이 읽기가 느리거나 멈춰도 종이 칸은
@@ -499,6 +501,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.
     sectionHashes = null
+    sectionHashesRoot = null
     set({ events: [], sections: null, outline: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat', paneHold: false, docReturn: null, foldNotice: false, listIntent: null, quoteIntent: null, paneTab: 'paper', docPath: null })
     canonPoll = setInterval(() => { void get().watchCanon() }, 2000)
     // 도우미가 하위 폴더에 init한 경우 — 빈 화면으로 두지 않고 어디에 만들었는지 알린다.

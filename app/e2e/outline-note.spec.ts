@@ -189,6 +189,24 @@ test('장 목록을 못 읽으면 null 이고 판정하지 않는다', async () 
   })
 })
 
+test('다른 폴더의 지문은 새 폴더 첫 읽기의 사건을 만들지 않는다', async () => {
+  const model = rpcModel({
+    sections: (root) => [
+      { ...sectionRow('sec-01'), draft_hash: root === '/leak-A' ? 'a' : 'b', draft_chars: 12 }
+    ]
+  })
+  await withWindow(model, async () => {
+    useProject.setState({ events: [] })
+    useProject.setState({ root: '/leak-A' })
+    await useProject.getState().loadSections()
+
+    useProject.setState({ root: '/leak-B' })
+    await useProject.getState().loadSections()
+
+    expect(useProject.getState().events).toEqual([])
+  })
+})
+
 test('다른 폴더로 바뀐 뒤 늦게 온 판정은 버린다', async () => {
   const slow = Promise.withResolvers<unknown>()
   const model = rpcModel({
