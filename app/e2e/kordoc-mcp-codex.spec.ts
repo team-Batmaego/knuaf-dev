@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   CODEX_STARTUP_TIMEOUT_SEC, CODEX_TOOL_TIMEOUT_SEC, READ_TOOLS, codexMcpArgs, codexMcpEnv,
-  advertisedReadTools, type KordocMcpSpec
+  advertisedReadTools, codexKordocCollision, type KordocMcpSpec
 } from '../src/main/chat/kordocMcp'
 import { McpSafetyError, ROOT_DENIAL_TEXT, verifyCodexKordoc, verifyKordocAbsent } from '../src/main/chat/kordocMcpVerify'
 
@@ -25,6 +25,10 @@ const spec: KordocMcpSpec = {
   env: { KORDOC_ROOT: root, KORDOC_OFFLINE: '1', ELECTRON_RUN_AS_NODE: '1' },
   version: '4.17.1'
 }
+const appServer = { command: spec.command, args: spec.args, env_vars: Object.keys(spec.env),
+  enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+const appLayers = [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc: appServer } } }]
+const mergedServer = { ...appServer, enabled: true, environment_id: 'local' }
 
 // ── 모킹 도구 ────────────────────────────────────────────────────────────────
 
@@ -71,7 +75,7 @@ function rpc(handler: (call: Call, round: number) => unknown) {
     request: async (method: string, params?: unknown) => {
       const call = { method, params: (params ?? {}) as Record<string, unknown> }
       if (method === 'config/read') return {
-        config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } }, layers: []
+        config: { mcp_servers: { kordoc: mergedServer } }, layers: appLayers
       }
       calls.push(call)
       if (method === 'mcpServerStatus/list') return handler(call, round++)
@@ -155,9 +159,9 @@ test('v067: 프로세스 후보가 있어도 명령·인자 신원이 다르면 
     const calls: string[] = []
     const m = { request: async (method: string) => {
       calls.push(method)
-      return { config: { mcp_servers: { kordoc: replacement } }, layers: [] }
+      return { config: { mcp_servers: { kordoc: { ...mergedServer, ...replacement } } }, layers: appLayers }
     } }
-    await expectSafety(verifyCodexKordoc(m, opts()), 'server-command')
+    await expectSafety(verifyCodexKordoc(m, opts()), 'server-collision')
     expect(calls).toEqual(['config/read'])
   }
 })
@@ -179,6 +183,18 @@ test('C-01: 비활성 중첩 프로필의 동명 설정도 소유권 충돌이�
   const m = { request: async () => ({ config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } },
     layers: [{ name: { type: 'user' }, config: { profiles: { student: { mcp_servers: { kordoc: { env: { KORDOC_OFFLINE: '0' } } } } } } }] }) }
   await expectSafety(verifyCodexKordoc(m, opts()), 'server-collision')
+})
+
+for (const [label, response] of [
+  ['empty layers', { config: { mcp_servers: { kordoc: mergedServer } }, layers: [] }],
+  ['array layer config', { config: { mcp_servers: { kordoc: mergedServer } }, layers: [{ name: { type: 'future' }, config: [] }] }],
+  ['unattributed merged env', { config: { mcp_servers: { kordoc: { ...mergedServer, env: { KORDOC_OFFLINE: '0' } } } }, layers: appLayers }]
+] as const) test(`C-01 잔여: ${label}는 충돌로 닫힌다`, () => {
+  expect(codexKordocCollision(response, spec)).toBe(true)
+})
+
+for (const altered of [{ enabled: false }, { environment_id: 'remote' }]) test(`C-01 정규화 기본값 변경도 거부 ${JSON.stringify(altered)}`, () => {
+  expect(codexKordocCollision({ config: { mcp_servers: { kordoc: { ...mergedServer, ...altered } } }, layers: appLayers }, spec)).toBe(true)
 })
 
 test('v067: null 상태도 도구 목록·신원·A/B가 검증되지 않으면 실패한다', async () => {

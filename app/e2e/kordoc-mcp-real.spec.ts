@@ -164,12 +164,15 @@ async function wrongRootCase(rootName: string) {
     const readNames = new Set<string>(advertisedReadTools(version) ?? [])
     const reads = (list.tools ?? []).filter((t) => readNames.has(t.name))
     const spec: KordocMcpSpec = { command: process.execPath, args: [], env: { KORDOC_ROOT: wrongRoot, KORDOC_OFFLINE: '1' }, version }
+    const appServer = { command: spec.command, args: spec.args, env_vars: Object.keys(spec.env),
+      enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
 
     // Codex 상태 조회만 어댑터 — 탐침 결과는 실제 서버 응답이다.
     const adapter = {
       request: async (method: string, params?: unknown) => {
         if (method === 'config/read') return {
-          config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } }, layers: []
+          config: { mcp_servers: { kordoc: { ...appServer, enabled: true, environment_id: 'local' } } },
+          layers: [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc: appServer } } }] 
         }
         if (method === 'mcpServerStatus/list') {
           // verify 가 root realpath 를 이미 구한 뒤 경로가 사라진 상황(검토자 반례 그대로).

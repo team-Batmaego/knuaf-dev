@@ -350,13 +350,15 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
         // 병합된 설정 — `mcp_servers` 는 항상 있고(없으면 `{}`), 사용자 층 표가 그대로 보인다.
         case 'config/read': {
           const injected = Array.isArray(rpc.argv) && rpc.argv.join(' ').includes('mcp_servers.kordoc')
-          const kordoc = injected ? { command: specFor(root).command, args: specFor(root).args }
+          const kordoc = injected ? { command: specFor(root).command, args: specFor(root).args,
+              env_vars: Object.keys(specFor(root).env), enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
             : { command: '/bin/false', args: ['/tmp/kordoc/dist/mcp.js'], enabled: true,
                 enabled_tools: ['generate_document', 'parse_document'], env: { KORDOC_ROOT: '/tmp' } }
           return { config: { mcp_servers: userKordoc
             ? { kordoc, foreign: { command: '/bin/false', args: ['/tmp/other.js'], enabled: true } }
-            : injected ? { kordoc } : {} }, layers: userKordoc
-              ? [{ name: { type: 'user' }, config: { mcp_servers: { kordoc } } }] : [] }
+            : injected ? { kordoc: { ...kordoc, enabled: true, environment_id: 'local' } } : {} }, layers: userKordoc
+              ? [{ name: { type: 'user' }, config: { mcp_servers: { kordoc } } }]
+              : injected ? [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc } } }] : [] }
         }
         case 'thread/start':
         case 'thread/resume':

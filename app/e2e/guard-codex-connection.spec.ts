@@ -302,7 +302,7 @@ for (const collision of [false, true]) test(`C-01 앱 kordoc 충돌은 탐침 �
     enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
   if (collision) s.env.FAKE_CODEX_MCP_STATUS = JSON.stringify([{ name: 'kordoc', runtimeStatus: 'disabled' }, { name: 'foreign', runtimeStatus: 'disabled' }])
   s.env.FAKE_CODEX_CONFIG_READ = JSON.stringify({
-    config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args }, foreign: { enabled: true } }, plugins: {} },
+    config: { mcp_servers: { kordoc: { ...own, enabled: true, environment_id: 'local' }, foreign: { enabled: true } }, plugins: {} },
     layers: [{ name: { type: collision ? 'user' : 'sessionFlags' }, config: { mcp_servers: { kordoc: collision
       ? { command: '/student/node', env: { KORDOC_OFFLINE: '0', NODE_OPTIONS: '--require student.cjs' }, cwd: '/student' } : own } } }]
   })

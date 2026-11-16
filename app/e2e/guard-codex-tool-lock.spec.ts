@@ -14,10 +14,16 @@ import {
   TERMINAL_REFUSAL_HEAD, TERMINAL_ENUM_FAILED_COPY, APP_THREAD_RESULT_REFUSAL_COPY, LIST_PAGE_CAP,
   type LockConfig, type ToolLockOutcome
 } from '../src/main/chat/codexToolLock'
-import { MCP_SERVER_NAME, type KordocMcpSpec } from '../src/main/chat/kordocMcp'
+import { MCP_SERVER_NAME, READ_TOOLS, type KordocMcpSpec } from '../src/main/chat/kordocMcp'
 
 const appSpec: KordocMcpSpec = { command: '/app/node', args: ['/app/mcp.js'], env: { KORDOC_ROOT: '/tmp/kd-lock-root', KORDOC_OFFLINE: '1' }, version: '4.17.1' }
 const appInjected = [{ name: MCP_SERVER_NAME, spec: appSpec }]
+const ownServer = { command: appSpec.command, args: appSpec.args, env_vars: Object.keys(appSpec.env),
+  enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+const ownConfig = (others: Record<string, unknown> = {}) => ({
+  config: { mcp_servers: { ...others, kordoc: { ...ownServer, enabled: true, environment_id: 'local' } }, plugins: {} },
+  layers: [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc: ownServer } } }]
+})
 
 // ── 가짜 연결 ─────────────────────────────────────────────────────────────────
 
@@ -256,7 +262,7 @@ test('§10-20 지문은 이름 순서에 무관하고 플러그인이 늘면 바
 
 test('§4.1-D 앱이 붙인 kordoc 은 끄지 않고, 학생 층에 같은 이름이 없으면 충돌도 아니다', async () => {
   const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, other: { command: 'o' } } }),
+    'config/read': () => ownConfig({ other: { command: 'o' } }),
     'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status([{ name: 'kordoc', runtimeStatus: 'connected' }, disabled('other')]),
     'app/list': () => status([])
@@ -272,7 +278,7 @@ for (const student of [false, true]) test(`v066 app-owned kordoc may be absent f
   // Mac 0.169: data:[]; G0 0.164: only node_repl disabled. Process status
   // lists kordoc separately, but cannot prove this thread's student MCP cutoff.
   const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, ...(student ? { node_repl: { command: 'node' } } : {}) } }),
+    'config/read': () => ownConfig(student ? { node_repl: { command: 'node' } } : {}),
     'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status(student ? [{ name: 'node_repl', runtimeStatus: 'disabled', tools: {}, resources: [], resourceTemplates: [], authStatus: 'unsupported' }] : []),
     'app/list': () => status([])
@@ -296,7 +302,7 @@ for (const collision of [false, true]) test(`v066 absent kordoc row is still ref
 
 test('v066 app-owned kordoc absence never excuses another missing student MCP', async () => {
   const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, node_repl: { command: 'node' } } }),
+    'config/read': () => ownConfig({ node_repl: { command: 'node' } }),
     'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status([])
   })
@@ -307,7 +313,7 @@ test('v066 app-owned kordoc absence never excuses another missing student MCP', 
 test('v066 app-owned kordoc absence does not bypass Apps or instruction checks', async () => {
   for (const bad of ['apps', 'instructions']) {
     const f = fakeRpc({
-      'config/read': () => configRead({ servers: { kordoc: { command: 'node' } } }),
+      'config/read': () => ownConfig(),
       'plugin/installed': () => installed([]),
       'mcpServerStatus/list': () => status([]),
       'app/list': () => status(bad === 'apps' ? [{ id: 'foreign' }] : [])
@@ -334,7 +340,7 @@ for (const type of ['user', 'project', 'system', 'profile', 'plugin', 'sessionFl
 }
 
 test('v067 지문과 verify는 앱 실행표 변조나 다른 살아 있는 MCP를 허용하지 않는다', async () => {
-  const f = fakeRpc({ 'config/read': () => configRead({ servers: { kordoc: {} } }), 'plugin/installed': () => installed([]),
+  const f = fakeRpc({ 'config/read': () => ownConfig(), 'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status([{ name: 'kordoc', runtimeStatus: 'connected' }, { name: 'foreign', runtimeStatus: 'connected' }]) })
   const req = { root: '/tmp/kd-lock-root', form: 'app-thread' as const, injected: appInjected, rpc: f.rpc, retry: { sleep: noSleep } }
   const result = await appThreadLockPlan(req)

@@ -324,12 +324,24 @@ export function codexMcpArgs(spec: KordocMcpSpec): string[] {
 
 /** All non-app layers owning the name are collisions: Codex retains env/cwd keys across overrides. */
 export function codexKordocCollision(read: unknown, spec: KordocMcpSpec): boolean {
-  if (!read || typeof read !== 'object' || !('layers' in read) || !Array.isArray(read.layers)) return true
+  if (!read || typeof read !== 'object' || !('layers' in read) || !Array.isArray(read.layers) || !read.layers.length) return true
   const expected: Record<string, unknown> = {
     command: spec.command, args: spec.args,
     env_vars: ['KORDOC_ROOT', 'KORDOC_OFFLINE', ...Object.keys(spec.env).filter((k) => k !== 'KORDOC_ROOT' && k !== 'KORDOC_OFFLINE')],
     enabled_tools: [...READ_TOOLS], startup_timeout_sec: CODEX_STARTUP_TIMEOUT_SEC, tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC
   }
+  const matchesApp = (value: unknown, identity: Record<string, unknown> = expected): boolean => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    const entries = Object.entries(value)
+    return entries.length === Object.keys(identity).length
+      && entries.every(([key, entry]) => Object.hasOwn(identity, key) && JSON.stringify(entry) === JSON.stringify(identity[key]))
+  }
+  // Codex 0.169 normalizes these defaults in config/read, but not in raw sessionFlags.
+  const mergedIdentity = { ...expected, enabled: true, environment_id: 'local' }
+  if (!('config' in read) || !read.config || typeof read.config !== 'object' || Array.isArray(read.config)
+    || !('mcp_servers' in read.config) || !read.config.mcp_servers || typeof read.config.mcp_servers !== 'object'
+    || !(MCP_SERVER_NAME in read.config.mcp_servers) || !matchesApp(read.config.mcp_servers[MCP_SERVER_NAME], mergedIdentity)) return true
+  let appLayerFound = false
   const nestedOwnsName = (value: unknown): boolean => {
     if (!value || typeof value !== 'object') return false
     for (const [key, child] of Object.entries(value)) {
@@ -339,7 +351,11 @@ export function codexKordocCollision(read: unknown, spec: KordocMcpSpec): boolea
     return false
   }
   for (const layer of read.layers) {
-    if (!layer || typeof layer !== 'object' || !('config' in layer) || !layer.config || typeof layer.config !== 'object') return true
+    if (!layer || typeof layer !== 'object' || Array.isArray(layer) || !('config' in layer) || !layer.config
+      || typeof layer.config !== 'object' || Array.isArray(layer.config)) return true
+    const name = 'name' in layer ? layer.name : null
+    if (!name || typeof name !== 'object' || Array.isArray(name) || !('type' in name)
+      || typeof name.type !== 'string' || !name.type) return true
     for (const [key, value] of Object.entries(layer.config)) {
       if (key !== 'mcp_servers' && nestedOwnsName(value)) return true
     }
@@ -348,14 +364,10 @@ export function codexKordocCollision(read: unknown, spec: KordocMcpSpec): boolea
     if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return true
     if (!(MCP_SERVER_NAME in servers)) continue
     const own = servers[MCP_SERVER_NAME]
-    const name = 'name' in layer ? layer.name : null
-    if (!name || typeof name !== 'object' || !('type' in name) || name.type !== 'sessionFlags'
-      || !own || typeof own !== 'object' || Array.isArray(own)) return true
-    const entries = Object.entries(own)
-    if (entries.length !== Object.keys(expected).length
-      || entries.some(([key, value]) => !(key in expected) || JSON.stringify(value) !== JSON.stringify(expected[key]))) return true
+    if (name.type !== 'sessionFlags' || !matchesApp(own)) return true
+    appLayerFound = true
   }
-  return false
+  return !appLayerFound
 }
 
 /**
