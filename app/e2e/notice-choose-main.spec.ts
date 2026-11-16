@@ -139,11 +139,7 @@ test('generic rpc 로는 notices.choose 를 부를 수 없다 — sidecar 에 �
   } finally { await h.cleanup() }
 })
 
-/**
- * 확인(`notices.confirm`)도 정본 쓰기다 — 메인의 2중 검사(열린 폴더·지금 알림)를 통과한 호출만
- * sidecar 에 닿아야 하고, generic `rpc` 로는 부를 수 없다. 출처(`--by app_click`)는 여기서 정하지
- * 않는다: 화면은 `(root, identity)` 만 준다.
- */
+/** 확인도 정본 쓰기이므로 열린 폴더·알림·전달 답을 메인에서 검사한다. */
 test('확인은 열린 폴더·지금 알림을 통과할 때만 sidecar 에 닿는다', async () => {
   const h = harness()
   try {
@@ -162,6 +158,23 @@ test('확인은 열린 폴더·지금 알림을 통과할 때만 sidecar 에 닿
     // 통과 — 폴더·identity 두 값만 넘긴다(출처를 화면이 고르게 두지 않는다).
     expect(await h.invoke('notices:confirm', h.root, IDENTITY)).toMatchObject({ result: { ok: true, status: 'acknowledged' } })
     expect(confirmCalls(h)).toEqual([{ method: 'notices.confirm', params: { root: h.root, identity: IDENTITY } }])
+  } finally { await h.cleanup() }
+})
+
+test('전달 답은 빈 값과 숫자를 막고 유효한 문장만 전달한다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    for (const quote of ['', '  ', 42]) {
+      expect(await h.invoke('notices:confirm', h.root, IDENTITY, quote)).toMatchObject({ error: { code: 'invalid_params' } })
+    }
+    expect(confirmCalls(h)).toEqual([])
+    await h.invoke('notices:confirm', h.root, IDENTITY, '  학생이 그대로 두라고 했어요  ')
+    await h.invoke('notices:confirm', h.root, IDENTITY)
+    expect(confirmCalls(h)).toEqual([
+      { method: 'notices.confirm', params: { root: h.root, identity: IDENTITY, relayed_quote: '학생이 그대로 두라고 했어요' } },
+      { method: 'notices.confirm', params: { root: h.root, identity: IDENTITY } }
+    ])
   } finally { await h.cleanup() }
 })
 

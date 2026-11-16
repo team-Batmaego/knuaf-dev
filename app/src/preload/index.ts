@@ -196,7 +196,7 @@ const api = {
    * 학교 재무 양식 알림 — 읽기·닫기 기억. 알림 파일은 규칙집이 쓰므로 앱은 **읽기만** 한다.
    * 선택 기록은 전용 IPC(`notices:choose`) 한 길이다 — 메인이 열린 폴더·알림·값을 다시 검사한 뒤
    * sidecar 로 넘기고, 정본·파일 다시 쓰기는 규칙집 몫이다. generic `rpc` 로는 그 method 가 거절된다.
-   * 확인(`notices:confirm`)도 같은 경계다 — 화면은 `(root, identity)` 만 주고, 출처는 사이드카가 붙인다.
+   * 확인도 같은 경계다 — 화면 단추는 `(root, identity)`만 주고, 전달 답은 별도로 넘긴다.
    */
   notices: {
     read: (root: string): Promise<{ result: NoticesRead } | { error: { code: string; message: string } }> =>
@@ -205,8 +205,8 @@ const api = {
       ipcRenderer.invoke('notices:dismiss', root, key),
     choose: (root: string, identity: string, value: NoticeChoiceValue): Promise<RpcResult<Envelope>> =>
       ipcRenderer.invoke('notices:choose', root, identity, value),
-    confirm: (root: string, identity: string): Promise<RpcResult<Envelope>> =>
-      ipcRenderer.invoke('notices:confirm', root, identity)
+    confirm: (root: string, identity: string, quote?: string): Promise<RpcResult<Envelope>> =>
+      ipcRenderer.invoke('notices:confirm', root, identity, quote)
   },
   // progress (v0.6.4 2단계): 논문 폴더의 진행 파일(main이 검증해 읽은 값). 경로 인자 없음 —
   // main이 지금 열린 논문만 읽는다. `onChanged`는 논문이 바뀌거나 파일이 다시 쓰일 때 온다.

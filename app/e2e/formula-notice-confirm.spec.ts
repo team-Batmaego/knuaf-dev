@@ -42,6 +42,9 @@ args = sys.argv[1:]
 root = Path(args[1])
 with (root / '.stub-calls').open('a', encoding='utf-8') as f:
     f.write(json.dumps(['confirm', *args], ensure_ascii=False) + '\\n')
+if (root / '.stub-delay').exists():
+    import time
+    time.sleep(2)
 if (root / '.stub-stale').exists():
     print(json.dumps({'status': 'rejected', 'reason': 'notice_stale'}))
     sys.exit(1)
@@ -63,7 +66,11 @@ with (root / '.stub-calls').open('a', encoding='utf-8') as f:
     f.write(json.dumps(['clear', *args], ensure_ascii=False) + '\\n')
 if not (root / '.stub-ack').exists():
     detail = {'cells': [${JSON.stringify(CELL)}], 'lineage_key': 'file:test', 'notice_identity': ${JSON.stringify(IDENTITY)}, 'guidance': ${JSON.stringify(HELD)}}
-    print(json.dumps({'status': 'held', 'reason': 'formula_cells_changed', 'detail': detail, 'guidance': detail['guidance']}, ensure_ascii=False))
+    print(json.dumps({'status': 'held', 'reason': 'formula_cells_changed', 'detail': detail, 'guidance': detail['guidance']}, ensure_ascii=False), flush=True)
+    if (root / '.stub-stream-delay').exists():
+        import time
+        (root / '.stub-streaming').write_text('yes', encoding='utf-8')
+        time.sleep(2)
     sys.exit(2)
 print(json.dumps({'status': 'ok', 'path': args[args.index('--out') + 1]}))
 `
@@ -150,6 +157,41 @@ for (const stale of [false, true]) {
     }
   })
 }
+
+test('확인 대기 중 다른 도구는 실행할 수 없다', async () => {
+  const s = scene()
+  writeFileSync(join(s.root, '.stub-delay'), 'yes')
+  const { electronApp, page } = await open(s)
+  try {
+    await navTo(page, '설정')
+    await openPreset(page, 'tools:excel')
+    await page.locator('#xl_source').fill(join(s.root, 'input.xlsx'))
+    const clear = page.getByRole('button', { name: '검토한 셀 지도대로 비우기', exact: true })
+    await clear.click()
+    await expect(page.locator('.result-held')).toContainText(HELD, { timeout: 30_000 })
+    await clear.click()
+    await expect.poll(() => calls(s.root).map((entry) => entry[0])).toEqual(['clear', 'confirm'])
+    await expect(page.getByRole('button', { name: '사본 만들기', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: '검사', exact: true })).toBeDisabled()
+    await expect(page.locator('.result-ok')).toContainText('완료', { timeout: 30_000 })
+    expect(calls(s.root).map((entry) => entry[0])).toEqual(['clear', 'confirm', 'clear'])
+  } finally { await electronApp.close() }
+})
+
+test('도구가 멈춤 출력을 내보낸 뒤 종료 전에도 사유 코드를 숨긴다', async () => {
+  const s = scene()
+  writeFileSync(join(s.root, '.stub-stream-delay'), 'yes')
+  const { electronApp, page } = await open(s)
+  try {
+    await navTo(page, '설정')
+    await openPreset(page, 'tools:excel')
+    await page.getByRole('button', { name: '검토한 셀 지도대로 비우기', exact: true }).click()
+    await expect.poll(() => existsSync(join(s.root, '.stub-streaming'))).toBe(true)
+    await expect(page.locator('.progress[aria-busy="true"]')).toBeVisible()
+    await expect(page.locator('body')).not.toContainText('formula_cells_changed')
+    await expect(page.locator('.result-held')).toContainText(HELD, { timeout: 30_000 })
+  } finally { await electronApp.close() }
+})
 
 test('43: 대화 알림을 확인하면 규칙집이 바꾼 행에서 단추가 사라진다', async () => {
   const s = scene()

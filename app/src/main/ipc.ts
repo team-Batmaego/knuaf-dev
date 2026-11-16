@@ -885,18 +885,16 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     }
   })
 
-  /**
-   * 확인 기록 — 말풍선 단추가 `(root, identity)` 만 보낸다. 메인이 **다시 검사**한다:
-   * ① 열린 폴더여야 하고 ② 그 `identity` 가 지금 알림 파일의 유효 알림이어야 한다.
-   * 확인은 정본 쓰기라 화면이 임의의 폴더·identity 로 부르게 두면 안 된다.
-   * 출처(`--by app_click`)는 사이드카가 붙인다 — 화면이 고르는 값이 아니다(계약 §2).
-   */
-  ipcMain.handle('notices:confirm', async (_e, root: unknown, identity: unknown) => {
+  /** 확인은 열린 폴더와 알림을 다시 검사하고, 전달받은 답이 있으면 출처를 보존한다. */
+  ipcMain.handle('notices:confirm', async (_e, root: unknown, identity: unknown, quote: unknown) => {
     if (typeof root !== 'string' || root !== currentRoot) {
       return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
     }
     if (typeof identity !== 'string' || !identity.trim()) {
       return { error: { code: 'invalid_params', message: '알림 식별자가 올바르지 않습니다.' } }
+    }
+    if (quote !== undefined && (typeof quote !== 'string' || !quote.trim())) {
+      return { error: { code: 'invalid_params', message: '전달한 답이 올바르지 않습니다.' } }
     }
     // 알림 파일은 규칙집이 쓴다 — 그 파일이 말하는 알림만 확인할 수 있다.
     let known = false
@@ -908,7 +906,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     if (!known) return { error: { code: 'notice_unknown', message: '그 알림을 이 폴더에서 찾지 못했어요.' } }
     if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
     try {
-      return { result: await sidecar.call('notices.confirm', { root, identity }) }
+      return { result: await sidecar.call('notices.confirm', { root, identity, ...(typeof quote === 'string' ? { relayed_quote: quote.trim() } : {}) }) }
     } catch (error) {
       return { error: ipcError(error) }
     }
