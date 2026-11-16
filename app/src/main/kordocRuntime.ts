@@ -53,8 +53,18 @@ const START_DELAY_MS = 5_000
 const HOST_OWNER = 'knuaf-dev.app'
 const HOST_FILE_NAME = 'kordoc-host.json'
 
+/**
+ * 이 모듈은 **Electron 밖에서도** 로드된다 — `ipc.ts` 를 VM 로더로 올리는 Node 시험
+ * (`preparation-main`·`app-store-broker`)이 그 경로다. 거기서 `require('electron')` 는
+ * 실행 파일 **경로 문자열**이라 `app` 이 없다. `app.isPackaged` 를 그냥 읽으면 TypeError 이므로
+ * 모든 `app.isPackaged` 판정은 이 함수를 지난다.
+ */
+function isPackaged(): boolean {
+  return app?.isPackaged === true
+}
+
 function kordocHostPath(): string {
-  const override = !app.isPackaged ? process.env.KNUAF_KORDOC_HOST_FILE : undefined
+  const override = !isPackaged() ? process.env.KNUAF_KORDOC_HOST_FILE : undefined
   if (override) return resolve(override)
   return join(resolve(process.env.XDG_CACHE_HOME || join(homedir(), '.cache')), 'ginseng-goat', HOST_FILE_NAME)
 }
@@ -113,7 +123,7 @@ function deleteHostPath(path: string, beforeDelete: () => void): void {
 }
 
 function removeKordocHostFile(beforeFinalCheck: () => void = () => {}): void {
-  if (!app.isPackaged) return
+  if (!isPackaged()) return
   const path = kordocHostPath()
   const folder = hostFolder(path, false)
   if (!folder) return
@@ -130,7 +140,7 @@ function removeKordocHostFile(beforeFinalCheck: () => void = () => {}): void {
 }
 
 function writeKordocHostFile(dir: string, spec: KordocSpec, target: KordocTarget): boolean {
-  if (!app.isPackaged) return false
+  if (!isPackaged()) return false
   const path = kordocHostPath()
   const folder = hostFolder(path, true)
   if (!folder) return false
@@ -179,13 +189,19 @@ function writeKordocHostFile(dir: string, spec: KordocSpec, target: KordocTarget
   }
 }
 
+/**
+ * 지금 쓸 수 있는 설치에 맞춰 안내 파일을 다시 쓴다. **던지지 않는다** — 시작 작업·설치 실패
+ * 처리(.catch)·선택기에서 모두 불리므로 여기서 던지면 그대로 unhandled rejection 이 된다.
+ * Electron 밖(Node 시험)에는 쓸 안내 파일 자체가 없으니 아무 일도 하지 않는다.
+ */
 function refreshHostFileForUsableRuntime(): boolean {
-  const state = kordocSpecState()
-  if (state.kind !== 'ok') {
-    removeKordocHostFile()
-    return false
-  }
+  if (!isPackaged()) return false
   try {
+    const state = kordocSpecState()
+    if (state.kind !== 'ok') {
+      removeKordocHostFile()
+      return false
+    }
     const dir = usableKordocDir(kordocRoot(), state.spec, state.targetKey, state.target, ledger)
     if (!dir) {
       removeKordocHostFile()
@@ -193,7 +209,7 @@ function refreshHostFileForUsableRuntime(): boolean {
     }
     return writeKordocHostFile(dir, state.spec, state.target)
   } catch {
-    removeKordocHostFile()
+    try { removeKordocHostFile() } catch { /* 지우기도 실패하면 다음 시작 때 재시도 */ }
     return false
   }
 }
@@ -209,7 +225,7 @@ export function kordocRoot(): string {
 }
 
 function specPath(): string {
-  const override = !app.isPackaged ? process.env.KNUAF_KORDOC_SPEC : undefined
+  const override = !isPackaged() ? process.env.KNUAF_KORDOC_SPEC : undefined
   return override ? resolve(override) : join(APP_ROOT, 'kordoc-runtime.json')
 }
 
@@ -341,7 +357,7 @@ function smoke(execPath: string, dir: string, cli: string, signal?: AbortSignal)
 
 /** 설치가 필요로 하는 다리(§4.2). 주소는 명세의 `release`+`file` 로만 조립한다. */
 function installDeps(state: Extract<SpecState, { kind: 'ok' }>, signal: AbortSignal, onEvent?: (event: Progress) => void): InstallDeps {
-  const base = !app.isPackaged && process.env.KNUAF_KORDOC_BASE_URL
+  const base = !isPackaged() && process.env.KNUAF_KORDOC_BASE_URL
     ? process.env.KNUAF_KORDOC_BASE_URL.replace(/\/+$/, '')
     : RELEASE_BASE
   return {
@@ -469,6 +485,8 @@ function scheduleRetry(): void {
  * ③은 이미 설치돼 있어도 **매 시작에** 다시 시도한다(§4.4, KC-12).
  */
 export function startKordocWork(delayMs = START_DELAY_MS): void {
+  // Electron 밖(ipc.ts 를 올리는 Node 시험)에서는 앱도, 쓸 안내 파일도 없다 — 타이머조차 걸지 않는다.
+  if (typeof app?.isPackaged !== 'boolean') return
   if (startWorkDone) return
   startWorkDone = true
   const timer = setTimeout(() => {
@@ -506,7 +524,7 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
         spec: state.spec,
         targetKey: state.targetKey,
         target: state.target,
-        isDev: !app.isPackaged,
+        isDev: !isPackaged(),
         ledger,
         now: () => Date.now(),
         pidAlive

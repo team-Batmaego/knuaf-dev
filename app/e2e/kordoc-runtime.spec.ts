@@ -729,6 +729,57 @@ test('시작 작업: isOnline 없는 호스트는 받지 않고, 배경 실패�
   }
 })
 
+test('맨 Node(electron 없음): 시작 작업은 타이머조차 걸지 않고 던지지 않는다', async () => {
+  // `ipc.ts` 를 VM 로더로 올리는 Node 시험은 진짜 `require('electron')`(실행 파일 경로 문자열)을 쓴다.
+  // 그 프로세스에서 5초 타이머가 터지면 `app.isPackaged` TypeError 가 unhandled rejection 이 되어
+  // 그 워커에서 돌던 무관한 시험이 실패한다(#157 CI 회귀).
+  const rejections: unknown[] = []
+  const onRejection = (error: unknown) => rejections.push(error)
+  let scheduled = 0
+  const adapter = loadAdapter({}, { setTimeout: () => { scheduled++; return { unref() {} } } })
+  process.on('unhandledRejection', onRejection)
+  try {
+    adapter.startKordocWork(0)
+    const tick = Promise.withResolvers<void>()
+    setImmediate(tick.resolve)
+    await tick.promise
+  } finally {
+    process.off('unhandledRejection', onRejection)
+  }
+  expect(scheduled).toBe(0)
+  expect(rejections).toEqual([])
+})
+
+test('패키징 시작 작업의 예상 밖 예외는 unhandled rejection 이 되지 않는다', async () => {
+  const root = tmpRoot()
+  const rejections: unknown[] = []
+  const onRejection = (error: unknown) => rejections.push(error)
+  let work: (() => void) | undefined
+  const adapter = loadAdapter({
+    electron: { app: { isPackaged: true }, net: {} },
+    './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
+    './diagLog': { diag() {} },
+    'node:os': { homedir: () => root },
+    './kordocRuntimeCore': {
+      ...require('../src/main/kordocRuntimeCore'),
+      readSpecState: () => { throw new Error('spec unreadable') }
+    }
+  }, { setTimeout: (fn: () => void) => { work = fn; return { unref() {} } }, process: { ...process, env: { ...process.env, XDG_CACHE_HOME: join(root, 'cache') } } })
+  process.on('unhandledRejection', onRejection)
+  try {
+    adapter.startKordocWork(0)
+    work!()
+    for (let index = 0; index < 2; index++) {
+      const tick = Promise.withResolvers<void>()
+      setImmediate(tick.resolve)
+      await tick.promise
+    }
+  } finally {
+    process.off('unhandledRejection', onRejection)
+  }
+  expect(rejections).toEqual([])
+})
+
 test('패키징 설치 실패: 사용 가능한 설치가 없으면 소유 안내 파일을 지운다', async () => {
   const root = tmpRoot()
   const cache = join(root, 'cache')
