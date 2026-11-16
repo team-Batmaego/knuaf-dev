@@ -15,9 +15,9 @@
 import { app, net } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { KordocRuntime } from './chat/kordocMcp'
 import { diag } from './diagLog'
 import {
@@ -59,19 +59,85 @@ function kordocHostPath(): string {
   return join(resolve(process.env.XDG_CACHE_HOME || join(homedir(), '.cache')), 'ginseng-goat', HOST_FILE_NAME)
 }
 
-function removeKordocHostFile(): void {
-  if (!app.isPackaged) return
-  const path = kordocHostPath()
+function hostFolder(path: string, create: boolean): string | null {
+  const folder = dirname(path)
+  if (create) {
+    try { mkdirSync(folder, { recursive: true, mode: 0o700 }) } catch { return null }
+  }
   try {
-    const current: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    if (!current || typeof current !== 'object' || !('owner' in current) || current.owner !== HOST_OWNER) return
-    rmSync(path)
-  } catch { /* 없거나 소유자를 확인할 수 없는 파일은 건드리지 않는다 */ }
+    const stat = lstatSync(folder)
+    return stat.isDirectory() && !stat.isSymbolicLink() ? folder : null
+  } catch { return null }
 }
 
-function writeKordocHostFile(dir: string, spec: KordocSpec, target: KordocTarget): void {
+function readHostOwner(path: string): { owner: string | null; stat: Stats } | null {
+  let pathStat: Stats
+  try {
+    pathStat = lstatSync(path)
+    if (!pathStat.isFile() || pathStat.isSymbolicLink()) return null
+  } catch { return null }
+  let fd: number
+  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)) }
+  catch { return null }
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.dev !== pathStat.dev || stat.ino !== pathStat.ino) return null
+    const value: unknown = JSON.parse(readFileSync(fd, { encoding: 'utf8' }))
+    if (!value || typeof value !== 'object' || !('owner' in value) || typeof value.owner !== 'string') return null
+    return { owner: value.owner, stat }
+  } catch { return null }
+  finally { closeSync(fd) }
+}
+
+function sameFile(path: string, expected: Stats): boolean {
+  try {
+    const current = lstatSync(path)
+    return current.isFile() && !current.isSymbolicLink() && current.dev === expected.dev && current.ino === expected.ino
+  } catch { return false }
+}
+
+function hostFileExists(path: string): boolean {
+  try { lstatSync(path); return true } catch { return false }
+}
+
+function sameFolder(path: string, expected: Stats): boolean {
+  try {
+    const current = lstatSync(path)
+    return current.isDirectory() && !current.isSymbolicLink() && current.dev === expected.dev && current.ino === expected.ino
+  } catch { return false }
+}
+
+function deleteHostPath(path: string, beforeDelete: () => void): void {
+  beforeDelete()
+  rmSync(path)
+}
+
+function removeKordocHostFile(beforeFinalCheck: () => void = () => {}): void {
   if (!app.isPackaged) return
   const path = kordocHostPath()
+  const folder = hostFolder(path, false)
+  if (!folder) return
+  let folderStat: Stats
+  try { folderStat = lstatSync(folder) } catch { return }
+  const opened = readHostOwner(path)
+  if (!opened || opened.owner !== HOST_OWNER || !sameFile(path, opened.stat) || !sameFolder(folder, folderStat)) return
+  try {
+    deleteHostPath(path, () => {
+      beforeFinalCheck()
+      if (!sameFolder(folder, folderStat) || !sameFile(path, opened.stat)) throw new Error('안내 파일 대상이 바뀜')
+    })
+  } catch { /* 다시 시작할 때 재시도 */ }
+}
+
+function writeKordocHostFile(dir: string, spec: KordocSpec, target: KordocTarget): boolean {
+  if (!app.isPackaged) return false
+  const path = kordocHostPath()
+  const folder = hostFolder(path, true)
+  if (!folder) return false
+  let folderStat: Stats
+  try { folderStat = lstatSync(folder) } catch { return false }
+  const existing = readHostOwner(path)
+  if (existsSync(path) && (!existing || existing.owner !== HOST_OWNER || !sameFile(path, existing.stat))) return false
   const installDir = resolve(dir)
   const executable = resolve(process.execPath)
   const shim = join(installDir, SHIM_NAME)
@@ -95,14 +161,40 @@ function writeKordocHostFile(dir: string, spec: KordocSpec, target: KordocTarget
     app_version: app.getVersion(),
     written_at: writtenAt
   }
-  const folder = dirname(path)
-  mkdirSync(folder, { recursive: true, mode: 0o700 })
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  const temporary = join(folder, `.${HOST_FILE_NAME}.${process.pid}.${randomUUID()}.tmp`)
   try {
-    writeFileSync(temporary, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 })
-    renameSync(temporary, path)
+    writeFileSync(temporary, JSON.stringify(data), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    if (!sameFolder(folder, folderStat)) return false
+    const current = readHostOwner(path)
+    if (existing) {
+      if (!current || current.owner !== HOST_OWNER || !sameFile(path, existing.stat)) return false
+      renameSync(temporary, path)
+    } else {
+      if (hostFileExists(path)) return false
+      linkSync(temporary, path)
+    }
+    return true
   } finally {
-    try { rmSync(temporary, { force: true }) } catch { /* atomic rename already consumed it */ }
+    try { rmSync(temporary, { force: true }) } catch { /* rename/link consumed it or cleanup can retry */ }
+  }
+}
+
+function refreshHostFileForUsableRuntime(): boolean {
+  const state = kordocSpecState()
+  if (state.kind !== 'ok') {
+    removeKordocHostFile()
+    return false
+  }
+  try {
+    const dir = usableKordocDir(kordocRoot(), state.spec, state.targetKey, state.target, ledger)
+    if (!dir) {
+      removeKordocHostFile()
+      return false
+    }
+    return writeKordocHostFile(dir, state.spec, state.target)
+  } catch {
+    removeKordocHostFile()
+    return false
   }
 }
 
@@ -314,6 +406,7 @@ export function installKordocRuntime(onEvent?: (event: Progress) => void): Promi
   if (installing) return installing
   const state = kordocSpecState()
   if (state.kind !== 'ok') {
+    removeKordocHostFile()
     return Promise.reject({
       code: 'runtime_spec_invalid',
       message: state.kind === 'invalid' ? state.reason : '이 PC 의 대상이 없음'
@@ -322,9 +415,16 @@ export function installKordocRuntime(onEvent?: (event: Progress) => void): Promi
   const abort = new AbortController()
   controller = abort
   const promise = installKordoc(installDeps(state, abort.signal, onEvent)).then((dir) => {
-    try { writeKordocHostFile(dir, state.spec, state.target) }
-    catch (error) { diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`) }
+    try {
+      if (!writeKordocHostFile(dir, state.spec, state.target)) removeKordocHostFile()
+    } catch (error) {
+      diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+      removeKordocHostFile()
+    }
     return dir
+  }).catch((error: unknown) => {
+    if (!refreshHostFileForUsableRuntime()) removeKordocHostFile()
+    throw error
   })
   installing = promise
   return promise.finally(() => {
@@ -392,8 +492,12 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
         smoke
       })
       if (dir) {
-        try { writeKordocHostFile(dir, state.spec, state.target) }
-        catch (error) { diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`) }
+        try {
+          if (!writeKordocHostFile(dir, state.spec, state.target)) refreshHostFileForUsableRuntime()
+        } catch (error) {
+          diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+          refreshHostFileForUsableRuntime()
+        }
       } else removeKordocHostFile()
       if (!dir && ledger.failed.size > 0) diag('kordoc 설치 확인 실패 — 쓰지 않는 폴더로 표시하고 다시 받는다')
       // ③ 정리 — 설치 여부와 무관하게 매 시작(§4.4).
@@ -409,7 +513,10 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
       })
       // ② 설치 — 온라인일 때만(§4.7).
       if (!dir && typeof net?.isOnline === 'function' && net.isOnline()) kickInstall()
-    })().catch((error: unknown) => diag(`kordoc 시작 작업 실패: ${String(error)}`))
+    })().catch((error: unknown) => {
+      diag(`kordoc 시작 작업 실패: ${String(error)}`)
+      if (!refreshHostFileForUsableRuntime()) removeKordocHostFile()
+    })
   }, delayMs)
   timer.unref?.()
 }
@@ -427,16 +534,25 @@ export function withManagedKordoc(
   return makeKordocSelector({
     specState: kordocSpecState,
     resolveManaged: async () => {
-      await verifyKordoc()
-      const managed = managedKordoc()
-      if (managed) {
-        const state = kordocSpecState()
-        if (state.kind === 'ok') {
-          try { writeKordocHostFile(dirname(managed.nodeArgs[1]), state.spec, state.target) }
-          catch (error) { diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`) }
-        }
-      } else removeKordocHostFile()
-      return managed
+      try {
+        await verifyKordoc()
+        const managed = managedKordoc()
+        if (managed) {
+          const state = kordocSpecState()
+          if (state.kind === 'ok') {
+            try {
+              if (!writeKordocHostFile(dirname(managed.nodeArgs[1]), state.spec, state.target)) refreshHostFileForUsableRuntime()
+            } catch (error) {
+              diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+              refreshHostFileForUsableRuntime()
+            }
+          }
+        } else if (!refreshHostFileForUsableRuntime()) removeKordocHostFile()
+        return managed
+      } catch (error) {
+        if (!refreshHostFileForUsableRuntime()) removeKordocHostFile()
+        throw error
+      }
     },
     startInstall: kickInstall,
     reportInvalid: (reason) => diag(`kordoc 명세 오류: ${reason}`)
