@@ -197,7 +197,8 @@ function readNotice(raw: unknown, documentProjectId: string): NoticeRow | null {
   // 열쇠가 없으면 "닫으면 다시 안 뜸"을 지킬 수 없다 — 그런 알림은 띄우지 않는다.
   if (!title || !identity || !projectId) return null
   const { items, omitted } = readItems(notice.items)
-  const card = notice.choice_policy === 'none' && CARD_KINDS.has(String(notice.kind))
+  // 강제 변환 금지 — 문자열이 아닌 kind({toString:null}·배열 등)는 던지지 않고 카드가 아닌 것으로 읽는다.
+  const card = notice.choice_policy === 'none' && typeof notice.kind === 'string' && CARD_KINDS.has(notice.kind)
   return {
     key: noticeKey(projectId, identity),
     title,

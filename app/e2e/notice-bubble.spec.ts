@@ -1261,6 +1261,21 @@ test('목표와 계획 차이 카드(8판)를 재무 카드로 읽는다 — 세
   expect(other.choices).toEqual([])
 })
 
+test('문자열이 아닌 kind 는 던지지 않고 카드로 승격하지 않으며, 뒤의 정상 알림을 지우지 않는다 (B2 검토 R1-01)', () => {
+  const plain = { title: '정상 알림', notice_identity: 'plain', project_id: 'project', items: [] }
+  for (const kind of [{ toString: null }, ['finance_hole_target_gap'], 7, null]) {
+    const rows = document({ schema: 'knuaf.notices/1', project_id: 'project', notices: [
+      { ...targetGapRaw(), kind }, plain, targetGapRaw('k'.repeat(64))
+    ] })
+    expect(rows.map((n) => [n.title, n.choicePolicy ?? null])).toEqual([
+      ['목표까지 12,000,000원이 모자라요', null],
+      ['정상 알림', null],
+      ['목표까지 12,000,000원이 모자라요', 'none']
+    ])
+    expect(rows[0].choices).toEqual([])
+  }
+})
+
 test('목표 차이 카드는 choose 없이 입력칸만 채우고, 막는 카드 뒤에 서며, 나중에로 접힌다', async () => {
   await withHostDom(async (document, act) => {
     const gap = one({ schema: 'knuaf.notices/1', project_id: 'project', notices: [targetGapRaw()] })
