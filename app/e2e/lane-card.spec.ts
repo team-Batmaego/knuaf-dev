@@ -13,6 +13,7 @@ import { planFromRow, type LaneRequest } from '../src/shared/lanes'
 import type { LaneEntry } from '../src/shared/lanes'
 import { assembleLanes } from '../src/main/lanes/snapshot'
 import { laneInput } from '../src/main/lanes/source'
+import { FREE_MODELS } from '../src/main/free/provider'
 import {
   LaneFailure, cardStatus, decideCard, disable, openCard, pickReview, reviewModels, settingsCard,
   type CardDeps
@@ -43,12 +44,14 @@ function setup(options: { mainCompany?: Provider; accounts?: Accounts } = {}) {
   mkdirSync(root, { recursive: true })
   const store = new JobStore(join(base, 'jobs'))
   const models = catalog(options.accounts)
-  const accountIds: Record<Provider, string> = { claude: 'claude-account', codex: 'codex-account' }
+  const accountIds: Record<Provider, string> = { claude: 'claude-account', codex: 'codex-account', free: 'knuaf-free' }
 
   const account = async (company: Provider): Promise<ExecutionAccount | null> => ({
     accountId: accountIds[company],
     connected: true,
-    account: company === 'claude'
+    account: company === 'free'
+      ? { company: 'free', models: FREE_MODELS }
+      : company === 'claude'
       ? {
         company: 'claude', apiKeySource: 'none', subscriptionType: 'max',
         models: models.claude.map(entry => ({
@@ -61,7 +64,7 @@ function setup(options: { mainCompany?: Provider; accounts?: Accounts } = {}) {
           model: entry.model, name: entry.model, efforts: entry.high ? ['low', 'high'] : ['low']
         }))
       },
-    consented: false,
+    consented: company === 'free',
     usage: 'allowed'
   })
 
@@ -319,8 +322,8 @@ test('card: settings revert without an approved plan is refused, and settings ca
   expect(f.store.card(conversation.cardId)?.state).toEqual({ kind: 'open' })
 })
 
-// ⑪ §3-4 검토 모델 고르기 — `high` 를 지원하는 모델만, 고르면 §3-2 카드가 열린다.
-test('card: review models list only high-effort models and picking one opens a change card', async () => {
+// ⑪ §3-4 검토 모델 고르기 — 구독은 `high`, 무료는 고정 DS·GLM 목록. 고르면 §3-2 카드가 열린다.
+test('card: review models filter paid models by high effort and include the fixed free catalog', async () => {
   const f = setup()
   const groups = await reviewModels(f.deps)
   expect(groups).toEqual([
@@ -332,9 +335,13 @@ test('card: review models list only high-effort models and picking one opens a c
         { model: 'gpt-6.1-sol', name: 'gpt-6.1-sol' },
         { model: 'gpt-6.1-terra', name: 'gpt-6.1-terra' }
       ]
-    }
+    },
+    { company: 'free', models: [
+      { model: 'deepseek-v4.1-flash-free', name: 'DeepSeek' },
+      { model: 'glm-5.3-flash-free', name: 'GLM' }
+    ] }
   ])
-  // `high` 를 못 쓰는 모델은 고를 수 없다 — 조용히 다른 모델로 바꾸지 않는다.
+  // 구독의 `high` 를 못 쓰는 모델은 고를 수 없다 — 조용히 다른 모델로 바꾸지 않는다.
   await expect(pickReview(f.deps, f.root, 'codex', 'gpt-6-luna')).rejects.toBeInstanceOf(LaneFailure)
 
   const opened = await pickReview(f.deps, f.root, 'claude', 'opus')
@@ -351,6 +358,20 @@ test('card: review models list only high-effort models and picking one opens a c
   expect(f.store.approvedPlan(f.root)?.review).toEqual({
     company: 'claude', model: 'opus', effort: 'high', how: 'relay'
   })
+})
+
+test('card: a free GLM review choice applies without effort or paid consent', async () => {
+  const f = setup()
+  const opened = await pickReview(f.deps, f.root, 'free', 'glm-5.3-flash-free')
+  expect(opened.rows.map(row => row.lane)).toEqual(['review'])
+  expect(opened.rows[0].after).toEqual({
+    company: 'free', model: 'glm-5.3-flash-free', effort: null, how: 'relay'
+  })
+  await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
+  expect(f.store.approvedPlan(f.root)?.review).toEqual({
+    company: 'free', model: 'glm-5.3-flash-free', effort: null, how: 'relay'
+  })
+  expect(f.store.consents().filter(row => row.company === 'free')).toEqual([])
 })
 
 // ⑫ §3.1 D2-03 설계 회사 전환 — 이음매가 없으면 누르기 전에 막고, 바뀌지 않았으면 적용이 아니다.

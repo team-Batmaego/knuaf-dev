@@ -15,6 +15,7 @@ import { canonical } from '../src/main/chat/jobs/isolation'
 import type { ExecutionAccount } from '../src/main/chat/jobs/types'
 import type { Provider } from '../src/shared/chat'
 import { planFromRow, resolveLanes } from '../src/shared/lanes'
+import { FREE_MODELS } from '../src/main/free/provider'
 
 function fixture() {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-lanes-')))
@@ -60,6 +61,10 @@ const accounts: Partial<Record<Provider, LaneAccountView>> = {
     connected: true, consented: true, usage: 'allowed', accountId: 'codex-account',
     account: { company: 'codex', accountType: 'chatgpt',
       models: ['gpt-6.1-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'].map(model => ({ model, name: model, efforts: ['low', 'high'] })) }
+  },
+  free: {
+    connected: true, consented: true, usage: 'unknown', accountId: 'knuaf-free',
+    account: { company: 'free', models: FREE_MODELS }
   }
 }
 
@@ -285,10 +290,7 @@ test('settings mode and source derive from the approval record, never from a new
 // ⑧ 서비스 이음매 — 계정 두 회사로 추천 줄을 고르고, 폴더 없이도 요금 동의 줄은 보인다.
 test('laneInput reads accounts through the source and publishes the assembled snapshot', async () => {
   const f = fixture()
-  const execution = (company: Provider): ExecutionAccount => ({
-    accountId: `${company}-account`, connected: true, usage: 'allowed', consented: true,
-    account: accounts[company]!.account
-  })
+  const execution = (company: Provider): ExecutionAccount => ({ ...accounts[company]! })
   const source: LaneSource = {
     store: f.store, runner: runnerStub([]), mainCompany: 'codex',
     account: async company => execution(company)

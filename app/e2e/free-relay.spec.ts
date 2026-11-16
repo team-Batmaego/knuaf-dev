@@ -182,7 +182,7 @@ test('define 식별자를 읽는 곳은 token.ts 한 곳 — 다른 메인 모�
 
 /** `release.yml` 에서 `- name: <이름>` 한 단계의 본문 줄들(다음 단계 전까지). */
 function stepBlocks(yaml: string, name: string): string[][] {
-  const lines = yaml.split('\n')
+  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
   const blocks: string[][] = []
   const header = new RegExp(`^\\s*- name: ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
   for (let i = 0; i < lines.length; i++) {
@@ -205,6 +205,8 @@ test('릴리스 워크플로: 두 설치본 빌드가 출입증을 받고, 만�
   // 것은 태그 릴리스에서만 가능하다). 그래서 세 가지만 잰다: 넘기는가, 검사하는가, 패키징 뒤를 보는가.
   const yaml = readFileSync(join(repoRoot, '.github/workflows/release.yml'), 'utf8')
 
+  const crlfYaml = yaml.replace(/\r?\n/g, '\r\n')
+  expect(stepBlocks(crlfYaml, '설치본 빌드'), 'CRLF 워크플로에서도 설치본 빌드 두 단계를 찾아야 한다').toHaveLength(2)
   const builds = stepBlocks(yaml, '설치본 빌드')
   expect(builds, '설치본 빌드 단계가 둘(맥·윈도)이어야 한다').toHaveLength(2)
   for (const block of builds) {

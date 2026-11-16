@@ -344,7 +344,7 @@ export function Chat() {
   const openFirstFolder = async (dir: string, generation: number, projectSeq: number): Promise<void> => {
     const live = (): boolean => submission.current === generation && useProject.getState().newProjectSeq === projectSeq
     if (!submitted || !live()) return
-    if (!settings?.provider_choice && useConnect.getState()[provider].state === 'connected') {
+    if (provider !== 'free' && !settings?.provider_choice && useConnect.getState()[provider].state === 'connected') {
       await window.knuaf.setSettings({ helper_mode: provider === 'claude' ? 'claude-chat' : 'codex-chat', provider_choice: { provider, at: new Date().toISOString() } })
       if (!live()) return
       useConnect.getState().select(provider)
@@ -440,7 +440,7 @@ export function Chat() {
     setNewText('')
     setSubmitted(null)
     setQueued(null)
-    if (status?.connected && !settings?.provider_choice && !useConnect.getState().selected) {
+    if (provider !== 'free' && status?.connected && !settings?.provider_choice) {
       void window.knuaf.setSettings({ helper_mode: provider === 'claude' ? 'claude-chat' : 'codex-chat', provider_choice: { provider, at: new Date().toISOString() } })
         .then(() => { useConnect.getState().select(provider); return useProject.getState().loadSettings() })
     }

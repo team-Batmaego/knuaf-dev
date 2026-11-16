@@ -12,6 +12,7 @@ import { LanesHub, connectChanges } from '../src/main/lanes/hub'
 import type { JobRecord, ExecutionAccount, JobConnection, RelayRequest } from '../src/main/chat/jobs/types'
 import type { Provider } from '../src/shared/chat'
 import { planFromRow } from '../src/shared/lanes'
+import { FREE_MODELS } from '../src/main/free/provider'
 import {
   JOBS_INVOKE, LANES_INVOKE, LANES_PUSH, type LanesReply
 } from '../src/shared/lanes-ipc'
@@ -38,7 +39,7 @@ function fixture() {
   writeFileSync(join(root, 'project.json'), '{"original":true}')
   const userData = mkdtempSync(join(tmpdir(), 'kd-ipc-ud-'))
   const store = new JobStore(join(userData, 'jobs'))
-  const accountIds: Record<Provider, string> = { claude: 'claude-account-id', codex: 'codex-account-id' }
+  const accountIds: Record<Provider, string> = { claude: 'claude-account-id', codex: 'codex-account-id', free: 'knuaf-free' }
   /**
    * [C1-07] 캐시된 A 와 실제 B 를 갈라 놓기 위한 손잡이.
    * `cached` 는 15초 캐시가 돌려주는 값, `observed` 는 캐시를 건너뛴 관측이다.
@@ -46,7 +47,8 @@ function fixture() {
   const state = {
     observed: {
       claude: { connected: true, usable: true },
-      codex: { connected: true, usable: true }
+      codex: { connected: true, usable: true },
+      free: { connected: true, usable: true }
     } as Record<Provider, { connected: boolean; usable: boolean }>,
     /** 지금 관측되는 계정 id — 처음에는 로그인한 계정과 같다. */
     observedId: { ...accountIds } as Record<Provider, string>
@@ -54,7 +56,9 @@ function fixture() {
   const snapshotOf = (company: Provider, accountId: string, usable: boolean): ExecutionAccount => ({
     accountId,
     connected: true,
-    account: company === 'claude'
+    account: company === 'free'
+      ? { company: 'free', models: FREE_MODELS }
+      : company === 'claude'
       ? {
         company: 'claude', apiKeySource: usable ? 'none' : 'ANTHROPIC_API_KEY', subscriptionType: 'max',
         models: ['opus', 'sonnet'].map(model => ({ model, name: model, efforts: ['low', 'high'] }))
@@ -63,7 +67,7 @@ function fixture() {
         company: 'codex', accountType: usable ? 'chatgpt' : 'apikey',
         models: ['gpt-6.1-astra', 'gpt-6.1-sol', 'gpt-6.1-terra'].map(model => ({ model, name: model, efforts: ['low', 'high'] }))
       },
-    consented: false,
+    consented: company === 'free',
     usage: 'allowed'
   })
   const account = async (company: Provider): Promise<ExecutionAccount> =>
@@ -239,7 +243,8 @@ test('setConsent stores per account and reports a masked label', async () => {
   expect(row.accountLabel).toBe('claude…')
   expect(row.accountLabel).not.toContain('account-id')
   expect(row.subscribed).toBe(true)
-  const rows = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ accountId: string; state: string }[]>)
+  const rows = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ company: Provider; accountId: string; state: string }[]>)
+  expect(rows.map(entry => entry.company)).toEqual(['claude', 'codex'])
   expect(rows.find(entry => entry.accountId === 'claude-account-id')?.state).toBe('agreed')
   // 거두면 저장은 남고 상태만 바뀐다(Q4).
   const withdrawn = resultOf(await f.ipc.call(
@@ -309,7 +314,8 @@ test('the bundle never carries the delivery text; only the explicit request retu
 test('read-only requests never push a bundle', async () => {
   const f = fixture()
   f.sent.length = 0
-  resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<unknown[]>)
+  const consents = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ company: Provider }[]>)
+  expect(consents.map(entry => entry.company)).toEqual(['claude', 'codex'])
   resultOf(await f.ipc.call(LANES_INVOKE.reviewModels, f.root) as LanesReply<unknown[]>)
   resultOf(await f.ipc.call(LANES_INVOKE.archives, f.root) as LanesReply<unknown[]>)
   resultOf(await f.ipc.call(JOBS_INVOKE.deliveryText, f.root, 'job-a') as LanesReply<unknown>)

@@ -447,7 +447,10 @@ test('설정 › 작업 분담', async () => {
     // 확대 → 내용 칸 실폭이 480 미만. 표가 줄마다 두 줄 카드로 바뀌고 머리는 숨는다.
     // CSS `zoom` 은 컨테이너 질의 폭에 반영되지 않는다 — Electron 줌으로 CSS 픽셀 자체를 줄인다.
     await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1.7) })
-    await page.waitForTimeout(500)
+    // 확대는 렌더러에 비동기로 반영될 수 있다. 실제 CSS 뷰포트가 줄어든 뒤에 배치를 잰다.
+    await expect.poll(() => page.evaluate(() => window.innerWidth), {
+      message: '확대 170%가 렌더러 뷰포트에 반영되지 않았다', timeout: 30_000
+    }).toBeLessThan(600)
     const narrow = await page.evaluate(() => {
       const dialog = document.querySelector('dialog[open]') as HTMLElement
       const nav = document.querySelector('dialog[open] nav.settings-nav') as HTMLElement

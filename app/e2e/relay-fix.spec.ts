@@ -354,16 +354,18 @@ test('[중요 3] 권한 요청 거절은 스키마 모양으로 보낸다', asyn
 })
 
 /**
- * [A 관문 ㉠] Claude 담당은 첫 턴에서 사용량을 판정한다고 선언한다.
- * 필드 이름은 a-gate 갈래 `jobs/types.ts` 와 같다(`gateInTurn`).
+ * [A 관문 ㉠] Claude·무료 담당은 첫 턴에서 사용량을 판정한다고 선언한다.
+ * 일반 Codex는 턴 밖에서 판정한다. 없거나 false인 선언은 unknown을 차단한다.
  */
-test('[㉠] Claude 담당 연결이 gateInTurn 을 선언한다', () => {
+test('[㉠] Claude·무료만 gateInTurn 을 켜고 일반 Codex는 끈다', () => {
   const { root, out, skill } = fixtureRoot('gate')
   const connection = new ClaudeRelayConnection(agentOptions('/fake/claude', root, skill), relayRequest(root, out, skill))
   expect(connection.gateInTurn).toBe(true)
-  // Codex 는 턴 밖에서 A 를 읽을 수 있으므로 선언하지 않는다(unknown 이면 그대로 차단).
+  // 일반 Codex는 턴 밖에서 A를 읽는다. false는 unknown을 통과시키지 않는다.
   const codex = new CodexRelayConnection(agentOptions('/fake/codex', root, skill), relayRequest(root, out, skill, { company: 'codex' }))
-  expect(codex.gateInTurn).toBeUndefined()
+  expect(codex.gateInTurn).toBe(false)
+  const free = new CodexRelayConnection(agentOptions('/fake/codex', root, skill), relayRequest(root, out, skill, { company: 'free' }))
+  expect(free.gateInTurn).toBe(true)
   expect(new JobFailure('limit', 'x').status).toBe('limit')
 })
 
