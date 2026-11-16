@@ -1226,3 +1226,84 @@ test('기본 접힌 둘째 카드의 내용 변경도 펼친다', async () => {
     await act(async () => root.unmount())
   })
 })
+
+/** 규칙집 B2(`gg_target_gap.row`)가 쓰는 행 그대로 — 계약 8판 목표와 계획 차이 카드. */
+const targetGapRaw = (cardKey = 'g'.repeat(64)) => ({
+  title: '목표까지 12,000,000원이 모자라요',
+  choices: [{ value: 'fix', label: '고치기' }, { value: 'proceed', label: '이대로 진행' }, { value: 'later', label: '나중에' }],
+  talk_message: '목표 순이익과 계획의 차이를 조정하고 싶어요',
+  proceed_message: '지금 계획대로 목표 차이를 감수하고 진행할게요',
+  items: [{
+    what: '목표는 50,000,000원인데, 지금 계획은 38,000,000원이에요. 두 값을 빼면 12,000,000원이 모자라요.',
+    where: '재무 계획', current: '2028년 목표 50,000,000원 · 지금 계획 38,000,000원 · 차이 12,000,000원',
+    basis: '목표에서 지금 계획을 뺀 금액이에요.', how: '목표와 계획을 도우미와 함께 살펴봐요.',
+    where_detail: '', changed: ''
+  }],
+  kind: 'finance_hole_target_gap', blocking: false, choice_policy: 'none', dismissible: false,
+  fix_mode: 'talk', record_refs: [], project_id: 'project', notice_identity: cardKey, card_key: cardKey
+})
+
+test('목표와 계획 차이 카드(8판)를 재무 카드로 읽는다 — 세 단추·X 없음·숫자는 원문 그대로', () => {
+  const row = one({ schema: 'knuaf.notices/1', project_id: 'project', notices: [targetGapRaw()] })
+  expect(row.choicePolicy).toBe('none')
+  expect(row.cardKey).toBe('g'.repeat(64))
+  expect(row.blocking).toBe(false)
+  expect(row.dismissible).toBe(false)
+  expect(row.choices.map((c) => c.value)).toEqual(['fix', 'proceed', 'later'])
+  expect(row.talkMessage).toBe('목표 순이익과 계획의 차이를 조정하고 싶어요')
+  expect(row.proceedMessage).toBe('지금 계획대로 목표 차이를 감수하고 진행할게요')
+  expect(row.title).toBe('목표까지 12,000,000원이 모자라요')
+  expect(row.items[0].current).toBe('2028년 목표 50,000,000원 · 지금 계획 38,000,000원 · 차이 12,000,000원')
+  expect(row.items[0].whereDetail).toBeUndefined()
+  // 목록 밖 kind 는 카드가 아니다 — 카드 단추를 그리지 않고 기존 알림으로 읽는다.
+  const other = one({ schema: 'knuaf.notices/1', project_id: 'project', notices: [{ ...targetGapRaw(), kind: 'finance_hole_unknown' }] })
+  expect(other.choicePolicy).toBeUndefined()
+  expect(other.choices).toEqual([])
+})
+
+test('목표 차이 카드는 choose 없이 입력칸만 채우고, 막는 카드 뒤에 서며, 나중에로 접힌다', async () => {
+  await withHostDom(async (document, act) => {
+    const gap = one({ schema: 'knuaf.notices/1', project_id: 'project', notices: [targetGapRaw()] })
+    const blocker = one({ schema: 'knuaf.notices/1', project_id: 'project', notices: [{
+      project_id: 'project', notice_identity: 'b'.repeat(64), card_key: 'b'.repeat(64), kind: 'finance_hole_figure',
+      choice_policy: 'none', blocking: true, dismissible: false, title: '막는 카드',
+      choices: [{ value: 'fix', label: '고치기' }, { value: 'later', label: '나중에' }], talk_message: '막음 고쳐 줘.', items: []
+    }] })
+    const written: string[] = []
+    let chooses = 0
+    const api = stackApi({
+      read: async () => ({ result: { notices: [gap], dismissed: [] } }),
+      choose: async () => { chooses++; return { result: { ok: true, status: 'chosen' } } }
+    })
+    const props = { root: ROOT, api, onWriteTalk: (text: string) => written.push(text) }
+    const { host, root, render } = await paintStack(document, act, props)
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    expect(byClass(host, 'notice-x')).toHaveLength(0)
+    expect(host.textContent).not.toContain('제출 전에 꼭 고쳐야 해요')
+    const labels = () => visibleChoices(host).map((b) => b.textContent)
+    expect(labels()).toEqual(['고치기', '이대로 진행', '나중에'])
+    await act(async () => pressChoice(visibleChoices(host)[0]))
+    await act(async () => pressChoice(visibleChoices(host)[1]))
+    expect(written).toEqual(['목표 순이익과 계획의 차이를 조정하고 싶어요', '지금 계획대로 목표 차이를 감수하고 진행할게요'])
+    expect(chooses).toBe(0)
+    await act(async () => pressChoice(visibleChoices(host)[2]))
+    expect(visibleChoices(host)).toHaveLength(0)
+    expect(byClass(host, 'notice-card')).toHaveLength(1)
+    // 같은 card_key 로 다시 읽어도 접힌 채, 금액이 바뀌어 card_key 가 바뀌면 다시 펼친다.
+    await render({ ...props, reloadKey: 1 })
+    expect(visibleChoices(host)).toHaveLength(0)
+    const changed = one({ schema: 'knuaf.notices/1', project_id: 'project', notices: [targetGapRaw('h'.repeat(64))] })
+    api.read = async () => ({ result: { notices: [changed], dismissed: [] } })
+    await render({ ...props, reloadKey: 2 })
+    expect(visibleChoices(host)).toHaveLength(3)
+    expect(chooses).toBe(0)
+    await act(async () => root.unmount())
+    // 막는 카드와 함께면 막는 카드가 먼저, 목표 차이 카드는 둘째(기본 접힘, 막는 문구 없음).
+    const mixed = await paintStack(document, act, { root: ROOT, api: stackApi({ read: async () => ({ result: { notices: [gap, blocker], dismissed: [] } }) }) })
+    expect(byClass(mixed.host, 'notice-title').map((n) => n.textContent)).toEqual(['막는 카드', '목표까지 12,000,000원이 모자라요'])
+    expect(visibleChoices(byClass(mixed.host, 'notice-card')[0])).toHaveLength(2)
+    expect(visibleChoices(byClass(mixed.host, 'notice-card')[1])).toHaveLength(0)
+    expect(byClass(mixed.host, 'notice-card')[1].textContent).not.toContain('제출 전에 꼭 고쳐야 해요')
+    await act(async () => mixed.root.unmount())
+  })
+})

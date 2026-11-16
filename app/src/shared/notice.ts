@@ -30,6 +30,12 @@ export type NoticeChoiceValue = 'direct_tell' | 'footnote'
 /** 계약이 허용하는 값은 둘뿐이다. sidecar 도 같은 목록으로 막는다. */
 export const CHOICE_VALUES: readonly NoticeChoiceValue[] = ['direct_tell', 'footnote']
 
+/**
+ * 재무 카드(`choice_policy:"none"`)로 읽는 kind — 계약 NOTICE-CARD 7판(figure·deficit)·8판(target_gap).
+ * 목록 밖 kind 는 기존 알림처럼 읽는다(fix·proceed·later 단추는 그리지 않음).
+ */
+const CARD_KINDS: ReadonlySet<string> = new Set(['finance_hole_figure', 'finance_hole_deficit', 'finance_hole_target_gap'])
+
 export type NoticeActionValue = NoticeChoiceValue | 'fix' | 'proceed' | 'later'
 export interface NoticeChoice { value: NoticeActionValue; label: string }
 export interface NoticeItem {
@@ -191,7 +197,7 @@ function readNotice(raw: unknown, documentProjectId: string): NoticeRow | null {
   // 열쇠가 없으면 "닫으면 다시 안 뜸"을 지킬 수 없다 — 그런 알림은 띄우지 않는다.
   if (!title || !identity || !projectId) return null
   const { items, omitted } = readItems(notice.items)
-  const card = notice.choice_policy === 'none' && (notice.kind === 'finance_hole_figure' || notice.kind === 'finance_hole_deficit')
+  const card = notice.choice_policy === 'none' && CARD_KINDS.has(String(notice.kind))
   return {
     key: noticeKey(projectId, identity),
     title,
