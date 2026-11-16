@@ -359,6 +359,12 @@ node app/scripts/check-app-channel.mjs --channel updates/channel.json
 pnpm dist:mac           # 또는 pnpm dist:win
 ```
 
+macOS dmg는 `electron-builder.yml`의 `dmg.filesystem: APFS`로 만든다. HFS+는 동봉 스킬의
+NFC 한글 파일명을 NFD로 바꿔 서명 봉인을 깨뜨린다. 스킬 파일명·설치 매니페스트·zip 경로는
+바꾸지 않는다. APFS 이미지는 macOS 10.13 이상에서 열리며, Electron 37의 지원 범위 안이다.
+`pnpm test:scripts`의 macOS 전용 회귀 시험은 작은 서명 앱을 같은 설정의 dmg로 만들고,
+마운트·설치 뒤 `codesign --verify --deep --strict`와 파일명·내용 보존을 확인한다.
+
 `dist:*`는 필요한 리소스(번들 python, 휠하우스, 아이콘, 학생용 안내 PDF, 스테이징된 스킬)를
 먼저 준비합니다. 개별로 돌리려면:
 
