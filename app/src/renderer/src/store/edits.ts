@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { rpc, RpcFailure } from '../rpc'
 import { recheckPlan, splitRecheck, withRecheck, type RecheckPlan } from '../../../shared/recheck'
 import type { EditNotice, EditResult, EditRow } from '../../../shared/types'
+import { usePrep } from './prep'
 
 /**
  * 뷰어 직접 수정 — 목록·알림·저장 호출 (설계 §3-3, §4-5-3, §5).
@@ -230,6 +231,8 @@ export const useEdits = create<EditState>((set, get) => ({
     // 기억한 값이 실제보다 크면 sidecar 가 그대로 거절하므로 stale 보호는 약해지지 않는다.
     // 기억은 **같은 폴더**일 때만 쓴다 — 폴더를 바꾸면 개정은 논문마다 따로 센다.
     const expected = committed.root === root ? Math.max(params.expected_revision, committed.revision) : params.expected_revision
+    // RPC 쓰기뿐 아니라 재확인 목록 반영까지 한 저장으로 기다린다.
+    usePrep.getState().begin(root, 'write')
     try {
       const result = params.kind === 'one'
         ? await rpc.editSection(root, {
@@ -267,12 +270,14 @@ export const useEdits = create<EditState>((set, get) => ({
         }
       }
       if (get().available === null) set({ available: true })
-      void get().load(root)
+      await get().load(root)
       return { ok: true, result }
     } catch (e) {
       const missing = e instanceof RpcFailure && e.code === 'not_found'
       if (missing) set({ available: false })
       return { ok: false, ...saveFailureText(e) }
+    } finally {
+      usePrep.getState().end(root, 'write')
     }
   },
 

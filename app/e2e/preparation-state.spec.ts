@@ -9,6 +9,8 @@ import type { useProject as ProjectStore } from '../src/renderer/src/store/proje
 import type { usePrep as PrepStore } from '../src/renderer/src/store/prep'
 import type { useChat as ChatStore } from '../src/renderer/src/store/chat'
 import type { rpc as RendererRpc } from '../src/renderer/src/rpc'
+import type { useEdits as EditsStore } from '../src/renderer/src/store/edits'
+import { RECHECK_MARK } from '../src/shared/recheck'
 
 const flush = async () => { for (let n = 0; n < 30; n++) await Promise.resolve() }
 const report = (ready: boolean): DependencyReport => ({
@@ -65,7 +67,8 @@ function harness() {
   const prep = load(join(__dirname, '../src/renderer/src/store/prep.ts')).usePrep as typeof PrepStore
   const chat = load(join(__dirname, '../src/renderer/src/store/chat.ts')).useChat as typeof ChatStore
   const rpc = load(join(__dirname, '../src/renderer/src/rpc.ts')).rpc as typeof RendererRpc
-  return { project, prep, chat, rpc, api, calls, sent,
+  const edits = load(join(__dirname, '../src/renderer/src/store/edits.ts')).useEdits as typeof EditsStore
+  return { project, prep, chat, rpc, edits, api, calls, sent,
     setDoctor: (fn: typeof doctor) => { doctor = fn }, setEnsure: (fn: typeof ensure) => { ensure = fn },
     setOpen: (fn: typeof open) => { open = fn },
     async open(root = '/A') {
@@ -75,6 +78,27 @@ function harness() {
     }
   }
 }
+
+test('저장 중 전송 — 쓰기 완료 뒤의 재확인 메모를 보내고 대기 중 새 초안을 지킨다', async () => {
+  const h = harness()
+  await h.open()
+  h.prep.getState().begin('/A', 'write')
+  const sending = h.chat.getState().send()
+  await flush()
+  expect(h.sent).toEqual([])
+  h.chat.getState().setDraft('다음에 보낼 새 글')
+  h.edits.setState({ root: '/A', rows: [{
+    edit_id: 'saved-edit', at: null, state: 'pending', revision_before: 1, revision_after: 2,
+    edits: [{ section_id: 'sec-01', before_block: '600평', after_block: '700평' }], section_ids: ['sec-01'],
+    needs_check: true, new_issues: [], remaining_issues: [], answered: false
+  }] })
+  h.prep.getState().end('/A', 'write')
+  expect(await sending).toBe(true)
+  expect(h.sent).toEqual([expect.stringContaining(RECHECK_MARK)])
+  expect(h.sent[0]).toContain('보존할 첫 문장')
+  expect(h.sent[0]).toContain('700평')
+  expect(h.chat.getState().draft).toBe('다음에 보낼 새 글')
+})
 
 test('checking is registered before peek; checking/installing/verifying never release a send', async () => {
   const h = harness(), first = Promise.withResolvers<unknown>(), verification = Promise.withResolvers<unknown>(), installed = Promise.withResolvers<unknown>()
