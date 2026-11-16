@@ -13,7 +13,7 @@
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { addSectionBody, launch, openProject, splitReady, synthProject } from './helpers'
+import { addSectionBody, launch, openProject, splitReady, synthProject, withoutProgressFile } from './helpers'
 import { fakeCodexEnv, scratch, seedChat } from './fixtures/fake-codex'
 
 const msg = { id: 'stale-u1', role: 'user', text: '지금 폴더의 질문', at: new Date().toISOString(), delivery: 'sent' }
@@ -216,6 +216,8 @@ test('A→B→A: 첫 A 방문의 늦은 절 목록이 지금 A 방문의 최신 
  */
 test('A→B: A 의 늦은 준비 확인 응답이 B 의 준비 상태를 바꾸지 않는다 (검토 OPEN-STALE-R1-02)', async () => {
   const a = synthProject(), b = synthProject()
+  withoutProgressFile(a)
+  withoutProgressFile(b)
   const { electronApp, page } = await launch({ env: fakeCodexEnv(join(scratch(), 'bin'), { FAKE_CODEX_MODE: 'logged-in' }) })
   try {
     // 준비 확인은 시험이 답한다: 첫 A 확인만 "준비 안 됨"을 보류해 두고, 나머지는 "준비됨". 설치는 부르지 않는다.

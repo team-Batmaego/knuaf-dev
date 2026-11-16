@@ -11,7 +11,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { join } from 'node:path'
-import { addSectionBody, launch, markSectionReady, openProject, rewriteSection, setWindowWidth, synthProject } from './helpers'
+import { addSectionBody, launch, markSectionReady, openProject, rewriteSection, setWindowWidth, synthProject, withoutProgressFile } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 
 test('본문이 없으면 한 칸, 첫 장이 저장되면 두 칸이 된다', async () => {
@@ -123,6 +123,7 @@ test('제출 전 점검 한 장이 논문 칸을 덮고, 확인 행이 네 개�
 
 test('제목줄 진행은 닫혀 있을 때도 열려 있을 때도 한 곳뿐이다 (T1)', async () => {
   const root = synthProject()
+  withoutProgressFile(root)
   const { electronApp, page } = await launch()
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
@@ -146,6 +147,7 @@ test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하
   const dir = scratch()
   const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
   const root = synthProject()
+  withoutProgressFile(root)
   const { electronApp, page } = await launch({ env })
   await openProject(page, root)
   await expect(page.locator('.paperpane')).toBeVisible({ timeout: 20_000 })
@@ -156,6 +158,7 @@ test('종이 머리 권하는 단추 — 3단계에서 "검토본 만들기" 하
 
   // 장을 다 쓴 상태로 올린다(기록 +1) → 2초 감시가 다시 읽고 내부 3단계가 된다.
   markSectionReady(root)
+  withoutProgressFile(root)
   await expect(page.locator('.paper-head button.primary')).toHaveText('검토본 만들기', { timeout: 20_000 })
   // 제목줄은 대화 진행 표시라 그대로 "시작 전"이다 — 내부 단계는 종이 머리 단추로만 보인다.
   await expect(page.locator('.titlebar .tbtn.stg')).toContainText('시작 전')

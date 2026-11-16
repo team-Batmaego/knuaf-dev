@@ -455,13 +455,6 @@ export function checkInstructionSources(
   return { ok: true }
 }
 
-/** 기대 행 집합(E) — `config/read` 의 유효 `mcp_servers` 키 + 앱이 붙인 kordoc. 플러그인은 안 들어간다. */
-function expectedRows(plan: AppPlan): string[] {
-  const names = Object.keys(plan.config.mcp_servers)
-  if (plan.kordocAttached && !names.includes(MCP_SERVER_NAME)) names.push(MCP_SERVER_NAME)
-  return names
-}
-
 /** 상태 목록 한 장면 — 이름 → 그 행(`disabled` 여부를 여기서 가른다). */
 interface StatusPage {
   rows: Map<string, Record<string, unknown>>
@@ -518,7 +511,10 @@ async function checkAppThreadResult(req: ToolLockRequest, plan: AppPlan): Promis
   const check = req.check
   if (!check || typeof check.threadId !== 'string' || !check.threadId) return { ok: false, reason: 'no-thread', detail: 'threadId 없이 대조할 수 없어요', remaining: [] }
 
-  const expected = expectedRows(plan)
+  // 0.164/0.169 omit app-owned kordoc from thread-scoped status after the thread
+  // MCP table override. Its startup/read-only safety is checked separately (§3.3).
+  // Student names (including a kordoc collision) still require a disabled row.
+  const expected = Object.keys(plan.config.mcp_servers)
   const polls = Math.max(1, req.retry?.polls ?? RESULT_POLLS)
   const gap = RESULT_POLL_MS
   const sleep = req.retry?.sleep ?? defaultSleep
@@ -527,7 +523,7 @@ async function checkAppThreadResult(req: ToolLockRequest, plan: AppPlan): Promis
     const got = await readStatusPage(req, check.threadId, expected, plan.kordocAttached)
     if (!got.ok) return { ok: false, reason: got.reason, detail: 'MCP 상태 목록을 읽지 못했어요', remaining: [] }
     // 기대 밖 살아 있는 행은 기다릴 것 없이 닫는다(설계 ⓒ). 기대 안 살아 있는 행도 같다(ⓕ).
-    if (got.page.live.length) return { ok: false, reason: 'result-check', detail: `꺼지지 않은 MCP 서버: ${got.page.live.join(', ')}`, remaining: [] }
+    if (got.page.live.length) return { ok: false, reason: 'result-check', detail: `꺼지지 않은 MCP 서버: ${got.page.live.join(', ')}`, remaining: [...got.page.live] }
     if (got.page.liveExpected.length) return { ok: false, reason: 'result-check', detail: `꺼지지 않은 MCP 서버: ${got.page.liveExpected.join(', ')}`, remaining: [...got.page.liveExpected] }
     return { ok: true, page: got.page }
   }
