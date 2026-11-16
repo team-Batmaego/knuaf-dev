@@ -15,11 +15,10 @@ import { generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { AppUpdates, type AppUpdateStatus } from '../src/main/update/appService'
+import { AppUpdates, RECHECK_INTERVAL_MS, startRecheckClock, type AppUpdateStatus } from '../src/main/update/appService'
 import { releasePage } from '../src/main/update/appManifest'
 import { ASSET_PREFIX, CHANNEL_URL, sha256 } from '../src/main/update/manifest'
 import { updateConfig } from '../src/main/update/keys'
-import { RECHECK_INTERVAL_MS, startRecheck } from '../src/main/update/recheck'
 
 /** 채널 문서 하나 — 서명된 설치 파일 항목까지 갖춘 최소 모양. */
 interface Fixture { bytes: Buffer; channel: { schema: number; app: Record<string, unknown> } }
@@ -68,9 +67,9 @@ function harness(options: { recheckMs?: number; fixture?: Fixture } = {}) {
       return new Response(f.bytes)
     },
     startInstaller: async () => {}, quit: () => {}, openExternal: async () => {},
-    emit: status => { emitted.push(status.phase) },
-    recheckMs: options.recheckMs ?? 0
+    emit: status => { emitted.push(status.phase) }
   })
+  if (options.recheckMs) updates.startRecheck(options.recheckMs)
   return {
     root, updates, requests, emitted, fixture: f,
     serve(next: unknown): void { channel = next },
@@ -133,7 +132,7 @@ test('(3) 인터넷이 끊긴 주기 확인은 오류를 띄우지 않고 다음
 
 test('(4) 타이머는 앱 종료를 붙잡지 않고 stopRecheck 뒤에는 박자가 멈춘다', async () => {
   let ticks = 0
-  const timer = startRecheck(10, async () => { ++ticks })
+  const timer = startRecheckClock(10, async () => { ++ticks })
   expect(timer.held()).toBe(false) // unref — 살아 있는 타이머가 프로세스를 못 붙잡는다
   await expect.poll(() => ticks, { timeout: 5_000 }).toBeGreaterThan(0)
   timer.stop(); timer.stop() // 여러 번 불러도 안전

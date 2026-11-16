@@ -7,13 +7,52 @@ import { parseApp, releasePage, verifyApp, type VerifiedApp } from './appManifes
 import { boundedFetch, readChannelDocument, type Transport } from './network'
 import type { UpdateConfig } from './keys'
 import type { AppHandoff } from './handoff'
-import { RECHECK_INTERVAL_MS, startRecheck, type RecheckTimer } from './recheck'
 export interface AppUpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'downloading' | 'preparing' | 'launching' | 'interrupted' | 'error' | 'unavailable' | 'blocked'
   current: string; latest: string | null; page: string | null; reason?: 'store_owner'; message?: string; received?: number; total?: number
 }
 interface Pending { from: string; to: string; installer: string; at: string }
 const RELEASES_PAGE = 'https://github.com/team-Batmaego/knuaf-dev/releases'
+
+/**
+ * 몇 시간마다 다시 확인할지. 채널 문서는 수 KB 라 하루 ~48회 요청은 부담이 없다.
+ * (v0.6.8 A1-3 — 켜 둔 학생에게 새 판을 알리는 주기 확인)
+ */
+export const RECHECK_INTERVAL_MS = 30 * 60 * 1000
+
+export interface RecheckTimer {
+  /** 주기 확인을 멈춘다. 여러 번 불러도 안전하다. */
+  stop(): void
+  /** 이 타이머가 프로세스 종료를 붙잡고 있나 — 시험이 `unref` 를 확인할 때 쓴다. */
+  held(): boolean
+}
+
+/**
+ * `task` 를 `intervalMs` 마다 부른다. 첫 박자는 간격 뒤에 온다 — 켤 때 확인이 이미 한 번 돌기
+ * 때문이다. `task` 의 거절은 삼킨다: 주기 확인의 실패는 다음 박자에 다시 시도할 뿐이고,
+ * 학생 화면의 오류 표시는 `AppUpdates` 가 정한다.
+ *
+ * 별도 파일이 아니라 이 파일 안에 있는 이유: `app/e2e/app-update-security.spec.ts` 가
+ * `appService` 가 `require` 하는 모듈을 허용 목록으로 못 박아 두었다 — 새 의존을 만들면
+ * 보안 시험의 허용 목록을 넓혀야 하고, 그 목록은 넓히라고 있는 것이 아니다.
+ */
+export function startRecheckClock(intervalMs: number, task: () => Promise<unknown>): RecheckTimer {
+  let stopped = false
+  const timer = setInterval(() => {
+    if (!stopped) void task().catch(() => { /* 다음 박자에 다시 */ })
+  }, intervalMs)
+  // 돌고 있는 주기 확인 때문에 앱 종료가 늦어지면 안 된다(`figures/heartbeat.ts` 와 같은 이유).
+  timer.unref?.()
+  return {
+    stop() {
+      if (stopped) return
+      stopped = true
+      clearInterval(timer)
+    },
+    held: () => timer.hasRef()
+  }
+}
+
 const OWNER_FAILURES = new Set([
   'user_data_owner_mismatch', 'user_data_owner_administrators',
   'pinned_owner_mismatch', 'pinned_owner_administrators',
@@ -36,19 +75,25 @@ export class AppUpdates {
     userData: string; current: string; platform: NodeJS.Platform; arch: string; config: UpdateConfig; fetch: Transport
     handoff: Pick<AppHandoff, 'run'>; startInstaller: (request: InstallerLaunch) => Promise<void>; quit: () => void; openStore?: OpenStore
     openExternal: (url: string) => Promise<unknown>; emit?: (status: AppUpdateStatus) => void
-    /** 주기 확인 간격(ms). 기본 30분, 0 이하면 끈다(시험). */
-    recheckMs?: number
   }) {
     version(opts.current)
     this.root = join(opts.userData, 'app-update')
     this.statusValue = { phase: opts.config.keys.length ? 'idle' : 'unavailable', current: opts.current, latest: null, page: null, ...(!opts.config.keys.length ? { message: '업데이트를 확인할 수 없어요.' } : {}) }
     this.ready = this.recover()
-    // 주기 확인은 생성자에서 건다 — 켤 때 한 번 확인(`ipc.ts` 의 `void appUpdates.check()`)이
-    // 이미 돈 뒤부터 간격을 센다(첫 박자는 간격 뒤). `recheckMs: 0` 은 시험이 끌 때 쓴다.
-    const intervalMs = opts.recheckMs ?? RECHECK_INTERVAL_MS
-    if (intervalMs > 0) this.recheckTimer = startRecheck(intervalMs, () => this.recheck())
   }
   status(): AppUpdateStatus { return { ...this.statusValue } }
+  /**
+   * 주기 확인을 건다(기본 30분). 첫 박자는 간격 뒤다 — 켤 때 한 번 확인(`ipc.ts` 의
+   * `void appUpdates.check()`)이 이미 돈 뒤부터 센다. `intervalMs <= 0` 이면 아무것도 하지 않는다.
+   *
+   * 생성자가 아니라 이 메서드인 이유: `app/e2e/app-update-security.spec.ts` 는 이 클래스의
+   * transpile 결과를 `vm` 문맥에서 돌리는데 그 문맥에는 `setInterval` 이 없다 — 생성자가 타이머를
+   * 만들면 보안 시험이 통째로 깨진다. 만드는 쪽(`ipc.ts`)이 언제 켤지 정한다.
+   */
+  startRecheck(intervalMs: number = RECHECK_INTERVAL_MS): void {
+    if (intervalMs <= 0 || this.recheckTimer) return
+    this.recheckTimer = startRecheckClock(intervalMs, () => this.recheck())
+  }
   /** 주기 확인을 멈춘다 — 앱이 닫히거나 시험이 정리할 때. */
   stopRecheck(): void { this.recheckTimer?.stop(); this.recheckTimer = null }
   /**

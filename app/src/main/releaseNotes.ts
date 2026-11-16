@@ -1,4 +1,4 @@
-import { app, ipcMain } from 'electron'
+import type { IpcMain } from 'electron'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadSettings, saveSettings } from './settings'
@@ -39,7 +39,7 @@ export function initialSeen(settings: Settings, current: Versions, notes: Releas
   }
   return { app: previous('app', current.app) ?? '0.0.0', skill: previous('skill', current.skill) }
 }
-export function registerReleaseNotes(resolveSkill: () => string, appRoot: string): void {
+export function registerReleaseNotes(resolveSkill: () => string, appRoot: string, ipcMain: Pick<IpcMain, 'handle'>, getVersion: () => string, isPackaged: boolean): void {
   let startupVersions: Versions | null = null
   let startupDialog = false
   let memorySeen: Versions | null = null
@@ -50,8 +50,8 @@ export function registerReleaseNotes(resolveSkill: () => string, appRoot: string
   }
   const read = (): NewsState => {
     const skillDir = resolveSkill()
-    const current: Versions = { app: app.getVersion(), skill: skillVersion(skillDir) }
-    const appDir = !app.isPackaged && process.env.KNUAF_E2E_RELEASE_NOTES ? process.env.KNUAF_E2E_RELEASE_NOTES : app.isPackaged ? join(process.resourcesPath, 'release-notes') : join(appRoot, 'release-notes')
+    const current: Versions = { app: getVersion(), skill: skillVersion(skillDir) }
+    const appDir = !isPackaged && process.env.KNUAF_E2E_RELEASE_NOTES ? process.env.KNUAF_E2E_RELEASE_NOTES : isPackaged ? join(process.resourcesPath, 'release-notes') : join(appRoot, 'release-notes')
     const notes = [...notesAt(appDir, 'app'), ...notesAt(join(skillDir, 'notes'), 'skill')]
       .filter(n => { const v = current[n.kind]; return v !== null && compare(n.version, v) <= 0 })
       .sort((a, b) => b.date.localeCompare(a.date) || (a.kind === b.kind ? compare(b.version, a.version) : a.kind === 'app' ? -1 : 1))
@@ -71,11 +71,16 @@ export function registerReleaseNotes(resolveSkill: () => string, appRoot: string
     const mode = unread.length ? startupDialog && startupVersions.app === current.app && startupVersions.skill === current.skill ? 'dialog' : 'button' : 'none'
     return { ...current, notes, unread, mode }
   }
-  // Capture the pre-onboarding settings before the renderer can record first-run activity.
-  read()
-  ipcMain.handle('news:state', () => read())
+  // The renderer requests state at startup before onboarding saves its first-use settings.
+  ipcMain.handle('news:state', () => {
+    try { return read() }
+    catch (error) {
+      console.error('[knuaf] 새 소식 불러오기 실패', error)
+      return { app: '', skill: null, mode: 'none', notes: [], unread: [] } satisfies NewsState
+    }
+  })
   ipcMain.handle('news:seen', (_event, versions: Versions) => {
-    const current: Versions = { app: app.getVersion(), skill: skillVersion(resolveSkill()) }
+    const current: Versions = { app: getVersion(), skill: skillVersion(resolveSkill()) }
     const previous = memorySeen ?? loadSettings().release_notes_seen
     const safe = (v: unknown, now: string | null, old: string | null | undefined): string | null => typeof v === 'string' && valid(v) && now && compare(v, now) <= 0 && (!old || compare(v, old) >= 0) ? v : old ?? null
     remember({ app: safe(versions?.app, current.app, previous?.app) ?? current.app, skill: safe(versions?.skill, current.skill, previous?.skill) })

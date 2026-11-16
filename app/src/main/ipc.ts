@@ -116,7 +116,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const store = new SkillStore(app.getPath('userData'), skillSource(APP_ROOT, app.isPackaged, process.resourcesPath), app.getVersion(), config.keys)
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
   configureSkillSource(() => store.resolveSkillSource())
-  registerReleaseNotes(() => store.resolveSkillSource(), APP_ROOT)
+  registerReleaseNotes(() => store.resolveSkillSource(), APP_ROOT, ipcMain, () => app.getVersion(), app.isPackaged)
   const updates = new SkillUpdates(store, {
     config, fetch: netRequestTransport,
     restartSidecar: () => sidecar.restart(),
@@ -655,6 +655,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('app-update:install', () => updateResult(async () => { await appUpdates.install(); return appUpdates.status() }))
   ipcMain.handle('app-update:open-page', () => updateResult(async () => { await appUpdates.openPage(); return true }))
   ipcMain.handle('app-update:cancel', () => ({ result: appUpdates.cancel() }))
+  // 켜 둔 채 쓰는 학생에게 새 판을 알린다(A1-3) — 켤 때 확인은 아래 한 번, 이후는 30분마다 조용히.
+  appUpdates.startRecheck()
   void appUpdates.check()
   const chatFail = (e: unknown): { error: { code: string; message: string } } => ({ error: { code: e instanceof UpdateSuspendedError ? e.code : 'chat', message: e instanceof Error ? e.message : String(e) } })
   ipcMain.handle('chat:snapshot', (_e, root: string, provider: Provider) => { try { return { result: chat.snapshot(root, provider) } } catch (e) { return chatFail(e) } })
