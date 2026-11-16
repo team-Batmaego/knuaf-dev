@@ -42,6 +42,8 @@ async function sendText(page: Page, text: string): Promise<void> {
   await expect(composer).toBeVisible({ timeout: 30_000 })
   await expect(send).toHaveAttribute('aria-label', CHAT.send, { timeout: 30_000 })
   await composer.fill(text)
+  // enabled가 잠깐 보였어도 의존성 준비가 시작될 수 있다. 준비/쓰기 완료 상태를 먼저 기다린다.
+  await expect(page.locator('.chat-zone .zline.wait')).toHaveCount(0, { timeout: 30_000 })
   await expect(send).toBeEnabled({ timeout: 30_000 })
   await send.click()
 }
@@ -225,7 +227,7 @@ test('목록의 다시 확인 요청 — 그 건이 확인 전으로 돌아가 �
 })
 
 for (const input of ['click', 'Enter', 'prep+write'] as const) {
-  test(`준비 중 ${input} 전송 의사는 준비 완료 뒤 한 번 전달된다`, async () => {
+  test(`준비 중 ${input} 전송은 막히고 준비 완료 뒤 사용자 입력만 전달된다`, async () => {
     const dir = scratch()
     const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
     const root = synthProject()
@@ -280,16 +282,17 @@ for (const input of ['click', 'Enter', 'prep+write'] as const) {
         }
         await expect(page.locator('.paper-fb.edit-line')).toContainText('고쳤어요')
       }
-      await expect(button).toBeEnabled()
-      if (input !== 'Enter') await button.click()
-      else await composer.press('Enter')
-      // busy가 켜져야 의사가 실제 store에 도달한 것이다. 준비가 풀리기 전 전송은 금지.
       await expect(button).toBeDisabled()
+      await composer.press('Enter')
       expect(userTexts(root)).toEqual([])
       await electronApp.evaluate(() => {
         const host = globalThis as Host // 위 evaluate가 만든 실행별 probe.
         host.__recheckPrep.release()
       })
+      await expect(button).toBeEnabled()
+      expect(userTexts(root)).toEqual([])
+      if (input === 'Enter') await composer.press('Enter')
+      else await button.click()
       if (input === 'prep+write') {
         await expect.poll(() => userTexts(root)).toHaveLength(1)
         expect(userTexts(root)[0]).toContain('준비가 끝나면 이 문장을 보내 줘')
