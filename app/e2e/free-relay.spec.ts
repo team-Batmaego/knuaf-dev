@@ -252,32 +252,53 @@ test('[A1/A3] 출입증이 없으면 무료 회사는 "쓸 수 없음"으로 닫
   expect(account.usage).toBe('auth')
   expect(account.account.company).toBe('free')
 
-  // 오염된 상속 환경: 무료 표식·토큰이 남아 있으면 학생 본인 Codex 가 중계로 갈 수 있다.
-  const dirty = { HOME: '/x', KNUAF_FREE_TOKEN: FAKE_TOKEN, KNUAF_FREE_RELAY: '1', KNUAF_FREE_RELAY_TOKEN: FAKE_TOKEN }
+  // Mixed-case inherited variables must not survive, including on Windows where names are case-insensitive.
+  const dirty = {
+    HOME: '/x', KNUAF_FREE_TOKEN: FAKE_TOKEN, KNUAF_FREE_RELAY: '1', KNUAF_FREE_RELAY_TOKEN: FAKE_TOKEN,
+    knuaf_free_relay_token: FAKE_TOKEN, KnUaF_FrEe_ReLaY_ToKeN: FAKE_TOKEN,
+    knuaf_free_token: FAKE_TOKEN, Knuaf_Free_Relay: '1'
+  }
+  const freeEnvNames = ['KNUAF_FREE_TOKEN', 'KNUAF_FREE_RELAY', 'KNUAF_FREE_RELAY_TOKEN']
+  const expectNoFreeEnvNames = (env: NodeJS.ProcessEnv) => {
+    for (const key of Object.keys(env)) {
+      expect(freeEnvNames, key).not.toContain(key.toUpperCase())
+    }
+  }
   for (const company of ['codex', 'claude'] as const) {
     const env = freeRelease.providerEnv(company, dirty)
-    expect(Object.keys(env), company).not.toContain('KNUAF_FREE_TOKEN')
-    expect(Object.keys(env), company).not.toContain('KNUAF_FREE_RELAY')
-    expect(Object.keys(env), company).not.toContain('KNUAF_FREE_RELAY_TOKEN')
+    expectNoFreeEnvNames(env)
     expect(serverArgsFor(env).join(' '), company).not.toContain('knuaf-free')
   }
-  // 원본은 건드리지 않는다.
+  // Original source remains untouched.
   expect(dirty.KNUAF_FREE_TOKEN).toBe(FAKE_TOKEN)
   expect(dirty.KNUAF_FREE_RELAY_TOKEN).toBe(FAKE_TOKEN)
-  // 구독 경로의 환경 조립도 같은 세 키를 지운다 — 여기가 실사용 경로다.
-  process.env.KNUAF_FREE_TOKEN = FAKE_TOKEN
-  process.env.KNUAF_FREE_RELAY = '1'
-  process.env.KNUAF_FREE_RELAY_TOKEN = FAKE_TOKEN
-  try {
-    const env = subscriptionEnv()
-    expect(Object.keys(env)).not.toContain('KNUAF_FREE_TOKEN')
-    expect(Object.keys(env)).not.toContain('KNUAF_FREE_RELAY')
-    expect(Object.keys(env)).not.toContain('KNUAF_FREE_RELAY_TOKEN')
-  } finally {
-    delete process.env.KNUAF_FREE_TOKEN
-    delete process.env.KNUAF_FREE_RELAY
-    delete process.env.KNUAF_FREE_RELAY_TOKEN
+
+  // Subscription env assembly removes all casing variants too — this is the actual launch path.
+  const originalEntries = Object.fromEntries(Object.entries(process.env).filter(([key]) => freeEnvNames.includes(key.toUpperCase())))
+  for (const key of Object.keys(originalEntries)) delete process.env[key]
+  for (const key of freeEnvNames) {
+    const variants = Object.keys(dirty).filter((candidate) => candidate.toUpperCase() === key)
+    for (const variant of variants) process.env[variant] = dirty[variant as keyof typeof dirty]
   }
+  try {
+    expectNoFreeEnvNames(subscriptionEnv())
+  } finally {
+    for (const key of Object.keys(process.env)) {
+      if (freeEnvNames.includes(key.toUpperCase())) delete process.env[key]
+    }
+    for (const [key, value] of Object.entries(originalEntries)) process.env[key] = value
+  }
+})
+
+test('[A3] 무료 환경은 혼합 표기도 정리하고 정식 대문자 이름만 다시 넣는다', () => {
+  const env = freeRelease.providerEnv('free', {
+    HOME: '/x', knuaf_free_token: 'old-token', KnUaF_Free_Relay: 'old-marker',
+    KnUaF_FrEe_ReLaY_ToKeN: 'old-relay-token'
+  })
+  expect(env.KNUAF_FREE_TOKEN).toBe(FAKE_TOKEN)
+  expect(env.KNUAF_FREE_RELAY).toBe('1')
+  expect(Object.keys(env).filter((key) => ['KNUAF_FREE_TOKEN', 'KNUAF_FREE_RELAY', 'KNUAF_FREE_RELAY_TOKEN'].includes(key.toUpperCase())).sort())
+    .toEqual(['KNUAF_FREE_RELAY', 'KNUAF_FREE_TOKEN'])
 })
 
 test('[A2] 무료 모델은 DS·GLM 둘뿐이고, 기본값은 DS 다', () => {

@@ -3,6 +3,14 @@ import { FREE_DS_MODEL, FREE_GLM_MODEL } from '../../shared/lanes'
 import type { ExecutionAccount } from '../chat/jobs/types'
 import { freeRelayToken } from './token'
 
+export const FREE_RELAY_ENV_KEYS = ['KNUAF_FREE_TOKEN', 'KNUAF_FREE_RELAY', 'KNUAF_FREE_RELAY_TOKEN'] as const
+
+export function deleteFreeRelayEnvKeys(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) {
+    if (FREE_RELAY_ENV_KEYS.some((name) => key.toUpperCase() === name)) delete env[key]
+  }
+}
+
 export const FREE_RELAY_URL = 'https://free.168-107-60-66.sslip.io/v1'
 export const FREE_MODELS: ChatModelInfo[] = [
   { model: FREE_DS_MODEL, name: 'DeepSeek', description: '', efforts: [], defaultEffort: null, isDefault: true },
@@ -18,9 +26,7 @@ export function freeStatus(): ConnectionStatus {
 }
 export function providerEnv(provider: Provider, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...source }
-  delete env.KNUAF_FREE_TOKEN
-  delete env.KNUAF_FREE_RELAY
-  delete env.KNUAF_FREE_RELAY_TOKEN
+  deleteFreeRelayEnvKeys(env)
   if (provider !== 'free') return env
   const token = freeRelayToken()
   if (!token) throw new FreeRelayError('free-unavailable')

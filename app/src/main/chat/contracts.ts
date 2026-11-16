@@ -3,6 +3,8 @@ import type { ChatModelInfo, ConnectionStatus, ModelChoice, PermissionRequest } 
 import type { LaneEntry } from '../../shared/lanes'
 import type { GuardKey } from '../guard/store'
 import type { KordocMcpSpec } from './kordocMcp'
+import { deleteFreeRelayEnvKeys } from '../free/provider'
+
 export interface AgentEvents {
   message: (id: string, text: string) => void
   permission: (request: PermissionRequest) => void
@@ -125,9 +127,7 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   for (const key of Object.keys(env)) {
     if (/^(ANTHROPIC_|OPENAI_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN)/.test(key)) delete env[key]
   }
-  delete env.KNUAF_FREE_TOKEN
-  delete env.KNUAF_FREE_RELAY
-  delete env.KNUAF_FREE_RELAY_TOKEN
+  deleteFreeRelayEnvKeys(env)
   delete env.CLAUDECODE
   // No CLAUDE.md memory files at all — the project's skill contract (SKILL.md) is
   // authoritative, and a user's ~/.claude/CLAUDE.md @import would otherwise surface an
