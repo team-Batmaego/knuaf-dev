@@ -171,7 +171,8 @@
       "update",
       "update-poll",
       "kordoc-mcp-codex",
-      "kordoc-mcp-wiring"
+      "kordoc-mcp-wiring",
+      "kordoc-runtime"
     ]
   ],
   "macos": [
@@ -257,7 +258,7 @@
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
       "kordoc-mcp-registry",
-      "crash-sanitise"
+      "crash-consent"
     ],
     [
       "agent-busy",
@@ -340,7 +341,8 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "crash-consent"
+      "kordoc-runtime",
+      "crash-sanitise"
     ]
   ]
 }

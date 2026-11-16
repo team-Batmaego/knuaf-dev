@@ -14,6 +14,9 @@ export const STAMP = '.knuaf-runtime.json'
 /** 도장 폴더 이름의 꼬리(설치 시각 ms) — 가장 최근 설치를 고르는 데 쓴다. */
 export const INSTALL_DIR_RE = /^cpython-.*-(\d+)$/
 
+/** kordoc 설치 폴더 — `k-<sha256 앞 12자>-<ms>`(설계 r2 §4.1). 꼬리 규칙은 파이썬과 같다. */
+export const KORDOC_INSTALL_DIR_RE = /^k-[0-9a-f]{12}-(\d+)$/
+
 export interface Stamp { version: string; release: string; target: string; sha256: string }
 
 /**
@@ -48,12 +51,12 @@ export function stampState(dir: string): StampState {
 }
 
 /** 도장·marker가 현재 명세와 맞는 설치 중 가장 최근 것. smoke 확인은 하지 않는다(선택은 동기). */
-export function findInstallIn(root: string, spec: { version: string; release: string; targets: Record<string, { sha256: string }> }, target: string, marker: string): string | null {
+export function findInstallIn(root: string, spec: { version: string; release: string; targets: Record<string, { sha256: string }> }, target: string, marker: string, dirRe: RegExp = INSTALL_DIR_RE): string | null {
   let names: string[]
   try { names = readdirSync(root) } catch { return null }
   let best: { dir: string; ms: number } | null = null
   for (const name of names) {
-    const m = INSTALL_DIR_RE.exec(name)
+    const m = dirRe.exec(name)
     if (!m) continue
     const dir = join(root, name)
     const state = stampState(dir)
