@@ -24,6 +24,7 @@ export const UPDATE = {
   available: (version: string) => `새 규칙집 ${version}이 있어요.`,
   repair: '규칙집을 다시 받을 수 있어요.',
   ready: '규칙집을 사용하고 있어요.',
+  latest: '최신이에요. 지금 규칙집을 사용하고 있어요.',
   needsApp: '이 규칙집은 앱 새 판이 필요해요.',
   needsAppWait: '지금 규칙집은 그대로 쓸 수 있어요. 앱 새 판이 나오면 위쪽에 알려 드릴게요.',
   downloading: '규칙집을 받고 있어요.',
