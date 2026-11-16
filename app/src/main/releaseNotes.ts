@@ -42,6 +42,12 @@ export function initialSeen(settings: Settings, current: Versions, notes: Releas
 export function registerReleaseNotes(resolveSkill: () => string, appRoot: string): void {
   let startupVersions: Versions | null = null
   let startupDialog = false
+  let memorySeen: Versions | null = null
+  const remember = (versions: Versions): void => {
+    memorySeen = versions
+    try { saveSettings({ release_notes_seen: versions }) }
+    catch (error) { console.error('[knuaf] 새 소식 확인 기록 저장 실패', error) }
+  }
   const read = (): NewsState => {
     const skillDir = resolveSkill()
     const current: Versions = { app: app.getVersion(), skill: skillVersion(skillDir) }
@@ -50,8 +56,11 @@ export function registerReleaseNotes(resolveSkill: () => string, appRoot: string
       .filter(n => { const v = current[n.kind]; return v !== null && compare(n.version, v) <= 0 })
       .sort((a, b) => b.date.localeCompare(a.date) || (a.kind === b.kind ? compare(b.version, a.version) : a.kind === 'app' ? -1 : 1))
     const settings = loadSettings()
-    const seen = initialSeen(settings, current, notes)
-    if (!settings.release_notes_seen) saveSettings({ release_notes_seen: seen })
+    const seen = memorySeen ?? initialSeen(settings, current, notes)
+    if (!memorySeen) {
+      if (settings.release_notes_seen) memorySeen = settings.release_notes_seen
+      else remember(seen)
+    }
     const unread = notes.filter(n => { const v = seen![n.kind]; return !!v && valid(v) && compare(n.version, v) > 0 })
     const major = unread.some(n => {
       const prior = seen![n.kind]!
@@ -67,8 +76,8 @@ export function registerReleaseNotes(resolveSkill: () => string, appRoot: string
   ipcMain.handle('news:state', () => read())
   ipcMain.handle('news:seen', (_event, versions: Versions) => {
     const current: Versions = { app: app.getVersion(), skill: skillVersion(resolveSkill()) }
-    const previous = loadSettings().release_notes_seen
+    const previous = memorySeen ?? loadSettings().release_notes_seen
     const safe = (v: unknown, now: string | null, old: string | null | undefined): string | null => typeof v === 'string' && valid(v) && now && compare(v, now) <= 0 && (!old || compare(v, old) >= 0) ? v : old ?? null
-    saveSettings({ release_notes_seen: { app: safe(versions?.app, current.app, previous?.app) ?? current.app, skill: safe(versions?.skill, current.skill, previous?.skill) } })
+    remember({ app: safe(versions?.app, current.app, previous?.app) ?? current.app, skill: safe(versions?.skill, current.skill, previous?.skill) })
   })
 }

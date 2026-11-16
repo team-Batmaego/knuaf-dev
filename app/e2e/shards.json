@@ -33,7 +33,8 @@
       "win-reqa-layout",
       "guard-codex-marketplace",
       "guard-codex-connection",
-      "kordoc-mcp-lifecycle"
+      "kordoc-mcp-lifecycle",
+      "news-storage-failure"
     ],
     [
       "agent-busy",
@@ -344,7 +345,8 @@
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
       "kordoc-runtime",
-      "news-release-notes"
+      "news-release-notes",
+      "news-storage-failure"
     ]
   ]
 }
