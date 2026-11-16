@@ -86,6 +86,9 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
   const [reload, setReload] = useState(0)
   // 저장이 확인된 선택. 파일이 아니라 **화면의 기억**이라, 옛 파일의 `choice:null` 을 이긴다.
   const [picked, setPicked] = useState<Readonly<Record<string, NoticeChoiceValue>>>({})
+  // 접기는 알림 닫기와 별도이며 폴더와 카드 내용 지문에 묶는다.
+  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set())
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
   // X 로 닫은 **그 다시 보기 요청**의 열쇠 — 요청이 끝났으니 목록에 남아 있어도 다시 그리지 않는다.
   // 요청은 "열쇠가 `forceOpenKeys` 에 없었다가 새로 들어옴"이다(아래 render-phase 비교).
   const [consumed, setConsumed] = useState<readonly string[]>([])
@@ -198,16 +201,32 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
       const local = picked[notice.key]
       return local && notice.choice !== local ? { ...notice, choice: local } : notice
     })
-    .filter((notice) => noticeVisible(notice, state.dismissed, reopened(notice.key)))
+    .filter((notice) => notice.choicePolicy === 'none' || noticeVisible(notice, state.dismissed, reopened(notice.key)))
+  const cards = shown.filter((notice) => notice.choicePolicy === 'none')
+    .sort((a, b) => Number(!!b.blocking) - Number(!!a.blocking))
+  const visibleCards = cards.slice(0, 3)
+  const legacy = shown.filter((notice) => notice.choicePolicy !== 'none')
   if (shown.length === 0) return null
 
   return (
     <div className="notice-zone">
       <div className="notice-stack">
-        {shown.map((notice) => (
+        {[...visibleCards, ...legacy].map((notice, index) => (
           <NoticeBubble
             key={notice.key}
             notice={notice}
+            collapsed={notice.choicePolicy === 'none' && (folded.has(JSON.stringify([root, notice.cardKey])) || (index > 0 && !expanded.has(JSON.stringify([root, notice.cardKey]))))}
+            onExpand={() => {
+              const key = JSON.stringify([root, notice.cardKey])
+              setFolded((prev) => { const next = new Set(prev); next.delete(key); return next })
+              setExpanded((prev) => new Set(prev).add(key))
+            }}
+            onCardAction={(value) => {
+              if (notice.choicePolicy !== 'none') return
+              if (value === 'later') setFolded((prev) => new Set(prev).add(JSON.stringify([root, notice.cardKey])))
+              if (value === 'fix' && notice.talkMessage) onWriteTalk?.(notice.talkMessage)
+              if (value === 'proceed' && notice.proceedMessage) onWriteTalk?.(notice.proceedMessage)
+            }}
             onDismiss={dismiss}
             onChoose={(value) => choose(notice.key, value)}
             onConfirm={() => confirm(notice.key)}
@@ -215,6 +234,7 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
             forceOpen={reopened(notice.key)}
           />
         ))}
+        {cards.length > 3 && <p className="notice-note">{NOTICE.cardMore.replace('{n}', String(cards.length - 3))}</p>}
       </div>
     </div>
   )

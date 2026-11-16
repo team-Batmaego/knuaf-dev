@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { Icon } from './Icon'
 import {
-  choiceOpen, hasDetail, type NoticeChoiceValue, type NoticeItem, type NoticeRow
+  choiceOpen, hasDetail, type NoticeActionValue, type NoticeChoiceValue, type NoticeItem, type NoticeRow
 } from '../../../shared/notice'
 import { NOTICE as COPY } from '../copy'
 
@@ -38,6 +38,9 @@ export interface NoticeBubbleProps {
   /** 선택 기록 — sidecar `notices.choose`. 성공하면 규칙집이 정본과 알림 파일을 다시 쓴다. */
   onChoose?: (value: NoticeChoiceValue) => void | Promise<void>
   onConfirm?: () => void | Promise<void>
+  onCardAction?: (value: NoticeActionValue) => void
+  collapsed?: boolean
+  onExpand?: () => void
   /** 고른 `footnote` 의 [각주 넣어 줘] — 문장은 알림 파일에 없으므로 부르는 쪽이 초점만 옮긴다. */
   onFootnote?: () => void
   /**
@@ -102,7 +105,7 @@ interface ChoiceAttempt {
 }
 
 /** 알림 한 건. 부르는 쪽이 띄울지 정하고, 여기서는 그리기·선택 잠금만 한다. */
-export function NoticeBubble({ notice, onDismiss, onChoose, onConfirm, onFootnote, forceOpen = false }: NoticeBubbleProps) {
+export function NoticeBubble({ notice, onDismiss, onChoose, onConfirm, onFootnote, onCardAction, collapsed = false, onExpand, forceOpen = false }: NoticeBubbleProps) {
   const [attempt, setAttempt] = useState<ChoiceAttempt | null>(null)
   const [confirmation, setConfirmation] = useState<{ key: string; error: string | null } | null>(null)
   const confirming = useRef(new Set<string>())
@@ -110,10 +113,12 @@ export function NoticeBubble({ notice, onDismiss, onChoose, onConfirm, onFootnot
   const current = attempt && attempt.key === notice.key ? attempt : null
   const picked = current && !current.failed ? current.value : null
   const failed = current?.failed ?? false
-  const showChoices = choiceOpen(notice, picked) && !!onChoose
+  const showChoices = choiceOpen(notice, picked) && (notice.choicePolicy === 'none' ? !!onCardAction : !!onChoose)
   const footnoteReady = (notice.choice === 'footnote' || picked === 'footnote') && !!onFootnote
 
-  const pick = (value: NoticeChoiceValue): void => {
+  const pick = (value: NoticeActionValue): void => {
+    if (notice.choicePolicy === 'none') { onCardAction?.(value); return }
+    if (value !== 'direct_tell' && value !== 'footnote') return
     const key = notice.key
     // 렌더를 기다리지 않고 즉시 잠근다 — 두 번 눌러도 기록은 하나.
     setAttempt({ key, value, failed: false })
@@ -150,8 +155,11 @@ export function NoticeBubble({ notice, onDismiss, onChoose, onConfirm, onFootnot
           </button>
         )}
       </div>
+      {notice.blocking && <p className="notice-note">{COPY.blocking}</p>}
+      {collapsed && <button type="button" onClick={onExpand}>{COPY.expand}</button>}
+      {!collapsed && <>
 
-      {notice.choices.length > 0 && <p className="notice-note">{COPY.choiceNote}</p>}
+      {notice.choicePolicy !== 'none' && notice.choices.length > 0 && <p className="notice-note">{COPY.choiceNote}</p>}
 
       {showChoices && (
         <div className="notice-choice">
@@ -194,6 +202,7 @@ export function NoticeBubble({ notice, onDismiss, onChoose, onConfirm, onFootnot
           {notice.omittedItems > 0 && <p className="notice-omitted">{COPY.more.replace('{n}', String(notice.omittedItems))}</p>}
         </details>
       )}
+      </>}
     </div>
   )
 }

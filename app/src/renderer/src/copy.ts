@@ -1702,6 +1702,9 @@ export const NOTICE = {
   confirmFailed: '확인을 기록하지 못했어요. 잠시 뒤 다시 눌러 주세요.',
   footnoteAction: '각주 넣어 줘',
   footnoteNote: '논문에 적을 문장을 입력칸에 채워 드려요.',
+  blocking: '제출 전에 꼭 고쳐야 해요',
+  expand: '다시 보기',
+  cardMore: '외 {n}건',
   choiceNote: '계산 방식을 다르게 한 곳은 알려 주셔야 해요.'
 } as const
 

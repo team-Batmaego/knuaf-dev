@@ -1106,3 +1106,69 @@ test('멈춤 카드는 사유 코드 대신 문장과 칸만 보여 준다', () 
     expect(html).not.toContain(reason)
   }
 })
+
+test('재무 카드는 입력칸만 채우고 접으며 내용이 바뀌면 다시 펼친다', async () => {
+  await withHostDom(async (document, act) => {
+    const makeCard = (cardKey: string, blocking: boolean): NoticeRow => one({
+      schema: 'knuaf.notices/1', project_id: 'project', notices: [{
+        project_id: 'project', notice_identity: 'identity', card_key: cardKey,
+        kind: blocking ? 'finance_hole_figure' : 'finance_hole_deficit',
+        choice_policy: 'none', blocking, dismissible: false, title: '확인해 주세요',
+        choices: [{ value: 'fix', label: '고치기' }, ...(blocking ? [] : [{ value: 'proceed', label: '이대로 진행' }]), { value: 'later', label: '나중에' }],
+        talk_message: '함께 고쳐 줘.', proceed_message: '함께 마무리해 줘.', items: []
+      }]
+    })
+    let card = makeCard('a', false)
+    const legacy = one(hortBefore)
+    const written: string[] = []
+    let chooses = 0
+    const api = stackApi({
+      read: async () => ({ result: { notices: [card, legacy], dismissed: [card.key] } }),
+      choose: async () => { chooses++; return { result: { ok: true, status: 'chosen' } } }
+    })
+    const props = { root: ROOT, api, onWriteTalk: (text: string) => written.push(text) }
+    const { host, root, render } = await paintStack(document, act, props)
+    expect(byClass(host, 'notice-card')).toHaveLength(2)
+    expect(byClass(host, 'notice-x')).toHaveLength(1)
+    await act(async () => pressChoice(visibleChoices(host)[0]))
+    await act(async () => pressChoice(visibleChoices(host)[1]))
+    expect(written).toEqual(['함께 고쳐 줘.', '함께 마무리해 줘.'])
+    expect(chooses).toBe(0)
+    await act(async () => pressChoice(visibleChoices(host)[2]))
+    expect(visibleChoices(host)).toHaveLength(legacy.choices.length)
+    card = makeCard('b', true)
+    await render({ ...props, reloadKey: 1 })
+    expect(visibleChoices(host)).toHaveLength(legacy.choices.length + 2)
+    await act(async () => pressChoice(visibleChoices(host)[1]))
+    expect(host.textContent).toContain('제출 전에 꼭 고쳐야 해요')
+    expect(visibleChoices(host)).toHaveLength(legacy.choices.length)
+    expect(chooses).toBe(0)
+    await act(async () => root.unmount())
+  })
+})
+
+test('재무 카드는 막는 것부터 세 장만 보이고 첫 장만 펼친다', async () => {
+  await withHostDom(async (document, act) => {
+    const makeCard = (id: string, blocking: boolean): NoticeRow => one({
+      schema: 'knuaf.notices/1', project_id: 'project', notices: [{
+        project_id: 'project', notice_identity: id, card_key: id,
+        kind: blocking ? 'finance_hole_figure' : 'finance_hole_deficit',
+        choice_policy: 'none', blocking, dismissible: false, title: id,
+        choices: [{ value: 'fix', label: '고치기' }, { value: 'later', label: '나중에' }], items: []
+      }]
+    })
+    const cards = [makeCard('적자1', false), makeCard('막음1', true), makeCard('적자2', false), makeCard('막음2', true)]
+    const legacy = one(hortBefore)
+    const api = stackApi({ read: async () => ({ result: { notices: [legacy, ...cards], dismissed: [] } }) })
+    const { host, root } = await paintStack(document, act, { root: ROOT, api })
+    const titles = byClass(host, 'notice-title').map((node) => node.textContent)
+    expect(titles).toEqual(['막음1', '막음2', '적자1', legacy.title])
+    expect(host.textContent).toContain('외 1건')
+    const shown = byClass(host, 'notice-card')
+    expect(visibleChoices(shown[0])).toHaveLength(2)
+    expect(visibleChoices(shown[1])).toHaveLength(0)
+    expect(visibleChoices(shown[2])).toHaveLength(0)
+    expect(visibleChoices(shown[3])).toHaveLength(legacy.choices.length)
+    await act(async () => root.unmount())
+  })
+})
