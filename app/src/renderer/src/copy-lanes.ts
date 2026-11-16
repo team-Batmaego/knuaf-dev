@@ -26,6 +26,7 @@ export function providerName(company: Provider): string {
  */
 const MODEL_DISPLAY: Record<string, string> = {
   sol: 'Sol', terra: 'Terra', astra: 'Astra', luna: 'Luna',
+  deepseek: 'DeepSeek', glm: 'GLM',
   opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku'
 }
 

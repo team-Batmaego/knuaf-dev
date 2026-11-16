@@ -125,6 +125,8 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   for (const key of Object.keys(env)) {
     if (/^(ANTHROPIC_|OPENAI_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN)/.test(key)) delete env[key]
   }
+  delete env.KNUAF_FREE_TOKEN
+  delete env.KNUAF_FREE_RELAY
   delete env.CLAUDECODE
   // No CLAUDE.md memory files at all — the project's skill contract (SKILL.md) is
   // authoritative, and a user's ~/.claude/CLAUDE.md @import would otherwise surface an

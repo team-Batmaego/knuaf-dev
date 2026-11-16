@@ -1,3 +1,4 @@
+import { FreeRelayError } from '../free/provider'
 import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
@@ -108,7 +109,7 @@ export class JobRunner {
     const skill = this.options.skill()
     if (!this.options.supportedSchemas.includes(spec.schema) || skill.schema !== spec.schema || skill.contractVersion !== spec.contractVersion) throw new Error('앱과 스킬 판이 맞지 않아요.')
     if (!/^[a-zA-Z0-9_-]+$/.test(spec.id) || !['research', 'writing', 'repeat', 'review'].includes(spec.lane)
-      || !['claude', 'codex'].includes(spec.company) || typeof spec.model !== 'string' || !spec.model || spec.model.includes('/')
+      || !['claude', 'codex', 'free'].includes(spec.company) || typeof spec.model !== 'string' || !spec.model || spec.model.includes('/')
       || (spec.effort !== null && typeof spec.effort !== 'string') || typeof spec.task !== 'string' || !spec.task.trim()
       || !Array.isArray(spec.inputs) || !Array.isArray(spec.outputs) || !spec.outputs.length) throw new Error('Invalid job specification')
     if (new Set(spec.outputs).size !== spec.outputs.length || spec.outputs.some(p => typeof p !== 'string' || !outputName(p))) throw new Error('Invalid output ownership')
@@ -292,7 +293,7 @@ export class JobRunner {
       record.outputs = this.collectOutputs(cwd, spec.outputs)
       this.update(record, 'completed')
     } catch (error) {
-      if (!current.stopped) this.update(record, current.failure ?? (error instanceof JobFailure ? error.status : 'error'))
+      if (!current.stopped) this.update(record, current.failure ?? (error instanceof JobFailure ? error.status : 'error'), error instanceof FreeRelayError ? error.kind : undefined)
     } finally {
       try {
         const connection = current.connection
@@ -354,6 +355,7 @@ export class JobRunner {
     try { await delivery } finally { inFlight.delete(delivery); if (!inFlight.size) this.delivering.delete(record.root) }
   }
   private async propose(record: JobRecord): Promise<ContinuationProposal | null> {
+    if (record.spec.company === 'free') return null
     if (this.state.delivered.includes(record.rootJobId)) return null
     const existing = this.state.proposals.find(p => p.rootJobId === record.rootJobId && p.state === 'open')
     if (existing) return existing

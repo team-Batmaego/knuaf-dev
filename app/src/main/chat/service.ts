@@ -29,6 +29,7 @@ import type { KordocMcpSpec, KordocRuntime } from './kordocMcp'
 import { rootKey } from './kordocMcp'
 import type { ChatModels, ChatModelInfo, ChatSnapshot, ModelChoice, PermissionRequest, Provider, ConnectionStatus } from '../../shared/chat'
 import { effectiveModelChoice, isCrossProviderModelId } from '../../shared/chat'
+import { FREE_MODELS, FreeRelayError, freeStatus, providerEnv } from '../free/provider'
 
 import { skillSwitch } from '../update/switch'
 import { agentActivity } from '../update/activity'
@@ -91,7 +92,7 @@ export class ChatService {
   private runs = new Map<string, Promise<void>>()
   private shuttingDown = false
   private authRequired = new Set<Provider>()
-  private authGeneration: Record<Provider, number> = { codex: 0, claude: 0 }
+  private authGeneration: Record<Provider, number> = { codex: 0, claude: 0, free: 0 }
   private reauthenticating = new Map<Provider, AgentConnection>()
   private pendingLogins = new Set<Provider>()
   private closingConnections = new Set<AgentConnection>()
@@ -572,7 +573,7 @@ export class ChatService {
     }, 1_000)
     this.pendingTimer.unref?.()
   }
-  private skillDir(root: string, provider: Provider) { return skillTargets(root, this.opts.userData)[provider] }
+  private skillDir(root: string, provider: Provider) { return skillTargets(root, this.opts.userData)[provider === 'free' ? 'codex' : provider] }
   /**
    * 지킴이 보관본 자리(§4.3). 열쇠를 못 얻었으면 `key: null` — 디스크 장부를 믿지 않는 것이지
    * 지킴이를 끄는 것이 아니다(C-02). 격리·잠금·플러그인 열거는 열쇠와 무관하게 늘 돌아야 하므로
@@ -703,7 +704,7 @@ export class ChatService {
     if (!c) {
       const guard = this.guardFor(root)
       const options: AgentOptions = {
-        binary: '', root, skill: this.skillDir(root, provider), env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
+        binary: '', root, skill: this.skillDir(root, provider), env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
         guard,
         // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
@@ -717,10 +718,10 @@ export class ChatService {
       if (this.opts.connectionFactory) {
         c = this.opts.connectionFactory(provider, options)
       } else {
-        const binary = findExecutable(provider)
-        if (!binary) throw new Error(`${provider === 'codex' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 연결 설정의 설치 안내를 열어 주세요.`)
+        const binary = findExecutable(provider === 'free' ? 'codex' : provider)
+        if (!binary) throw new Error(`${provider !== 'claude' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 연결 설정의 설치 안내를 열어 주세요.`)
         options.binary = binary
-        c = provider === 'codex' ? new CodexConnection(options) : new ClaudeConnection(options)
+        c = provider !== 'claude' ? new CodexConnection(options) : new ClaudeConnection(options)
       }
       this.connections.set(key, c)
     }
@@ -729,7 +730,8 @@ export class ChatService {
   async status(root: string, provider: Provider): Promise<ConnectionStatus> {
     return agentActivity.run(async () => {
     this.ensureActive()
-    if (!this.opts.connectionFactory && !findExecutable(provider)) return { installed: false, connected: false, version: null, detail: '설치 안내를 열어 준비한 뒤 다시 확인해 주세요.' }
+    if (!this.opts.connectionFactory && !findExecutable(provider === 'free' ? 'codex' : provider)) return { installed: false, connected: false, version: null, detail: '설치 안내를 열어 준비한 뒤 다시 확인해 주세요.' }
+    if (provider === 'free') return freeStatus()
     return this.checkedStatus(provider, this.connection(root, provider))
     })
   }
@@ -756,6 +758,10 @@ export class ChatService {
     const pinned = root ? this.pinnedChoice.get(this.key(root, provider)) : undefined
     if (pinned) return pinned
     const stored = this.opts.modelChoice?.(provider) ?? null
+    if (provider === 'free') {
+      if (stored && !FREE_MODELS.some(entry => entry.model === stored.model)) throw new FreeRelayError('free-error')
+      return effectiveModelChoice(stored, FREE_MODELS)
+    }
     // 제외된 저장 선택은 해제(null)가 아니다. 명시적 재선택 전에는 전송을 차단한다.
     if (provider === 'codex' && stored?.model && isCrossProviderModelId(stored.model)) {
       throw new Error(MODEL_SELECTION_COPY.reselectionRequired)
@@ -768,6 +774,7 @@ export class ChatService {
    * 있다(ChatGPT `model/list`, Claude 초기화 응답의 `models`).
    */
   async models(root: string | null, provider: Provider): Promise<ChatModels> {
+    if (provider === 'free') return { provider, supported: true, models: FREE_MODELS, selected: effectiveModelChoice(this.opts.modelChoice?.(provider), FREE_MODELS) }
     return agentActivity.run(async () => {
     // 폴더를 정하기 전에도 계정 목록은 고를 수 있다. 전역 연결로는 턴을 보내지 않는다.
     const connection = root ? this.connection(root, provider) : this.globalConnection(provider)
@@ -847,7 +854,7 @@ export class ChatService {
       const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
-        env: this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root)),
+        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))),
         openExternal: this.opts.openExternal, trusted: () => false,
         guard,
         skillBundleSource: () => this.opts.skillSource()
@@ -855,10 +862,10 @@ export class ChatService {
       if (this.opts.connectionFactory) {
         c = this.opts.connectionFactory(provider, options)
       } else {
-        const binary = findExecutable(provider)
-        if (!binary) throw new Error(`${provider === 'codex' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 연결 설정의 설치 안내를 열어 주세요.`)
+        const binary = findExecutable(provider === 'free' ? 'codex' : provider)
+        if (!binary) throw new Error(`${provider !== 'claude' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 연결 설정의 설치 안내를 열어 주세요.`)
         options.binary = binary
-        c = provider === 'codex' ? new CodexConnection(options) : new ClaudeConnection(options)
+        c = provider !== 'claude' ? new CodexConnection(options) : new ClaudeConnection(options)
       }
       this.globals.set(provider, c)
     }
@@ -871,7 +878,8 @@ export class ChatService {
   async globalStatus(provider: Provider): Promise<ConnectionStatus> {
     return agentActivity.run(async () => {
     this.ensureActive()
-    if (!this.opts.connectionFactory && !findExecutable(provider)) return { installed: false, connected: false, version: null, detail: '설치 안내를 열어 준비한 뒤 다시 확인해 주세요.' }
+    if (!this.opts.connectionFactory && !findExecutable(provider === 'free' ? 'codex' : provider)) return { installed: false, connected: false, version: null, detail: '설치 안내를 열어 준비한 뒤 다시 확인해 주세요.' }
+    if (provider === 'free') return freeStatus()
     try {
       return await this.checkedStatus(provider, this.globalConnection(provider))
     } catch (e) {
@@ -938,6 +946,7 @@ export class ChatService {
       }
       const live = attach.connection
       s.skillHash = version; s.skillLoaded = false; s.state = 'running'; s.error = undefined
+      s.errorKind = undefined
       s.authRequired = undefined
       s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
       this.publish(s)
@@ -1013,6 +1022,7 @@ export class ChatService {
       // 학생이 멈춘 것은 실패가 아니다 — 취소로 끝난 턴에 오류 문구를 붙이지 않는다.
       // (중단하면 연결이 끊겨 run 이 예외로 끝나므로 여기로 온다.)
       if (s.state !== 'stopped') {
+        if (e instanceof FreeRelayError) s.errorKind = e.kind
         if ((s.provider === 'claude' && e instanceof ClaudeAuthenticationError) || (s.provider === 'codex' && codexAuthFailure(e))) {
           if (authGeneration === this.authGeneration[s.provider]) {
             this.authRequired.add(s.provider)
@@ -1123,7 +1133,7 @@ export class ChatService {
     const account = await this.opts.jobAccount?.(company,
       options?.once ? { once: { epoch: this.authEpoch(company) } } : { fresh: options?.fresh })
     if (!account) return null
-    return { ...account, consented: this.store().consented(company, account.accountId) }
+    return { ...account, consented: company === 'free' || this.store().consented(company, account.accountId) }
   }
   /** 로그인 세대 — 성공한 로그인 확인마다 하나씩 오른다(§5 "로그인 변경 뒤 1회"). */
   authEpoch(company: Provider): number { return this.authGeneration[company] }
@@ -1210,7 +1220,7 @@ export class ChatService {
       // 동의는 앱 저장소가 정본이다 — 엔진이 준 계정 값 위에 앱의 동의만 얹는다.
       account: async company => {
         const account = await this.opts.jobAccount!(company)
-        return account ? { ...account, consented: store.consented(company, account.accountId) } : null
+        return account ? { ...account, consented: company === 'free' || store.consented(company, account.accountId) } : null
       },
       skill: () => {
         if (!this.jobSkill) throw new Error('설치된 스킬에서 주문 판 선언을 찾지 못했어요.')
@@ -2114,7 +2124,7 @@ export class ChatService {
   }
 }
 
-const COMPANY_LABEL: Record<Provider, string> = { claude: 'Claude', codex: 'ChatGPT' }
+const COMPANY_LABEL: Record<Provider, string> = { claude: 'Claude', codex: 'ChatGPT', free: '무료 모델' }
 const EFFORT_LABEL: Record<string, string> = { low: '낮음', medium: '보통', high: '높음', max: '최대' }
 
 /**

@@ -118,7 +118,7 @@ export interface LaneInput {
   extraLines?: LaneLine[]
 }
 
-const OTHER: Record<Provider, Provider> = { claude: 'codex', codex: 'claude' }
+const OTHER: Record<Provider, Provider> = { claude: 'codex', codex: 'claude', free: 'free' }
 
 /**
  * 계정 표시를 가린다(계약 §6 "가리지 않은 이메일은 화면으로 보내지 않는다").
@@ -157,6 +157,7 @@ export function consentRows(accounts: Partial<Record<Provider, LaneAccountView>>
   for (const entry of stored) {
     const key = `${entry.company}\0${entry.accountId}`
     if (seen.has(key)) continue
+    if (entry.company === 'free') continue
     rows.push({
       company: entry.company,
       accountId: entry.accountId,
@@ -200,7 +201,13 @@ export function lanesSettings(input: LaneSettingsInput): LanesSettingsView {
   const declined = store.events(root).some(event => event.kind === 'lanes-declined')
   const mode: LanesSettingsView['mode'] = approved ? 'on' : declined ? 'off' : 'undecided'
   const recommendedPlan = input.recommended?.plan ?? null
-  const shown = approved ?? recommendedPlan
+  const shown = approved ? {
+    ...approved,
+    ...Object.fromEntries(Object.entries(approved).filter(([, entry]) => entry?.how === 'main').map(([lane, entry]) => [lane, {
+      ...entry, company: input.mainCompany,
+      model: recommendedPlan?.design?.model ?? null, effort: recommendedPlan?.design?.effort ?? null
+    }]))
+  } : recommendedPlan
   const at = store.approvedAt(root) ?? EPOCH
 
   const rows = modesRows(mode, shown)
@@ -219,7 +226,7 @@ export function lanesSettings(input: LaneSettingsInput): LanesSettingsView {
     }
   }
 
-  const design = (approved ?? recommendedPlan)?.design ?? null
+  const design = recommendedPlan?.design ?? approved?.design ?? null
   return {
     mode,
     source: approved

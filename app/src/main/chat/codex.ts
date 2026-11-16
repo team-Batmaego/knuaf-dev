@@ -20,6 +20,8 @@ import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocM
 import { appThreadLockPlan, appThreadLockVerify, KORDOC_COLLISION_NOTE, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
 import { codeOf, diag } from '../diagLog'
+import { FREE_RELAY_URL, FREE_MODELS, FreeRelayError, freeStatus, freeExecutionAccount, freeRelayError } from '../free/provider'
+import { FREE_DS_MODEL } from '../../shared/lanes'
 
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
@@ -42,6 +44,14 @@ export function serverArgsFor(env: NodeJS.ProcessEnv): string[] {
   // 않고 CLI 기본값(학생의 config.toml)을 그대로 쓴다.
   if (env.KNUAF_CODEX_MODEL) args.push('-c', `model=${env.KNUAF_CODEX_MODEL}`)
   if (env.KNUAF_CODEX_EFFORT) args.push('-c', `model_reasoning_effort=${env.KNUAF_CODEX_EFFORT}`)
+  if (env.KNUAF_FREE_RELAY === '1') {
+    if (!env.KNUAF_FREE_TOKEN) throw new FreeRelayError('free-unavailable')
+    args.push('-c', 'model_provider="knuaf-free"',
+      '-c', 'model_providers.knuaf-free.name="knuaf-free"',
+      '-c', `model_providers.knuaf-free.base_url="${FREE_RELAY_URL}"`,
+      '-c', 'model_providers.knuaf-free.wire_api="responses"',
+      '-c', 'model_providers.knuaf-free.env_key="KNUAF_FREE_TOKEN"')
+  }
   // 논문 폴더의 `AGENTS.md` 는 도우미에게 새어 들어가면 안 된다(설계 §4.1-E). 스칼라라 `-c` 가
   // 안전하고, 프로세스 전체(모든 스레드)에 걸린다 — 기동 뒤 `instructionSources` 로 한 번 더 본다.
   args.push('-c', 'project_doc_max_bytes=0')
@@ -77,6 +87,7 @@ function filePermission(id: string, reason: unknown, changes?: PermissionFileCha
 }
 
 export class CodexConnection implements AgentConnection {
+  private get free(): boolean { return this.options.env.KNUAF_FREE_RELAY === '1' }
   private rpc?: JsonRpcProcess
   private events?: AgentEvents
   private serverVersion: string | null = null
@@ -372,11 +383,11 @@ export class CodexConnection implements AgentConnection {
       if (!turnKey) return
       const model = this.turnTokens?.model ?? ''
       const effort = this.turnTokens?.effort ?? null
-      appendTokenRecord(this.options.root, 'codex', {
+      appendTokenRecord(this.options.root, this.free ? 'free' : 'codex', {
         conversationId, turnKey,
         build: ({ requestSequence, notificationSequence }) => tokenRecord({
-          conversationId, jobId: '', company: 'codex', model, effort, role: 'chat'
-        }, codexTokens({ last: usage.last as TokenCounts, total: usage.total as TokenCounts }, requestSequence, notificationSequence),
+          conversationId, jobId: '', company: this.free ? 'free' : 'codex', model, effort, role: 'chat'
+        }, codexTokens({ last: usage.last as TokenCounts, total: usage.total as TokenCounts }, requestSequence, notificationSequence, this.free ? 'free' : 'codex'),
         new Date().toISOString())
       })
     } catch { /* 기록 실패는 대화를 막지 않는다 */ }
@@ -454,7 +465,7 @@ export class CodexConnection implements AgentConnection {
       mkdirSync(dir, { recursive: true })
       const name = `subagent-${randomUUID()}.json`
       writeFileAtomic(join(dir, name), JSON.stringify({
-        type: `subagent-${data.event}`, provider: 'codex', at: new Date().toISOString(), ...data
+        type: `subagent-${data.event}`, provider: this.free ? 'free' : 'codex', at: new Date().toISOString(), ...data
       }))
     } catch { /* 기록 자리는 최선 노력 — 대화 흐름을 막지 않는다 */ }
   }
@@ -521,6 +532,7 @@ export class CodexConnection implements AgentConnection {
         this.fileChanges.clear(); this.pendingFileApprovals.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') w?.resolve()
+        else if (this.free) w?.reject(freeRelayError(p.turn.error))
         else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
         // 한도는 **구조 코드** `usageLimitExceeded` 만 인정한다(설계 §1-2, p1X 11-11).
         // `rateLimitExceeded` 는 한도가 아니라 `unknown` 이다 — 단추를 덜 띄우는 방향.
@@ -587,6 +599,7 @@ export class CodexConnection implements AgentConnection {
     }
   }
   async status() {
+    if (this.free) return freeStatus()
     const rpc = await this.connect()
     const r = await rpc.request('account/read', { refreshToken: false })
     const connected = !this.loginPending && r.account?.type === 'chatgpt' && (!this.loginInfo || this.loginConfirmed)
@@ -605,6 +618,7 @@ export class CodexConnection implements AgentConnection {
    * 실계정 목록은 미확인이다 — 이번 판 시험은 가짜 서버로만 돈다.
    */
   async models(): Promise<ChatModelInfo[]> {
+    if (this.free) return FREE_MODELS
     const rpc = await this.connect()
     const out: ChatModelInfo[] = []
     const seen = new Set<string>()
@@ -641,6 +655,7 @@ export class CodexConnection implements AgentConnection {
     return out
   }
   async login() {
+    if (this.free) { if (!freeStatus().connected) throw new FreeRelayError('free-unavailable'); return }
     this.loginPending = true
     this.loginConfirmed = false
     this.loginInfo = undefined
@@ -751,6 +766,7 @@ export class CodexConnection implements AgentConnection {
   private async runTurn(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
     this.turnActive = true
     try { return await this.turnBody(text, sessionId, events, replayHistory) }
+    catch (error) { throw this.free && !(error instanceof FreeRelayError) ? freeRelayError(error) : error }
     finally { this.turnActive = false }
   }
   private async turnBody(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
@@ -872,6 +888,12 @@ export class CodexConnection implements AgentConnection {
    * 아직 검증하지 않은 조회도 하지 않는다.
    */
   private async turnModelParams(resumed: boolean): Promise<{ params: { model?: string; effort?: string }; clears: boolean }> {
+    if (this.free) {
+      const choice = this.options.modelChoice?.()
+      const model = choice?.model ?? FREE_DS_MODEL
+      if (!FREE_MODELS.some(entry => entry.model === model)) throw new FreeRelayError('free-error')
+      return { params: { model }, clears: false }
+    }
     const choice = this.options.modelChoice?.() ?? null
     if (choice?.model && isCrossProviderModelId(choice.model)) throw new Error(MODEL_SELECTION_COPY.reselectionRequired)
     if (choice?.model) {
@@ -899,6 +921,7 @@ export class CodexConnection implements AgentConnection {
    * 새 대화(`sessionId` 없음)는 덮어쓴 적이 없으므로 묻지 않는다.
    */
   async prepare(sessionId: string | undefined): Promise<void> {
+    if (this.free) { await this.turnModelParams(Boolean(sessionId)); return }
     const choice = this.options.modelChoice?.()
     if (choice?.model && isCrossProviderModelId(choice.model)) throw new Error(MODEL_SELECTION_COPY.reselectionRequired)
     if (!sessionId) return
@@ -1139,6 +1162,8 @@ const RELAY_DEVELOPER_INSTRUCTIONS = '이 세션은 knuaf-dev 개인용 GUI가 �
  */
 export class CodexRelayConnection implements JobConnection {
   readonly relayProtocol = 1 as const
+  get gateInTurn(): boolean { return this.free }
+  private get free(): boolean { return this.request.company === 'free' }
   private rpc?: JsonRpcProcess
   private connecting?: Promise<JsonRpcProcess>
   private serverArgs: string[]
@@ -1154,6 +1179,7 @@ export class CodexRelayConnection implements JobConnection {
   }
 
   async status(): Promise<ConnectionStatus> {
+    if (this.free) return freeStatus()
     try {
       const rpc = await this.connect()
       const r = await rpc.request('account/read', { refreshToken: false })
@@ -1177,6 +1203,7 @@ export class CodexRelayConnection implements JobConnection {
    * 그래서 Claude 와 달리 여기서 A 를 사실대로 판정할 수 있다.
    */
   async availability(): Promise<ExecutionAccount> {
+    if (this.free) return freeExecutionAccount()
     let rpc: JsonRpcProcess
     try { rpc = await this.connect() } catch { return { ...codexExecutionAccount(this.options, null), connected: false, usage: 'auth' } }
     let accountType: string | null = null
@@ -1233,15 +1260,23 @@ export class CodexRelayConnection implements JobConnection {
   }
 
   async runJob(text: string, events: JobEvents): Promise<void> {
+    try { return await this.runJobBody(text, events) }
+    catch (error) { throw this.free && !(error instanceof FreeRelayError) ? freeRelayError(error) : error }
+  }
+
+  private async runJobBody(text: string, events: JobEvents): Promise<void> {
     this.events = events
     const rpc = await this.connect()
-    const account = await rpc.request('account/read', { refreshToken: false })
-    if (account?.account?.type !== 'chatgpt') throw new JobFailure('auth', 'ChatGPT 계정 로그인이 필요해요.')
+    if (!this.free) {
+      const account = await rpc.request('account/read', { refreshToken: false })
+      if (account?.account?.type !== 'chatgpt') throw new JobFailure('auth', 'ChatGPT 계정 로그인이 필요해요.')
+    } else if (!freeStatus().connected) throw new FreeRelayError('free-unavailable')
     // 별칭(`astra`·`sol`…)을 이 계정의 실제 id 로 푼다. 목록에 없으면 보낸 값을 그대로 쓴다 —
     // 서버가 거절하면 그 오류가 그대로 주문 실패로 남는다(추측으로 다른 모델을 고르지 않는다).
-    const models = (await this.catalog(rpc)) ?? []
+    const models = this.free ? FREE_MODELS : (await this.catalog(rpc)) ?? []
     const model = resolveCodexAlias([...models], this.request.model) ?? this.request.model
     const skillPath = join(this.request.skill, 'SKILL.md')
+    if (this.free && !FREE_MODELS.some(entry => entry.model === model)) throw new FreeRelayError('free-error')
     // 스킬 폴더가 작업 폴더 밖이므로 경로 루트를 따로 알려 준다(실측: 이것 없이는 발견 못 함).
     try { await rpc.request('skills/extraRoots/set', { extraRoots: [dirname(this.request.skill)] }) } catch { /* 옛 서버: 아래 확인이 실패로 잡는다 */ }
     const skills = await rpc.request('skills/list', { cwds: [this.request.cwd], forceReload: true })
@@ -1443,11 +1478,12 @@ export class CodexRelayConnection implements JobConnection {
     if (method === 'thread/tokenUsage/updated') {
       this.notifications++
       const usage = p?.tokenUsage
-      if (usage && typeof usage === 'object') this.events?.tokens(codexTokens(usage, 1, this.notifications))
+      if (usage && typeof usage === 'object') this.events?.tokens(codexTokens(usage, 1, this.notifications, this.free ? 'free' : 'codex'))
       return
     }
     if (method === 'account/rateLimits/updated') {
       // 이 알림은 단면(`rateLimits`)만 준다 — `ordinaryUsageAllowed` 가 없다. 다시 읽어 판정한다.
+      if (this.free) return
       // 스키마 주석: "merge … or refetch that snapshot" — 여기서는 재조회 쪽을 고른다.
       const rpc = this.rpc
       if (!rpc || rpc.closed) return
@@ -1456,6 +1492,7 @@ export class CodexRelayConnection implements JobConnection {
     }
     if (method === 'turn/completed') {
       const w = this.waiter; this.waiter = undefined
+      if (this.free && p?.turn?.status !== 'completed') { w?.reject(freeRelayError(p?.turn?.error)); return }
       const error = p?.turn?.error
       if (p?.turn?.status === 'completed') { w?.resolve(); return }
       if (p?.turn?.status === 'interrupted') { w?.reject(new JobFailure('unknown', '담당 턴이 중단됐어요.')); return }

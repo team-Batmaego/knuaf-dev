@@ -22,6 +22,7 @@ export interface LaneSource {
   runner: JobRunner | null
   /** 이 폴더 본대화의 회사 — 설계 차선이 여기로 고정된다(정본 §3.8). */
   mainCompany: Provider
+  designChoice?: () => { model: string | null; effort: string | null }
   /** 지금 로그인한 계정. 없으면 그 회사는 `undefined`. */
   account: (company: Provider) => Promise<ExecutionAccount | null>
   /** §4-2 한도로 멈춘 대화 — 인계 이음매가 없으면 빈 배열(U6). */
@@ -41,7 +42,7 @@ export async function laneAccounts(
 ): Promise<LaneAccounts> {
   const executions: Partial<Record<Provider, ExecutionAccount>> = {}
   const views: Partial<Record<Provider, LaneAccountView>> = {}
-  for (const company of ['claude', 'codex'] as const) {
+  for (const company of ['claude', 'codex', 'free'] as const) {
     const account = await source.account(company)
     if (!account) continue
     executions[company] = account
@@ -74,14 +75,14 @@ export function recommendation(
   mainCompany: Provider,
   designModel: string | null
 ): LaneRecommendation | null {
-  const snapshots = (['claude', 'codex'] as const)
-    .map(company => accounts[company]?.account)
-    .filter((account): account is AccountSnapshot => Boolean(account))
+  const snapshots = (['claude', 'codex', 'free'] as const)
+    .filter(company => accounts[company]?.connected)
+    .map(company => accounts[company]!.account)
   if (!snapshots.length) return null
   const tiers = snapshots.map(account => judgePlan(account))
   const claudeTier = tiers.find(tier => tier.company === 'claude')?.tier ?? null
   const codexTier = tiers.find(tier => tier.company === 'codex')?.tier ?? null
-  const rowId = selectLaneRow(claudeTier, codexTier)
+  const rowId = selectLaneRow(claudeTier, codexTier) ?? (accounts.free?.connected ? 'free-only' : null)
   if (!rowId) return null
   const catalog = Object.fromEntries(snapshots.map(account => [account.company, account.models])) as Partial<
     Record<Provider, AccountSnapshot['models']>
@@ -97,8 +98,10 @@ export function recommendation(
 /** 저장소·러너 → 조립기 입력. 폴더가 없으면 승인·카드·주문 줄이 모두 비어 있다. */
 export async function laneInput(source: LaneSource, root: string | null): Promise<LaneInput> {
   const { executions, views } = await laneAccounts(source)
-  const design = root ? source.store.approvedPlan(root)?.design?.model ?? null : null
+  const choice = source.designChoice?.()
+  const design = choice ? choice.model : root ? source.store.approvedPlan(root)?.design?.model ?? null : null
   const recommended = recommendation(executions, source.mainCompany, design)
+  if (choice && recommended?.plan.design) recommended.plan.design = { company: source.mainCompany, ...choice, how: 'main' }
   const settings = lanesSettings({
     root,
     store: source.store,
@@ -131,9 +134,9 @@ export function lanesPublisher(source: LaneSource, send: (snapshot: LanesSnapsho
 
 /** 추천 줄 id 만 필요한 호출자(설정 창)용 — 조립기 전체를 돌리지 않는다. */
 export function recommendedRow(accounts: Partial<Record<Provider, ExecutionAccount>>): LaneRowId | null {
-  const claude = accounts.claude ? judgePlan(accounts.claude.account) : null
-  const codex = accounts.codex ? judgePlan(accounts.codex.account) : null
-  return selectLaneRow(claude?.tier ?? null, codex?.tier ?? null)
+  const claude = accounts.claude?.connected ? judgePlan(accounts.claude.account) : null
+  const codex = accounts.codex?.connected ? judgePlan(accounts.codex.account) : null
+  return selectLaneRow(claude?.tier ?? null, codex?.tier ?? null) ?? (accounts.free?.connected ? 'free-only' : null)
 }
 
 /** 추천 줄의 설계 모델 — [F2] "아래 칩에서 골라요 (추천 {회사 모델)". */

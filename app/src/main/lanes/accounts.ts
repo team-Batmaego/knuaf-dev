@@ -16,6 +16,7 @@ import { ClaudeRelayConnection } from '../chat/claude'
 import { CodexRelayConnection } from '../chat/codex'
 import type { AgentOptions } from '../chat/contracts'
 import { isProvider } from './providers'
+import { freeExecutionAccount } from '../free/provider'
 
 /** 계정 값 캐시 수명. 짧게 — 요금제·한도는 몇 초 사이에 바뀌지 않는다. */
 const TTL_MS = 15_000
@@ -57,6 +58,7 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
     if (!isProvider(company)) return null
     const binary = deps.binary(company)
     if (!binary) return null
+    if (company === 'free') return freeExecutionAccount()
     const options: AgentOptions = {
       binary, root: deps.appDir, skill: '', env: deps.env(), openExternal: deps.openExternal
     }

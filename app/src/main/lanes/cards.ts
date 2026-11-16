@@ -67,6 +67,7 @@ export interface CardDeps {
   account: (company: Provider) => Promise<ExecutionAccount | null>
   /** 이 폴더 본대화의 회사 — 설계 차선이 여기로 고정된다(정본 §3.8). */
   mainCompany: Provider
+  designChoice?: () => { model: string | null; effort: string | null }
   /** §3-3 끄기 — 진행·대기 주문만 멈춘다(본대화는 건드리지 않는다). */
   runner?: Pick<JobRunner, 'records' | 'stopJob'> | null
   /**
@@ -107,7 +108,8 @@ async function openCardLocked(
 ): Promise<LaneCard> {
   const accounts = await laneAccounts(deps)
   const approved = deps.store.approvedPlan(folder)
-  const recommended = recommendation(accounts.executions, deps.mainCompany, approved?.design?.model ?? null)
+  const recommended = recommendation(accounts.executions, deps.mainCompany, deps.designChoice?.().model ?? approved?.design?.model ?? null)
+  if (recommended?.plan.design && deps.designChoice) recommended.plan.design = { company: deps.mainCompany, ...deps.designChoice(), how: 'main' }
   const base = approved ?? recommended?.plan
   if (!base) throw new LaneFailure('unavailable', '맡길 수 있는 계정이 없어요.')
   const proposal = proposeLaneRequest(
@@ -147,7 +149,8 @@ async function settingsCardLocked(deps: CardDeps, folder: string, kind: 'enable'
   const accounts = await laneAccounts(deps)
   const approved = deps.store.approvedPlan(folder)
   if (kind === 'revert' && !approved) throw new LaneFailure('not-found', '되돌릴 배치가 없어요.')
-  const recommended = recommendation(accounts.executions, deps.mainCompany, approved?.design?.model ?? null)
+  const recommended = recommendation(accounts.executions, deps.mainCompany, deps.designChoice?.().model ?? approved?.design?.model ?? null)
+  if (recommended?.plan.design && deps.designChoice) recommended.plan.design = { company: deps.mainCompany, ...deps.designChoice(), how: 'main' }
   if (!recommended) throw new LaneFailure('unavailable', '추천 배치를 정할 수 없어요.')
   const card: LaneCard = {
     cardId: randomUUID(),
@@ -171,12 +174,12 @@ async function settingsCardLocked(deps: CardDeps, folder: string, kind: 'enable'
 /** §3-4 검토 모델 목록 — 그 계정 모델 중 `high` 를 지원하는 것만. 추천·자동 선택 없음. */
 export async function reviewModels(deps: Pick<CardDeps, 'account'>): Promise<ReviewModelGroup[]> {
   const groups: ReviewModelGroup[] = []
-  for (const company of ['claude', 'codex'] as const) {
+  for (const company of ['claude', 'codex', 'free'] as const) {
     const account = await deps.account(company)
     const models = account?.account.models
     if (!models) continue
     const list = models
-      .filter(entry => !isCrossProviderModelId(entry.model) && entry.efforts.includes(REVIEW_EFFORT))
+      .filter(entry => !isCrossProviderModelId(entry.model) && (company === 'free' || entry.efforts.includes(REVIEW_EFFORT)))
       .map(entry => ({ model: entry.model, name: entry.name }))
     if (list.length) groups.push({ company, models: list })
   }
@@ -191,13 +194,13 @@ export async function pickReview(deps: CardDeps, root: string, company: Provider
   return withFolderLock(folder, async () => {
     const account = await deps.account(provider)
     const matched = account?.account.models?.find(entry => entry.model === model)
-    if (!matched || !matched.efforts.includes(REVIEW_EFFORT)) {
+    if (!account?.connected || !matched || (provider !== 'free' && !matched.efforts.includes(REVIEW_EFFORT))) {
       throw new LaneFailure('not-found', '검토에 쓸 수 있는 모델이 아니에요.')
     }
     return openCardLocked(deps, folder, {
       scope: 'continue',
       quote: '',
-      lanes: { review: { company: provider, model: matched.model, effort: REVIEW_EFFORT } }
+      lanes: { review: { company: provider, model: matched.model, effort: provider === 'free' ? null : REVIEW_EFFORT } }
     }, 'change')
   })
 }
@@ -304,7 +307,7 @@ async function decideCardLocked(
   // [C1-06] 이 대조는 권한을 바꾸기 직전이라 캐시를 건너뛴 관측을 쓴다(15초 전 값이면 A 카드가
   // B 계정에서 적용된다). 관측 실패(`null`)도 불일치다 — 모르면 닫는다.
   const fresh = deps.freshAccount ?? deps.account
-  for (const company of ['claude', 'codex'] as const) {
+  for (const company of ['claude', 'codex', 'free'] as const) {
     const bound = stored.boundAccounts[company]
     if (!bound) continue
     const account = await fresh(company)
@@ -487,7 +490,7 @@ function boundAccounts(
   views: Partial<Record<Provider, LaneAccountView>>
 ): Partial<Record<Provider, string>> {
   const bound: Partial<Record<Provider, string>> = {}
-  for (const company of ['claude', 'codex'] as const) {
+  for (const company of ['claude', 'codex', 'free'] as const) {
     const view = views[company]
     if (!view) continue
     const involved = plans.some(plan => WORK_LANES.some(({ lane }) => plan?.[lane]?.company === company))
@@ -532,7 +535,7 @@ function designRef(recommended: LaneRecommendation | null): ModelRef | null {
 
 function accountSnapshots(executions: Partial<Record<Provider, ExecutionAccount>>): AccountSnapshot[] {
   const snapshots: AccountSnapshot[] = []
-  for (const company of ['claude', 'codex'] as const) {
+  for (const company of ['claude', 'codex', 'free'] as const) {
     const account = executions[company]
     if (account) snapshots.push(account.account)
   }

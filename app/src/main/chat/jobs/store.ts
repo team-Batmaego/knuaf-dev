@@ -91,7 +91,7 @@ export interface TemporaryPlan {
 const EVENT_LIMIT = 500
 
 const LANES = ['design', 'research', 'writing', 'repeat', 'review'] as const
-const COMPANIES = ['claude', 'codex']
+const COMPANIES = ['claude', 'codex', 'free']
 const HOWS = ['main', 'sub', 'relay']
 
 function isLaneEntry(value: unknown): boolean {

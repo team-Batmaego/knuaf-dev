@@ -11,10 +11,10 @@
 import type { Provider } from '../../shared/chat'
 import { LaneFailure } from './failure'
 
-export const PROVIDERS = ['claude', 'codex'] as const
+export const PROVIDERS = ['claude', 'codex', 'free'] as const
 
 export function isProvider(value: unknown): value is Provider {
-  return value === 'claude' || value === 'codex'
+  return value === 'claude' || value === 'codex' || value === 'free'
 }
 
 /** 아니면 `internal` 로 닫는다 — 화면 값이 틀린 것이므로 성공을 만들지 않는다. */

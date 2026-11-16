@@ -729,7 +729,7 @@ export function cleanupEmptyClaudeDirs(rootReal: string): string[] {
 export interface SentEntry {
   id: string
   folder: string
-  provider: 'claude' | 'codex'
+  provider: 'claude' | 'codex' | 'free'
   convId: string
   /** 학생이 보낸 글자 그대로 */
   text: string

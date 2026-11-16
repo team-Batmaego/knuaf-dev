@@ -1,3 +1,5 @@
+import { FreeRelayError, providerEnv } from './free/provider'
+import { providerOf } from './lanes/providers'
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, systemPreferences } from 'electron'
 import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, readSync, statSync } from 'node:fs'
 import { mkdir, lstat } from 'node:fs/promises'
@@ -603,8 +605,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
    * 주문서가 준 폴더다(엔진이 `SKILL.md` 를 붙인다). 격리 판정은 `request.isolation` 이 정본이다.
    */
   const relayOptions = (company: Provider, root: string): AgentOptions => {
-    const binary = findExecutable(company)
-    if (!binary) throw new Error(`${company === 'codex' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 설치 안내를 열어 주세요.`)
+    providerOf(company)
+    const binary = findExecutable(company === 'free' ? 'codex' : company)
+    if (!binary) throw new Error(`${company !== 'claude' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 설치 안내를 열어 주세요.`)
     // 본대화와 같은 PATH 앞자리(프로젝트 .venv → 번들 CPython) — 담당이 도우미와 같은
     // 인터프리터를 찾아야 스킬 스크립트가 같은 결과를 낸다.
     const python = venvPython(currentRoot) ?? bundledPython()
@@ -612,7 +615,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       binary,
       root,
       skill: '',
-      env: subscriptionEnv(python ? [dirname(python)] : []),
+      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [])),
       openExternal: (url) => shell.openExternal(url)
     }
   }
@@ -622,7 +625,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     appDir: join(app.getPath('userData'), 'relay'),
     env: () => subscriptionEnv(),
     openExternal: (url) => shell.openExternal(url),
-    binary: company => findExecutable(company)
+    binary: company => findExecutable(providerOf(company) === 'free' ? 'codex' : company)
   })
   /**
    * §4 본대화 인계 — 앱이 쥔 `ConversationHandoff` 하나. 새 대화 열기·닫기는 `chat` 이 알고
@@ -651,6 +654,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     // 앱의 대화 정체성은 (폴더, 회사) 하나다 — 넘겨받는 대화 id 도 같은 규칙으로 짓는다.
     mintId: (root, company) => `${company}\0${root}`
   })
+  let activeMainCompany: Provider = loadSettings().provider_choice?.provider ?? (loadSettings().helper_mode === 'codex-chat' ? 'codex' : 'claude')
   /** `lanes:changed` 송신기 — `chat` 이 선 뒤에 만든다(저장소·러너를 그때 읽는다). */
   let lanesHub: LanesHub | null = null
 
@@ -729,8 +733,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     store: chat.lanesStore(),
     // 러너 이음매가 없으면(담당 기능이 꺼져 있으면) 줄 집합도 비운다.
     runner: chat.lanesRunner(),
-    // 본대화 회사 — 학생이 고른 대화 공급자. 고른 적이 없으면 설계 차선은 Claude 로 고정된다.
-    mainCompany: loadSettings().provider_choice?.provider ?? 'claude',
+    // 설정 변경 뒤에도 설계는 현재 본대화 회사를 읽는다.
+    get mainCompany() { return loadSettings().provider_choice?.provider ?? activeMainCompany },
+    designChoice: () => loadSettings().chat_models?.[loadSettings().provider_choice?.provider ?? activeMainCompany] ?? { model: null, effort: null },
     account: company => chat.laneAccount(company),
     archives: root => chat.handoffArchives(root),
     extraLines: root => chat.handoffLines(root)
@@ -757,7 +762,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       if (!currentRoot) return false
       try { return canonical(currentRoot) === folder } catch { return false }
     },
-    mainCompany: loadSettings().provider_choice?.provider ?? 'claude',
+    get mainCompany() { return loadSettings().provider_choice?.provider ?? activeMainCompany },
+    designChoice: () => loadSettings().chat_models?.[loadSettings().provider_choice?.provider ?? activeMainCompany] ?? { model: null, effort: null },
     applyDesign: async (root, design) => {
       const before = loadSettings().chat_models?.[design.company] ?? null
       if (!design.model) return false
@@ -800,8 +806,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('app-update:open-page', () => updateResult(async () => { await appUpdates.openPage(); return true }))
   ipcMain.handle('app-update:cancel', () => ({ result: appUpdates.cancel() }))
   void appUpdates.check()
-  const chatFail = (e: unknown): { error: { code: string; message: string } } => ({ error: { code: e instanceof UpdateSuspendedError ? e.code : 'chat', message: e instanceof Error ? e.message : String(e) } })
-  ipcMain.handle('chat:snapshot', (_e, root: string, provider: Provider) => { try { return { result: chat.snapshot(root, provider) } } catch (e) { return chatFail(e) } })
+  const chatFail = (e: unknown): { error: { code: string; message: string } } => ({ error: { code: e instanceof FreeRelayError ? e.kind : e instanceof UpdateSuspendedError ? e.code : 'chat', message: e instanceof Error ? e.message : String(e) } })
+  ipcMain.handle('chat:snapshot', (_e, root: string, provider: Provider) => { try { activeMainCompany = providerOf(provider); return { result: chat.snapshot(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:draft', (_e, root: string) => { try { return { result: chat.draft(root) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:set-draft', (_e, root: string, text: string, expected?: string) => { try { return { result: chat.setDraft(root, text, expected) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:status', async (_e, root: string, provider: Provider) => { try { return { result: await chat.status(root, provider) } } catch (e) { return chatFail(e) } })

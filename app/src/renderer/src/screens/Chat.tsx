@@ -28,7 +28,7 @@ import { eventView, lineView, stopLabel, type LaneActionId } from '../laneLines'
 import type { ArchivedChat, CardAction, LaneLine } from '../../../shared/lanes-ipc'
 import { RuntimeFix } from '../components/RuntimeFix'
 import { QUESTION_FORM } from '../copy'
-import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, projectFolderCreationError } from '../copy'
+import { CHAT, CHAT_EVENT, CLOSE_LABEL, ONBOARD, PROJECT_FOLDER, PROVIDER_NAME, REPORT, REVIEW, RUNTIME, describeChatError, describeFreeRelayError, projectFolderCreationError } from '../copy'
 import { chatSuggestion } from '../suggest'
 import { joinPath } from '../paths'
 import { useStage } from '../components/useStage'
@@ -714,7 +714,7 @@ export function Chat() {
   }, [startIntent, projectRoot, snapshot, status, provider, hasRevision, send, disarmStart])
 
   const chatErr = error ? describeChatError(error) : null
-  const snapErr = snapshot?.error && snapshot.state !== 'interrupted' && snapshot.state !== 'stopped' ? describeChatError(snapshot.error) : null
+  const snapErr = snapshot && (snapshot.error || snapshot.errorKind) && snapshot.state !== 'interrupted' && snapshot.state !== 'stopped' ? (snapshot.errorKind ? describeFreeRelayError(snapshot.errorKind) : describeChatError(snapshot.error!)) : null
   /**
    * 스냅샷 오류·중단 안내는 main 이 쥔 값이라 화면에서 지울 수 없다 — 학생이 닫은 **그 건**만 기억해 감춘다.
    * 건 = 폴더·공급자·마지막 메시지·문구. 문구만 기억하면 다음 턴의 같은 오류까지 숨는다(검토 RETAKE-UI-R1-01).
@@ -723,14 +723,15 @@ export function Chat() {
   const noteKey = (kind: string, text: string): string => [projectRoot, snapshot?.provider, snapshot?.messages.at(-1)?.id ?? '', kind, text].join('\0')
   const closeNote = (key: string): void => setClosedNotes((prev) => new Set(prev).add(key))
   const haltKey = snapshot?.state === 'stopped' || snapshot?.state === 'interrupted' ? noteKey(snapshot.state, '') : null
-  const snapErrKey = snapErr && snapshot?.error ? noteKey('error', snapshot.error) : null
+  const snapErrKey = snapErr && snapshot ? noteKey('error', snapshot.errorKind ?? snapshot.error ?? '') : null
   /**
    * 끊긴 자리에서 무엇을 말하고 무엇을 권할지 — 연결 상태와 브라우저의 오프라인 신호를 쓴다.
    * 확인 실패(failed·unknown)는 로그인 안내가 아니라 "확인하지 못했어요 + 다시 확인"이다.
    */
   const connFailed = connState === 'failed' || connState === 'unknown'
-  const chatConnTitle = connFailed ? CHAT.statusFailTitle : connState === 'no-tool' ? CHAT.needInstallTitle : CHAT.needLoginTitleFor(provider)
-  const chatConnBody = connFailed ? CHAT.statusFailBody : connState === 'no-tool' ? CHAT.needInstallBody : CHAT.needLoginBody
+  const freeConnError = provider === 'free' && status?.errorKind ? describeFreeRelayError(status.errorKind) : null
+  const chatConnTitle = freeConnError?.title ?? (connFailed ? CHAT.statusFailTitle : connState === 'no-tool' ? CHAT.needInstallTitle : CHAT.needLoginTitleFor(provider))
+  const chatConnBody = freeConnError ? null : connFailed ? CHAT.statusFailBody : connState === 'no-tool' ? CHAT.needInstallBody : CHAT.needLoginBody
   const chatConnSub = offline && connState === 'need-login'
     ? <>{ONBOARD.offlineHint} {chatConnBody}</>
     : chatConnBody
@@ -948,7 +949,7 @@ export function Chat() {
         onWriteTalk={requestDraftText} />
 
       <div className="chat-thread" ref={threadRef} onScroll={onThreadScroll}>
-        {switchNotice && <div className="chat-event" role="status">{PROVIDER_NAME[switchNotice]}는 {PROVIDER_NAME[switchNotice === 'claude' ? 'codex' : 'claude']}와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.</div>}
+        {switchNotice && <div className="chat-event" role="status">{PROVIDER_NAME[switchNotice]}는 다른 AI와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.</div>}
         {thread.map((t) => <Fragment key={t.key}>{t.node}</Fragment>)}
       </div>
 
@@ -987,7 +988,7 @@ export function Chat() {
             actions={lastUncertain ? <button type="button" className="lk" onClick={() => void send(lastUncertain.text)} disabled={running || busy || !!waiting}>{CHAT.resend}</button> : undefined}
             onClose={() => closeNote(haltKey)} onReport={() => requestReport(snapshot.state === 'stopped' ? CHAT.stoppedTitle : CHAT.interruptedTitle)} />
         )}
-        {snapErr && snapErrKey && !closedNotes.has(snapErrKey) && <ZoneLine tone="bad" title={snapErr.title} sub={snapErr.action} raw={snapErr.raw} onClose={() => closeNote(snapErrKey)} onReport={() => requestReport(snapErr.title)} />}
+        {snapErr && snapErrKey && !closedNotes.has(snapErrKey) && <ZoneLine tone={toneOf(snapErr.kind)} title={snapErr.title} sub={snapErr.action} raw={snapErr.raw} onClose={() => closeNote(snapErrKey)} onReport={() => requestReport(snapErr.title)} />}
         {reportNotice && reportNotice !== 'no-folder' && <ZoneLine tone="info"
           title={reportNotice === 'status-failed' ? CHAT.statusFailTitle : reportNotice === 'disconnected' ? REPORT.disconnected : reportNotice === 'offline' ? REPORT.offline : REPORT.notice}
           sub={reportNotice === 'status-failed' ? CHAT.statusFailBody : zone.kind === 'permission' && reportNotice !== 'disconnected' ? REPORT.permission : undefined}

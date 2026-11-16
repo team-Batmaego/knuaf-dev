@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ChatMessage } from '../../../shared/chat'
+import type { ChatMessage, Provider } from '../../../shared/chat'
 import { continueAfterLimit, type LaneEntry, type LanePlan } from '../../../shared/lanes'
 import type { ArchivedChat, ArchivedChatSummary, ModelRef } from '../../../shared/lanes-ipc'
 import { readRecoverable, writeFileAtomic } from '../../safeWrite'
@@ -102,14 +102,14 @@ export interface ConversationHandoffOptions {
    *   소유를 넘긴다(REVIEW-C4 I-01).
    */
   account: {
-    propose: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
-    click: (company: 'claude' | 'codex') => Promise<ExecutionAccount | null>
+    propose: (company: Provider) => Promise<ExecutionAccount | null>
+    click: (company: Provider) => Promise<ExecutionAccount | null>
   }
   /**
    * §1-4 ② — 누르기 전 단추 조건에 쓰는 연결 쪽 선언(㉠). `true` 인 연결만 `usage:'unknown'`
    * 이어도 첫 턴 안 확인으로 넘긴다. 넘기지 않으면 `false`(안전 기본값 = 단추 없음).
    */
-  gateInTurn?: (company: 'claude' | 'codex') => boolean
+  gateInTurn?: (company: Provider) => boolean
   /**
    * Abort must stop in-flight creation; close also cleans a session returned after cancellation.
    *
@@ -127,7 +127,7 @@ export interface ConversationHandoffOptions {
    * 이어 받을 대화 id. 앱의 대화 정체성은 `(폴더, 회사)` 하나뿐이라(대화 id 를 따로 두지
    * 않는다) 호출자가 `<company>\0<root>` 로 짓는다 — 넘기지 않으면 무작위 id.
    */
-  mintId?: (root: string, company: 'claude' | 'codex') => string
+  mintId?: (root: string, company: Provider) => string
 }
 /** Deterministic mechanical packet. Full source remains in private storage, never an AI summary. */
 export function buildHandoffBundle(source: HandoffSource, archive: string, maxBytes: number): HandoffBundle | null {
@@ -233,6 +233,7 @@ export class ConversationHandoff {
    * 쓸 수 없다"는 뜻이라 새 제안을 열지 않는다.
    */
   async propose(source: HandoffSource, known?: ExecutionAccount | null): Promise<ConversationProposal | null> {
+    if (source.entry.company === 'free') return null
     if (source.reason !== 'limit' || source.entry.how !== 'main') return null
     const rootId = source.rootConversationId
     const generation = this.generations.get(rootId) ?? 0

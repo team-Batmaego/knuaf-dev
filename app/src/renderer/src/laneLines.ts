@@ -1,5 +1,5 @@
 import type { LaneAnnouncement, LaneLine, LaneEvent } from '../../shared/lanes-ipc'
-import type { LaneRejectReason } from '../../shared/lanes'
+import type { LaneRejectReason, Provider } from '../../shared/lanes'
 import type { JobLane } from '../../shared/lanes-ipc'
 import type { ZoneTone } from './components/ZoneLine'
 import {
@@ -405,7 +405,7 @@ export function eventView(event: LaneEvent): LaneEventView | null {
 
 /** 카드·설정 표가 함께 쓰는 값 모양 — `LaneEntry`·`CardRow` 양쪽이 만족한다. */
 export type LaneTextEntry = {
-  company: 'claude' | 'codex'
+  company: Provider
   model: string | null
   effort: string | null
   how: 'main' | 'sub' | 'relay'

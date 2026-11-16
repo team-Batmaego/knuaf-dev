@@ -53,6 +53,7 @@ export interface LaneHandlerDeps {
    */
   allowed: (folder: string) => boolean
   mainCompany: Provider
+  designChoice?: CardDeps['designChoice']
   /** 설계를 다른 회사로 바꾸는 적용(칩 다시 쓰기) — `null` 이면 그런 카드는 `unavailable`. */
   applyDesign: CardDeps['applyDesign']
   setConsent: (company: Provider, accountId: string, on: boolean) => { state: 'agreed' | 'withdrawn'; at: string | null }
@@ -126,7 +127,8 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     store: deps.store,
     account: deps.account,
     freshAccount: deps.freshAccount,
-    mainCompany: deps.mainCompany,
+    get mainCompany() { return deps.mainCompany },
+    designChoice: deps.designChoice,
     runner: deps.runner ? { records: () => deps.runner!.records(), stopJob: id => deps.runner!.stopJob(id) } : null,
     applyDesign: deps.applyDesign
   }
@@ -136,7 +138,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
 
   const refreshAccounts = async (): Promise<LaneAccountView[]> => {
     const views: LaneAccountView[] = []
-    for (const company of ['claude', 'codex'] as const) {
+    for (const company of ['claude', 'codex', 'free'] as const) {
       const account = await deps.account(company)
       if (!account) { accounts.delete(company); continue }
       accounts.set(company, account)
