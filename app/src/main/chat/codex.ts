@@ -265,7 +265,13 @@ export class CodexConnection implements AgentConnection {
               return { ok: false, detail: 'plugin-skills' }
             }
           }
-          if (!out.ok) diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length}`)
+          if (!out.ok) {
+            // Exact product names only: kordocMcp.MCP_SERVER_NAME and bundled Codex's node_repl
+            // (scripts/fetch-codex.mjs). Even short user names can contain secrets or personal data.
+            let userMcp = 0
+            const names = out.remaining.map((name) => name === MCP_SERVER_NAME || name === 'node_repl' ? name : `user-mcp-${++userMcp}`)
+            diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length} names=${JSON.stringify(names)}`)
+          }
           return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
           diag(`codex-lock stage=verify code=${codeOf(e)}`)
@@ -529,7 +535,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.5' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.6' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
