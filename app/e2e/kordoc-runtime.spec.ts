@@ -680,13 +680,13 @@ test('실패 뒤 10분 안에는 다시 안 받고, 성공하면 곧바로 다�
   expect(gate.mayStart(1000 + 10 * 60 * 1000 + 1)).toBe(true)
 })
 
-/** Electron 다리의 비공개 smoke 는 시험용 VM 안에서만 노출한다. */
+/** Electron 다리의 비공개 테스트 함수는 시험용 VM 안에서만 노출한다. */
 function loadAdapter(stubs: Record<string, unknown>, globals: Record<string, unknown> = {}) {
   const file = join(__dirname, '../src/main/kordocRuntime.ts')
   const js = transpileModule(readFileSync(file, 'utf-8'), {
     compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
   }).outputText
-  const factory = new Script(`(function(require,exports,__dirname){${js}\nexports.testSmoke = smoke;\n})`, { filename: file })
+  const factory = new Script(`(function(require,exports,__dirname){${js}\nexports.testSmoke = smoke;\nexports.testWriteHost = writeKordocHostFile;\nexports.testRemoveHost = removeKordocHostFile;\n})`, { filename: file })
     .runInNewContext({ process, console, setTimeout, clearTimeout, AbortController, ...globals })
   const realRequire = createRequire(file)
   const exports: Record<string, unknown> = {}
@@ -694,6 +694,8 @@ function loadAdapter(stubs: Record<string, unknown>, globals: Record<string, unk
   return exports as {
     startKordocWork: (delay?: number) => void
     testSmoke: (exe: string, dir: string, cli: string, signal?: AbortSignal) => Promise<void>
+    testWriteHost: (dir: string, spec: KordocSpec, target: KordocTarget) => void
+    testRemoveHost: () => void
   }
 }
 
@@ -753,6 +755,63 @@ test('smoke: 시간 초과·취소는 자식 close 뒤 정리하고, 빈 산출�
     expect(await result).toBe(mode === 'success' ? 'ok' : mode === 'empty' ? 'kordoc 확인 실행이 빈 파일이거나 파일을 만들지 않음' : mode === 'timeout' ? 'kordoc 확인 실행 시간 초과' : 'kordoc 확인 실행 취소')
     expect(existsSync(box)).toBe(false)
   }
+})
+
+test('호스트 안내 파일: R1 명령/파일·exe 지문을 쓰고 소유자 파일만 삭제한다', () => {
+  const root = tmpRoot()
+  const install = join(root, 'install')
+  const cache = join(root, 'cache')
+  mkdirSync(join(install, dirname(CLI)), { recursive: true })
+  mkdirSync(cache, { recursive: true })
+  writeFileSync(join(install, SHIM_NAME), SHIM_CONTENT)
+  writeFileSync(join(install, CLI), CLI_BODY)
+  const hostFile = join(cache, 'ginseng-goat', 'kordoc-host.json')
+  const fakeProcess = { ...process, env: { ...process.env, XDG_CACHE_HOME: cache }, execPath: process.execPath, pid: process.pid }
+  const adapter = loadAdapter({
+    electron: { app: { isPackaged: true, getVersion: () => '0.6.7' }, net: {} },
+    './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
+    './diagLog': { diag() {} },
+    'node:os': { homedir: () => root }
+  }, { process: fakeProcess })
+  adapter.testWriteHost(install, specOf(), targetOf(specOf()))
+  const data = JSON.parse(readFileSync(hostFile, 'utf8')) as Record<string, any>
+  const executableStat = statSync(process.execPath)
+  expect(data.schema).toBe(1)
+  expect(data.owner).toBe('knuaf-dev.app')
+  expect(data.kordoc_version).toBe('4.17.1')
+  expect(data.command).toEqual([process.execPath, '-r', join(install, SHIM_NAME), join(install, CLI)])
+  expect(data.files).toEqual(data.command.filter((arg: string) => arg.startsWith('/')))
+  expect(data.files[0]).toBe(data.command[0])
+  expect(data.files).toContain(data.command.at(-1))
+  expect(data.exe_stat).toEqual({ size: executableStat.size, mtime: Math.floor(executableStat.mtimeMs / 1000) })
+  expect(Object.keys(data.env).sort()).toEqual(['ELECTRON_RUN_AS_NODE'])
+  expect(statSync(hostFile).isFile()).toBe(true)
+  expect(statSync(hostFile).mode & 0o777).toBe(0o600)
+  adapter.testRemoveHost()
+  expect(existsSync(hostFile)).toBe(false)
+  mkdirSync(dirname(hostFile), { recursive: true })
+  writeFileSync(hostFile, JSON.stringify({ owner: 'someone-else' }))
+  adapter.testRemoveHost()
+  expect(existsSync(hostFile)).toBe(true)
+})
+
+test('호스트 안내 파일: 개발 빌드는 시험 경로를 지정해도 쓰거나 지우지 않는다', () => {
+  const root = tmpRoot()
+  const install = join(root, 'install')
+  const hostFile = join(root, 'host.json')
+  mkdirSync(join(install, dirname(CLI)), { recursive: true })
+  writeFileSync(join(install, SHIM_NAME), SHIM_CONTENT)
+  writeFileSync(join(install, CLI), CLI_BODY)
+  const adapter = loadAdapter({
+    electron: { app: { isPackaged: false }, net: {} },
+    './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
+    './diagLog': { diag() {} },
+    'node:os': { homedir: () => root }
+  }, { process: { ...process, env: { ...process.env, KNUAF_KORDOC_HOST_FILE: hostFile } } })
+  adapter.testWriteHost(install, specOf(), targetOf(specOf()))
+  expect(existsSync(hostFile)).toBe(false)
+  adapter.testRemoveHost()
+  expect(existsSync(hostFile)).toBe(false)
 })
 
 test('선택: retired 최신 설치를 건너뛰고 온전한 설치를 쓰며, 은퇴 시각을 보존한다', async () => {

@@ -13,13 +13,16 @@
  * `KNUAF_KORDOC_BASE_URL`)는 `app.isPackaged` 면 **읽지 않는다**.
  */
 import { app, net } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import type { KordocRuntime } from './chat/kordocMcp'
 import { diag } from './diagLog'
 import {
   SHIM_NAME,
+  insideDir,
   SMOKE_TIMEOUT_MS,
   cleanupKordocAt,
   createRetryGate,
@@ -33,6 +36,7 @@ import {
   type InstallDeps,
   type KordocSpec,
   type KordocStatus,
+  type KordocTarget,
   type Progress,
   type SpecState,
   type VerifyLedger
@@ -45,6 +49,62 @@ const RELEASE_BASE = 'https://github.com/team-Batmaego/knuaf-dev/releases/downlo
 /** 다시 시도 간격 — 같은 앱 실행 안에서 10분에 한 번(§4.7). */
 const RETRY_MS = 10 * 60 * 1000
 const START_DELAY_MS = 5_000
+
+const HOST_OWNER = 'knuaf-dev.app'
+const HOST_FILE_NAME = 'kordoc-host.json'
+
+function kordocHostPath(): string {
+  const override = !app.isPackaged ? process.env.KNUAF_KORDOC_HOST_FILE : undefined
+  if (override) return resolve(override)
+  return join(resolve(process.env.XDG_CACHE_HOME || join(homedir(), '.cache')), 'ginseng-goat', HOST_FILE_NAME)
+}
+
+function removeKordocHostFile(): void {
+  if (!app.isPackaged) return
+  const path = kordocHostPath()
+  try {
+    const current: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!current || typeof current !== 'object' || !('owner' in current) || current.owner !== HOST_OWNER) return
+    rmSync(path)
+  } catch { /* 없거나 소유자를 확인할 수 없는 파일은 건드리지 않는다 */ }
+}
+
+function writeKordocHostFile(dir: string, spec: KordocSpec, target: KordocTarget): void {
+  if (!app.isPackaged) return
+  const path = kordocHostPath()
+  const installDir = resolve(dir)
+  const executable = resolve(process.execPath)
+  const shim = join(installDir, SHIM_NAME)
+  const cli = resolve(installDir, spec.cli)
+  const exeStat = statSync(executable)
+  if (!exeStat.isFile() || !statSync(shim).isFile() || !statSync(cli).isFile() || !insideDir(installDir, shim) || !insideDir(installDir, cli)) {
+    throw new Error('kordoc 안내 파일의 실행 파일이 보통 파일이 아니거나 설치 폴더 밖')
+  }
+  const writtenAt = Math.floor(Date.now() / 1000)
+  const data = {
+    schema: 1,
+    owner: HOST_OWNER,
+    kordoc_version: spec.version,
+    install_dir: installDir,
+    release: spec.release,
+    payload_sha256: target.sha256,
+    command: [executable, '-r', shim, cli],
+    files: [executable, shim, cli],
+    exe_stat: { size: exeStat.size, mtime: Math.floor(exeStat.mtimeMs / 1000) },
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    app_version: app.getVersion(),
+    written_at: writtenAt
+  }
+  const folder = dirname(path)
+  mkdirSync(folder, { recursive: true, mode: 0o700 })
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 })
+    renameSync(temporary, path)
+  } finally {
+    try { rmSync(temporary, { force: true }) } catch { /* atomic rename already consumed it */ }
+  }
+}
 
 /** 이번 실행의 꼼꼼한 확인 기억(§4.5 r3). 앱 실행마다 새로 — 디스크에 안 남긴다. */
 const ledger: VerifyLedger = createVerifyLedger()
@@ -261,7 +321,11 @@ export function installKordocRuntime(onEvent?: (event: Progress) => void): Promi
   }
   const abort = new AbortController()
   controller = abort
-  const promise = installKordoc(installDeps(state, abort.signal, onEvent))
+  const promise = installKordoc(installDeps(state, abort.signal, onEvent)).then((dir) => {
+    try { writeKordocHostFile(dir, state.spec, state.target) }
+    catch (error) { diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`) }
+    return dir
+  })
   installing = promise
   return promise.finally(() => {
     installing = null
@@ -312,6 +376,7 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
       const state = kordocSpecState()
       if (state.kind !== 'ok') {
         if (state.kind === 'invalid') diag(`kordoc 명세 오류: ${state.reason}`)
+        removeKordocHostFile()
         return
       }
       const root = kordocRoot()
@@ -326,6 +391,10 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
         now: () => Date.now(),
         smoke
       })
+      if (dir) {
+        try { writeKordocHostFile(dir, state.spec, state.target) }
+        catch (error) { diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`) }
+      } else removeKordocHostFile()
       if (!dir && ledger.failed.size > 0) diag('kordoc 설치 확인 실패 — 쓰지 않는 폴더로 표시하고 다시 받는다')
       // ③ 정리 — 설치 여부와 무관하게 매 시작(§4.4).
       cleanupKordocAt({
@@ -359,7 +428,15 @@ export function withManagedKordoc(
     specState: kordocSpecState,
     resolveManaged: async () => {
       await verifyKordoc()
-      return managedKordoc()
+      const managed = managedKordoc()
+      if (managed) {
+        const state = kordocSpecState()
+        if (state.kind === 'ok') {
+          try { writeKordocHostFile(dirname(managed.nodeArgs[1]), state.spec, state.target) }
+          catch (error) { diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`) }
+        }
+      } else removeKordocHostFile()
+      return managed
     },
     startInstall: kickInstall,
     reportInvalid: (reason) => diag(`kordoc 명세 오류: ${reason}`)
