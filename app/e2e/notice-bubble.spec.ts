@@ -1172,3 +1172,57 @@ test('재무 카드는 막는 것부터 세 장만 보이고 첫 장만 펼친�
     await act(async () => root.unmount())
   })
 })
+
+test('둘째와 셋째 카드는 다시 읽은 내용이 바뀔 때 펼친다', async () => {
+  await withHostDom(async (document, act) => {
+    const makeCard = (key: string): NoticeRow => one({
+      schema: 'knuaf.notices/1', project_id: 'project', notices: [{
+        project_id: 'project', notice_identity: key, card_key: key, kind: 'finance_hole_figure',
+        choice_policy: 'none', blocking: true, dismissible: false, title: key,
+        choices: [{ value: 'fix', label: '고치기' }, { value: 'later', label: '나중에' }], items: []
+      }]
+    })
+    let cards = ['a', 'b', 'c'].map(makeCard)
+    const api = stackApi({ read: async () => ({ result: { notices: cards, dismissed: [] } }) })
+    const props = { root: ROOT, api }
+    const { host, root, render } = await paintStack(document, act, props)
+    const displayed = () => byClass(host, 'notice-card')
+    const buttons = (index: number) => walk(displayed()[index], (node) => node.tagName === 'BUTTON')
+    expect(visibleChoices(displayed()[1])).toHaveLength(0)
+    await render({ ...props, reloadKey: 1 })
+    expect(visibleChoices(displayed()[1])).toHaveLength(0)
+    await act(async () => pressChoice(buttons(1)[0]))
+    await act(async () => pressChoice(visibleChoices(displayed()[1])[1]))
+    expect(visibleChoices(displayed()[1])).toHaveLength(0)
+    cards = ['a', 'b2', 'c'].map(makeCard)
+    await render({ ...props, reloadKey: 2 })
+    expect(visibleChoices(displayed()[1])).toHaveLength(2)
+    expect(visibleChoices(displayed()[2])).toHaveLength(0)
+    cards = ['a', 'b3', 'c2'].map(makeCard)
+    await render({ ...props, reloadKey: 3 })
+    expect(visibleChoices(displayed()[1])).toHaveLength(2)
+    expect(visibleChoices(displayed()[2])).toHaveLength(2)
+    await act(async () => root.unmount())
+  })
+})
+
+test('기본 접힌 둘째 카드의 내용 변경도 펼친다', async () => {
+  await withHostDom(async (document, act) => {
+    const makeCard = (key: string): NoticeRow => one({
+      schema: 'knuaf.notices/1', project_id: 'project', notices: [{
+        project_id: 'project', notice_identity: key, card_key: key, kind: 'finance_hole_deficit',
+        choice_policy: 'none', blocking: false, dismissible: false, title: key,
+        choices: [{ value: 'later', label: '나중에' }], items: []
+      }]
+    })
+    let cards = ['a', 'b'].map(makeCard)
+    const api = stackApi({ read: async () => ({ result: { notices: cards, dismissed: [] } }) })
+    const props = { root: ROOT, api }
+    const { host, root, render } = await paintStack(document, act, props)
+    expect(visibleChoices(byClass(host, 'notice-card')[1])).toHaveLength(0)
+    cards = ['a', 'b2'].map(makeCard)
+    await render({ ...props, reloadKey: 1 })
+    expect(visibleChoices(byClass(host, 'notice-card')[1])).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+})

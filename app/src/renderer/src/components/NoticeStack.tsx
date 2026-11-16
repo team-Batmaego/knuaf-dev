@@ -89,6 +89,8 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
   // 접기는 알림 닫기와 별도이며 폴더와 카드 내용 지문에 묶는다.
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set())
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  // 생산자는 내용이 바뀌면 identity도 바꾸므로, 직전 읽기의 표시 자리와 비교한다.
+  const previousCards = useRef<{ root: string; keys: string[] } | null>(null)
   // X 로 닫은 **그 다시 보기 요청**의 열쇠 — 요청이 끝났으니 목록에 남아 있어도 다시 그리지 않는다.
   // 요청은 "열쇠가 `forceOpenKeys` 에 없었다가 새로 들어옴"이다(아래 render-phase 비교).
   const [consumed, setConsumed] = useState<readonly string[]>([])
@@ -135,6 +137,16 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
         return
       }
       const next: StackState = { root, notices: reply.result.notices, dismissed: reply.result.dismissed }
+      const keys = next.notices.filter((notice) => notice.choicePolicy === 'none')
+        .sort((a, b) => Number(!!b.blocking) - Number(!!a.blocking))
+        .slice(0, 3).map((notice) => JSON.stringify([root, notice.cardKey]))
+      const previous = previousCards.current
+      const changed = previous?.root === root ? keys.filter((key, index) => previous.keys[index] !== undefined && previous.keys[index] !== key && !previous.keys.includes(key)) : []
+      previousCards.current = { root, keys }
+      if (changed.length > 0) {
+        setExpanded((prev) => new Set([...prev, ...changed]))
+        setFolded((prev) => { const nextFolded = new Set(prev); changed.forEach((key) => nextFolded.delete(key)); return nextFolded })
+      }
       setState(next)
       // 파일에서 사라진 알림의 로컬 선택은 버린다 — 같은 열쇠가 다시 생기면 그때는 새 알림이다.
       setPicked((prev) => {
