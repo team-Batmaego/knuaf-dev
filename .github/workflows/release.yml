@@ -217,11 +217,9 @@ jobs:
           fi
           asar=$(find dist -name app.asar -print -quit)
           if [ -z "$asar" ]; then echo "::error::app.asar 를 찾지 못했습니다"; exit 1; fi
-          if ! grep -qF "$IN_TOKEN" "$asar"; then
-            echo "::error::출입증이 메인 묶음(app.asar)에 없습니다 - define 이 빌드에 전달되지 않았습니다"; exit 1
-          fi
+          node -e 'const fs = require("node:fs"); const token = process.env.IN_TOKEN; const files = process.argv.slice(1); const contains = (path) => fs.statSync(path).isDirectory() ? fs.readdirSync(path).some((name) => contains(`${path}/${name}`)) : fs.readFileSync(path).includes(token); if (!contains(files[0])) { console.error("::error::출입증이 메인 묶음(app.asar)에 없습니다 - define 이 빌드에 전달되지 않았습니다"); process.exit(1); } for (const dir of files.slice(1)) { if (contains(dir)) { console.error(`::error::${dir} 에 출입증이 들어갔습니다(화면 번들 유출)`); process.exit(1); } }' "$asar" out/renderer out/preload
           for d in out/renderer out/preload; do
-            if grep -rqF "$IN_TOKEN" "$d" || grep -rqE 'kf1_[A-Za-z0-9_-]{43}' "$d" || grep -rqF '__KNUAF_FREE_TOKEN__' "$d"; then
+            if grep -rqE 'kf1_[A-Za-z0-9_-]{43}' "$d" || grep -rqF '__KNUAF_FREE_TOKEN__' "$d"; then
               echo "::error::$d 에 출입증이 들어갔습니다(화면 번들 유출)"; exit 1
             fi
           done

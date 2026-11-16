@@ -223,6 +223,13 @@ test('릴리스 워크플로: 두 설치본 빌드가 출입증을 받고, 만�
   // 패키징(app.asar) 뒤를 보는 단계가 최소 하나는 있어야 한다 — out/ 만 보면 electron-builder 가
   // 무엇을 실었는지와 어긋날 수 있다(asar 는 out/ 을 그대로 담지만, 그것을 여기서 잰다).
   expect(joined.some((block) => /app\.asar/.test(block))).toBe(true)
+  const macGuard = joined.find((block) => block.includes("node -e 'const fs = require"))
+  const windowsGuard = joined.find((block) => block.includes('$bytes.Contains($env:IN_TOKEN)'))
+  expect(macGuard).toContain('process.env.IN_TOKEN')
+  expect(macGuard).not.toMatch(/grep\s+-[^\n]*\$IN_TOKEN/)
+  expect(windowsGuard).toContain('$env:IN_TOKEN')
+  expect(windowsGuard).toContain('.Contains(')
+  expect(windowsGuard).not.toMatch(/(?:grep|findstr|Select-String)\b[^\n]*\$env:IN_TOKEN/)
 })
 
 const freeRelease = loadTsModule(
@@ -246,25 +253,30 @@ test('[A1/A3] 출입증이 없으면 무료 회사는 "쓸 수 없음"으로 닫
   expect(account.account.company).toBe('free')
 
   // 오염된 상속 환경: 무료 표식·토큰이 남아 있으면 학생 본인 Codex 가 중계로 갈 수 있다.
-  const dirty = { HOME: '/x', KNUAF_FREE_TOKEN: FAKE_TOKEN, KNUAF_FREE_RELAY: '1' }
+  const dirty = { HOME: '/x', KNUAF_FREE_TOKEN: FAKE_TOKEN, KNUAF_FREE_RELAY: '1', KNUAF_FREE_RELAY_TOKEN: FAKE_TOKEN }
   for (const company of ['codex', 'claude'] as const) {
-    const env = free.providerEnv(company, dirty)
+    const env = freeRelease.providerEnv(company, dirty)
     expect(Object.keys(env), company).not.toContain('KNUAF_FREE_TOKEN')
     expect(Object.keys(env), company).not.toContain('KNUAF_FREE_RELAY')
+    expect(Object.keys(env), company).not.toContain('KNUAF_FREE_RELAY_TOKEN')
     expect(serverArgsFor(env).join(' '), company).not.toContain('knuaf-free')
   }
   // 원본은 건드리지 않는다.
   expect(dirty.KNUAF_FREE_TOKEN).toBe(FAKE_TOKEN)
-  // 구독 경로의 환경 조립도 같은 두 키를 지운다 — 여기가 실사용 경로다.
+  expect(dirty.KNUAF_FREE_RELAY_TOKEN).toBe(FAKE_TOKEN)
+  // 구독 경로의 환경 조립도 같은 세 키를 지운다 — 여기가 실사용 경로다.
   process.env.KNUAF_FREE_TOKEN = FAKE_TOKEN
   process.env.KNUAF_FREE_RELAY = '1'
+  process.env.KNUAF_FREE_RELAY_TOKEN = FAKE_TOKEN
   try {
     const env = subscriptionEnv()
     expect(Object.keys(env)).not.toContain('KNUAF_FREE_TOKEN')
     expect(Object.keys(env)).not.toContain('KNUAF_FREE_RELAY')
+    expect(Object.keys(env)).not.toContain('KNUAF_FREE_RELAY_TOKEN')
   } finally {
     delete process.env.KNUAF_FREE_TOKEN
     delete process.env.KNUAF_FREE_RELAY
+    delete process.env.KNUAF_FREE_RELAY_TOKEN
   }
 })
 

@@ -20,6 +20,7 @@ export function providerEnv(provider: Provider, source: NodeJS.ProcessEnv): Node
   const env = { ...source }
   delete env.KNUAF_FREE_TOKEN
   delete env.KNUAF_FREE_RELAY
+  delete env.KNUAF_FREE_RELAY_TOKEN
   if (provider !== 'free') return env
   const token = freeRelayToken()
   if (!token) throw new FreeRelayError('free-unavailable')

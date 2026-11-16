@@ -127,6 +127,7 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   }
   delete env.KNUAF_FREE_TOKEN
   delete env.KNUAF_FREE_RELAY
+  delete env.KNUAF_FREE_RELAY_TOKEN
   delete env.CLAUDECODE
   // No CLAUDE.md memory files at all — the project's skill contract (SKILL.md) is
   // authoritative, and a user's ~/.claude/CLAUDE.md @import would otherwise surface an
