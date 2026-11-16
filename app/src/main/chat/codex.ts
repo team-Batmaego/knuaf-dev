@@ -17,7 +17,7 @@ import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
 import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
-import { appThreadLockPlan, appThreadLockVerify, KORDOC_COLLISION_NOTE, type AppThreadPlan } from './codexToolLock'
+import { appThreadLockPlan, appThreadLockVerify, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
 import { codeOf, diag } from '../diagLog'
 import { FREE_RELAY_URL, FREE_MODELS, FreeRelayError, freeStatus, freeExecutionAccount, freeRelayError } from '../free/provider'
@@ -201,6 +201,10 @@ export class CodexConnection implements AgentConnection {
     if (!plan.ok) {
       diag(`codex-lock stage=plan reason=${plan.reason}`)
       throw new Error(plan.studentCopy)
+    }
+    // Restart without -c injection before any inventory/probe can start a contaminated MCP.
+    if (this.mcpSpec && plan.plan.kordocCollision) {
+      throw new McpSafetyError('학생 설정의 동명 한글 문서 도구는 붙이지 않아요', 'server-collision')
     }
     return plan.plan
   }
@@ -800,7 +804,6 @@ export class CodexConnection implements AgentConnection {
         await verifyCodexKordoc(rpc, { threadId: acquired.threadId, root: this.options.root, spec: this.mcpSpec })
         this.verifiedOn = rpc
       }
-      if (plan.kordocCollision) events.note(KORDOC_COLLISION_NOTE)
       if (this.mcpLocked) await verifyKordocAbsent(rpc, { threadId: acquired.threadId, names: plan.lockedNames })
       this.threadModel = this.loaded?.model ?? null
       this.threadEffort = this.loaded?.effort ?? null

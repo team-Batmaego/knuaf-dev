@@ -346,6 +346,8 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
   // 검증은 `realpathSync(root)` 로 탐침한다 — /var → /private/var 를 흉내 쪽에서도 맞춘다.
   const rootReal = realpathSync(root)
   const rpc = {
+    // 생성자 argv 를 함께 둔다 — main 쪽 `config/read` 대역이 `rpc.argv` 로 주입 여부를 본다.
+    argv,
     closed: false,
     lastStderr: '',
     onNotification: null,
@@ -367,19 +369,18 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
           if (failSkills) throw new Error('스킬 목록을 읽지 못했어요')
           return { data: [{ skills: [{ path: realpathSync(join(skill, 'SKILL.md')), enabled: true }] }] }
         // 병합된 설정 — `mcp_servers` 는 항상 있고(없으면 `{}`), 사용자 층 표가 그대로 보인다.
-        case 'config/read':
+        case 'config/read': {
+          const injected = Array.isArray(rpc.argv) && rpc.argv.join(' ').includes('mcp_servers.kordoc')
+          const kordoc = injected ? { command: specFor(root).command, args: specFor(root).args,
+              env_vars: Object.keys(specFor(root).env), enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+            : { command: '/bin/false', args: ['/tmp/kordoc/dist/mcp.js'], enabled: true,
+                enabled_tools: ['generate_document', 'parse_document'], env: { KORDOC_ROOT: '/tmp' } }
           return { config: { mcp_servers: userKordoc
-            ? {
-                kordoc: {
-                  command: '/bin/false',
-                  args: ['/tmp/kordoc/dist/mcp.js'],
-                  enabled: true,
-                  enabled_tools: ['generate_document', 'parse_document'],
-                  env: { KORDOC_ROOT: '/tmp' }
-                },
-                foreign: { command: '/bin/false', args: ['/tmp/other.js'], enabled: true }
-              }
-            : {} } }
+            ? { kordoc, foreign: { command: '/bin/false', args: ['/tmp/other.js'], enabled: true } }
+            : injected ? { kordoc: { ...kordoc, enabled: true, environment_id: 'local' } } : {} }, layers: userKordoc
+              ? [{ name: { type: 'user' }, config: { mcp_servers: { kordoc } } }]
+              : injected ? [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc } } }] : [] }
+        }
         case 'thread/start':
         case 'thread/resume':
           rpc.threadConfig = params.config
@@ -391,8 +392,11 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
           // (첫 프로세스는 항상 있고, 재시도 프로세스는 없다. `liveWithoutArg` 는 인자 없이도 사는 반례.)
           const oursAlive = liveWithoutArg || argv.some((a, i) => i > 0 && argv[i - 1] === '-c' && a.startsWith('mcp_servers.kordoc.'))
           if (!userKordoc) {
+            // 이 프로세스가 띄운 kordoc 은 상태가 비어(null) 오고(main 2d22f4e — 소유 근거는 config/read 층),
+            // 인자 없이 살아 있는 반례(`liveWithoutArg`)만 `connected` 로 보인다.
+            const injectedHere = argv.some((a, i) => i > 0 && argv[i - 1] === '-c' && a.startsWith('mcp_servers.kordoc.'))
             return { data: oursAlive
-              ? [{ name: 'kordoc', runtimeStatus: 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }]
+              ? [{ name: 'kordoc', runtimeStatus: injectedHere ? null : 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }]
               : [] }
           }
           // 잠갔으면 프로세스가 뜨지 않는다 — 목록에는 `disabled` 로만 남는다(실측 fix1-filter).
