@@ -3,10 +3,15 @@ import { useProject } from '../store/project'
 import { useChat } from '../store/chat'
 import type { Settings } from '../../../shared/types'
 import { PROJECT_FOLDER } from '../copy'
+import { SupportDialog } from './SupportDialog'
+import { SidebarUpdateCard } from './SidebarUpdateCard'
+import { SUPPORT } from '../copy-support'
+import './support.css'
 
 export function ProjectSidebar() {
   const [drawer, setDrawer] = useState(false)
   const [openError, setOpenError] = useState(false)
+  const [supportOpen, setSupportOpen] = useState(false)
   const root = useProject((s) => s.root)
   const recent = useProject((s) => s.settings?.recent ?? [])
   const loading = useProject((s) => s.loading)
@@ -50,6 +55,11 @@ export function ProjectSidebar() {
         {window.knuaf.platform === 'darwin' ? PROJECT_FOLDER.finder : PROJECT_FOLDER.explorer}
       </button>}
       {openError && <p role="alert" className="caption">{PROJECT_FOLDER.openFailed}</p>}
+      <div className="sidebar-bottom">
+        <SidebarUpdateCard />
+        <button className="support-trigger" onClick={() => setSupportOpen(true)}><span aria-hidden="true">♥</span> {SUPPORT.title}</button>
+      </div>
     </aside>
+    <SupportDialog open={supportOpen} onClose={() => setSupportOpen(false)} />
   </>
 }

@@ -8,6 +8,7 @@ import { insideByFileId } from './file-identity'
 import { registerProgressIpc } from './progress'
 // link (v0.6.4 ⑤): 대화 속 http(s) 주소 열기 — 채널 하나(`link:open`), main이 주소를 다시 본다.
 import { registerLinkIpc } from './links'
+import { registerReleaseNotes } from './releaseNotes'
 // paper-images (v0.6.4 사진 갈래): 종이 칸 그림 — 스킴(`knuaf-img:`) 처리기 하나. electron 값 import 없음.
 import { createPaperImages } from './paper-images'
 import type { PaperImages } from './paper-images'
@@ -115,6 +116,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const store = new SkillStore(app.getPath('userData'), skillSource(APP_ROOT, app.isPackaged, process.resourcesPath), app.getVersion(), config.keys)
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
   configureSkillSource(() => store.resolveSkillSource())
+  registerReleaseNotes(() => store.resolveSkillSource(), APP_ROOT)
   const updates = new SkillUpdates(store, {
     config, fetch: netRequestTransport,
     restartSidecar: () => sidecar.restart(),

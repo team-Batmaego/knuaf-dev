@@ -67,7 +67,8 @@
       "edits-store",
       "sameword",
       "guard-codex-thread-lock",
-      "kordoc-mcp-policy"
+      "kordoc-mcp-policy",
+      "support-sidebar"
     ],
     [
       "artifacts-states",
@@ -101,7 +102,8 @@
       "recheck",
       "viewer-edit",
       "guard-codex-tool-lock",
-      "kordoc-mcp-real"
+      "kordoc-mcp-real",
+      "news-release-notes"
     ],
     [
       "app-update-install-mode",
@@ -135,7 +137,8 @@
       "recheck-screen",
       "guard-claude-skill-host",
       "guard-key",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "app-update-recheck"
     ],
     [
       "agent",
@@ -255,7 +258,9 @@
       "guard-codex-tool-lock",
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "support-sidebar",
+      "app-update-recheck"
     ],
     [
       "agent-busy",
@@ -338,7 +343,8 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "news-release-notes"
     ]
   ]
 }

@@ -5,6 +5,7 @@ import type { NoticeChoiceValue, NoticeRow } from '../shared/notice'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 import type { ProgressFile } from '../shared/progress-file'
 import type { LinkOpenReply } from '../shared/link'
+import type { NewsState } from '../shared/types'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -103,6 +104,10 @@ const api = {
   windowInfo: () => ipcRenderer.invoke('window:info'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: Record<string, unknown>) => ipcRenderer.invoke('settings:set', patch),
+  news: {
+    state: (): Promise<NewsState> => ipcRenderer.invoke('news:state'),
+    seen: (versions: { app: string; skill: string | null }): Promise<void> => ipcRenderer.invoke('news:seen', versions)
+  },
   sidecarInfo: () => ipcRenderer.invoke('sidecar:info'),
   sidecarRestart: () => ipcRenderer.invoke('sidecar:restart'),
   update: {

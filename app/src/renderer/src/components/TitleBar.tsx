@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
 import { PopHead, Popover, PopRow, PopSep } from './Popover'
 import { StageMenu } from './StageMenu'
@@ -9,6 +9,10 @@ import { useShallow } from 'zustand/react/shallow'
 import { AppUpdateDialog, useUpdateSubscription, useUpdates } from './Updates'
 import { UPDATE } from '../copy'
 import { MENUS } from '../copy-menus'
+import { NewsDialog } from './NewsDialog'
+import type { NewsState } from '../../../shared/types'
+import { NEWS } from '../copy-news'
+import './news.css'
 
 /**
  * 제목줄 (DESIGN §1-3, 시안 ③④⑯).
@@ -27,6 +31,19 @@ export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
   const skillUpdate = useUpdates(s => s.skill)
   const appUpdate = useUpdates(s => s.app)
   const showUpdate = useUpdates(s => s.setDialog)
+  const [news, setNews] = useState<NewsState | null>(null)
+  const openSettings = useProject(s => s.openSettings)
+  useEffect(() => { void window.knuaf.news.state().then(setNews) }, [])
+  useEffect(() => {
+    const off = window.knuaf.update.onStatus(() => { void window.knuaf.news.state().then(next => setNews(old => old?.mode === 'dialog' ? old : next)) })
+    return off
+  }, [])
+  const openNews = async () => {
+    if (!news) return
+    await window.knuaf.news.seen({ app: news.app, skill: news.skill })
+    setNews({ ...news, mode: 'none', unread: [] })
+    openSettings('news:history')
+  }
   const blocked = appUpdate?.phase === 'blocked'
   const appAvailable = blocked || !!appUpdate?.latest && ['available', 'interrupted', 'error', 'downloading', 'preparing', 'launching'].includes(appUpdate.phase)
   const hasUpdate = skillUpdate?.phase === 'available' || appAvailable
@@ -87,6 +104,7 @@ export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
       {layout.kind === 'solo' && <span className="tbtn quiet">{TITLEBAR.paperLater}</span>}
 
 
+      {news?.mode === 'button' && <button type="button" className={`tbtn news-button${appAvailable ? ' news-defer-narrow' : ''}`} onClick={() => void openNews()}><span className="news-dot" aria-hidden="true" /><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 11v3h4l9 4V7l-9 4H3zM7 14l2 5h3l-2-5M19 10v5" /></svg>{NEWS.button}</button>}
       {onReport && <button type="button" className="tbtn" style={{ fontSize: 12.5, color: 'var(--ink-2)' }} title={MENUS.reportTitle} onClick={onReport}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: 'var(--muted)' }}><path d="M5 21V4m0 1h12l-2 4 2 4H5" /></svg>{MENUS.report}
       </button>}
@@ -94,7 +112,8 @@ export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
         <Icon name="gear" size={17} />
         {hasUpdate && <span aria-hidden="true" style={{ position: 'absolute', right: 3, top: 3, width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)' }} />}
       </button>
-      {appAvailable && <button className="tbtn" style={{ borderRadius: 5, background: 'var(--btn-bg)', color: 'var(--btn-ink)', border: '1px solid var(--btn-border)' }} onClick={() => showUpdate(true)}>{blocked ? UPDATE.appBlockedTitle : UPDATE.title}</button>}
+      {appAvailable && <button className="tbtn news-app-update" onClick={() => showUpdate(true)}>{blocked ? UPDATE.appBlockedTitle : UPDATE.title}</button>}
+      {news?.mode === 'dialog' && <NewsDialog state={news} onSeen={() => setNews({ ...news, mode: 'none', unread: [] })} />}
       <AppUpdateDialog />
     </header>
   )
