@@ -6,6 +6,7 @@ import { Icon } from './Icon'
 import { useChat } from '../store/chat'
 import { useProject } from '../store/project'
 import { CHAT, MODEL_PICKER, PROVIDER_NAME } from '../copy'
+import { modelName } from '../copy-lanes'
 import { codexRecommendations, isCrossProviderModelId, type ModelChoice } from '../../../shared/chat'
 
 /** 회사 전환은 AccountChooser, 같은 회사의 모델 선택은 이 부품이 맡는다. */
@@ -75,7 +76,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   return (
     <div className="pop-host composer-model-host" ref={host}>
       <button type="button" className="model" ref={trigger} title={CHAT.modelChipTitle} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span>{PROVIDER_NAME[provider]} · {needsReselection ? MODEL_PICKER.reselectionTitle : state === 'connected' && choice ? selected?.name ?? choice.model : connection} · {MODEL_PICKER.depthChip(depth)}</span><Icon name="chevronDown" size={12} />
+        <span>{PROVIDER_NAME[provider]} · {needsReselection ? MODEL_PICKER.reselectionTitle : state === 'connected' && choice ? (provider === 'free' ? modelName(choice.model) : selected?.name ?? choice.model) : connection}{provider !== 'free' && ` · ${MODEL_PICKER.depthChip(depth)}`}</span><Icon name="chevronDown" size={12} />
       </button>
       <Popover open={open} onClose={close} align="left" placement={direction} label={CHAT.modelChipTitle}>
         <div className="pop-scroll model-picker">
@@ -88,37 +89,38 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
             </div>
             {state !== 'connected' ? <p className="model-picker-note">{MODEL_PICKER.connectFirst}</p> : <>
               {needsReselection && <p className="model-picker-note" role="alert">{MODEL_PICKER.reselectionRequired}</p>}
-              <button type="button" className={`pop-row model-option${!choice && !needsReselection ? ' cur' : ''}`} aria-pressed={!choice && !needsReselection} disabled={saving} onClick={() => void pick(null)}>
+              {provider !== 'free' && <button type="button" className={`pop-row model-option${!choice && !needsReselection ? ' cur' : ''}`} aria-pressed={!choice && !needsReselection} disabled={saving} onClick={() => void pick(null)}>
                 <span className="c"><b>{MODEL_PICKER.accountDefault}</b><small>{MODEL_PICKER.accountDefaultHintFor(PROVIDER_NAME[provider])}</small></span>
                 {!choice && !needsReselection && <Icon name="check" size={16} />}
-              </button>
+              </button>}
               {loading && <p className="model-picker-note" role="status">{MODEL_PICKER.loading}</p>}
               {listError ? <div className="model-picker-note" role="alert"><p>{MODEL_PICKER.listFailed}</p><small>{listError}</small><button type="button" onClick={() => void loadModels(provider)} disabled={loading}>{CHAT.recheck}</button></div>
                 : catalog?.map((m) => {
                   const recommended = recommendations.byModel[m.model]
                   return <button type="button" key={m.model} className={`pop-row model-option${choice?.model === m.model ? ' cur' : ''}`} aria-pressed={choice?.model === m.model} disabled={saving || loading} onClick={() => void pick({ model: m.model, effort: null })}>
-                    <span className="c"><b>{m.name}</b><small>{recommended ? MODEL_PICKER.purpose(recommended.purpose) : m.description || MODEL_PICKER.otherModel}</small></span>
+                    <span className="c"><b>{provider === 'free' ? modelName(m.model) : m.name}</b>{provider !== 'free' && <small>{recommended ? MODEL_PICKER.purpose(recommended.purpose) : m.description || MODEL_PICKER.otherModel}</small>}</span>
                     {recommended && <span className="model-recommend">{MODEL_PICKER.recommended}</span>}
                     {choice?.model === m.model && <Icon name="check" size={16} />}
                   </button>
                 })}
               {!loading && !listError && catalog?.length === 0 && <p className="model-picker-note">{MODEL_PICKER.empty}</p>}
-              <PopSep />
-              <label className="model-depth"><span>{CHAT.depthTitle}</span>
-                <select aria-label={CHAT.depthTitle} value={choice?.effort ?? ''} disabled={!selected || saving || loading || !!listError} onChange={(e) => { if (choice) void pick({ model: choice.model, effort: e.target.value || null }) }}>
-                  <option value="">{MODEL_PICKER.defaultDepth}</option>
-                  {selected?.efforts.map((e) => <option key={e} value={e}>{MODEL_PICKER.efforts[e] ?? e}</option>)}
-                </select>
-              </label>
-              {!choice && <p className="model-picker-note">{MODEL_PICKER.chooseForDepth}</p>}
+              {provider !== 'free' && <>
+                <PopSep />
+                <label className="model-depth"><span>{CHAT.depthTitle}</span>
+                  <select aria-label={CHAT.depthTitle} value={choice?.effort ?? ''} disabled={!selected || saving || loading || !!listError} onChange={(e) => { if (choice) void pick({ model: choice.model, effort: e.target.value || null }) }}>
+                    <option value="">{MODEL_PICKER.defaultDepth}</option>
+                    {selected?.efforts.map((e) => <option key={e} value={e}>{MODEL_PICKER.efforts[e] ?? e}</option>)}
+                  </select>
+                </label>
+                {!choice && <p className="model-picker-note">{MODEL_PICKER.chooseForDepth}</p>}
+              </>}
               {saving && <p className="model-picker-note" role="status">{MODEL_PICKER.saving}</p>}
               {saveError && <p className="model-picker-note" role="alert">{saveError}</p>}
               <p className="model-picker-note">{MODEL_PICKER.sameConversationFor(PROVIDER_NAME[provider])}</p>
               {provider === 'codex' && recommendations.lanes.some((l) => l.lane === 'review') && <p className="model-picker-note">{MODEL_PICKER.reviewNotice}</p>}
             </>}
           </>
-          <PopSep />
-          <p className="model-picker-note">{MODEL_PICKER.subscription}</p>
+          {provider !== 'free' && <><PopSep /><p className="model-picker-note">{MODEL_PICKER.subscription}</p></>}
         </div>
       </Popover>
     </div>

@@ -1,6 +1,7 @@
 import { MODEL_SELECTION_COPY } from '../../shared/copy'
 import { APP_NAME } from '../../shared/name'
 import { fileStateOf, isReviewExport, reviewBasisOf, type LoadLike } from '../../shared/files'
+import type { FreeRelayErrorKind } from '../../shared/chat'
 /**
  * copy.ts — every user-facing string of the companion app in one place.
  *
@@ -319,6 +320,20 @@ export function describeError(e: unknown): DescribedError {
     code === 'operation_not_committed' || code === 'committed_cleanup_pending' || code === 'indeterminate'
   ) ? `\n${JSON.stringify(e.data, null, 2)}` : ''
   return { ...copy, code, raw: (code ? `(${code}) ${message}` : message) + evidence }
+}
+
+/** 무료 중계가 알려 준 오류 종류만 학생에게 짧게 표시한다. */
+export function describeFreeRelayError(kind: FreeRelayErrorKind): DescribedError {
+  const titles: Record<typeof kind, string> = {
+    'free-unavailable': '무료 모델을 지금 사용할 수 없어요. 잠시 후 다시 시도해 주세요.',
+    'free-busy': '무료 모델이 붐비고 있어요. 잠시 후 다시 시도해 주세요.',
+    'free-minute-limit': '요청이 너무 많아요. 잠시 후 다시 시도해 주세요.',
+    'free-daily-limit': '오늘 무료 모델 사용량을 다 썼어요. 내일 다시 시도해 주세요.',
+    'free-off': '무료 모델이 꺼져 있어요. 나중에 다시 시도해 주세요.',
+    'free-auth': '무료 모델에 연결할 수 없어요. 나중에 다시 시도해 주세요.',
+    'free-error': '무료 모델이 답하지 못했어요. 잠시 후 다시 시도해 주세요.'
+  }
+  return { title: titles[kind], action: null, kind: 'warning', code: null, raw: '' }
 }
 
 /**
@@ -834,15 +849,15 @@ export const ONBOARD = {
 } as const
 
 /** 연결 도구 이름 — 설치가 필요할 때만, 그리고 어느 도구인지 구분할 때만 화면에 나온다. */
-export const CONNECT_TOOL: Record<'codex' | 'claude', string> = { codex: 'Codex', claude: 'Claude Code' }
-export const PROVIDER_NAME: Record<'codex' | 'claude', string> = { codex: 'ChatGPT', claude: 'Claude' }
+export const CONNECT_TOOL: Record<'codex' | 'claude' | 'free', string> = { codex: 'Codex', claude: 'Claude Code', free: '무료 모델' }
+export const PROVIDER_NAME: Record<'codex' | 'claude' | 'free', string> = { codex: 'ChatGPT', claude: 'Claude', free: '무료 모델' }
 
 /**
  * 연결 상태 한 줄 — 관찰한 것만 말한다. 확인하지 못한 것을 연결됨·끊김으로 꾸미지 않는다(R5 §6.3).
  * `failed`(도구는 있는데 대답을 못 들음)와 `unknown`(요청 자체가 실패)을 "로그인이 필요해요"로
  * 접지 않는다 — 그 구분이 `ConnectionStatus.probe` 다.
  */
-export function connectStateLine(provider: 'codex' | 'claude', state: string): string {
+export function connectStateLine(provider: 'codex' | 'claude' | 'free', state: string): string {
   switch (state) {
     case 'checking': return '연결 상태를 확인하고 있어요'
     case 'no-tool': return `연결 도구(${CONNECT_TOOL[provider]})를 먼저 설치해요`

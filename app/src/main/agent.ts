@@ -274,7 +274,8 @@ export function skillSource(appRoot: string, isPackaged: boolean, resourcesPath:
   return resolveSkillSource(bundled)
 }
 
-const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json']
+// Optional root files: copy and fingerprint only when present, including pre-delegation bundles.
+const SKILL_METADATA = ['version.json', 'skill.json', 'install-manifest.json', 'delegation.json']
 
 /** Walk `abs`, collecting "rel/path:sha256(content)" for the files installSkill copies. */
 function skillFingerprint(abs: string, rel: string, out: string[], strictHost: boolean): void {

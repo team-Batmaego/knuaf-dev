@@ -9,7 +9,7 @@ export interface TokenCounts {
 }
 export type TokenEvent =
   | { company: 'claude'; requestSequence: number; notificationSequence: number; usage: TokenCounts }
-  | { company: 'codex'; requestSequence: number; notificationSequence: number; last: TokenCounts; total: TokenCounts }
+  | { company: 'codex' | 'free'; requestSequence: number; notificationSequence: number; last: TokenCounts; total: TokenCounts }
 export interface TokenContext {
   conversationId: string
   jobId: string
@@ -36,7 +36,7 @@ export function tokenRecord(context: TokenContext, event: TokenEvent, at: string
     firstRequest: event.requestSequence === 1, requestSequence: event.requestSequence,
     notificationSequence: event.notificationSequence, at
   }
-  return event.company === 'codex'
+  return event.company !== 'claude'
     ? { ...base, last: counts(event.last), total: counts(event.total) }
     : { ...base, usage: counts(event.usage) }
 }
@@ -48,6 +48,6 @@ export function claudeTokens(usage: { input_tokens: number; output_tokens: numbe
   } }
 }
 /** app-server thread/tokenUsage/updated: preserve last and total separately, never accumulate total. */
-export function codexTokens(tokenUsage: { last: TokenCounts; total: TokenCounts }, requestSequence: number, notificationSequence: number): TokenEvent {
-  return { company: 'codex', requestSequence, notificationSequence, last: counts(tokenUsage.last), total: counts(tokenUsage.total) }
+export function codexTokens(tokenUsage: { last: TokenCounts; total: TokenCounts }, requestSequence: number, notificationSequence: number, company: 'codex' | 'free' = 'codex'): TokenEvent {
+  return { company, requestSequence, notificationSequence, last: counts(tokenUsage.last), total: counts(tokenUsage.total) }
 }

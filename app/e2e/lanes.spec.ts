@@ -63,6 +63,13 @@ function codex(over: { accountType?: string | null; models?: readonly ModelCatal
 }
 
 const EXPECTED_LANES: Record<LaneRowId, Record<WorkLane, LaneEntry>> = {
+  'free-only': {
+    design: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'main' },
+    research: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
+    writing: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
+    review: { company: 'free', model: 'glm-5.3-flash-free', effort: null, how: 'relay' }
+  },
   'codex-low': {
     design: { company: 'codex', model: 'terra', effort: null, how: 'main' },
     research: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
@@ -148,7 +155,7 @@ test('요금제 판정 — Codex는 chatgpt 로그인만 쓰고, Sol·Astra가 �
   expect(subscriptionCheck(codex({ accountType: 'apiKey' })).reason).toBe('codex-not-chatgpt')
 })
 
-test('요금제 조합이 레인표 8줄 중 어느 줄인지 고른다', () => {
+test('유료 요금제 조합이 레인표 8줄 중 어느 줄인지 고른다', () => {
   expect(selectLaneRow('high', 'high')).toBe('both-high')
   expect(selectLaneRow('high', 'low')).toBe('claude-high-codex-low')
   expect(selectLaneRow('low', 'high')).toBe('claude-low-codex-high')
@@ -160,7 +167,7 @@ test('요금제 조합이 레인표 8줄 중 어느 줄인지 고른다', () => 
   expect(selectLaneRow(null, null)).toBeNull()
 })
 
-test('LANE_TABLE 8줄의 40칸이 11-04 확정 표와 일치하고 초안 표시는 없다', () => {
+test('LANE_TABLE 9줄의 45칸이 제품 표와 일치하고 초안 표시는 없다', () => {
   expect(Object.keys(LANE_TABLE).sort()).toEqual(Object.keys(EXPECTED_LANES).sort())
   for (const rowId of Object.keys(EXPECTED_LANES) as LaneRowId[]) {
     expect(LANE_TABLE[rowId].lanes).toEqual(EXPECTED_LANES[rowId])
@@ -490,8 +497,14 @@ function catalogFor(account: AccountSnapshot): ModelCatalog {
   return account.company === 'claude' ? { claude: account.models } : { codex: account.models }
 }
 
-test('한도 이어 하기는 8개 표와 다섯 역할에서 반대 회사의 혼자 줄을 쓴다', () => {
-  for (const rowId of Object.keys(LANE_TABLE) as LaneRowId[]) {
+test('한도 이어 하기는 8개 유료 표와 다섯 역할에서 반대 회사의 혼자 줄을 쓰고, free-only는 null이다', () => {
+  for (const lane of ['design', 'research', 'writing', 'repeat', 'review'] as const) {
+    expect(
+      continueAfterLimit(lane, LANE_TABLE['free-only'].lanes[lane], claude(), CONTINUATION_STATE, { claude: CLAUDE_MODELS })
+    ).toBeNull()
+  }
+
+  for (const rowId of Object.keys(LANE_TABLE).filter((id) => id !== 'free-only') as Exclude<LaneRowId, 'free-only'>[]) {
     for (const lane of ['design', 'research', 'writing', 'repeat', 'review'] as const) {
       const failedEntry = LANE_TABLE[rowId].lanes[lane]
       const otherCompany = failedEntry.company === 'claude' ? 'codex' : 'claude'
