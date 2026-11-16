@@ -17,7 +17,7 @@
  */
 import { realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { MCP_SERVER_NAME, READ_TOOLS, advertisedReadTools, type KordocMcpSpec } from './kordocMcp'
+import { MCP_SERVER_NAME, READ_TOOLS, advertisedReadTools, codexKordocCollision, type KordocMcpSpec } from './kordocMcp'
 
 /** 검증에 실패한 이유. 연결 단계는 이것을 받아 MCP를 끄고 새 연결 객체로 다시 시도한다. */
 export class McpSafetyError extends Error {
@@ -32,7 +32,7 @@ export interface JsonRpcLike {
 }
 
 export interface VerifyOptions {
-  /** `thread/start`가 준 그 스레드. 목록 조회와 탐침 호출이 **같은 threadId**여야 한다. */
+  /** `thread/start`가 준 그 스레드. A/B 탐침은 이 스레드에 호출한다(목록은 프로세스 범위). */
   threadId: string
   /** 논문 폴더(학생이 고른 그 폴더). */
   root: string
@@ -178,9 +178,28 @@ function statusPages(result: unknown): { servers: unknown[]; cursor: string | nu
 /** 페이지 수 상한 — cursor 가 계속 새 값으로 늘어나는 서버에서도 끝난다. */
 const MAX_PAGES = 100
 
+/** 상태 목록에는 command/args가 없으므로 같은 프로세스의 유효 설정으로 주입 신원을 확인한다. */
+async function checkCommand(call: BudgetedRequests, opts: VerifyOptions): Promise<void> {
+  const result = asRecord(await call.request('config/read', {
+    cwd: opts.root, includeLayers: true
+  }, 'server-config'))
+  if (codexKordocCollision(result, opts.spec)) {
+    throw new McpSafetyError('학생 설정과 kordoc MCP 실행 환경을 분리하지 못했어요', 'server-collision')
+  }
+  const config = asRecord(result?.config)
+  const server = asRecord(asRecord(config?.mcp_servers)?.[MCP_SERVER_NAME])
+  if (!server || server.command !== opts.spec.command || !Array.isArray(server.args)
+    || server.args.length !== opts.spec.args.length
+    || server.args.some((arg, i) => arg !== opts.spec.args[i])
+    || server.enabled === false || server.url != null) {
+    throw new McpSafetyError('kordoc MCP 실행 명령이 앱이 주입한 명령과 달라요', 'server-command')
+  }
+}
+
 /**
- * 1·2단계: `mcpServerStatus/list`를 `nextCursor` 끝까지 모아 **서버 항목이 정확히 하나**이고
- * `runtimeStatus === 'connected'`가 될 때까지 1초 간격으로 재조회한다.
+ * 1·2단계: 프로세스 범위 `mcpServerStatus/list`를 끝까지 모아 서버가 정확히 하나인지 본다.
+ * 0.164/0.169의 프로세스 목록은 runtimeStatus:null이다. null은 연결 성공이 아니라
+ * 신원·읽기 도구 검사와 A/B 실호출로 넘어갈 후보일 뿐이다. starting은 계속 기다린다.
  *
  * 상한 검사는 **응답을 받은 직후·사용 전**에 한다 — 늦게 온 connected 는 통과가 아니다.
  */
@@ -201,7 +220,6 @@ async function waitForConnected(
     do {
       const page = await call.request('mcpServerStatus/list', {
         serverName: MCP_SERVER_NAME,
-        threadId: opts.threadId,
         detail: 'full',
         ...(cursor ? { cursor } : {})
       }, 'status-list')
@@ -220,13 +238,10 @@ async function waitForConnected(
     const server = asRecord(servers[0])
     if (server) {
       const status = server.runtimeStatus
-      if (typeof status !== 'string') throw new McpSafetyError('kordoc MCP 서버 상태를 읽지 못했어요', 'status-missing')
-      if (TERMINAL_STATUS.has(status)) throw new McpSafetyError(`kordoc MCP 서버가 ${status} 상태예요`, `status-${status}`)
-      if (status === 'connected') {
-        // connected 를 받았어도 상한을 먼저 본다 — 늦게 온 통과는 통과가 아니다.
-        if (call.expired()) throw new McpSafetyError('kordoc MCP 서버가 제한 시간 안에 연결되지 않았어요', 'startup-timeout')
-        return server
-      }
+      if (status !== null && typeof status !== 'string') throw new McpSafetyError('kordoc MCP 서버 상태를 읽지 못했어요', 'status-missing')
+      if (typeof status === 'string' && TERMINAL_STATUS.has(status)) throw new McpSafetyError(`kordoc MCP 서버가 ${status} 상태예요`, `status-${status}`)
+      // 응답 직후의 deadline 검사 뒤에만 후보를 넘긴다. A/B가 실제 연결을 확인한다.
+      if (status === 'connected' || status === null) return server
     }
     if (call.expired()) break
     await sleep(pollMs)
@@ -239,6 +254,7 @@ async function waitForConnected(
  * 기대 집합 = `READ_TOOLS ∩ (그 판이 광고하는 도구)` — 표에 없는 판은 부분집합 조건만 쓴다.
  */
 function checkTools(server: Record<string, unknown>, spec: KordocMcpSpec): void {
+  if (server.name !== MCP_SERVER_NAME) throw new McpSafetyError('kordoc MCP 상태 행의 이름이 달라요', 'server-name')
   if (server.toolsError !== null && server.toolsError !== undefined) {
     throw new McpSafetyError('kordoc MCP 도구 목록을 받지 못했어요', 'tools-error')
   }
@@ -419,6 +435,7 @@ export async function verifyCodexKordoc(request: JsonRpcLike, opts: VerifyOption
     throw new McpSafetyError('논문 폴더 경로를 확인하지 못해 kordoc MCP를 검증할 수 없어요', 'bad-root')
   }
   const call = budgeted(request, opts.now ?? Date.now, opts.startupTimeoutMs ?? 20_000)
+  await checkCommand(call, opts)
   const server = await waitForConnected(call, opts)
   checkTools(server, opts.spec)
 
