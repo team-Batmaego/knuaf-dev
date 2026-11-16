@@ -4,7 +4,7 @@ import { expect, test } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
-import { launch, navTo, openProject, synthProject } from './helpers'
+import { launch, navTo, openProject, synthProject, withoutProgressFile } from './helpers'
 import { writeCliShim } from './fixtures/fake-codex'
 
 // chat.status RPC가 실패하면 status가 null로 남는다 — 그건 "확인 중"이 아니라 확정된
@@ -42,6 +42,7 @@ test('a failed status check is a confirmed failure, not a dead end', async () =>
 //  아래 세 자리로 옮긴다.)
 test('한글 마무리 항목은 인터뷰 질문으로 세지 않는다 (GUI-10)', async () => {
   const root = synthProject()
+  withoutProgressFile(root)
   const { electronApp, page } = await launch()
   try {
     await openProject(page, root)
