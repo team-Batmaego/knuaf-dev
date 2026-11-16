@@ -687,7 +687,7 @@ function loadAdapter(stubs: Record<string, unknown>, globals: Record<string, unk
   const js = transpileModule(readFileSync(file, 'utf-8'), {
     compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
   }).outputText
-  const factory = new Script(`(function(require,exports,__dirname){${js}\nexports.testSmoke = smoke;\nexports.testWriteHost = writeKordocHostFile;\nexports.testRemoveHost = (hook) => removeKordocHostFile(hook);\nexports.testHostFileExists = hostFileExists;\nexports.testSameFile = sameFile;\n})`, { filename: file })
+  const factory = new Script(`(function(require,exports,__dirname){${js}\nexports.testSmoke = smoke;\nexports.testWriteHost = writeKordocHostFile;\nexports.testRemoveHost = (hook) => removeKordocHostFile(hook);\nexports.testHostFileExists = hostFileExists;\nexports.testSameFile = sameFile;\nexports.testInstall = installKordocRuntime;\n})`, { filename: file })
     .runInNewContext({ process, console, setTimeout, clearTimeout, AbortController, ...globals })
   const realRequire = createRequire(file)
   const exports: Record<string, unknown> = {}
@@ -699,6 +699,7 @@ function loadAdapter(stubs: Record<string, unknown>, globals: Record<string, unk
     testRemoveHost: (beforeFinalCheck?: () => void) => void
     testHostFileExists: (path: string) => boolean
     testSameFile: (path: string, expected: Stats) => boolean
+    testInstall: () => Promise<string>
   }
 }
 
@@ -726,6 +727,101 @@ test('시작 작업: isOnline 없는 호스트는 받지 않고, 배경 실패�
     expect(downloads).toBe(0)
     expect(logs.some((text) => text.includes('verification unavailable'))).toBe(failReady)
   }
+})
+
+test('패키징 설치 실패: 사용 가능한 설치가 없으면 소유 안내 파일을 지운다', async () => {
+  const root = tmpRoot()
+  const cache = join(root, 'cache')
+  const folder = join(cache, 'ginseng-goat')
+  mkdirSync(folder, { recursive: true })
+  const hostFile = join(folder, 'kordoc-host.json')
+  writeFileSync(hostFile, JSON.stringify({ owner: 'knuaf-dev.app' }))
+  const spec = specOf()
+  const adapter = loadAdapter({
+    electron: { app: { isPackaged: true }, net: {} },
+    './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
+    './diagLog': { diag() {} },
+    'node:os': { homedir: () => root },
+    './kordocRuntimeCore': {
+      ...require('../src/main/kordocRuntimeCore'),
+      readSpecState: () => ({ kind: 'ok', spec, targetKey: TARGET_KEY, target: targetOf(spec) }),
+      installKordoc: async () => { throw new Error('install rejected') },
+      usableKordocDir: () => null
+    }
+  }, { process: { ...process, env: { ...process.env, XDG_CACHE_HOME: cache } } })
+  await expect(adapter.testInstall()).rejects.toThrow('install rejected')
+  expect(existsSync(hostFile)).toBe(false)
+})
+
+test('패키징 시작 검증 예외: 사용 가능한 설치가 없으면 소유 안내 파일을 지운다', async () => {
+  const root = tmpRoot()
+  const cache = join(root, 'cache')
+  const folder = join(cache, 'ginseng-goat')
+  mkdirSync(folder, { recursive: true })
+  const hostFile = join(folder, 'kordoc-host.json')
+  writeFileSync(hostFile, JSON.stringify({ owner: 'knuaf-dev.app' }))
+  let start: (() => void) | undefined
+  const spec = specOf()
+  const adapter = loadAdapter({
+    electron: { app: { isPackaged: true }, net: {} },
+    './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
+    './diagLog': { diag() {} },
+    'node:os': { homedir: () => root },
+    './kordocRuntimeCore': {
+      ...require('../src/main/kordocRuntimeCore'),
+      readSpecState: () => ({ kind: 'ok', spec, targetKey: TARGET_KEY, target: targetOf(spec) }),
+      readyKordocDir: async () => { throw new Error('startup verify failed') },
+      usableKordocDir: () => null,
+      cleanupKordocAt() {}
+    }
+  }, { setTimeout: (fn: () => void) => { start = fn; return { unref() {} } }, process: { ...process, env: { ...process.env, XDG_CACHE_HOME: cache } } })
+  adapter.startKordocWork(0)
+  start!()
+  const tick = Promise.withResolvers<void>()
+  setImmediate(tick.resolve)
+  await tick.promise
+  expect(existsSync(hostFile)).toBe(false)
+})
+
+test('패키징 안내 파일 rename 실패: 사용 가능한 설치가 없으면 기존 안내 파일을 지운다', async () => {
+  const root = tmpRoot()
+  const cache = join(root, 'cache')
+  const folder = join(cache, 'ginseng-goat')
+  const install = join(root, 'install')
+  mkdirSync(folder, { recursive: true })
+  mkdirSync(join(install, dirname(CLI)), { recursive: true })
+  writeFileSync(join(install, SHIM_NAME), SHIM_CONTENT)
+  writeFileSync(join(install, CLI), CLI_BODY)
+  const hostFile = join(folder, 'kordoc-host.json')
+  writeFileSync(hostFile, JSON.stringify({ owner: 'knuaf-dev.app' }))
+  let start: (() => void) | undefined
+  const spec = specOf()
+  const adapter = loadAdapter({
+    electron: { app: { isPackaged: true, getVersion: () => '0.6.7' }, net: {} },
+    './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
+    './diagLog': { diag() {} },
+    'node:os': { homedir: () => root },
+    'node:fs': {
+      ...require('node:fs'),
+      renameSync: (source: string, destination: string) => {
+        if (destination === hostFile) throw new Error('host rename rejected')
+        return renameSync(source, destination)
+      }
+    },
+    './kordocRuntimeCore': {
+      ...require('../src/main/kordocRuntimeCore'),
+      readSpecState: () => ({ kind: 'ok', spec, targetKey: TARGET_KEY, target: targetOf(spec) }),
+      readyKordocDir: async () => install,
+      usableKordocDir: () => null,
+      cleanupKordocAt() {}
+    }
+  }, { setTimeout: (fn: () => void) => { start = fn; return { unref() {} } }, process: { ...process, env: { ...process.env, XDG_CACHE_HOME: cache } } })
+  adapter.startKordocWork(0)
+  start!()
+  const tick = Promise.withResolvers<void>()
+  setImmediate(tick.resolve)
+  await tick.promise
+  expect(existsSync(hostFile)).toBe(false)
 })
 
 test('smoke: 시간 초과·취소는 자식 close 뒤 정리하고, 빈 산출물은 거절한다', async () => {
