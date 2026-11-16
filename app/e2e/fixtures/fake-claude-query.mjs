@@ -14,6 +14,24 @@ else if (seqFile) {
   writeFileSync(seqFile, String(n))
   sessionId = `fake-session-${n}`
 }
+/**
+ * 턴 번호 — 실제 CLI 는 턴마다 새 프로세스라 환경 변수로는 "몇 번째 턴"을 바꿀 수 없다.
+ * 그래서 카운터 **파일**로 센다. `W1_SESSION_SEQ`(새 대화마다 +1)와 반드시 다른 파일이다 —
+ * 재개 턴도 세야 하기 때문이다(재개는 세션 id 가 그대로다).
+ */
+const turnFile = process.env.W1_TURN_SEQ
+let turnNo = 0
+// `auth status`·`auth login` 은 대화 턴이 아니다 — 앱은 턴마다 상태를 먼저 묻는다.
+if (turnFile && args[0] !== 'auth') {
+  turnNo = (existsSync(turnFile) ? Number(readFileSync(turnFile, 'utf8')) || 0 : 0) + 1
+  writeFileSync(turnFile, String(turnNo))
+}
+/** `W1_QUERY_FAIL_TURNS='1,3'` 처럼 턴 번호 집합으로 이 턴만 실패시킨다. */
+const turnIn = (name) => {
+  const raw = process.env[name]
+  if (!raw) return false
+  return raw.split(',').map((s) => Number(s.trim())).includes(turnNo)
+}
 // 이 턴에 앱이 실제로 넘긴 모델 — 초기화가 무엇을 답할지 시험이 정한다(`W1_INIT_MODEL_BY_MODEL`).
 const modelArg = args.includes('--model') ? args[args.indexOf('--model') + 1] : undefined
 /**
@@ -125,12 +143,36 @@ if (args[0] === 'auth' && args[1] === 'status') {
             content: outcome.denied ? outcome.reason : 'Agent 결과: 혼자 조사했습니다.'
           }] } })
         }
-        const failure = process.env.W1_QUERY_ERROR || (process.env.W1_AUTH_STATE && !existsSync(process.env.W1_AUTH_STATE) ? 'authentication_failed' : '')
+        // 턴별 스위치가 있으면 그 턴만 실패한다(`W1_QUERY_FAIL_TURNS`). 없으면 예전처럼 전역 env.
+        const failure = (turnIn('W1_QUERY_FAIL_TURNS') ? (process.env.W1_QUERY_ERROR || 'network') : process.env.W1_QUERY_ERROR) ||
+          (process.env.W1_AUTH_STATE && !existsSync(process.env.W1_AUTH_STATE) ? 'authentication_failed' : '')
         if (failure) {
-          const text = failure === 'authentication_failed'
+          // 오류 원문을 시험이 바꿀 수 있다 — 앱이 문구가 아니라 구조 신호로 판정하는지 본다.
+          const text = process.env.W1_QUERY_ERROR_TEXT || (failure === 'authentication_failed'
             ? 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.'
-            : failure === 'rate_limit' ? 'API Error: 429 rate limit exceeded' : 'Network error: ECONNRESET'
+            : failure === 'rate_limit' ? 'API Error: 429 rate limit exceeded' : 'Network error: ECONNRESET')
           const fail = () => {
+            // §1-2 구조 신호 — 한도 거절은 **결과 줄 앞의 사건**으로만 온다(가짜 CLI 도 같은 순서).
+            // 턴별 집합이 있으면 그 턴에만 보낸다(앞 턴 거절이 다음 턴에 새지 않는지 본다).
+            if (process.env.W1_RATE_LIMIT || turnIn('W1_RATE_LIMIT_TURNS')) {
+              send({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected' }, uuid: 'fake-rate', session_id: sessionId })
+            }
+            /**
+             * `crash` — 결과 줄 없이 CLI 가 죽는 장면. SDK 는 스트림 예외(`Claude Code process
+             * exited with code 1`)만 던진다. 사건은 이미 보냈으므로 앱은 그 턴의 한도 실패로
+             * 읽어야 한다(설계 §1-2: 결과 줄의 유무가 판정 근거가 아니다).
+             */
+            if (failure === 'crash') {
+              // 사건을 **흘리지 않고** 죽는다 — 실제 CLI 도 쓰던 줄을 다 내보낸 뒤 끝난다.
+              // `process.exit(1)` 은 파이프에 남은 쓰기를 버려 사건까지 유실되므로(그러면
+              // "사건은 왔는데 결과 줄이 없다"를 재현할 수 없다), 종료 코드만 남기고
+              // 이벤트 루프가 빈 뒤 스스로 끝나게 둔다.
+              process.stdout.write('', () => {
+                process.exitCode = 1
+                process.stdin.destroy()
+              })
+              return
+            }
             send({ type: 'assistant', error: failure === 'network' ? 'unknown' : failure, uuid: 'fake-error', session_id: sessionId, message: {
               content: [{ type: 'text', text }]
             } })

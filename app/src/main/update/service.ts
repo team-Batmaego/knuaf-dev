@@ -56,6 +56,10 @@ export class SkillUpdates {
       this.candidate = p
       if (!compatible(p.manifest, this.store.appVersion)) return this.set({ phase: 'needs-app', available: p.manifest.version, message: '이 규칙집은 앱 새 판이 필요해요.' })
       const kind = this.store.disposition(p)
+      if (kind === 'kept' && p.manifest.version === this.store.bundledVersion && !this.store.state().highest) {
+        this.candidate = null
+        return this.set({ phase: 'idle', available: null })
+      }
       return this.set({ phase: kind === 'new' ? 'available' : kind === 'repair' ? 'repair' : 'ready', available: p.manifest.version })
     } catch (error) {
       this.candidate = null

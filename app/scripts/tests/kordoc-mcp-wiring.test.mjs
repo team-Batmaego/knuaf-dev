@@ -70,6 +70,21 @@ const codex = load(join(CHAT, 'codex.ts'))
 const { READ_TOOLS, WRITE_TOOLS, DENY_FOREIGN_MCP, DENY_NOT_READ, DENY_OUTSIDE_ROOT,
   MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_TOOL_PREFIX } = mcp
 
+/**
+ * 지킴이가 엔진 옵션에서 빼는 하위 담당 도구(01ce608, `claude.ts` 의 사설 상수).
+ * 내보내지 않는 값이라 여기 그대로 적는다 — 이름이 바뀌거나 목록이 줄면 이 시험이 깨져야 한다
+ * (`u5-subagent-guard.spec.ts` 가 같은 이유로 이름을 직접 적는다).
+ */
+const DISALLOWED_SUBAGENT_TOOLS = ['Agent', 'Task', 'Workflow', 'Skill']
+
+/**
+ * kordoc 쓰기 도구 12개를 제품 상수(`WRITE_TOOLS`)와 따로 고정한다. 기대값을 제품 상수로만
+ * 만들면 제품 목록이 줄 때 실제값과 기대값이 함께 줄어 시험이 통과해 버린다(roh200 I-01).
+ */
+const KORDOC_WRITE_TOOLS = ['fill_form', 'extract_tables', 'place_seal', 'add_memo',
+  'patch_document', 'redact_document', 'render_document', 'crop_regions', 'extract_profile',
+  'generate_document', 'build_agency_pack', 'convert_to_hwpx']
+
 /** 논문 폴더 하나 + 그 밖의 폴더 하나. root 는 realpath 기준으로만 비교된다. */
 function fixtures(tag) {
   const base = tempDir(tag)
@@ -156,11 +171,11 @@ test('E2: spec 이 있으면 mcpServers·strictMcpConfig·disallowedTools·지�
   assert.equal(options.mcpServers.kordoc.type, 'stdio')
   assert.equal(options.mcpServers.kordoc.timeout, mcp.CLAUDE_MCP_TIMEOUT_MS)
   assert.equal(options.strictMcpConfig, true)
-  // 도우미(서브에이전트) 금지 4개는 MCP 와 무관하게 늘 붙고(c59c16c), 그 뒤에 MCP 쓰기 12개가 온다.
-  assert.deepEqual(plain(options.disallowedTools), [
-    'Agent', 'Task', 'Workflow', 'Skill',
-    ...WRITE_TOOLS.map((tool) => `${MCP_TOOL_PREFIX}${tool}`)
-  ])
+  // 지킴이 잠금(하위 담당 4개)이 **앞**, kordoc 쓰기 12개가 **뒤** — 두 잠금은 합집합이다(01ce608).
+  // 기대값은 시험 안에 따로 고정한 이름으로 만든다 — 제품 목록이 줄거나 바뀌면 깨진다.
+  assert.deepEqual(plain(WRITE_TOOLS), KORDOC_WRITE_TOOLS)
+  assert.deepEqual(plain(options.disallowedTools), [...DISALLOWED_SUBAGENT_TOOLS,
+    ...KORDOC_WRITE_TOOLS.map((tool) => `${MCP_TOOL_PREFIX}${tool}`)])
   assert.equal(options.disallowedTools.length, 16)
   assert.ok(options.systemPrompt.append.includes(MCP_DOC_READ_INSTRUCTION))
   assert.ok(!options.systemPrompt.append.includes(LEGACY_DOC_READ_INSTRUCTION))
@@ -175,8 +190,8 @@ test('E2: spec 이 없으면 MCP 키가 없고 기존 지시문 그대로다', a
   const { options } = await captureClaudeRun({ root, spec: null })
 
   assert.equal(options.mcpServers, undefined)
-  // MCP 가 없어도 도우미 금지는 남는다(제품 결정 c59c16c) — 0 이 아니라 기본 4개다.
-  assert.deepEqual(plain(options.disallowedTools), ['Agent', 'Task', 'Workflow', 'Skill'])
+  // MCP 이 없어도 지킴이 잠금은 남는다 — 이 변경이 만든 몫이 아니라 01ce608 이 이미 넣은 몫이다.
+  assert.deepEqual(plain(options.disallowedTools), DISALLOWED_SUBAGENT_TOOLS)
   // strictMcpConfig 는 MCP 이전부터 있던 리터럴이다 — 이 변경이 만들거나 없애지 않았다.
   assert.equal(options.strictMcpConfig, true)
   assert.ok(options.systemPrompt.append.includes(LEGACY_DOC_READ_INSTRUCTION))
@@ -278,6 +293,7 @@ test('E3: spawnArgs 는 app-server 바로 앞에 -c 블록을 끼우고, 없으�
   connection.mcpSpec = spec
   assert.deepEqual(plain(connection.spawnArgs()), plain([...base.slice(0, -1), ...block, 'app-server']))
   // 옛 CLI 의 `--listen stdio://` 재시도가 뒤에 붙어도 -c 블록은 subcommand 앞에 남는다.
+  // (serverArgs 를 손으로 갈아 끼우면 지킴이 인자도 함께 사라진다 — 그건 spawnArgs 의 몫이 아니다.)
   connection.serverArgs = ['--listen', 'stdio://', 'app-server']
   assert.deepEqual(plain(connection.spawnArgs()), plain(['--listen', 'stdio://', ...block, 'app-server']))
   // subcommand 가 없으면 끝에 붙는다(추측해서 문자열을 꽂지 않는다).
@@ -322,11 +338,16 @@ test('E8: 쓰기 12개는 폴더 안 경로를 줘도 정책이 거절한다', (
  * `config/read` 병합 결과에 쓰기 도구·/tmp root 로 나타나고, 스레드 config 로 끄지 않으면
  * 상태 목록에서 `connected` 로 되살아난다(Roh 재현). `lockIgnored` 는 그 잠금이 조용히
  * 무시되는 경우(f 실측 — 요청은 성공하는데 효력이 없다)를 흉내 낸다.
+ * `argv` 는 이 프로세스의 실제 명령줄이다 — `-c mcp_servers.kordoc.*` 가 없으면 kordoc 은
+ * 뜨지 않으므로(실측) 대역도 그 사실을 따른다. `liveWithoutArg` 는 인자 없이도 사는 경우(반례).
  */
-function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false, lockIgnored = false, holdTurnStart = false }) {
+function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false, lockIgnored = false,
+  holdTurnStart = false, argv = [], liveWithoutArg = false }) {
   // 검증은 `realpathSync(root)` 로 탐침한다 — /var → /private/var 를 흉내 쪽에서도 맞춘다.
   const rootReal = realpathSync(root)
   const rpc = {
+    // 생성자 argv 를 함께 둔다 — main 쪽 `config/read` 대역이 `rpc.argv` 로 주입 여부를 본다.
+    argv,
     closed: false,
     lastStderr: '',
     onNotification: null,
@@ -367,12 +388,16 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
         case 'mcpServerStatus/list': {
           if (failVerify) throw new Error('MCP 서버가 떠오르지 않았어요')
           const off = rpc.threadConfig?.mcp_servers?.kordoc?.enabled === false && !lockIgnored
+          // 이 프로세스가 kordoc 을 띄웠는가 — 인자에 `-c mcp_servers.kordoc.*` 가 있을 때만 뜬다.
+          // (첫 프로세스는 항상 있고, 재시도 프로세스는 없다. `liveWithoutArg` 는 인자 없이도 사는 반례.)
+          const oursAlive = liveWithoutArg || argv.some((a, i) => i > 0 && argv[i - 1] === '-c' && a.startsWith('mcp_servers.kordoc.'))
           if (!userKordoc) {
-            // 사용자 층에 kordoc 이 없으면 이 프로세스가 띄우지 않은 한 목록에도 없다. 인자로 꽂혔는지로
-            // 가른다 — 첫 프로세스(§3.3 검증)는 꽂혀 있어 `connected`, 재시도 프로세스는 아니다.
-            const injected = Array.isArray(rpc.argv) && rpc.argv.join(' ').includes('mcp_servers.kordoc')
-            if (!injected) return { data: [] }
-            return { data: [{ name: 'kordoc', runtimeStatus: null, serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }] }
+            // 이 프로세스가 띄운 kordoc 은 상태가 비어(null) 오고(main 2d22f4e — 소유 근거는 config/read 층),
+            // 인자 없이 살아 있는 반례(`liveWithoutArg`)만 `connected` 로 보인다.
+            const injectedHere = argv.some((a, i) => i > 0 && argv[i - 1] === '-c' && a.startsWith('mcp_servers.kordoc.'))
+            return { data: oursAlive
+              ? [{ name: 'kordoc', runtimeStatus: injectedHere ? null : 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }]
+              : [] }
           }
           // 잠갔으면 프로세스가 뜨지 않는다 — 목록에는 `disabled` 로만 남는다(실측 fix1-filter).
           rpc.kordocStatus = off ? 'disabled' : 'connected'
@@ -435,7 +460,7 @@ async function runCodexRetryScenario(scenario, { userKordoc = false, lockIgnored
     // 재시도 턴이 다른 이유로 깨지는 경우(검증이 아닌 오류)도 한 번만 돌아야 한다.
     const failSkills = scenario === 'retry-error' && rpcs.length > 0
     const log = []
-    const rpc = fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc, lockIgnored })
+    const rpc = fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc, lockIgnored, argv })
     rpc.argv = argv
     rpc.env = env
     rpc.log = log
@@ -468,11 +493,12 @@ test('E8: 검증이 실패하면 MCP 를 끄고 한 번 다시 돌아 턴이 끝
   // 스킬 확인은 `runTurn` 마다 한 번이라 두 번 — 재시도가 스킬 단계를 건너뛰지 않는다.
   assert.equal(ev.calls.skill, 2)
   // 재시도는 인자를 빼는 데 그치지 않고 **병합 설정을 먼저 본다**(M2-R1-01). 여기 설정에는
-  // kordoc 이 없으므로 잠글 이름도, 확인할 상태도 없다 — 그래도 턴은 정상으로 돈다.
+  // kordoc 이 없으므로 잠글 이름이 없고, 프로세스도 그 서버를 띄우지 않았다(argv).
+  // 그래도 상태 목록은 **한 번 본다**(01ce608 검토 R-1) — 이름이 없어도 살아 있는 kordoc 이
+  // 보이면 거부해야 하기 때문이다. 여기서는 비어 있으므로 턴이 정상으로 돈다.
   assert.equal(rpcs[1].log.includes('config/read'), true)
   assert.equal(rpcs[1].threadConfig, undefined, '설정에 없는 이름은 잠금 키를 만들지 않는다')
-  // 잠글 이름이 없어도 상태 목록은 **한 번** 본다(검토 R-1). 살아 있는 kordoc 이 없으므로 통과한다.
-  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), true, '이름이 없어도 한 번은 본다')
+  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), true, '잠글 이름이 없어도 목록은 한 번 본다')
   assert.ok(rpcs[1].log.includes('turn/start'))
 })
 
@@ -514,8 +540,7 @@ test('M2-R1-02: turn/start 응답을 기다리는 동안에도 setMcpSpec 은 �
   let held
   rpcFactory = (binary, argv, cwd, env) => {
     const log = []
-    held = fakeRpc({ root, skill, failVerify: false, failSkills: false, log, holdTurnStart: true })
-    held.argv = argv
+    held = fakeRpc({ root, skill, failVerify: false, failSkills: false, log, holdTurnStart: true, argv })
     held.log = log
     return held
   }
@@ -567,4 +592,41 @@ test('M2-R1-01: 잠금이 조용히 무시되면(서버가 살아 있으면) 재
   assert.equal(rpcs[1].kordocStatus, 'connected', '요청이 성공해도 상태가 살아 있으면 통과가 아니다')
   assert.equal(rpcs[1].log.includes('turn/start'), false, '턴을 열지 않는다')
   assert.equal(ev.calls.note.length, 1, '안내는 여전히 한 줄')
+})
+
+test('M2-R1-01: 잠글 이름이 없어도 상태 목록에 살아 있는 kordoc 이 보이면 재시도 턴을 열지 않는다', async (t) => {
+  t.after(() => { rpcFactory = null })
+  // 검토 R-1 의 본체 — 설정에 kordoc 이름이 없어 `wanted` 가 비어도, 프로세스가 인자 없이
+  // 그 서버를 띄웠다면(대역 `liveWithoutArg`) 통과가 아니다. 이 방어를 빼면 이 시험이 깨진다.
+  const { root } = fixtures('r1-01-live-no-name')
+  const skill = join(root, 'skill')
+  mkdirSync(skill, { recursive: true })
+  writeFileSync(join(skill, 'SKILL.md'), '# knuaf-dev\n')
+  const home = tempDir('r1-01-live-no-name-home')
+  const rpcs = []
+  rpcFactory = (binary, argv, cwd, env) => {
+    const log = []
+    // 첫 프로세스는 관문 검증 실패, 재시도 프로세스는 인자 없이도 kordoc 이 살아 있는 반례.
+    const rpc = fakeRpc({ root, skill, failVerify: rpcs.length === 0, failSkills: false, log, argv,
+      liveWithoutArg: rpcs.length > 0 })
+    rpc.argv = argv
+    rpc.env = env
+    rpc.log = log
+    rpcs.push(rpc)
+    return rpc
+  }
+  const connection = new codex.CodexConnection({
+    binary: 'codex', root, skill, env: { HOME: home },
+    openExternal: async () => {}, modelChosen: () => false
+  })
+  await connection.setMcpSpec(specFor(root))
+  const ev = events()
+  await assert.rejects(connection.run('논문 읽어 줘', 'session-1', ev),
+    /재시도 턴에서 kordoc MCP가 꺼지지 않았어요\(kordoc: connected\)/)
+
+  assert.equal(rpcs.length, 2, '세 번째 시도는 없다')
+  assert.equal(rpcs[1].argv.join(' ').includes('mcp_servers.kordoc'), false, '인자로는 붙지 않았다')
+  assert.equal(rpcs[1].log.includes('mcpServerStatus/list'), true, '잠글 이름이 없어도 목록은 본다')
+  assert.equal(rpcs[1].log.includes('turn/start'), false, '살아 있는 서버를 보고도 턴을 열지 않는다')
+  assert.deepEqual(ev.calls.note, ['안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요'])
 })
