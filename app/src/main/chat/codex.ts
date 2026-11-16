@@ -13,7 +13,7 @@ import type { ChatModelInfo, PermissionFileChange, PermissionRequest } from '../
 import { isCrossProviderModelId } from '../../shared/chat'
 import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
-import { appThreadLockPlan, appThreadLockVerify, KORDOC_COLLISION_NOTE, type AppThreadPlan } from './codexToolLock'
+import { appThreadLockPlan, appThreadLockVerify, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
 import { codeOf, diag } from '../diagLog'
 
@@ -764,7 +764,6 @@ export class CodexConnection implements AgentConnection {
         await verifyCodexKordoc(rpc, { threadId: acquired.threadId, root: this.options.root, spec: this.mcpSpec })
         this.verifiedOn = rpc
       }
-      if (plan.kordocCollision) events.note(KORDOC_COLLISION_NOTE)
       if (this.mcpLocked) await verifyKordocAbsent(rpc, { threadId: acquired.threadId, names: plan.lockedNames })
       this.threadModel = this.loaded?.model ?? null
       this.threadEffort = this.loaded?.effort ?? null

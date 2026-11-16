@@ -348,19 +348,16 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
           if (failSkills) throw new Error('스킬 목록을 읽지 못했어요')
           return { data: [{ skills: [{ path: realpathSync(join(skill, 'SKILL.md')), enabled: true }] }] }
         // 병합된 설정 — `mcp_servers` 는 항상 있고(없으면 `{}`), 사용자 층 표가 그대로 보인다.
-        case 'config/read':
+        case 'config/read': {
+          const injected = Array.isArray(rpc.argv) && rpc.argv.join(' ').includes('mcp_servers.kordoc')
+          const kordoc = injected ? { command: specFor(root).command, args: specFor(root).args }
+            : { command: '/bin/false', args: ['/tmp/kordoc/dist/mcp.js'], enabled: true,
+                enabled_tools: ['generate_document', 'parse_document'], env: { KORDOC_ROOT: '/tmp' } }
           return { config: { mcp_servers: userKordoc
-            ? {
-                kordoc: {
-                  command: '/bin/false',
-                  args: ['/tmp/kordoc/dist/mcp.js'],
-                  enabled: true,
-                  enabled_tools: ['generate_document', 'parse_document'],
-                  env: { KORDOC_ROOT: '/tmp' }
-                },
-                foreign: { command: '/bin/false', args: ['/tmp/other.js'], enabled: true }
-              }
-            : {} } }
+            ? { kordoc, foreign: { command: '/bin/false', args: ['/tmp/other.js'], enabled: true } }
+            : injected ? { kordoc } : {} }, layers: userKordoc
+              ? [{ name: { type: 'user' }, config: { mcp_servers: { kordoc } } }] : [] }
+        }
         case 'thread/start':
         case 'thread/resume':
           rpc.threadConfig = params.config
@@ -373,7 +370,7 @@ function fakeRpc({ root, skill, failVerify, failSkills, log, userKordoc = false,
             // 가른다 — 첫 프로세스(§3.3 검증)는 꽂혀 있어 `connected`, 재시도 프로세스는 아니다.
             const injected = Array.isArray(rpc.argv) && rpc.argv.join(' ').includes('mcp_servers.kordoc')
             if (!injected) return { data: [] }
-            return { data: [{ runtimeStatus: 'connected', serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }] }
+            return { data: [{ name: 'kordoc', runtimeStatus: null, serverInfo: { name: 'kordoc', version: '4.24.39' }, tools: [...READ_TOOLS], toolsError: null }] }
           }
           // 잠갔으면 프로세스가 뜨지 않는다 — 목록에는 `disabled` 로만 남는다(실측 fix1-filter).
           rpc.kordocStatus = off ? 'disabled' : 'connected'

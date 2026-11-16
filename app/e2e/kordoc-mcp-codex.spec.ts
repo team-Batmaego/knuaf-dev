@@ -46,6 +46,7 @@ type Call = { method: string; params: Record<string, unknown> }
 function server(over: Record<string, unknown> = {}) {
   const advertised = advertisedReadTools(spec.version) ?? READ_TOOLS
   return {
+    name: 'kordoc',
     runtimeStatus: 'connected',
     tools: Object.fromEntries(advertised.map((t) => [t, { name: t }])),
     serverInfo: { name: 'kordoc', version: spec.version },
@@ -69,6 +70,9 @@ function rpc(handler: (call: Call, round: number) => unknown) {
     calls,
     request: async (method: string, params?: unknown) => {
       const call = { method, params: (params ?? {}) as Record<string, unknown> }
+      if (method === 'config/read') return {
+        config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } }, layers: []
+      }
       calls.push(call)
       if (method === 'mcpServerStatus/list') return handler(call, round++)
       return handler(call, -1)
@@ -122,9 +126,11 @@ test('E3: 한글·공백 경로는 JSON 문자열 하나로 보존된다', () =>
 
 // ── E3: 정상 1건 ────────────────────────────────────────────────────────────
 
-test('E3: 정상 서버 1건만 통과 — 목록 조회와 탐침이 같은 threadId', async () => {
+test('E3: 프로세스에만 있는 서버도 통과 — A/B는 원래 스레드에서 확인', async () => {
   const m = rpc((call) => {
-    if (call.method === 'mcpServerStatus/list') return { data: [server()], nextCursor: null }
+    if (call.method === 'mcpServerStatus/list') return {
+      data: call.params.threadId ? [] : [server({ runtimeStatus: null })], nextCursor: null
+    }
     if (call.method === 'mcpServer/tool/call') return probeReply((call.params.arguments as { file_path: string }).file_path)
     throw new Error(`예상 밖 메서드: ${call.method}`)
   })
@@ -132,12 +138,58 @@ test('E3: 정상 서버 1건만 통과 — 목록 조회와 탐침이 같은 thr
 
   const list = m.calls.filter((c) => c.method === 'mcpServerStatus/list')
   expect(list.length).toBe(1)
-  expect(list[0].params).toMatchObject({ serverName: 'kordoc', threadId: 'th-1', detail: 'full' })
+  expect(list[0].params).toEqual({ serverName: 'kordoc', detail: 'full' })
   const probes = m.calls.filter((c) => c.method === 'mcpServer/tool/call')
   expect(probes).toHaveLength(2)
   for (const p of probes) expect(p.params).toMatchObject({ server: 'kordoc', threadId: 'th-1', tool: 'detect_format' })
   expect((probes[0].params.arguments as { file_path: string }).file_path).toBe(realpathSync(root))
   expect((probes[1].params.arguments as { file_path: string }).file_path).toBe(dirname(realpathSync(root)))
+})
+
+test('v067: 프로세스 후보가 있어도 명령·인자 신원이 다르면 탐침 전에 거부한다', async () => {
+  for (const replacement of [
+    { command: '/student/node', args: spec.args },
+    { command: spec.command, args: ['/student/mcp.js'] },
+    { command: spec.command, args: [...spec.args, '--other-root'] }
+  ]) {
+    const calls: string[] = []
+    const m = { request: async (method: string) => {
+      calls.push(method)
+      return { config: { mcp_servers: { kordoc: replacement } }, layers: [] }
+    } }
+    await expectSafety(verifyCodexKordoc(m, opts()), 'server-command')
+    expect(calls).toEqual(['config/read'])
+  }
+})
+
+test('v067: 학생 동명 설정보다 앱 명령이 유효하면 A/B를 검증한다', async () => {
+  for (const type of ['user', 'project', 'system']) {
+    const m = { request: async (method: string, params?: unknown) => {
+      if (method === 'config/read') return {
+        config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } },
+        layers: [{ name: { type }, config: { mcp_servers: { kordoc: { command: '/student/node' } } } }]
+      }
+      if (method === 'mcpServerStatus/list') return { data: [server({ runtimeStatus: null })] }
+      if (!params || typeof params !== 'object' || !('arguments' in params)) throw new Error('missing arguments')
+      const args = params.arguments
+      if (!args || typeof args !== 'object' || !('file_path' in args) || typeof args.file_path !== 'string') throw new Error('missing path')
+      return probeReply(args.file_path)
+    } }
+    await verifyCodexKordoc(m, opts())
+  }
+})
+
+test('v067: null 상태도 도구 목록·신원·A/B가 검증되지 않으면 실패한다', async () => {
+  const missing = rpc(() => ({ data: [server({ runtimeStatus: undefined })] }))
+  await expectSafety(verifyCodexKordoc(missing, opts()), 'status-missing')
+  const empty = rpc(() => ({ data: [server({ runtimeStatus: null, tools: {} })] }))
+  await expectSafety(verifyCodexKordoc(empty, opts()), 'tools-empty')
+  const wrongName = rpc(() => ({ data: [server({ runtimeStatus: null, name: 'student' })] }))
+  await expectSafety(verifyCodexKordoc(wrongName, opts()), 'server-name')
+  const failedProbe = rpc((call) => call.method === 'mcpServerStatus/list'
+    ? { data: [server({ runtimeStatus: null })] }
+    : { content: [{ type: 'text', text: '파일을 찾을 수 없습니다' }], isError: true })
+  await expectSafety(verifyCodexKordoc(failedProbe, opts()), 'probe-a-unproven')
 })
 
 // ── E3: 실패 입력 11가지(설계 §5 E3 칸) ─────────────────────────────────────

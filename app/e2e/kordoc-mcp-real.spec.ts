@@ -168,6 +168,9 @@ async function wrongRootCase(rootName: string) {
     // Codex 상태 조회만 어댑터 — 탐침 결과는 실제 서버 응답이다.
     const adapter = {
       request: async (method: string, params?: unknown) => {
+        if (method === 'config/read') return {
+          config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } }, layers: []
+        }
         if (method === 'mcpServerStatus/list') {
           // verify 가 root realpath 를 이미 구한 뒤 경로가 사라진 상황(검토자 반례 그대로).
           renameSync(root, moved)
@@ -175,6 +178,7 @@ async function wrongRootCase(rootName: string) {
           return {
             data: [{
               runtimeStatus: 'connected',
+              name: 'kordoc',
               toolsError: null,
               serverInfo: init.serverInfo,
               tools: Object.fromEntries(reads.map((t) => [t.name, t]))
