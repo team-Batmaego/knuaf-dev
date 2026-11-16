@@ -1455,7 +1455,7 @@ export class CodexRelayConnection implements JobConnection {
     }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.0' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.7' }, capabilities: { experimentalApi: true } })
     } catch (error) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
