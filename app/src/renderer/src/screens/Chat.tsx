@@ -287,9 +287,10 @@ export function Chat() {
   /** 카드별 무효 사유(`account-changed` 만 다른 문구). */
   const laneInvalid = useLanes((s) => s.invalid)
   const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, insertPath, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, insertPath: s.insertPath, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
-  /** 이 폴더의 준비(.venv) 중인가 — 그동안 보낸 글은 끝날 때까지 기다린다(store/prep.ts). */
-  /** 이 폴더에서 기다리는 것 — 폴더 준비('prep')·저장·검사('write'). 그동안 보내기는 잠긴다. */
+  /** 준비·정본 쓰기 중에는 자유 입력 전송을 막는다(알림창 B안). */
   const waiting = usePrep((s) => waitKind(s, projectRoot))
+  // 안내 문구는 prep 우선이지만 쓰기 잠금은 두 작업이 겹쳐도 독립적으로 유지한다.
+  const writing = usePrep((s) => !!projectRoot && (s.write[projectRoot] ?? 0) > 0)
   const waitingPrep = useChat((s) => s.waitingPrep)
   const preparation = usePrep(s => projectRoot ? s.dependencies[projectRoot] : undefined)
   /** 온보딩 2단계에서 폴더를 고른 순간의 시작 의사 — 한 번만 쓴다(store/chat.ts 주석). */
@@ -1067,9 +1068,8 @@ export function Chat() {
                   }
                   if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
                   e.preventDefault()
-                  // 보내기 단추와 같은 조건이다. 작업 중·전송 중에는 키보드로도 보내지 않는다 —
-                  // 단추만 막으면 Enter 로 들어와 main 의 소유권 잠금에 걸린다(검토 P1-R1-03).
-                  if (zone.kind === 'running' || zone.kind === 'disconnected' || busy || !!waiting || !canSend) return
+                  // 단추와 같은 잠금 조건: 준비·쓰기·전송 중에는 Enter로도 보내지 않는다.
+                  if (zone.kind === 'running' || zone.kind === 'disconnected' || busy || !!waiting || writing || !canSend) return
                   void sendBody()
                 }} />
               <div className="crow">
@@ -1080,7 +1080,7 @@ export function Chat() {
                 {/* 오른쪽 아래 34×34 원형 위 화살표(먹색 채움) — 작업 중이면 같은 자리 멈추기. */}
                 {zone.kind === 'running'
                   ? <button type="button" className="send" title={stopText} aria-label={stopText} onClick={() => void stop()}><Icon name="stop" size={20} /></button>
-                  : <button type="button" className="send" title={CHAT.send} aria-label={CHAT.send} onClick={() => void sendBody()} disabled={zone.kind === 'disconnected' || busy || !!waiting || !canSend}><Icon name="up" size={17} /></button>}
+                  : <button type="button" className="send" title={CHAT.send} aria-label={CHAT.send} onClick={() => void sendBody()} disabled={zone.kind === 'disconnected' || busy || !!waiting || writing || !canSend}><Icon name="up" size={17} /></button>}
               </div>
             </div>
             <p className="disc">{CHAT.disclaimer}</p>
