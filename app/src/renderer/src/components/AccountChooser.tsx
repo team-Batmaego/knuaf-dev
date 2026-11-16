@@ -12,10 +12,10 @@ import { useShallow } from 'zustand/react/shallow'
  * 우선순위: 학생이 고른 것 → 옛 설정(`helper_mode`). 판정은 `chosenProvider` 한 곳에 있다.
  */
 export function useAccountProvider(): { provider: Provider; stateOf: (p: Provider) => ConnState } {
-  const { selected, codex, claude, loggingIn } = useConnect(useShallow((s) => ({ selected: s.selected, codex: s.codex, claude: s.claude, loggingIn: s.loggingIn })))
+  const { selected, codex, claude, free, loggingIn } = useConnect(useShallow((s) => ({ selected: s.selected, codex: s.codex, claude: s.claude, free: s.free, loggingIn: s.loggingIn })))
   const settings = useProject((s) => s.settings)
   const provider: Provider = chosenProvider(selected, settings) ?? chatProvider(resolveChatMode(null, settings))
-  const stateOf = (p: Provider): ConnState => displayState(p === 'codex' ? codex : claude, loggingIn[p])
+  const stateOf = (p: Provider): ConnState => displayState({ codex, claude, free }[p], loggingIn[p])
   return { provider, stateOf }
 }
 
@@ -52,7 +52,7 @@ export function AccountChooser({ onPicked }: { onPicked?: () => void }) {
     <div className="list">
       <p className="caption">AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.</p>
       {offline && loginAvailable && <p className="caption" role="status">{ONBOARD.offlineHint}</p>}
-      {(['codex', 'claude'] as Provider[]).map((p) => (
+      {(['free', 'codex', 'claude'] as Provider[]).filter((p) => p !== 'free' || stateOf(p) === 'connected').map((p) => (
         <ConnectRow key={p} provider={p} current={p === provider}
           extra={stateOf(p) === 'connected' && p !== provider
             ? { label: TITLEBAR.switchTo(PROVIDER_NAME[p]), run: () => void pickProvider(p) }
