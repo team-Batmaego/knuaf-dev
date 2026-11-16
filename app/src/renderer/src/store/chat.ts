@@ -306,8 +306,8 @@ export const useChat = create<ChatState>((set, get) => ({
     // 여러 칸 폼)이 모두 이 함수를 지나므로 여기 한 곳이면 다 덮인다. 확인 전 고침이 없으면
     // 본문 그대로다. 제목은 지금 등록된 절 목록에서 읽는다(옛 제목을 붙이지 않는다).
     const titles = Object.fromEntries((useProject.getState().sections ?? []).map((sec) => [sec.id, sec.title]))
-    const attached = useEdits.getState().attach((text ?? draft), titles)
-    const body = attached.text.trim()
+    let attached = useEdits.getState().attach((text ?? draft), titles)
+    let body = attached.text.trim()
     if (!root || !body) return false
     // 실패 복구 초안에 메모를 넣지 않는다 — 입력칸에 메모 전문이 드러나면 §6-1 위반이고,
     // 다시 보낼 때 `attach` 가 또 붙여 메모가 2벌이 된다(검토 B-R1 권고 3).
@@ -336,7 +336,8 @@ export const useChat = create<ChatState>((set, get) => ({
     }
     // A zero work counter is not success: blocked/idle visits keep the draft and do not send.
     let ready = usePrep.getState().dependencies[root]?.phase === 'ready'
-    if (isPreparing(root)) {
+    const waited = isPreparing(root)
+    if (waited) {
       set({ waitingPrep: true })
       ready = await waitPrepared(root, left, (check) => useChat.subscribe(check))
     }
@@ -345,6 +346,13 @@ export const useChat = create<ChatState>((set, get) => ({
     if (!ready) {
       set({ busy: false, error: preparationFailureTitle(usePrep.getState().dependencies[root]?.error) })
       return false
+    }
+    // 저장을 기다리는 동안 행이 추가된다. 실제 전송 직전에 메모·닫을 id를 함께 확정한다.
+    if (waited) {
+      attached = useEdits.getState().attach(bare, Object.fromEntries(
+        (useProject.getState().sections ?? []).map((sec) => [sec.id, sec.title])))
+      body = attached.text.trim()
+      if (!body) { set({ busy: false }); return false }
     }
     const requestId = crypto.randomUUID()
     const snapshotAtSend = get().snapshot
