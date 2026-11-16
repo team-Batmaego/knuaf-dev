@@ -44,6 +44,8 @@
  *   FAKE_CODEX_PLUGIN_INSTALLED     `plugin/installed` 실제 응답(JSON {marketplaces,marketplaceLoadErrors}, 또는 {error:true})
  *   FAKE_CODEX_APP_LIST             `app/list` 목록(JSON 배열 또는 `{pages:[…]}`/`{endless}`/`{malformed}`)
  *   FAKE_CODEX_MCP_STATUS           `mcpServerStatus/list` 목록(위와 같은 모양) — 장 넘김 시험용
+ *   FAKE_CODEX_MCP_PROCESS_STATUS   threadId 없는 프로세스 범위의 별도 목록(없으면 MCP_STATUS 사용)
+ *   FAKE_CODEX_MCP_PROBE_ROOT       detect_format A/B 응답을 낼 root(설정한 시험에서만 사용)
  *   FAKE_CODEX_THREAD_LIST          `thread/list` 목록(같은 모양)
  *   FAKE_CODEX_THREAD_TURNS_LIST    `thread/turns/list` 목록(같은 모양)
  *   FAKE_CODEX_THREAD_TURNS         `{threadId: [turn, …]}` — `thread/start`·`resume` 응답의 `thread.turns`
@@ -191,6 +193,8 @@ let configReadFailures = Math.max(0, Number(process.env.FAKE_CODEX_CONFIG_READ_F
 const PLUGIN_INSTALLED = jsonKnob('FAKE_CODEX_PLUGIN_INSTALLED')
 const APP_LIST = jsonKnob('FAKE_CODEX_APP_LIST')
 const MCP_STATUS = jsonKnob('FAKE_CODEX_MCP_STATUS')
+const MCP_PROCESS_STATUS = jsonKnob('FAKE_CODEX_MCP_PROCESS_STATUS')
+const MCP_PROBE_ROOT = process.env.FAKE_CODEX_MCP_PROBE_ROOT
 const THREAD_LIST = jsonKnob('FAKE_CODEX_THREAD_LIST')
 const THREAD_TURNS_LIST = jsonKnob('FAKE_CODEX_THREAD_TURNS_LIST')
 const THREAD_TURNS_KNOB = jsonKnob('FAKE_CODEX_THREAD_TURNS')
@@ -295,6 +299,7 @@ const replyText = () => {
 let threadId = 't-fake'
 let serverSeq = 9000
 /** 서버가 아직 initialize 를 못 받았으면 다른 요청은 거절한다(문서의 초기화 계약). */
+const threadMcpConfigs = new Map()
 let initialized = false
 /** 대화별로 **실제 적용된** model·effort. 턴 덮어쓰기가 뒤 턴에 남는 계약을 흉내 낸다. */
 const threads = new Map()
@@ -377,7 +382,22 @@ function handle(message) {
     case 'app/list':
       return sendPaged(id, 'apps', APP_LIST)
     case 'mcpServerStatus/list':
-      return sendPaged(id, 'mcp', MCP_STATUS)
+      return params.threadId === undefined && MCP_PROCESS_STATUS !== undefined
+        ? sendPaged(id, 'mcp-process', MCP_PROCESS_STATUS)
+        : sendPaged(id, 'mcp', MCP_STATUS)
+    case 'mcpServer/tool/call': {
+      if (!MCP_PROBE_ROOT || params.server !== 'kordoc' || params.tool !== 'detect_format') {
+        return out({ id, error: { code: -32601, message: 'unsupported probe' } })
+      }
+      if (threadMcpConfigs.get(params.threadId)?.kordoc?.enabled !== true) {
+        return out({ id, error: { code: -32603, message: "unknown MCP server 'kordoc'" } })
+      }
+      const filePath = params.arguments?.file_path
+      const text = filePath === realpathSync(MCP_PROBE_ROOT)
+        ? '지원하지 않는 확장자입니다: (폴더)'
+        : `허용된 작업 디렉토리(KORDOC_ROOT) 밖의 경로입니다: ${filePath}`
+      return out({ id, result: { content: [{ type: 'text', text }], isError: true } })
+    }
     case 'thread/list':
       return sendPaged(id, 'threads', THREAD_LIST)
     case 'thread/turns/list':
@@ -433,6 +453,7 @@ function handle(message) {
         return out({ id, result: eph })
       }
       threadId = params.threadId ?? 't-fake'
+      if (MCP_PROBE_ROOT) threadMcpConfigs.set(threadId, params.config?.mcp_servers ?? {})
       const isResume = message.method === 'thread/resume'
       if (isResume) {
         if (RESUME_ERROR && resumeFailures !== 0) {
