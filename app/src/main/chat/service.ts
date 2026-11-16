@@ -631,13 +631,13 @@ export class ChatService {
         if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
         // 처음 보는 연결에는 "붙일 것이 없다"를 알린다. 실패해도 안전 문제는 아니다 — 아직 아무것도
         // 넘기지 않은 연결이므로 남은 구성이 없다(M1-02 는 이미 사양이 올라간 연결의 경우다).
-        else if (!state) this.releaseKordocSpec(target, registry, s.root, false)
+        else if (!state) await this.releaseKordocSpec(target, registry, s.root, false)
       }
       if (outcome === 'unsafe') {
         target = await this.reopenConnection(s.root, s.provider, connection, s.sessionId)
         // 새 연결은 처음 보는 연결이다 — 같은 사양을 한 번 더 적용한다.
         if (spec !== null) outcome = await this.applyKordocSpec(target, spec, registry, s.root)
-        else { this.releaseKordocSpec(target, registry, s.root, false); outcome = 'rejected' }
+        else { await this.releaseKordocSpec(target, registry, s.root, false); outcome = 'rejected' }
         if (outcome === 'unsafe') {
           throw new Error('한글 문서 읽기 도구를 붙이지 못했어요. 이 대화 도구가 문서 읽기 설정을 받아들이지 못해 안전하게 보낼 수 없어요. 잠시 뒤 다시 시도해 주세요.')
         }

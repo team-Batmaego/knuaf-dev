@@ -202,7 +202,9 @@ test('E2: canUseTool 은 trusted() 보다 먼저 mcp 정책을 본다', async (t
   t.after(() => { queryDouble = null })
   const { root, outside, insideFile, outsideFile } = fixtures('e2-policy')
   // 폴더 안 심볼릭 링크가 밖을 가리키는 경우 — 문자열 비교로는 걸러지지 않는다.
-  symlinkSync(outside, join(root, 'link'))
+  // 윈도 기본 심볼릭 링크는 관리자 권한이 필요해 러너에서 못 만든다 — 정션은 권한 없이 되고
+  // realpath 도 대상 경로로 풀리므로 같은 탈출을 그대로 시험한다.
+  symlinkSync(outside, join(root, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
   const { options } = await captureClaudeRun({ root, spec: specFor(root), trusted: () => true })
   const canUseTool = options.canUseTool
   const signal = new AbortController().signal
@@ -284,12 +286,12 @@ test('E3: spawnArgs 는 app-server 바로 앞에 -c 블록을 끼우고, 없으�
   const spec = specFor(root)
   const block = mcp.codexMcpArgs(spec)
 
-  // 지킴이(01ce608): 논문 폴더의 `AGENTS.md` 가 새지 않도록 `-c project_doc_max_bytes=0` 이 늘 앞에 온다.
-  // 이 줄을 지우면 그 방어가 사라지므로 그대로 고정한다.
-  const guard = ['-c', 'project_doc_max_bytes=0']
-  assert.deepEqual(plain(connection.spawnArgs()), [...guard, 'app-server'])
+  // 기동 인자는 논문 폴더 지시문과 플러그인 스킬을 프로세스 전체에서 끈다.
+  const base = plain(codex.serverArgsFor({ HOME: home }))
+  assert.deepEqual(base, ['-c', 'project_doc_max_bytes=0', '-c', 'features.plugins=false', 'app-server'])
+  assert.deepEqual(plain(connection.spawnArgs()), base)
   connection.mcpSpec = spec
-  assert.deepEqual(plain(connection.spawnArgs()), plain([...guard, ...block, 'app-server']))
+  assert.deepEqual(plain(connection.spawnArgs()), plain([...base.slice(0, -1), ...block, 'app-server']))
   // 옛 CLI 의 `--listen stdio://` 재시도가 뒤에 붙어도 -c 블록은 subcommand 앞에 남는다.
   // (serverArgs 를 손으로 갈아 끼우면 지킴이 인자도 함께 사라진다 — 그건 spawnArgs 의 몫이 아니다.)
   connection.serverArgs = ['--listen', 'stdio://', 'app-server']

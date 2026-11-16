@@ -19,6 +19,7 @@ import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_IN
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
 import { appThreadLockPlan, appThreadLockVerify, KORDOC_COLLISION_NOTE, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
+import { codeOf, diag } from '../diagLog'
 
 /** Codex 턴이 구조화해 보낸 인증 거절. 오류 본문은 판정·저장에 쓰지 않는다. */
 export class CodexAuthenticationError extends Error {}
@@ -29,9 +30,9 @@ export function realOrSelf(p: string): string {
 }
 
 /**
- * `codex app-server` argv. `-c 'skills.config=…'`(전역 knuaf-dev 사본 끄기)는 subcommand
- * 앞에 온다 — codex 의 config 오버라이드는 루트 인자다. 존재하는 사본이 없으면 순수
- * `['app-server']`. 단위 테스트가 이 모양을 고정한다(e2e/agent.spec.ts).
+ * `codex app-server` argv. 전역 스킬 사본·플러그인 기능은 프로세스 시작 전에 끈다.
+ * thread/start 의 plugins config 는 capability 필터가 아니므로 startup 차단을 병행한다.
+ * `-c` 는 subcommand 앞의 루트 인자다.
  */
 export function serverArgsFor(env: NodeJS.ProcessEnv): string[] {
   const args: string[] = []
@@ -44,6 +45,7 @@ export function serverArgsFor(env: NodeJS.ProcessEnv): string[] {
   // 논문 폴더의 `AGENTS.md` 는 도우미에게 새어 들어가면 안 된다(설계 §4.1-E). 스칼라라 `-c` 가
   // 안전하고, 프로세스 전체(모든 스레드)에 걸린다 — 기동 뒤 `instructionSources` 로 한 번 더 본다.
   args.push('-c', 'project_doc_max_bytes=0')
+  args.push('-c', 'features.plugins=false')
   return [...args, 'app-server']
 }
 const FILE_CHANGE_UNAVAILABLE = '변경 내용을 확인하지 못했어요. 거절한 뒤 도우미에게 어떤 파일을 어떻게 바꾸는지 물어봐 주세요.'
@@ -185,7 +187,10 @@ export class CodexConnection implements AgentConnection {
     const plan = await appThreadLockPlan({
       root: this.options.root, form: 'app-thread', injected, rpc, codexHome: this.codexHome()
     })
-    if (!plan.ok) throw new Error(plan.studentCopy)
+    if (!plan.ok) {
+      diag(`codex-lock stage=plan reason=${plan.reason}`)
+      throw new Error(plan.studentCopy)
+    }
     return plan.plan
   }
   /** 이 턴의 계획을 재사용한다 — `verify` 가 **같은** `config` 를 기준으로 대조해야 한다. */
@@ -223,6 +228,7 @@ export class CodexConnection implements AgentConnection {
           const plan = await this.ensurePlan(rpc)
           return this.loadReply(await rpc.request('thread/start', { ...args, config: plan.config }))
         } catch (e) {
+          diag(`codex-lock stage=thread-start code=${codeOf(e)}`)
           return { ok: false, kind: 'error', message: text(e) }
         }
       },
@@ -232,6 +238,7 @@ export class CodexConnection implements AgentConnection {
           const plan = await this.ensurePlan(rpc)
           return this.loadReply(await rpc.request('thread/resume', { ...args, threadId, config: plan.config }))
         } catch (e) {
+          diag(`codex-lock stage=thread-resume code=${codeOf(e)}`)
           const message = text(e)
           const kind = message.includes('already has an active writer')
             ? 'active-writer'
@@ -255,9 +262,30 @@ export class CodexConnection implements AgentConnection {
             codexHome: this.codexHome(),
             check: { threadId, instructionSources }
           }, plan)
-          return out.ok ? { ok: true } : { ok: false, detail: out.studentCopy }
+          // Process/cwd scoped, not thread scoped: verify the startup cutoff, not the
+          // thread config's disabled-plugin declaration.
+          if (out.ok) {
+            const listed = await rpc.request('skills/list', { cwds: [this.options.root], forceReload: true })
+            const entries: unknown = listed?.data
+            const clean = Array.isArray(entries) && entries.length === 1 && entries.every((entry) =>
+              Array.isArray(entry?.skills) && entry.skills.every((skill: { enabled?: unknown; pluginId?: unknown } | null) =>
+                typeof skill?.enabled === 'boolean' && skill.pluginId === null))
+            if (!clean) {
+              diag('codex-lock stage=verify reason=plugin-skills')
+              return { ok: false, detail: 'plugin-skills' }
+            }
+          }
+          if (!out.ok) {
+            // Exact product names only: kordocMcp.MCP_SERVER_NAME and bundled Codex's node_repl
+            // (scripts/fetch-codex.mjs). Even short user names can contain secrets or personal data.
+            let userMcp = 0
+            const names = out.remaining.map((name) => name === MCP_SERVER_NAME || name === 'node_repl' ? name : `user-mcp-${++userMcp}`)
+            diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length} names=${JSON.stringify(names)}`)
+          }
+          return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
-          return { ok: false, detail: text(e) }
+          diag(`codex-lock stage=verify code=${codeOf(e)}`)
+          return { ok: false, detail: 'exception' }
         }
       },
       restart: async () => { await this.discardProcess() }
@@ -527,7 +555,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.4' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.6' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})

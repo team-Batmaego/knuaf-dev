@@ -136,11 +136,17 @@ function tarPath(): string | null {
   return existsSync('/usr/bin/tar') ? '/usr/bin/tar' : null
 }
 
-function extract(archive: string, dest: string): Promise<void> {
+/**
+ * tgz 풀기 — 기본은 최상위 폴더 하나를 벗긴다(`--strip-components=1`, 파이썬 런타임 지금 동작).
+ * kordoc 덩어리는 맨 위에 감싸는 폴더가 **없어서**(`node_modules/`·`package.json` 이 최상위) `strip: 0` 으로
+ * 부른다 — `0` 이면 `--strip-components` 인자를 아예 넣지 않는다(설계 r2 §4.2-5, 실측 §3).
+ */
+export function extract(archive: string, dest: string, strip = 1): Promise<void> {
   const tar = tarPath()
   if (!tar) return Promise.reject({ code: 'runtime_tar_missing', message: 'tar 실행 파일을 찾지 못함' } satisfies RuntimeFailure)
   const { promise, resolve, reject } = Promise.withResolvers<void>()
-  const p = spawn(tar, ['-xzf', archive, '-C', dest, '--strip-components=1'], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+  const args = ['-xzf', archive, '-C', dest, ...(strip > 0 ? [`--strip-components=${strip}`] : [])]
+  const p = spawn(tar, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
   let stderr = ''
   p.stderr.on('data', (c) => { stderr += String(c) })
   p.on('error', (e) => reject({ code: 'runtime_extract_failed', message: String(e) } satisfies RuntimeFailure))

@@ -29,6 +29,7 @@ import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
 import { loadGuardKey } from './guard/key'
 import { runtimeFromEnsureEnvelope } from './chat/kordocMcp'
+import { withManagedKordoc } from './kordocRuntime'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
 import { APP_NAME } from '../shared/name'
@@ -668,17 +669,16 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       for (const entry of inflight.values()) if (sidecar.isWrite(entry.method)) return true
       return false
     },
-    // 폴더의 첫 전송에서만 kordoc 런타임을 확인한다(설계 §3.2). 앱은 이 값을 **입력으로만** 받는다 —
-    // 실행 파일 선택은 v0.6.0 ③(런타임 실측)의 몫이다. 여기서는 그 ③이 `kordoc.ensure`를 거칠 때의
-    // 잠정 경로를 봉투에서 그대로 읽는다(`node_path`·`cli.js`·`actual_version`). ③이 Electron 을
-    // Node 로 쓰기로 하면 이 호출에 `node`(그 실행 파일)를 넘기고 `extraEnv` 에
-    // `ELECTRON_RUN_AS_NODE=1` 을 넣는 것으로 바뀐다 — 그때까지 `node_path` 가 없으면 추측하지 않고
-    // 미부착(null)이고, 대화는 MCP 없이 그대로 간다.
-    ensureKordoc: async (root) => {
+    // 폴더의 첫 전송에서만 kordoc 런타임을 확인한다(설계 §3.2). 앱이 직접 받아 둔 덩어리
+    // (`kordocRuntime.ts`)가 있으면 그 실행 사양을 쓰고, 사이드카는 부르지 않는다.
+    // 명세가 이 PC의 대상을 열거하지 않았을 때(윈도 ARM 등)만 옛 길(`kordoc.ensure`)로 간다 —
+    // 거기서 `node_path` 가 없으면 추측하지 않고 미부착(null)이고, 대화는 MCP 없이 그대로 간다.
+    // 명세 자체가 깨졌으면 옛 길도 열지 않는다(해시 고정 없는 길을 조용히 만들지 않으려는 것, §5.2).
+    ensureKordoc: withManagedKordoc(async (root) => {
       const envelope = await sidecar.call<Envelope>('kordoc.ensure', { root })
       const node = (envelope.data as { node_path?: unknown } | null | undefined)?.node_path
       return typeof node === 'string' && node ? runtimeFromEnsureEnvelope(envelope, node) : null
-    },
+    }),
     // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
     bundledPython,

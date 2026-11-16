@@ -26,8 +26,9 @@ concurrency:
 
 jobs:
   # ci.yml 은 push 트리거가 브랜치 한정(`branches: ["main", "release/**"]`)이라 태그 푸시에는 돌지 않는다.
-  # 검증되지 않은 커밋이 설치본이 되지 않도록 여기서 다시 돈다. 맥 e2e 는 여기서 돌지만
-  # 윈도 e2e 는 PR 에서 빠졌으므로(ci.yml) 아래 `e2e-windows` 가 그 자리를 채운다.
+  # 검증되지 않은 커밋이 설치본이 되지 않도록 여기서 다시 돈다. 맥 e2e 도 윈도 e2e 도 여기서 돈다 —
+  # ci.yml 의 e2e 는 PR·main push 를 덮지만 태그 커밋은 그 어느 쪽도 아니므로 아래 `e2e-windows` 가
+  # 태그 경로의 윈도 몫을 맡는다.
   verify:
     runs-on: macos-latest
     steps:
@@ -73,9 +74,11 @@ jobs:
           # 스펙에서 macOS 기본 3.9 를 집어 project:open 이 실패한다(ci.yml 과 같은 수정).
           KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
 
-  # 태그 배포에서도 윈도 e2e 를 실제로 돌린다. ci.yml 이 PR 에서 윈도 e2e 를 건너뛰므로
-  # (perf/ci-light), 공개 전 관문은 여기다 — 초안을 만드는 `macos` 와 설치본을 올리는 `windows` 가
-  # 이 작업의 성공을 `needs` 로 기다린다. 즉 윈도 e2e 가 빨개지면 초안 자체가 생기지 않는다.
+  # 태그 경로의 윈도 e2e 관문. ci.yml 은 PR·main push 에서 윈도 e2e 를 돌지만 태그 커밋은 그
+  # 트리거에 걸리지 않으므로(브랜치 한정 push) 여기서 한 번 더 돈다 — 초안을 만드는 `macos` 와
+  # 설치본을 올리는 `windows` 가 이 작업의 성공을 `needs` 로 기다린다. 즉 윈도 e2e 가 빨개지면
+  # 초안 자체가 생기지 않는다. PR 에서 이미 같은 시험을 돌았더라도 태그 커밋은 PR 커밋과 다를 수
+  # 있으므로(머지 커밋) 중복이 아니라 재확인이다.
   # 대가: 태그 1회당 러너 ~36분(5샤드 병렬) + 설치본 작업 대기. 배포는 드물어 감수한다.
   e2e-windows:
     needs: verify

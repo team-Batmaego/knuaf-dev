@@ -41,9 +41,9 @@
  * 1층 잠금(§4.1-C)·턴 원장(⑨) 시험용 노브 — **설정하지 않으면 기존 동작 그대로**다.
  *   FAKE_CODEX_CONFIG_READ          `config/read` 응답(JSON). `{config, layers}` 또는 `{fail}`/`{malformed}`
  *   FAKE_CODEX_CONFIG_READ_FAIL_TIMES  `config/read` 를 처음 N회 오류로 거절
- *   FAKE_CODEX_PLUGIN_INSTALLED     `plugin/installed` 목록(JSON 배열 또는 `{pages:[…]}`/`{endless}`/`{malformed}`)
- *   FAKE_CODEX_APP_LIST             `app/list` 목록(같은 모양)
- *   FAKE_CODEX_MCP_STATUS           `mcpServerStatus/list` 목록(같은 모양) — 장 넘김 시험용
+ *   FAKE_CODEX_PLUGIN_INSTALLED     `plugin/installed` 실제 응답(JSON {marketplaces,marketplaceLoadErrors}, 또는 {error:true})
+ *   FAKE_CODEX_APP_LIST             `app/list` 목록(JSON 배열 또는 `{pages:[…]}`/`{endless}`/`{malformed}`)
+ *   FAKE_CODEX_MCP_STATUS           `mcpServerStatus/list` 목록(위와 같은 모양) — 장 넘김 시험용
  *   FAKE_CODEX_THREAD_LIST          `thread/list` 목록(같은 모양)
  *   FAKE_CODEX_THREAD_TURNS_LIST    `thread/turns/list` 목록(같은 모양)
  *   FAKE_CODEX_THREAD_TURNS         `{threadId: [turn, …]}` — `thread/start`·`resume` 응답의 `thread.turns`
@@ -372,7 +372,8 @@ function handle(message) {
       return out({ id, result: CONFIG_READ })
     }
     case 'plugin/installed':
-      return sendPaged(id, 'plugin', PLUGIN_INSTALLED)
+      if (PLUGIN_INSTALLED?.error === true) return out({ id, error: { code: -32603, message: 'plugin inventory failed' } })
+      return out({ id, result: PLUGIN_INSTALLED ?? { marketplaces: [], marketplaceLoadErrors: [] } })
     case 'app/list':
       return sendPaged(id, 'apps', APP_LIST)
     case 'mcpServerStatus/list':
@@ -386,7 +387,7 @@ function handle(message) {
       const cwd = (params.cwds ?? [])[0] ?? process.cwd()
       const skill = join(cwd, '.agents', 'skills', 'knuaf-dev', 'SKILL.md')
       // 실제 Codex처럼 설치된 파일만 보고하고 경로 별칭·구분자를 정규화한다.
-      const skills = existsSync(skill) ? [{ path: realpathSync(skill), enabled: true }] : []
+      const skills = existsSync(skill) ? [{ path: realpathSync(skill), enabled: true, pluginId: null }] : []
       return out({ id, result: { data: [{ skills }] } })
     }
     case 'hooks/list':
