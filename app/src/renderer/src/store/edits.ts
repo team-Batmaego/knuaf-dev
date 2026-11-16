@@ -271,6 +271,21 @@ export const useEdits = create<EditState>((set, get) => ({
       }
       if (get().available === null) set({ available: true })
       await get().load(root)
+      // revision 감시가 더 새 load를 시작했으면 앞 load 종료는 게시 완료가 아니다.
+      // 최신 읽기가 끝나거나 논문을 떠날 때까지 저장의 write gate를 유지한다.
+      if (get().root === root && get().loading) {
+        const { promise, resolve } = Promise.withResolvers<void>()
+        const check = (): void => {
+          if (get().root !== root || !get().loading) { off(); resolve() }
+        }
+        const off = useEdits.subscribe(check)
+        check()
+        await promise
+      }
+      if (get().root !== root || get().error) {
+        return { ok: false, message: '본문은 저장했지만 고침 목록을 확인하지 못했어요.',
+          detail: get().root === root ? get().error ?? undefined : '다른 논문으로 이동했어요.' }
+      }
       return { ok: true, result }
     } catch (e) {
       const missing = e instanceof RpcFailure && e.code === 'not_found'

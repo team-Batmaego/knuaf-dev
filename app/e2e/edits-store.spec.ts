@@ -417,6 +417,42 @@ for (const kind of ['one', 'batch'] as const) {
   })
 }
 
+for (const failLatest of [false, true]) {
+  test(`R1-01 — 저장 목록이 revision 읽기에 밀려도 최신 게시까지 기다린다 (${failLatest ? '읽기 실패' : '성공'})`, async () => {
+    const first = Promise.withResolvers<unknown>()
+    const latest = Promise.withResolvers<unknown>()
+    const started = Promise.withResolvers<void>()
+    let reads = 0
+    const model = { knuaf: { call: async (method: string) => {
+      if (method !== 'section.edits') return { result: { ...editResult(2), needs_check: true } }
+      if (++reads === 1) { started.resolve(); return { result: await first.promise } }
+      return { result: await latest.promise }
+    } } }
+    await withWindow(model, async () => {
+      let done = false
+      const saving = useEdits.getState().save('/A', {
+        kind: 'one', id: 'sec-01', expected_revision: 1, before_block: '가', after_block: '나'
+      }).then((result) => { done = true; return result })
+      await started.promise
+      const revisionRead = useEdits.getState().load('/A')
+      first.resolve({ edits: [editRow('edit-2', 'pending')], notices: [] })
+      await flush()
+      try {
+        expect(done).toBe(false)
+        expect(waitKind(usePrep.getState(), '/A')).toBe('write')
+      } finally {
+        if (failLatest) latest.reject(new Error('목록 읽기 실패'))
+        else latest.resolve({ edits: [editRow('edit-2', 'pending')], notices: [] })
+        await revisionRead
+        await saving
+      }
+      const outcome = await saving
+      expect(outcome.ok).toBe(!failLatest)
+      if (!failLatest) expect(useEdits.getState().attach('바로 보내기').ids).toEqual(['edit-2'])
+    })
+  })
+}
+
 test('연속 저장 — 화면이 옛 개정을 들고 있어도 다음 저장은 앞 저장이 알려 준 개정으로 나간다', async () => {
   // 실제로 깨지던 꼴(#125 맥 e2e viewer-edit.spec.ts:279): 앞 저장(`kind:'one'`)의 응답은 이미
   // 왔는데 그 뒤의 조용한 `refresh()` 가 아직 안 돌아와 `status.revision` 이 옛 값이다. 그 40ms
