@@ -25,7 +25,7 @@ export interface KordocMcpRegistryDeps {
 
 /** 미부착 이유 → 안내 문장 조각. 이유를 모르면 일반 문장으로 닫는다. */
 const FAILURE_REASON: Record<KordocAttachFailure, string> = {
-  'no-runtime': 'kordoc을 찾지 못했어요',
+  'no-runtime': '한글 문서 도구가 아직 준비되지 않았어요. 준비되면 다음 메시지부터 붙어요',
   'old-version': '깔린 kordoc 판이 오래됐어요',
   'no-node': 'kordoc을 실행할 프로그램을 정하지 못했어요',
   'shuttle': 'kordoc 실행 파일이 직접 실행할 수 있는 형태가 아니에요',

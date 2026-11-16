@@ -79,6 +79,8 @@ export const MCP_DOC_READ_INSTRUCTION = '한글 문서(HWP·HWPX)·PDF 읽기는
 export interface KordocRuntime {
   /** kordoc을 돌릴 Node 실행 파일(또는 Electron을 Node로 쓰는 그 실행 파일). */
   node: string
+  /** `node`와 스크립트 사이에 끼우는 인자(예: `['-r', shim]`). `cli.js`를 부를 때만 쓴다. */
+  nodeArgs?: string[]
   /** `…/dist/cli.js`. 셔틀(`.cmd`·셸 래퍼)이면 미부착이다. */
   cliJs: string
   /** `actual_version` 같은 판 문자열. */
@@ -159,7 +161,9 @@ export function rootKey(root: string, fs: Pick<KordocFs, 'realpathSync'> = NODE_
  *
  * - 판 < 4.17.1 → 미부착(울타리·읽기 8개를 확인한 최저판).
  * - `cliJs`가 `.js`가 아니면(셔틀·셸 래퍼) 미부착 — 셔틀을 command로 넘기지 않는다.
- * - `dirname(cliJs)/mcp.js`가 있으면 그것을, 없으면 `[cliJs, 'mcp']` 부명령을 쓴다.
+ * - `dirname(cliJs)/mcp.js`가 있으면 그것을, 없으면 `[...nodeArgs, cliJs, 'mcp']` 부명령을 쓴다.
+ *   `mcp.js` 갈래에는 `nodeArgs`를 끼우지 않는다 — 그 갈래로 잰 실측이 shim 없이 돈다(설계 §6).
+ * - `nodeArgs`가 있는데 문자열 배열이 아니면 미부착(`no-node`).
  * - `root`의 realpath를 못 구하면 미부착 — 울타리를 정확히 그을 수 없으면 열지 않는다.
  * - `extraEnv`를 먼저 깔고 `KORDOC_ROOT`·`KORDOC_OFFLINE`을 **덮어쓴다**(울타리가 extraEnv로 흔들리지 않게).
  */
@@ -172,11 +176,18 @@ export function resolveKordocMcp(
   if (!runtime) return fail('no-runtime')
   if (!versionAtLeast(runtime.version)) return fail('old-version')
   if (typeof runtime.node !== 'string' || !runtime.node.trim()) return fail('no-node')
+  // 호출자가 타입 밖의 값을 넣을 수 있다(사이드카 봉투·시험 대역) — 런타임에 모양을 확인한다.
+  const rawArgs: unknown = runtime.nodeArgs
+  let nodeArgs: string[] = []
+  if (rawArgs !== undefined) {
+    if (!Array.isArray(rawArgs) || rawArgs.some((a) => typeof a !== 'string')) return fail('no-node')
+    nodeArgs = [...(rawArgs as string[])]
+  }
   if (typeof runtime.cliJs !== 'string' || !/\.js$/i.test(runtime.cliJs)) return fail('shuttle')
   let rootReal: string
   try { rootReal = fs.realpathSync(root) } catch { return fail('bad-root') }
   const sibling = join(dirname(runtime.cliJs), 'mcp.js')
-  const args = fs.existsSync(sibling) ? [sibling] : [runtime.cliJs, 'mcp']
+  const args = fs.existsSync(sibling) ? [sibling] : [...nodeArgs, runtime.cliJs, 'mcp']
   return {
     ok: true,
     spec: {
