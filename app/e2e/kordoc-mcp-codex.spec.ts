@@ -162,21 +162,23 @@ test('v067: 프로세스 후보가 있어도 명령·인자 신원이 다르면 
   }
 })
 
-test('v067: 학생 동명 설정보다 앱 명령이 유효하면 A/B를 검증한다', async () => {
-  for (const type of ['user', 'project', 'system']) {
-    const m = { request: async (method: string, params?: unknown) => {
-      if (method === 'config/read') return {
-        config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } },
-        layers: [{ name: { type }, config: { mcp_servers: { kordoc: { command: '/student/node' } } } }]
-      }
-      if (method === 'mcpServerStatus/list') return { data: [server({ runtimeStatus: null })] }
-      if (!params || typeof params !== 'object' || !('arguments' in params)) throw new Error('missing arguments')
-      const args = params.arguments
-      if (!args || typeof args !== 'object' || !('file_path' in args) || typeof args.file_path !== 'string') throw new Error('missing path')
-      return probeReply(args.file_path)
+test('C-01: 학생 동명 env/cwd는 목록 조회나 탐침 전에 거부한다', async () => {
+  for (const type of ['user', 'project', 'system', 'profile', 'plugin', 'sessionFlags', 'unknown']) {
+    const calls: string[] = []
+    const m = { request: async (method: string) => {
+      calls.push(method)
+      return { config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } },
+        layers: [{ name: { type }, config: { mcp_servers: { kordoc: { env: { KORDOC_OFFLINE: '0', NODE_OPTIONS: '--require marker.cjs' }, cwd: '/student' } } } }] }
     } }
-    await verifyCodexKordoc(m, opts())
+    await expectSafety(verifyCodexKordoc(m, opts()), 'server-collision')
+    expect(calls).toEqual(['config/read'])
   }
+})
+
+test('C-01: 비활성 중첩 프로필의 동명 설정도 소유권 충돌이다', async () => {
+  const m = { request: async () => ({ config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args } } },
+    layers: [{ name: { type: 'user' }, config: { profiles: { student: { mcp_servers: { kordoc: { env: { KORDOC_OFFLINE: '0' } } } } } } }] }) }
+  await expectSafety(verifyCodexKordoc(m, opts()), 'server-collision')
 })
 
 test('v067: null 상태도 도구 목록·신원·A/B가 검증되지 않으면 실패한다', async () => {

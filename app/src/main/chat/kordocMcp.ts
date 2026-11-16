@@ -322,6 +322,42 @@ export function codexMcpArgs(spec: KordocMcpSpec): string[] {
   ]
 }
 
+/** All non-app layers owning the name are collisions: Codex retains env/cwd keys across overrides. */
+export function codexKordocCollision(read: unknown, spec: KordocMcpSpec): boolean {
+  if (!read || typeof read !== 'object' || !('layers' in read) || !Array.isArray(read.layers)) return true
+  const expected: Record<string, unknown> = {
+    command: spec.command, args: spec.args,
+    env_vars: ['KORDOC_ROOT', 'KORDOC_OFFLINE', ...Object.keys(spec.env).filter((k) => k !== 'KORDOC_ROOT' && k !== 'KORDOC_OFFLINE')],
+    enabled_tools: [...READ_TOOLS], startup_timeout_sec: CODEX_STARTUP_TIMEOUT_SEC, tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC
+  }
+  const nestedOwnsName = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'mcp_servers' && child && typeof child === 'object' && MCP_SERVER_NAME in child) return true
+      if (nestedOwnsName(child)) return true
+    }
+    return false
+  }
+  for (const layer of read.layers) {
+    if (!layer || typeof layer !== 'object' || !('config' in layer) || !layer.config || typeof layer.config !== 'object') return true
+    for (const [key, value] of Object.entries(layer.config)) {
+      if (key !== 'mcp_servers' && nestedOwnsName(value)) return true
+    }
+    if (!('mcp_servers' in layer.config)) continue
+    const servers = layer.config.mcp_servers
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return true
+    if (!(MCP_SERVER_NAME in servers)) continue
+    const own = servers[MCP_SERVER_NAME]
+    const name = 'name' in layer ? layer.name : null
+    if (!name || typeof name !== 'object' || !('type' in name) || name.type !== 'sessionFlags'
+      || !own || typeof own !== 'object' || Array.isArray(own)) return true
+    const entries = Object.entries(own)
+    if (entries.length !== Object.keys(expected).length
+      || entries.some(([key, value]) => !(key in expected) || JSON.stringify(value) !== JSON.stringify(expected[key]))) return true
+  }
+  return false
+}
+
 /**
  * `env_vars`는 codex 자식에게 **부모 환경에서 이름으로** 전달된다 — 그래서 app-server 프로세스 env에
  * 이 값을 합쳐야 한다. `root×provider`당 하나이므로 폴더가 섞이지 않는다(설계 §1-L).

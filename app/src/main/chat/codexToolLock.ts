@@ -22,7 +22,7 @@
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, sep } from 'node:path'
-import { MCP_SERVER_NAME, READ_TOOLS, CODEX_STARTUP_TIMEOUT_SEC, CODEX_TOOL_TIMEOUT_SEC, type KordocMcpSpec } from './kordocMcp'
+import { MCP_SERVER_NAME, READ_TOOLS, CODEX_STARTUP_TIMEOUT_SEC, CODEX_TOOL_TIMEOUT_SEC, codexKordocCollision, type KordocMcpSpec } from './kordocMcp'
 import { codeOf, diag } from '../diagLog'
 
 /** 목록 한 번에 받는 장 수 상한. 상한에 닿았는데 커서가 남으면 실패다(설계 '목록 읽기 규칙'). */
@@ -114,6 +114,7 @@ export interface AppThreadPlan {
   lockedNames: string[]
   lockedPlugins: string[]
   kordocAttached: boolean
+  kordocCollision: boolean
 }
 
 export interface AppThreadLock extends AppThreadPlan {
@@ -245,6 +246,7 @@ interface Enumeration {
   plugins: Record<string, unknown>
   /** 층마다 그 층 자신의 표에 적힌 이름 → 값 */
   layers: Record<LayerKind, Record<string, unknown>>
+  kordocCollision: boolean
   /** `plugin/installed` 가 알려 준 설치 id */
   installed: string[]
 }
@@ -320,7 +322,8 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
       if (row.installed || row.enabled) ids.push(row.id)
     }
   }
-  return { ok: true, value: { servers, plugins, layers, installed: ids } }
+  const spec = req.injected.find((i) => i.name === MCP_SERVER_NAME)?.spec
+  return { ok: true, value: { servers, plugins, layers, installed: ids, kordocCollision: !!spec && codexKordocCollision(read, spec) } }
 }
 
 /** 그 이름이 학생 층 어디엔가 있는가(N-01). 앱 주입 이름을 학생 서버로 오인하지 않기 위한 판정. */
@@ -393,6 +396,7 @@ interface AppPlan {
   lockedNames: string[]
   lockedPlugins: string[]
   kordocAttached: boolean
+  kordocCollision: boolean
 }
 
 function planAppThread(req: ToolLockRequest, enumeration: Enumeration): AppPlan {
@@ -400,14 +404,14 @@ function planAppThread(req: ToolLockRequest, enumeration: Enumeration): AppPlan 
   const lockedNames: string[] = []
   const lockedPlugins: string[] = []
   const appSpec = req.injected.find((i) => i.name === MCP_SERVER_NAME)?.spec
-  const kordocAttached = !!appSpec
+  const kordocAttached = !!appSpec && !enumeration.kordocCollision
   for (const name of Object.keys(enumeration.servers)) {
-    if (name === MCP_SERVER_NAME && appSpec) continue
+    if (name === MCP_SERVER_NAME && kordocAttached) continue
     config.mcp_servers[name] = { enabled: false }
     lockedNames.push(name)
   }
   // thread config replaces the complete table: carry the app's exact command/args, never student values.
-  if (appSpec) config.mcp_servers[MCP_SERVER_NAME] = injectedKordocConfig(appSpec)
+  if (appSpec && kordocAttached) config.mcp_servers[MCP_SERVER_NAME] = injectedKordocConfig(appSpec)
 
   for (const id of new Set<string>([...Object.keys(enumeration.plugins), ...enumeration.installed])) {
     if (!id) continue
@@ -415,7 +419,7 @@ function planAppThread(req: ToolLockRequest, enumeration: Enumeration): AppPlan 
     lockedPlugins.push(id)
   }
 
-  return { config, lockedNames, lockedPlugins, kordocAttached }
+  return { config, lockedNames, lockedPlugins, kordocAttached, kordocCollision: enumeration.kordocCollision }
 }
 
 // ── 결과 대조 ─────────────────────────────────────────────────────────────────
@@ -516,7 +520,7 @@ async function checkAppThreadResult(req: ToolLockRequest, plan: AppPlan): Promis
   const enabled = Object.entries(plan.config.mcp_servers).filter(([, row]) => row.enabled !== false)
   if (enabled.some(([name, row]) => name !== MCP_SERVER_NAME || !appSpec
     || JSON.stringify(row) !== JSON.stringify(injectedKordocConfig(appSpec)))
-    || plan.kordocAttached !== (enabled.length === 1)) {
+    || plan.kordocAttached !== (enabled.length === 1) || (plan.kordocCollision && enabled.length > 0)) {
     return { ok: false, reason: 'result-check', detail: '앱 주입 MCP 잠금 표가 달라요', remaining: enabled.map(([name]) => name) }
   }
   const expected = Object.keys(plan.config.mcp_servers).filter((name) => plan.config.mcp_servers[name].enabled === false)

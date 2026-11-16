@@ -181,6 +181,10 @@ export class CodexConnection implements AgentConnection {
       diag(`codex-lock stage=plan reason=${plan.reason}`)
       throw new Error(plan.studentCopy)
     }
+    // Restart without -c injection before any inventory/probe can start a contaminated MCP.
+    if (this.mcpSpec && plan.plan.kordocCollision) {
+      throw new McpSafetyError('학생 설정의 동명 한글 문서 도구는 붙이지 않아요', 'server-collision')
+    }
     return plan.plan
   }
   /** 이 턴의 계획을 재사용한다 — `verify` 가 **같은** `config` 를 기준으로 대조해야 한다. */

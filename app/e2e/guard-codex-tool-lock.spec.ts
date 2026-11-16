@@ -316,20 +316,22 @@ test('v066 app-owned kordoc absence does not bypass Apps or instruction checks',
   }
 })
 
-test('v067 학생 동명 서버보다 앱 command/args가 이기고 다른 학생 서버는 잠근다', async () => {
-  const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, other: { command: 'student' } }, layers: { user: { kordoc: { command: 'student', args: ['write.js'] } } } }),
-    'plugin/installed': () => installed([]),
-    'mcpServerStatus/list': () => status([{ name: 'kordoc', runtimeStatus: 'connected' }, disabled('other')]),
-    'app/list': () => status([])
+for (const type of ['user', 'project', 'system', 'profile', 'plugin', 'sessionFlags', 'futureLayer']) {
+  test(`C-01 동명 ${type} 설정의 env/cwd는 앱 실행표로 덮지 않고 잠근다`, async () => {
+    const f = fakeRpc({
+      'config/read': () => ({ config: { mcp_servers: { kordoc: { command: appSpec.command }, other: {} }, plugins: {} },
+        layers: [{ name: { type }, config: { mcp_servers: { kordoc: { command: appSpec.command, args: appSpec.args,
+          env: { KORDOC_OFFLINE: '0', NODE_OPTIONS: '--require student.cjs' }, cwd: '/student' } } } }] }),
+      'plugin/installed': () => installed([]),
+      'mcpServerStatus/list': () => status([disabled('kordoc'), disabled('other')]), 'app/list': () => status([])
+    })
+    const out = expectOk(await appThread(f, { injected: appInjected }))
+    if (out.form !== 'app-thread') throw new Error('not app thread')
+    expect(out.config.mcp_servers).toEqual({ kordoc: { enabled: false }, other: { enabled: false } })
+    expect(out.kordocAttached).toBe(false)
+    expect(out.kordocCollision).toBe(true)
   })
-  const out = expectOk(await appThread(f, { injected: appInjected }))
-  if (out.form !== 'app-thread') throw new Error('앱 스레드가 아니에요')
-  expect(out.config.mcp_servers.kordoc).toMatchObject({ enabled: true, command: appSpec.command, args: appSpec.args })
-  expect(out.config.mcp_servers.other).toEqual({ enabled: false })
-  expect(out.lockedNames).toEqual(['other'])
-  expect(out.kordocAttached).toBe(true)
-})
+}
 
 test('v067 지문과 verify는 앱 실행표 변조나 다른 살아 있는 MCP를 허용하지 않는다', async () => {
   const f = fakeRpc({ 'config/read': () => configRead({ servers: { kordoc: {} } }), 'plugin/installed': () => installed([]),

@@ -18,7 +18,7 @@ import { codexThreadRow, loadCodexThreads, saveCodexThreads } from '../src/main/
 import { lockFingerprint, type LockConfig } from '../src/main/chat/codexToolLock'
 import { newChatNotice, OTHER_WINDOW_COPY } from '../src/main/chat/codexThreadLock'
 import type { AgentConnection, AgentEvents, AgentOptions } from '../src/main/chat/contracts'
-import { advertisedReadTools, type KordocMcpSpec } from '../src/main/chat/kordocMcp'
+import { READ_TOOLS, advertisedReadTools, type KordocMcpSpec } from '../src/main/chat/kordocMcp'
 import { fakeCodexEnv } from './fixtures/fake-codex'
 
 const scratch: string[] = []
@@ -289,7 +289,7 @@ test('§10-23 ⓓ rollout 이 아직 없는 대화는 새 대화로 다시 열�
   }
 })
 
-for (const collision of [false, true]) test(`v067 앱 kordoc은 학생 동명 설정을 덮고 A/B 뒤 재기동 없이 사용한다(collision=${collision})`, async () => {
+for (const collision of [false, true]) test(`C-01 앱 kordoc 충돌은 탐침 없이 미부착 폴백한다(collision=${collision})`, async () => {
   const s = scene('process-kordoc', {
     FAKE_CODEX_MCP_STATUS: FOREIGN_STATUS,
     FAKE_CODEX_TURN_ID_MODE: 'unique'
@@ -298,9 +298,13 @@ for (const collision of [false, true]) test(`v067 앱 kordoc은 학생 동명 �
     command: '/app/node', args: ['/app/kordoc/mcp.js'],
     env: { KORDOC_ROOT: s.root, KORDOC_OFFLINE: '1' }, version: '4.17.1'
   }
+  const own = { command: spec.command, args: spec.args, env_vars: ['KORDOC_ROOT', 'KORDOC_OFFLINE'],
+    enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+  if (collision) s.env.FAKE_CODEX_MCP_STATUS = JSON.stringify([{ name: 'kordoc', runtimeStatus: 'disabled' }, { name: 'foreign', runtimeStatus: 'disabled' }])
   s.env.FAKE_CODEX_CONFIG_READ = JSON.stringify({
     config: { mcp_servers: { kordoc: { command: spec.command, args: spec.args }, foreign: { enabled: true } }, plugins: {} },
-    layers: [{ name: { type: collision ? 'user' : 'sessionFlags' }, config: { mcp_servers: { kordoc: { command: collision ? '/student/node' : spec.command, args: collision ? ['write.js'] : spec.args } } } }]
+    layers: [{ name: { type: collision ? 'user' : 'sessionFlags' }, config: { mcp_servers: { kordoc: collision
+      ? { command: '/student/node', env: { KORDOC_OFFLINE: '0', NODE_OPTIONS: '--require student.cjs' }, cwd: '/student' } : own } } }]
   })
   s.env.FAKE_CODEX_MCP_PROCESS_STATUS = JSON.stringify([{
     name: 'kordoc', runtimeStatus: null, serverInfo: { name: 'kordoc', version: spec.version },
@@ -314,18 +318,18 @@ for (const collision of [false, true]) test(`v067 앱 kordoc은 학생 동명 �
   } finally {
     await conn.stop()
   }
-  expect(s.notes).toEqual([])
+  expect(s.notes).toEqual(collision ? ['안전 검사를 통과하지 못해 한글 문서 도구를 끄고 진행해요'] : [])
   expect(liveLoads(s.requests(), 'thread/start')).toHaveLength(1)
   expect(liveLoads(s.requests(), 'thread/start')[0].params.config).toMatchObject({
-    mcp_servers: { foreign: { enabled: false }, kordoc: { enabled: true, command: spec.command, args: spec.args } }
+    mcp_servers: { foreign: { enabled: false }, kordoc: collision ? { enabled: false } : { enabled: true, command: spec.command, args: spec.args } }
   })
   const probes = s.requests().filter((r) => r.method === 'mcpServer/tool/call')
-  expect(probes).toHaveLength(2)
+  expect(probes).toHaveLength(collision ? 0 : 2)
   expect(probes.every((r) => r.params.threadId === 't-fake')).toBe(true)
   expect(s.requests().filter((r) => r.method === 'turn/start')).toHaveLength(1)
   const statuses = s.requests().filter((r) => r.method === 'mcpServerStatus/list')
   expect(statuses.some((r) => r.params.threadId === 't-fake')).toBe(true)
-  expect(statuses.filter((r) => r.params.threadId === undefined)).toHaveLength(1)
+  expect(statuses.filter((r) => r.params.threadId === undefined)).toHaveLength(collision ? 0 : 1)
 })
 
 

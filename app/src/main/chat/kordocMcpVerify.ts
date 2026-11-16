@@ -17,7 +17,7 @@
  */
 import { realpathSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { MCP_SERVER_NAME, READ_TOOLS, advertisedReadTools, type KordocMcpSpec } from './kordocMcp'
+import { MCP_SERVER_NAME, READ_TOOLS, advertisedReadTools, codexKordocCollision, type KordocMcpSpec } from './kordocMcp'
 
 /** 검증에 실패한 이유. 연결 단계는 이것을 받아 MCP를 끄고 새 연결 객체로 다시 시도한다. */
 export class McpSafetyError extends Error {
@@ -183,6 +183,9 @@ async function checkCommand(call: BudgetedRequests, opts: VerifyOptions): Promis
   const result = asRecord(await call.request('config/read', {
     cwd: opts.root, includeLayers: true
   }, 'server-config'))
+  if (codexKordocCollision(result, opts.spec)) {
+    throw new McpSafetyError('학생 설정과 kordoc MCP 실행 환경을 분리하지 못했어요', 'server-collision')
+  }
   const config = asRecord(result?.config)
   const server = asRecord(asRecord(config?.mcp_servers)?.[MCP_SERVER_NAME])
   if (!server || server.command !== opts.spec.command || !Array.isArray(server.args)
