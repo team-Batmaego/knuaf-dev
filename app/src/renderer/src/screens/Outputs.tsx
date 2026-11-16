@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import { rpc } from '../rpc'
 import { Feedback } from '../components/Feedback'
@@ -9,7 +9,7 @@ import { EmptyState } from '../components/EmptyState'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { ResultCard } from '../components/ResultCard'
 import { useRunner } from '../components/useRunner'
-import { COMPLETION, EMPTY, FIELD_HINT, FIELD_LABEL, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, NO_OVERWRITE_NOTE, describeError, officeHint, type DescribedError } from '../copy'
+import { COMPLETION, EMPTY, FIELD_HINT, FIELD_LABEL, FORMULA_HELD, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, NO_OVERWRITE_NOTE, NOTICE, describeError, officeHint, type DescribedError } from '../copy'
 import { useShallow } from 'zustand/react/shallow'
 
 /** Next free sibling name (…-v2, -v3): outputs are never overwritten. */
@@ -35,6 +35,10 @@ export function OutputsTools() {
   const [kind, setKind] = useState('review')
   const [exportResult, setExportResult] = useState<{ path: string } | null>(null)
   const [exportErr, setExportErr] = useState<DescribedError | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
+  const [confirmError, setConfirmError] = useState<string | null>(null)
+  const confirmLock = useRef(false)
+  const pendingClear = useRef<{ env: NonNullable<typeof runner.env>; params: Record<string, unknown> } | null>(null)
   const [form, setForm] = useState<Record<string, string>>({ paper_in: 'paper-input.json', paper_out: 'build/검토전_본문.md', docx_in: 'build/검토전_본문.md', docx_out: 'build/검토전_논문.docx', font: '신명조', xl_source: '', xl_map: 'build/template-review/source-map.json', xl_blank: 'build/template-review/blank-v1.xlsx', xl_values: '', xl_writemap: '', xl_filled: 'build/template-review/filled-v1.xlsx', xl_final: '', xl_receipts: '', of_input: '', of_out: 'build/native' })
   const existing = useMemo(() => {
     const s = new Set<string>()
@@ -61,6 +65,45 @@ export function OutputsTools() {
   const reveal = (p: string) => window.knuaf.reveal(joinPath(root, p))
   const vOut = (k: string, ext: string[]) => validateOutPath(form[k], ext, (p) => existing.has(p))
   const done = (m: string) => runner.env?.ok && runner.env.argv.some((a) => a.endsWith(m))
+
+  const clear = async () => {
+    if (confirmLock.current || runner.busy) return
+    confirmLock.current = true
+    setConfirmError(null)
+    const pending = pendingClear.current
+    try {
+      if (pending && pending.params.root === root && pending.env === runner.env && pending.env.block_reason === 'formula_cells_changed') {
+        const detail = pending.env.detail as Record<string, unknown> | null
+        const identity = detail?.notice_identity
+        if (typeof identity === 'string' && identity) {
+          setConfirmBusy(true)
+          const reply = await window.knuaf.notices.confirm(root, identity)
+          if (reply.error || !reply.result?.ok || reply.result.status !== 'acknowledged') {
+            setConfirmError(reply.result?.block_reason || NOTICE.confirmFailed)
+            if ((reply.result?.data as { reason?: unknown } | null)?.reason === 'notice_stale') {
+              pendingClear.current = null
+              void window.knuaf.notices.read(root).catch(() => {})
+            }
+            return
+          }
+          // 확인 중 논문을 바꾸었다면 이전 논문의 사본을 이 화면에서 실행하지 않는다.
+          if (useProject.getState().root !== root) return
+          pendingClear.current = null
+          const env = await runner.run('excel.clear', pending.params)
+          pendingClear.current = env ? { env, params: pending.params } : null
+          return
+        }
+      }
+      const params = { root, source: form.xl_source, map: form.xl_map, out: form.xl_blank, receipt: form.xl_blank.replace(/\.xlsx$/, '-receipt.json') }
+      const env = await runner.run('excel.clear', params)
+      pendingClear.current = env ? { env, params } : null
+    } catch {
+      setConfirmError(NOTICE.confirmFailed)
+    } finally {
+      confirmLock.current = false
+      setConfirmBusy(false)
+    }
+  }
 
   return (
     <div>
@@ -122,7 +165,7 @@ export function OutputsTools() {
             <Field id="xl_blank" label={FIELD_LABEL.xl_blank} invalid={vOut('xl_blank', ['.xlsx'])} trailing={<button onClick={rename('xl_blank')}>다른 이름으로</button>}><input id="xl_blank" value={form.xl_blank} onChange={set('xl_blank')} aria-invalid={!!vOut('xl_blank', ['.xlsx'])} /></Field>
             <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
               <button className="primary" disabled={runner.busy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => runner.run('excel.create', { root, source: form.xl_source, out: form.xl_blank })}>사본 만들기</button>
-              <button disabled={runner.busy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => runner.run('excel.clear', { root, source: form.xl_source, map: form.xl_map, out: form.xl_blank, receipt: form.xl_blank.replace(/\.xlsx$/, '-receipt.json') })}>검토한 셀 지도대로 비우기</button>
+              <button disabled={runner.busy || confirmBusy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => void clear()}>검토한 셀 지도대로 비우기</button>
             </div>
           </li>
           <li className="item">
@@ -173,8 +216,10 @@ export function OutputsTools() {
       </Disclosure>
 
       {runner.err && <div style={{ marginTop: 'var(--sp-4)' }}>{(() => { const d = describeError({ code: null, message: runner.err }); return <Feedback kind="error" title={d.title} body={d.action} details={<code>{runner.err}</code>} /> })()}</div>}
+      {confirmError && <p className="notice-failed" role="alert">{confirmError}</p>}
       {runner.cancelled && <div style={{ marginTop: 'var(--sp-4)' }}><Feedback kind="status" title={COMPLETION.cancelled} /></div>}
-      <ProgressPanel busy={runner.busy} phase={runner.phase} elapsedMs={runner.elapsedMs} lines={runner.lines} onCancel={runner.cancel} />
+      {/* 멈춤의 원본 JSON에는 학생에게 보여 주지 않는 사유 코드가 있다. */}
+      {!(runner.env && !runner.env.ok && runner.env.block_reason && Object.hasOwn(FORMULA_HELD, runner.env.block_reason)) && <ProgressPanel busy={runner.busy} phase={runner.phase} elapsedMs={runner.elapsedMs} lines={runner.lines} onCancel={runner.cancel} />}
       {runner.env && !runner.busy && (() => { const h = officeHint(runner.env.block_reason ?? (runner.env.data as any)?.engine_stderr); return h ? <div style={{ marginTop: 'var(--sp-4)' }}><Feedback kind="warning" title={h.title} body={h.body} /></div> : null })()}
       {runner.env && !runner.busy && <ResultCard env={runner.env} onReveal={reveal} onOpen={(p) => openPreview(joinPath(root, p))} />}
     </div>

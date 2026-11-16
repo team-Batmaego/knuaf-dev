@@ -42,13 +42,16 @@ class ControlledSidecar extends EventEmitter {
   calls: { method: string; params: Record<string, unknown> }[] = []
   /** `notices.choose` 응답 — 시험이 갈아 끼운다. */
   choose: () => Envelope = () => envelope('chosen')
+  /** `notices.confirm` 응답 — 시험이 갈아 끼운다. */
+  confirm: () => Envelope = () => envelope('acknowledged')
   status() { return { python: '/bundled/python', kind: 'bundled' as const, scriptsDir: join(source, 'scripts'), running: true } }
   async configure(root: string) { this.configured.push(root); return this.status() }
-  isWrite(method: string) { return method === 'notices.choose' }
+  isWrite(method: string) { return method === 'notices.choose' || method === 'notices.confirm' }
   cancel() {}
   async call(method: string, params: Record<string, unknown>) {
     this.calls.push({ method, params })
     if (method === 'notices.choose') return this.choose()
+    if (method === 'notices.confirm') return this.confirm()
     throw new Error('Unexpected method ' + method)
   }
 }
@@ -96,6 +99,8 @@ function harness() {
     cleanup: async () => { await services.chat.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
+/** 확인 통로 시험의 호출 목록 — `chooseCalls` 와 같은 모양(같이 봐야 어느 문이 열렸는지 안다). */
+const confirmCalls = (h: ReturnType<typeof harness>): unknown[] => h.sidecar.calls.filter((call) => call.method === 'notices.confirm')
 const chooseCalls = (h: ReturnType<typeof harness>): unknown[] => h.sidecar.calls.filter((call) => call.method === 'notices.choose')
 
 test('선택은 열린 폴더·지금 알림·계약 값 셋을 통과할 때만 sidecar 에 닿는다', async () => {
@@ -131,6 +136,60 @@ test('generic rpc 로는 notices.choose 를 부를 수 없다 — sidecar 에 �
     expect(await h.invoke('rpc', 'notices.choose', { root: h.root, identity: IDENTITY, value: 'footnote' }, 'c2'))
       .toMatchObject({ error: { code: 'invalid_method' } })
     expect(chooseCalls(h)).toEqual([])
+  } finally { await h.cleanup() }
+})
+
+/**
+ * 확인(`notices.confirm`)도 정본 쓰기다 — 메인의 2중 검사(열린 폴더·지금 알림)를 통과한 호출만
+ * sidecar 에 닿아야 하고, generic `rpc` 로는 부를 수 없다. 출처(`--by app_click`)는 여기서 정하지
+ * 않는다: 화면은 `(root, identity)` 만 준다.
+ */
+test('확인은 열린 폴더·지금 알림을 통과할 때만 sidecar 에 닿는다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    expect(confirmCalls(h)).toEqual([])
+
+    // ① 다른 폴더 — 열린 폴더는 A 다.
+    expect(await h.invoke('notices:confirm', h.other, IDENTITY)).toMatchObject({ error: { code: 'project_mismatch' } })
+    // ② 이 폴더에 없는 알림 identity(모양은 hex 64자).
+    expect(await h.invoke('notices:confirm', h.root, 'd'.repeat(64))).toMatchObject({ error: { code: 'notice_unknown' } })
+    // 빈 identity·문자열이 아닌 값도 같은 문에서 막힌다.
+    expect(await h.invoke('notices:confirm', h.root, '  ')).toMatchObject({ error: { code: 'invalid_params' } })
+    expect(await h.invoke('notices:confirm', h.root, 42)).toMatchObject({ error: { code: 'invalid_params' } })
+    expect(confirmCalls(h)).toEqual([])
+
+    // 통과 — 폴더·identity 두 값만 넘긴다(출처를 화면이 고르게 두지 않는다).
+    expect(await h.invoke('notices:confirm', h.root, IDENTITY)).toMatchObject({ result: { ok: true, status: 'acknowledged' } })
+    expect(confirmCalls(h)).toEqual([{ method: 'notices.confirm', params: { root: h.root, identity: IDENTITY } }])
+  } finally { await h.cleanup() }
+})
+
+test('확인 거절은 화면이 코드로 판단할 수 있게 그대로 올라간다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    h.sidecar.confirm = () => ({
+      ...envelope('rejected', false, 1),
+      data: { status: 'rejected', reason: 'notice_stale' },
+      block_reason: '알림을 본 뒤에 파일이 바뀌었어요. 다시 요청해 주시면 지금 상태로 다시 알려 드릴게요'
+    })
+    expect(await h.invoke('notices:confirm', h.root, IDENTITY)).toMatchObject({
+      result: { ok: false, status: 'rejected', data: { reason: 'notice_stale' } }
+    })
+  } finally { await h.cleanup() }
+})
+
+test('generic rpc 로는 notices.confirm 을 부를 수 없다 — sidecar 에 닿지 않는다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    expect(await h.invoke('rpc', 'notices.confirm', { root: h.root, identity: IDENTITY }, 'c1'))
+      .toMatchObject({ error: { code: 'invalid_method' } })
+    // 다른 폴더를 실어 보내도 마찬가지다 — 좁은 문(`notices:confirm`) 하나뿐이다.
+    expect(await h.invoke('rpc', 'notices.confirm', { root: h.other, identity: IDENTITY }, 'c2'))
+      .toMatchObject({ error: { code: 'invalid_method' } })
+    expect(confirmCalls(h)).toEqual([])
   } finally { await h.cleanup() }
 })
 

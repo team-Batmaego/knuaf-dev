@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Icon } from './Icon'
 import {
   choiceOpen, hasDetail, type NoticeChoiceValue, type NoticeItem, type NoticeRow
@@ -37,6 +37,7 @@ export interface NoticeBubbleProps {
   onDismiss?: (key: string) => void
   /** 선택 기록 — sidecar `notices.choose`. 성공하면 규칙집이 정본과 알림 파일을 다시 쓴다. */
   onChoose?: (value: NoticeChoiceValue) => void | Promise<void>
+  onConfirm?: () => void | Promise<void>
   /** 고른 `footnote` 의 [각주 넣어 줘] — 문장은 알림 파일에 없으므로 부르는 쪽이 초점만 옮긴다. */
   onFootnote?: () => void
   /**
@@ -101,8 +102,10 @@ interface ChoiceAttempt {
 }
 
 /** 알림 한 건. 부르는 쪽이 띄울지 정하고, 여기서는 그리기·선택 잠금만 한다. */
-export function NoticeBubble({ notice, onDismiss, onChoose, onFootnote, forceOpen = false }: NoticeBubbleProps) {
+export function NoticeBubble({ notice, onDismiss, onChoose, onConfirm, onFootnote, forceOpen = false }: NoticeBubbleProps) {
   const [attempt, setAttempt] = useState<ChoiceAttempt | null>(null)
+  const [confirmation, setConfirmation] = useState<{ key: string; error: string | null } | null>(null)
+  const confirming = useRef(new Set<string>())
   // 열쇠가 다르면 없는 것으로 친다 — 새 알림은 **같은 렌더에서** 곧바로 선택지를 되찾는다(초기화 렌더 없음).
   const current = attempt && attempt.key === notice.key ? attempt : null
   const picked = current && !current.failed ? current.value : null
@@ -121,6 +124,18 @@ export function NoticeBubble({ notice, onDismiss, onChoose, onFootnote, forceOpe
         // 응답은 요청 때의 열쇠·값이 아직 그 자리일 때만 반영한다 — 앞 알림의 늦은 실패가 새 알림을 건드리지 않는다.
         setAttempt((prev) => (prev && prev.key === key && prev.value === value ? { key, value, failed: true } : prev))
       })
+  }
+
+  const confirm = (): void => {
+    const key = notice.key
+    if (confirming.current.has(key)) return
+    confirming.current.add(key)
+    setConfirmation({ key, error: null })
+    void Promise.resolve().then(() => onConfirm?.()).catch((error: unknown) => {
+      confirming.current.delete(key)
+      const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : COPY.confirmFailed
+      setConfirmation((prev) => prev?.key === key ? { key, error: message || COPY.confirmFailed } : prev)
+    })
   }
 
   return (
@@ -147,6 +162,13 @@ export function NoticeBubble({ notice, onDismiss, onChoose, onFootnote, forceOpe
           ))}
         </div>
       )}
+
+      {notice.confirm && onConfirm && (
+        <div className="notice-confirm">
+          <button type="button" disabled={confirmation?.key === notice.key && !confirmation.error} onClick={confirm}>{notice.confirm.label}</button>
+        </div>
+      )}
+      {confirmation?.key === notice.key && confirmation.error && <p className="notice-failed" role="alert">{confirmation.error}</p>}
 
       {failed && <p className="notice-failed" role="alert">{COPY.failed}</p>}
 

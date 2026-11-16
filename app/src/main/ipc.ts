@@ -161,7 +161,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     if (method === 'artifact.preview') return { error: { code: 'invalid_method', message: '미리보기는 preview:read 경로만 사용할 수 있어요.' } }
     // 선택은 `notices:choose` 만 — generic RPC 는 `params.root` 를 그대로 넘기므로(아래 `root`)
     // 화면이 고른 폴더와 다른 폴더에 학생 선택을 적을 수 있다. 그 문을 닫는다.
+    // 확인(`notices.confirm`)도 정본 쓰기라 같은 좁은 문 하나뿐이다.
     if (method === 'notices.choose') return { error: { code: 'invalid_method', message: '알림 선택은 notices:choose 경로만 사용할 수 있어요.' } }
+    if (method === 'notices.confirm') return { error: { code: 'invalid_method', message: '알림 확인은 notices:confirm 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -878,6 +880,35 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     try {
       // 정본·알림 파일 다시 쓰기는 sidecar(규칙집) 몫이다. 앱은 결과 봉투만 그대로 돌려준다.
       return { result: await sidecar.call('notices.choose', { root, identity, value }) }
+    } catch (error) {
+      return { error: ipcError(error) }
+    }
+  })
+
+  /**
+   * 확인 기록 — 말풍선 단추가 `(root, identity)` 만 보낸다. 메인이 **다시 검사**한다:
+   * ① 열린 폴더여야 하고 ② 그 `identity` 가 지금 알림 파일의 유효 알림이어야 한다.
+   * 확인은 정본 쓰기라 화면이 임의의 폴더·identity 로 부르게 두면 안 된다.
+   * 출처(`--by app_click`)는 사이드카가 붙인다 — 화면이 고르는 값이 아니다(계약 §2).
+   */
+  ipcMain.handle('notices:confirm', async (_e, root: unknown, identity: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof identity !== 'string' || !identity.trim()) {
+      return { error: { code: 'invalid_params', message: '알림 식별자가 올바르지 않습니다.' } }
+    }
+    // 알림 파일은 규칙집이 쓴다 — 그 파일이 말하는 알림만 확인할 수 있다.
+    let known = false
+    try {
+      known = readNotices(root).notices.some((notice) => notice.key.slice(notice.key.indexOf(':') + 1) === identity)
+    } catch (error) {
+      return { error: { code: 'notices_read', message: error instanceof Error ? error.message : String(error) } }
+    }
+    if (!known) return { error: { code: 'notice_unknown', message: '그 알림을 이 폴더에서 찾지 못했어요.' } }
+    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    try {
+      return { result: await sidecar.call('notices.confirm', { root, identity }) }
     } catch (error) {
       return { error: ipcError(error) }
     }

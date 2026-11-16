@@ -1699,9 +1699,19 @@ export const NOTICE = {
   dismiss: '알림 닫기',
   more: '외 {n}곳',
   failed: '선택을 기록하지 못했어요. 잠시 뒤 다시 눌러 주세요.',
+  confirmFailed: '확인을 기록하지 못했어요. 잠시 뒤 다시 눌러 주세요.',
   footnoteAction: '각주 넣어 줘',
   footnoteNote: '논문에 적을 문장을 입력칸에 채워 드려요.',
   choiceNote: '계산 방식을 다르게 한 곳은 알려 주셔야 해요.'
+} as const
+
+/** 계산 칸 때문에 사본을 만들지 않았을 때의 계약 문장. */
+export const FORMULA_HELD = {
+  formula_cells_changed: '원래 자동으로 계산되던 칸이 바뀌어 있어서 이번에는 만들지 않았어요. 일부러 바꾼 거라면 같은 단추를 한 번 더 눌러 주세요',
+  formula_cell_conflict: '도우미가 계산을 바로잡는 자리라서 바로잡은 사본은 만들 수 없어요. 학교 양식의 원래 식으로 되돌린 뒤 다시 요청해 주세요. 빈 사본은 지금도 만들 수 있어요',
+  formula_audit_unavailable: '도우미 쪽 준비가 덜 되어 이 양식의 계산 칸을 확인할 수 없어요. 파일 문제가 아니에요',
+  formula_cell_notice_record: '지금은 기록을 남길 수 없어 만들지 않았어요. 잠시 뒤 다시 요청해 주세요',
+  lineage_id_collision: '기록 자리가 겹쳐 만들지 않았어요. 다시 요청해 주세요'
 } as const
 
 /**
