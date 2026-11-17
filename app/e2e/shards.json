@@ -157,7 +157,8 @@
       "recheck-screen",
       "guard-claude-skill-host",
       "guard-key",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "crash-consent"
     ],
     [
       "agent",
@@ -192,7 +193,8 @@
       "update-poll",
       "kordoc-mcp-codex",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "crash-sanitise"
     ]
   ],
   "macos": [
@@ -382,7 +384,9 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "crash-consent",
+      "crash-sanitise"
     ]
   ]
 }

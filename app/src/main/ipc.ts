@@ -34,6 +34,7 @@ import { runtimeFromEnsureEnvelope } from './chat/kordocMcp'
 import { withManagedKordoc } from './kordocRuntime'
 import { openGuide } from './menu'
 import { loadSettings, rememberRecent, saveSettings } from './settings'
+import { crashAnswer, crashStatus, onConsentChanged } from './crash'
 import { APP_NAME } from '../shared/name'
 import { hideAppDirs } from './hidden'
 import { projectFolderName } from '../shared/project-folder'
@@ -571,7 +572,18 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('window:info', () => windowInfo())
 
   ipcMain.handle('settings:get', () => loadSettings())
-  ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
+  ipcMain.handle('settings:set', (_e, patch) => {
+    const s = saveSettings(patch)
+    onRecentsChanged()
+    // 동의 전이는 저장 직후 상태 전이다 — `on` 이면 대기 큐를 그 자리에서 보내고,
+    // `off` 면 진행 중 전송을 끊고 큐를 지운다(DESIGN §2-5).
+    if (patch && typeof patch === 'object' && 'report_consent' in patch) onConsentChanged(s.report_consent)
+    return s
+  })
+  // 훅이 안 달린 실행(보낼 곳 없음)에서도 핸들러는 등록한다 — 조건부 등록이면 렌더러가 부르는
+  // 순간 `no handler registered` 예외가 나고, 그게 다시 보고 대상이 되는 고리가 생긴다.
+  ipcMain.handle('crash:status', () => crashStatus())
+  ipcMain.handle('crash:answer', (_e, allow: boolean) => crashAnswer(allow === true))
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
