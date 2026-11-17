@@ -7,9 +7,9 @@
  * `turn/start` 가 나가며, 턴 id 는 응답을 받은 즉시 원장에 남는다.
  */
 import { expect, test, afterAll } from '@playwright/test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { CodexConnection } from '../src/main/chat/codex'
 import { ChatService } from '../src/main/chat/service'
 import { findExecutable } from '../src/main/agent'
@@ -440,9 +440,36 @@ test('§10-23 ⓖ 이어 하기는 같은 잠금 config 를 다시 싣고, 원�
   })
 })
 
-for (const trust of ['verified', 'absent', 'collision', 'failed-probe'] as const) {
-  test(`v071 MCP 승인: ${trust} 신원과 요청 모양을 프로세스 경계에서 대조한다`, async () => {
+for (const [trust, boundary] of [
+  ['verified', 'plain'], ['absent', 'plain'], ['collision', 'plain'], ['failed-probe', 'plain'],
+  ['verified', 'unicode'], ['verified', 'case']
+] as const) {
+  test(`v071 MCP 승인: ${trust}/${boundary} 신원과 요청 모양을 프로세스 경계에서 대조한다`, async () => {
     const s = scene(`approval-${trust}`)
+    let siblingFile = join(s.base, 'outside.hwpx')
+    if (boundary !== 'plain') {
+      const rootName = boundary === 'unicode' ? '가' : 'CaseRoot'
+      const siblingName = boundary === 'unicode' ? '가'.normalize('NFD') : 'caseroot'
+      s.root = join(s.base, rootName)
+      mkdirSync(s.root)
+      const sibling = join(s.base, siblingName)
+      if (boundary === 'unicode' && process.platform === 'win32') {
+        expect(existsSync(sibling), 'Windows must execute the distinct NFC/NFD sibling regression').toBe(false)
+      }
+      if (existsSync(sibling)) {
+        // APFS may alias these names. Do not claim two distinct directories here.
+        expect(statSync(sibling).ino).toBe(statSync(s.root).ino)
+        test.skip(true, `${boundary}: host filesystem aliases sibling names; distinct-directory regression runs on Windows/Linux`)
+      }
+      mkdirSync(sibling)
+      siblingFile = join(sibling, 'document.hwpx')
+      s.skill = join(s.root, '.agents', 'skills', 'knuaf-dev')
+      mkdirSync(s.skill, { recursive: true })
+      writeFileSync(join(s.skill, 'SKILL.md'), '# test skill\n')
+    }
+    writeFileSync(siblingFile, 'outside fixture')
+    const linkOut = join(s.root, 'outside-link.hwpx')
+    symlinkSync(siblingFile, linkOut)
     const spec: KordocMcpSpec = {
       command: '/app/node', args: ['/app/kordoc/mcp.js'],
       env: { KORDOC_ROOT: s.root, KORDOC_OFFLINE: '1' }, version: '4.17.1'
@@ -478,7 +505,9 @@ for (const trust of ['verified', 'absent', 'collision', 'failed-probe'] as const
       { _meta: { ...meta, codex_sensitive_action: true } },
       { requestedSchema: null }, { requestedSchema: { type: 'object', properties: { answer: { type: 'string' } } } },
       { requestedSchema: { type: 'object', properties: {}, required: ['answer'] } },
-      { threadId: 'other-thread' }, { turnId: 'other-turn' }, { turnId: null }
+      { threadId: 'other-thread' }, { turnId: 'other-turn' }, { turnId: null },
+      ...[siblingFile, relative(s.root, siblingFile), linkOut]
+        .map((file_path) => ({ _meta: { ...meta, tool_params: { file_path } } }))
     ]
     s.env.FAKE_CODEX_SERVER_REQUESTS = JSON.stringify([
       ...variants.map((over) => ({ method: 'mcpServer/elicitation/request', params: { ...approval, ...over } })),
