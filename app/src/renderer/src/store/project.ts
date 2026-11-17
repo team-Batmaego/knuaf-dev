@@ -359,14 +359,35 @@ export const useProject = create<ProjectState>((set, get) => ({
     const visit = visitOf(root)
     const request = ++sectionRequest
     const mine = () => visit() && request === sectionRequest
+    // A section read may observe the disk commit before section.edit returns its fingerprints.
+    // Wait for the existing write boundary, then read again instead of publishing that snapshot.
+    const waitForWrite = async (): Promise<boolean> => {
+      if (!(usePrep.getState().write[root] > 0)) return false
+      const { promise, resolve } = Promise.withResolvers<void>()
+      let offPrep = (): void => {}
+      let offProject = (): void => {}
+      const check = (): void => {
+        if (!mine() || !(usePrep.getState().write[root] > 0)) { offPrep(); offProject(); resolve() }
+      }
+      offPrep = usePrep.subscribe(check)
+      offProject = useProject.subscribe(check)
+      check()
+      await promise
+      return true
+    }
     try {
+      await waitForWrite()
+      if (!mine()) return
       const rows = await rpc.sections(root)
       if (!mine()) return
+      if (await waitForWrite()) {
+        if (mine()) await get().loadSections()
+        return
+      }
       const prev = sectionHashes
       // 내가 방금 고친 절은 이번 읽기에서 '도우미가 바꾼 절'이 아니다 — 한 번만 건너뛴다.
       // 내가 저장한 그 지문과 **같을 때만** '내 변경'이다 — 다르면 도우미가 그사이 다시 썼다.
       const justMine = new Map(ownEdited)
-      ownEdited.clear()
       const changed = rows.filter((r) => (
         justMine.get(r.id) !== r.draft_hash && (!prev || prev[r.id] !== r.draft_hash)
       ))
@@ -390,8 +411,15 @@ export const useProject = create<ProjectState>((set, get) => ({
         }
       }
       if (!mine()) return
+      if (await waitForWrite()) {
+        if (mine()) await get().loadSections()
+        return
+      }
+      // A save can also finish while readAllSections/noteSeen is awaiting.
+      const published = events.filter((event) => ownEdited.get(event.sectionId) !== rows.find((row) => row.id === event.sectionId)?.draft_hash)
+      ownEdited.clear()
       sectionHashes = Object.fromEntries(rows.map((r) => [r.id, r.draft_hash]))
-      set((s) => ({ sections: rows, events: [...s.events, ...events].slice(-20), foldNotice: s.foldNotice || (s.paperClosed && events.length > 0) }))
+      set((s) => ({ sections: rows, events: [...s.events, ...published].slice(-20), foldNotice: s.foldNotice || (s.paperClosed && published.length > 0) }))
     } catch {
       // 읽지 못한 것을 "등록된 절이 없다"로 꾸미지 않는다 — null 은 모른다는 뜻이다.
       if (mine()) set({ sections: null })
