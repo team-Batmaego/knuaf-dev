@@ -43,6 +43,10 @@ export interface ConversationOwner { id: string; sessionId: string; company: Pro
 export const LANES_INVOKE = {
   /** 지금 상태 묶음 한 번 받기(창을 열 때·폴더를 바꿀 때). */
   snapshot: 'lanes:snapshot',
+  /** 모델 메뉴에서 카드 없이 역할 배치를 승인한다. */
+  setPlacement: 'lanes:set-placement',
+  /** 로그인 계정의 실측 모델·지원 추론 목록. */
+  laneModels: 'lanes:models',
   /** §3·§3-5·§8-4·§8-10 카드 단추. */
   decideCard: 'lanes:decide-card',
   /** §3-5 "적용됐는지 확인하지 못했어요" [다시 확인] — 다시 적용하지 않고 상태만 묻는다. */
@@ -55,9 +59,9 @@ export const LANES_INVOKE = {
   reviewModels: 'lanes:review-models',
   /** §3-4 목록에서 고름 → 대화에 §3-2 카드를 띄운다(고르는 것만으로는 적용 안 됨). */
   pickReview: 'lanes:pick-review',
-  /** §5 요금 동의 묶음 — 계정 단위라 폴더 없이도 부른다. */
+  /** 구 계약: 빈 동의 목록을 돌려준다(r12j). */
   consents: 'lanes:consents',
-  /** §5·§8-6·§8-8 동의하기·거두기. 거두면 그 회사로 앱이 맡긴 담당을 멈춘다. */
+  /** 구 계약: 저장·실행 중단 없이 응답만 돌려준다(r12j). */
   setConsent: 'lanes:set-consent',
   /** §2-0 ✕로 닫는 줄. */
   dismiss: 'lanes:dismiss',
@@ -125,6 +129,8 @@ export interface LanesSnapshot {
   root: string | null
   /** 보낼 때마다 1씩 오른다. 화면은 더 작은 seq를 버린다(늦게 온 옛 묶음 무시). */
   seq: number
+  /** 폴더 배치 판 번호. setPlacement의 baseVersion으로 보낸다. */
+  version: number
   /** §2-0 알림 자리 작업 분담 줄. **main이 이미 정렬**(종류 1→5, 같은 종류는 먼저 생긴 것부터). */
   lines: LaneLine[]
   /**
@@ -445,11 +451,25 @@ export interface ReviewModelGroup {
   models: { model: string; name: string }[]
 }
 
+/** 설계는 기존 채팅 칩이 정본이다. 나머지 네 역할은 전체 값을 보낸다. */
+export type PlacementEntries = Record<JobLane, LaneEntry | null>
+export type PlacementOrigin = { kind: 'recommended'; rowId: LaneRowId } | { kind: 'mine' }
+export type PlacementDecision =
+  | { outcome: 'applied'; version: number }
+  | { outcome: 'invalid'; reason: 'base-version' | 'account-changed' }
+  | { outcome: 'rejected'; rejected: { lane: JobLane; reason: LaneRejectReason }[] }
+export interface LaneModelGroup {
+  company: Provider
+  models: { model: string; name: string; efforts: string[] }[]
+}
+
 // ---------------------------------------------------------------- §5 설정
 
 export interface LanesSettingsView {
   /** ① 나눠 맡김 ② 나눠 맡기지 않음 ③ 아직 안 정함. 폴더가 없으면 null. */
   mode: 'on' | 'off' | 'undecided' | null
+  /** Team 상태·출처와 무관한 현재 계정 맞춤 추천. 없으면 null. */
+  recommendedRowId?: LaneRowId | null
   /** 묶음 머리 오른쪽 출처. */
   source:
     | { kind: 'recommended'; rowId: LaneRowId }
@@ -471,6 +491,8 @@ export interface LanesSettingsView {
   recommendedDesign: ModelRef | null
   /** "다음 메시지부터: 설계 {회사}" — 없으면 null. */
   nextDesignCompany: Provider | null
+  /** 다음 새 대화 주 모델 예약(회사·모델·추론). */
+  pendingDesign?: ModelRef | null
   consents: ConsentRow[]
 }
 
@@ -527,6 +549,8 @@ export interface ArchivedChat {
  */
 export interface LanesApi {
   snapshot(root: string | null): Promise<LanesReply<LanesSnapshot>>
+  setPlacement(root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>>
+  laneModels(root: string): Promise<LanesReply<LaneModelGroup[]>>
   /** 구독. 해제 함수를 돌려준다. */
   onSnapshot(fn: (snapshot: LanesSnapshot) => void): () => void
 
@@ -544,9 +568,9 @@ export interface LanesApi {
   /** §3-4 고름 → 대화에 카드가 뜬다(그 카드를 돌려준다). */
   pickReview(root: string, company: Provider, model: string): Promise<LanesReply<LaneCard>>
 
-  /** §5 폴더 없이도. */
+  /** 구 계약: 항상 빈 목록(r12j). */
   consents(): Promise<LanesReply<ConsentRow[]>>
-  /** §5·§8-6·§8-8. `on:false`면 그 회사로 앱이 맡긴 진행 중 담당을 멈춘다. */
+  /** 구 계약: 저장·실행 중단 없는 호환 무동작(r12j). */
   setConsent(company: Provider, accountId: string, on: boolean): Promise<LanesReply<ConsentRow>>
 
   /** §2-0 ✕. `dismissible:false`인 줄이면 오류. */

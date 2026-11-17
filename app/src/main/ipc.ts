@@ -27,6 +27,7 @@ import { subscriptionEnv, type AgentOptions } from './chat/contracts'
 import { ConversationHandoff } from './chat/jobs/conversation'
 import { laneAccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
+import { consumePendingDesign, selectDesign } from './lanes/cards'
 import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
 import { loadGuardKey } from './guard/key'
@@ -569,7 +570,16 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('window:info', () => windowInfo())
 
   ipcMain.handle('settings:get', () => loadSettings())
-  ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
+  ipcMain.handle('settings:set', async (_e, patch) => {
+    const provider = patch?.provider_choice?.provider
+    if (currentRoot && provider && provider !== loadSettings().provider_choice?.provider) {
+      await consumePendingDesign(chat.lanesStore(), currentRoot, provider, async pending => {
+        if (!pending.model) throw new Error('예약 모델이 없어요.')
+        await chat.setModel(currentRoot, provider, { model: pending.model, effort: pending.effort })
+      })
+    }
+    const s = saveSettings(patch); onRecentsChanged(); return s
+  })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
@@ -835,7 +845,24 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('chat:models', async (_e, root: string | null, provider: Provider) => { try { return { result: await chat.models(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:set-model', async (_e, root: string | null, provider: Provider, choice: ModelChoice | null) => {
     // 저장·순서는 ChatService 가 맡는다(목록 검증과 저장 사이에 새 선택이 끼어드는 경합).
-    try { return { result: await chat.setModel(root, provider, choice) } } catch (e) { return chatFail(e) }
+    try {
+      if (root && choice) {
+        const folder = canonical(root)
+        if (!currentRoot || canonical(currentRoot) !== folder) throw new Error('지금 열린 논문 폴더가 아니에요.')
+        await selectDesign({
+          store: chat.lanesStore(), account: company => chat.laneAccount(company),
+          freshAccount: company => chat.laneAccount(company, { fresh: true }),
+          mainCompany: loadSettings().provider_choice?.provider ?? activeMainCompany,
+          applyDesign: async (_root, entry) => {
+            await chat.setModel(folder, entry.company, { model: entry.model!, effort: entry.effort })
+            return true
+          }
+        }, folder, { company: providerOf(provider), model: choice.model, effort: choice.effort, how: 'main' })
+        lanesHub.touch(folder)
+        return { result: choice }
+      }
+      return { result: await chat.setModel(root, provider, choice) }
+    } catch (e) { return chatFail(e) }
   })
 
   // 폴더 없이 쓰는 연결 — 첫 실행 화면(온보딩)이 폴더를 고르기 전에 쓴다. root 인자가 없다.

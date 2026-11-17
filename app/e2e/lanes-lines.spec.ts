@@ -9,7 +9,6 @@ import {
   LANE_SAY,
   LANE_ACTION,
   LANE_STOP_LABEL,
-  LANES_SETTINGS,
   clip,
   depthName,
   modelLabel,
@@ -322,13 +321,6 @@ test('이름·조사·자르기 — 표 밖 이름도 읽을 수 있게', () => 
   expect(stopLabel('chat', '멈추기')).toBe('멈추기')
 })
 
-test('설정 표 문구 — 설계 §5 원문 그대로', () => {
-  expect(LANES_SETTINGS.designCell(null)).toBe('아래 칩에서 골라요')
-  expect(LANES_SETTINGS.designCell('Claude Opus')).toBe('아래 칩에서 골라요 (추천 Claude Opus)')
-  expect(LANES_SETTINGS.colLane).toBe('역할')
-  expect(LANES_SETTINGS.colWhere).toBe('어디서')
-  expect(LANES_SETTINGS.consentYes).toBe('동의')
-})
 
 test('C03: 카드 줄 문구 — 직접 맡기기와 새 대화를 실행 방식으로 구별한다', () => {
   // 설계 차선은 how:'main' 이면서 모델이 있다 — how 만 보면 설계 모델이 사라진다.

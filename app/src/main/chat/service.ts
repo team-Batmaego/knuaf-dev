@@ -1086,24 +1086,9 @@ export class ChatService {
    */
   approvePlan(root: string, plan: LanePlan): void { this.store().approve(root, plan) }
   revokePlan(root: string): void { this.store().revokePlan(root) }
-  /**
-   * 동의를 거두면 그 회사 계정으로 맡긴 **대기·진행** 주문을 그 자리에서 멈춘다(계약
-   * `lanes:set-consent`). 저장은 동기(옛 호출자·시험 그대로)이고, 멈추기는 러너의 비동기
-   * 경로라 기다리지 않고 넘긴다 — 저장이 늦어지면 그 사이 주문이 시작될 수 있다.
-   */
-  setConsent(company: Provider, accountId: string, on: boolean): ConsentRecord {
-    const record = this.store().setConsent(company, accountId, on)
-    if (!on) {
-      for (const job of this.jobRunner?.records() ?? []) {
-        if (job.spec.company !== company) continue
-        // 아직 계정을 고정하지 않은 대기 주문은 이 회사 하나뿐이라 그대로 멈춘다.
-        if (job.accountId !== undefined && job.accountId !== accountId) continue
-        if (!['queued', 'running', 'limit'].includes(job.status)) continue
-        void this.jobRunner!.stopJob(job.spec.id).catch(error => console.error('[knuaf] jobs',
-          JSON.stringify({ type: 'stop-job', jobId: job.spec.id, error: error instanceof Error ? error.message : String(error) })))
-      }
-    }
-    return record
+  /** 보존된 구 계약. 동의는 저장하거나 실행 상태를 바꾸지 않는다. */
+  setConsent(_company: Provider, _accountId: string, _on: boolean): ConsentRecord {
+    return { state: 'withdrawn', at: null }
   }
   /** §2-1 [이 담당 멈추기] — 그 주문 하나만. 본대화·다른 주문은 그대로다(Q2). */
   async stopJob(root: string, jobId: string): Promise<JobRecord> {
@@ -1125,7 +1110,7 @@ export class ChatService {
     return runner.beginOwnerTransition(root)
   }
   /**
-   * 지금 담당 회사의 계정 — `consented` 는 앱 저장소 값으로 덮인다(엔진은 그 값을 모른다).
+   * 지금 담당 회사의 계정. 동의 필드는 호환용일 뿐 저장·검사하지 않는다.
    * `once` 면 **인계 제안 판정용 실행 메모**를 쓴다(실행당 회사당 1회, 로그인 세대가 바뀌면 1회 더).
    * 세대는 여기서 읽는 순간의 값이다 — 늦게 온 답은 엔진 쪽 세대 비교가 버린다.
    */
@@ -1133,7 +1118,7 @@ export class ChatService {
     const account = await this.opts.jobAccount?.(company,
       options?.once ? { once: { epoch: this.authEpoch(company) } } : { fresh: options?.fresh })
     if (!account) return null
-    return { ...account, consented: company === 'free' || this.store().consented(company, account.accountId) }
+    return account
   }
   /** 로그인 세대 — 성공한 로그인 확인마다 하나씩 오른다(§5 "로그인 변경 뒤 1회"). */
   authEpoch(company: Provider): number { return this.authGeneration[company] }
@@ -1217,11 +1202,7 @@ export class ChatService {
     this.jobRunner = new JobRunner({
       stateDir: join(this.opts.userData, 'jobs'),
       approvedPlan: root => store.effectivePlan(root),
-      // 동의는 앱 저장소가 정본이다 — 엔진이 준 계정 값 위에 앱의 동의만 얹는다.
-      account: async company => {
-        const account = await this.opts.jobAccount!(company)
-        return account ? { ...account, consented: company === 'free' || store.consented(company, account.accountId) } : null
-      },
+      account: company => this.opts.jobAccount!(company),
       skill: () => {
         if (!this.jobSkill) throw new Error('설치된 스킬에서 주문 판 선언을 찾지 못했어요.')
         return this.jobSkill

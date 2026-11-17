@@ -1,8 +1,8 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Provider } from '../../../shared/chat'
-import type { LanePlan } from '../../../shared/lanes'
-import type { CardState, LaneCard, LaneEvent } from '../../../shared/lanes-ipc'
+import type { LanePlan, LaneEntry } from '../../../shared/lanes'
+import type { CardState, LaneCard, LaneEvent, PlacementOrigin } from '../../../shared/lanes-ipc'
 import { readRecoverable, writeFileAtomic } from '../../safeWrite'
 import { canonical } from './isolation'
 
@@ -65,6 +65,8 @@ interface StoreState {
   dismissed: Record<string, string[]>
   /** 폴더별 승인 시각 — §5 "내가 정함 · {날짜}" 의 근거. 옛 파일에는 없다. */
   approvalAt: Record<string, string>
+  placementOrigin?: Record<string, PlacementOrigin>
+  pendingDesign?: Record<string, LaneEntry>
   /**
    * 폴더별 [이번만] 배치(Q5) — 승인 배치를 덮지 않는다.
    * **[v0.7.1] v0.7은 쓰지 않는다** — 카드가 만들지도 않고(`cards.ts` `ONCE_DEFERRED`),
@@ -192,6 +194,25 @@ function parse(text: string): StoreState {
     consent: {},
     deliveries: state.deliveries as Record<string, DeliveryRecord>,
     cards: {}, baseVersion: {}, events: {}, deliveryText: {}, dismissed: {}, approvalAt: {}, temporary: {}, thesisBaseline: {}
+  }
+  if (state.placementOrigin !== undefined) {
+    if (!isRecord(state.placementOrigin)) throw new Error('Invalid placement origin')
+    parsed.placementOrigin = {}
+    for (const [root, origin] of Object.entries(state.placementOrigin)) {
+      if (!isRecord(origin) || (origin.kind !== 'mine' && origin.kind !== 'recommended')
+        || (origin.kind === 'recommended' && typeof origin.rowId !== 'string')) throw new Error('Invalid placement origin')
+      parsed.placementOrigin[root] = origin as PlacementOrigin
+    }
+  }
+  if (state.pendingDesign !== undefined) {
+    if (!isRecord(state.pendingDesign)) throw new Error('Invalid pending design')
+    parsed.pendingDesign = {}
+    for (const [root, entry] of Object.entries(state.pendingDesign)) {
+      if (!isRecord(entry) || !['codex', 'claude', 'free'].includes(String(entry.company))
+        || typeof entry.model !== 'string' || (entry.effort !== null && typeof entry.effort !== 'string')
+        || entry.how !== 'main') throw new Error('Invalid pending design')
+      parsed.pendingDesign[root] = entry as unknown as LaneEntry
+    }
   }
   for (const [key, record] of Object.entries(state.consent as Record<string, unknown>)) {
     const consent = consentOf(record)
@@ -329,18 +350,38 @@ export class JobStore {
     return () => { this.listeners.delete(listener) }
   }
 
-  approve(root: string, plan: LanePlan): void {
+  approve(root: string, plan: LanePlan, origin?: PlacementOrigin): void {
     const key = canonical(root)
     if (!isPlan(structuredClone(plan))) throw new Error('승인 배치의 모양이 올바르지 않아요.')
     this.state.approvals[key] = structuredClone(plan)
     // 같은 배치를 다시 저장해도 "내가 정한 날"이 조용히 밀리지 않게 최초 승인만 남긴다.
     this.state.approvalAt[key] ??= new Date().toISOString()
+    this.state.placementOrigin ??= {}
+    if (origin) this.state.placementOrigin[key] = structuredClone(origin)
+    else delete this.state.placementOrigin[key]
     this.persist()
   }
 
   approvedPlan(root: string): LanePlan | null {
     const plan = this.state.approvals[canonical(root)]
     return plan ? structuredClone(plan) : null
+  }
+
+  placementOrigin(root: string): PlacementOrigin | null {
+    return this.state.placementOrigin?.[canonical(root)] ?? null
+  }
+
+  pendingDesign(root: string): LaneEntry | null {
+    const entry = this.state.pendingDesign?.[canonical(root)]
+    return entry ? { ...entry } : null
+  }
+
+  setPendingDesign(root: string, entry: LaneEntry | null): void {
+    this.state.pendingDesign ??= {}
+    const key = canonical(root)
+    if (entry) this.state.pendingDesign[key] = { ...entry }
+    else delete this.state.pendingDesign[key]
+    this.persist()
   }
 
   /**
@@ -360,6 +401,7 @@ export class JobStore {
     if (this.state.approvals[key]) {
       delete this.state.approvals[key]
       delete this.state.approvalAt[key]
+      if (this.state.placementOrigin) delete this.state.placementOrigin[key]
       this.persist()
     }
   }
@@ -418,16 +460,9 @@ export class JobStore {
     return structuredClone(record)
   }
 
-  /** 동의는 **지우지 않는다** — 거둠도 날짜와 함께 남아야 §5 가 `withdrawn` 을 그린다(Q4). */
-  setConsent(company: Provider, accountId: string, on: boolean): ConsentRecord {
-    const key = consentKey(company, accountId)
-    const previous = this.state.consent[key]
-    // 같은 날 다시 켠 것을 새 동의로 적지 않는다 — 날짜가 조용히 밀리면 화면이 거짓말을 한다.
-    if (on && previous?.state === 'agreed') return structuredClone(previous)
-    const next: ConsentRecord = { state: on ? 'agreed' : 'withdrawn', at: new Date().toISOString() }
-    this.state.consent[key] = next
-    this.persist()
-    return structuredClone(next)
+  /** r12j: 구 호출자도 동의를 저장하지 않는다. */
+  setConsent(_company: Provider, _accountId: string, _on: boolean): ConsentRecord {
+    return { state: 'withdrawn', at: null }
   }
 
   consent(company: Provider, accountId: string): ConsentRecord | null {

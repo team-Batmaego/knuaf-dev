@@ -1,28 +1,37 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { AccountChooser, useAccountProvider } from './AccountChooser'
-import { PopHead, Popover, PopSep } from './Popover'
+import { useAccountProvider } from './AccountChooser'
+import { Popover } from './Popover'
 import { Icon } from './Icon'
 import { useChat } from '../store/chat'
 import { useProject } from '../store/project'
-import { CHAT, MODEL_PICKER, PROVIDER_NAME } from '../copy'
-import { modelName } from '../copy-lanes'
-import { codexRecommendations, isCrossProviderModelId, type ModelChoice } from '../../../shared/chat'
+import { CHAT, PROVIDER_NAME } from '../copy'
+import { isCrossProviderModelId } from '../../../shared/chat'
+import { LANE_TABLE, type LaneRowId } from '../../../shared/lanes'
+import type { LaneModelGroup, PlacementEntries, PlacementOrigin } from '../../../shared/lanes-ipc'
+import { LaneModelMenu, type LaneMenuModel, type LaneMenuRole } from './LaneModelMenu'
+import { laneActions, useLanes } from '../store/lanes'
 
 /** 회사 전환은 AccountChooser, 같은 회사의 모델 선택은 이 부품이 맡는다. */
 export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'down' }) {
   const [open, setOpen] = useState(false)
   const [direction, setDirection] = useState(placement)
+  const [view, setView] = useState<'top' | 'recommendations' | LaneMenuRole>('top')
+  const [groups, setGroups] = useState<LaneModelGroup[]>([])
+  const [laneBusy, setLaneBusy] = useState(false)
+  const [laneError, setLaneError] = useState<string | null>(null)
+  const root = useProject((s) => s.root)
+  const snapshot = useLanes((s) => s.snapshot)
+  const laneView = snapshot?.root === root ? snapshot.settings : null
   const host = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const { provider, stateOf } = useAccountProvider()
   const state = stateOf(provider)
   const settings = useProject((s) => s.settings)
   const loadSettings = useProject((s) => s.loadSettings)
-  const { models, modelChoice, modelProvider, modelLoading, modelSaving, modelsError, modelSaveError, loadModels, chooseModel } = useChat(useShallow((s) => ({
+  const { models, modelChoice, modelProvider, modelsError, modelSaveError, loadModels } = useChat(useShallow((s) => ({
     models: s.models, modelChoice: s.modelChoice, modelProvider: s.modelProvider,
-    modelLoading: s.modelLoading, modelSaving: s.modelSaving, modelsError: s.modelsError,
-    modelSaveError: s.modelSaveError, loadModels: s.loadModels, chooseModel: s.chooseModel
+    modelsError: s.modelsError, modelSaveError: s.modelSaveError, loadModels: s.loadModels
   })))
   const sameProvider = modelProvider === provider
   const catalog = sameProvider ? models : null
@@ -34,19 +43,31 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   )
   const choice = needsReselection ? null : currentChoice
   const selected = catalog?.find((m) => m.model === choice?.model)
-  // 추천표는 ChatGPT 모델 별칭(sol·terra·astra·luna)으로 만든 표다 — 다른 회사 목록에는 붙이지 않는다.
-  const recommendations = codexRecommendations(provider === 'codex' ? catalog ?? [] : [])
-  const loading = sameProvider && modelLoading
-  const saving = sameProvider && modelSaving
   const listError = sameProvider ? modelsError : null
   const saveError = sameProvider ? modelSaveError : null
   const connection = state === 'connected' ? '연결됨' : state === 'need-login' ? '로그인 필요' : state === 'logging-in' ? '로그인 중' : state === 'no-tool' ? '설치 필요' : state === 'failed' || state === 'unknown' ? '확인 실패' : '확인 중'
-  const depth = choice?.effort ? MODEL_PICKER.efforts[choice.effort] ?? choice.effort : MODEL_PICKER.defaultDepth
+  const accountDefault = !choice && !needsReselection ? catalog?.find((model) => model.isDefault) : undefined
+  const displayModel = choice ? selected?.name ?? choice.model : accountDefault?.name
+  const displayEffort = choice ? choice.effort : accountDefault?.defaultEffort
+  const mainLabel = state === 'connected' && displayModel ? `${displayModel}${displayEffort ? ` · ${displayEffort}` : ''}` : connection
   const close = (): void => { setOpen(false); trigger.current?.focus() }
 
   useEffect(() => {
-    if (open && state === 'connected') void loadModels(provider)
-  }, [open, provider, state, loadModels])
+    if (state === 'connected') void loadModels(provider)
+  }, [provider, state, loadModels])
+
+  useEffect(() => {
+    if (!open || !root) return
+    let current = true
+    useLanes.getState().attach()
+    void useLanes.getState().load(root)
+    void laneActions().laneModels(root).then((result) => {
+      if (!current) return
+      if ('value' in result) setGroups(result.value)
+      else setLaneError(result.error)
+    })
+    return () => { current = false }
+  }, [open, root])
 
   useLayoutEffect(() => {
     if (!open) return
@@ -70,57 +91,63 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
     return () => window.removeEventListener('resize', position)
   }, [open, placement])
 
-  const pick = async (next: ModelChoice | null): Promise<void> => {
-    if (await chooseModel(next, provider)) await loadSettings()
+  const entries: PlacementEntries = { research: null, writing: null, repeat: null, review: null }
+  for (const row of laneView?.rows ?? []) entries[row.lane] = row.entry
+  const role = view !== 'top' && view !== 'recommendations' && view !== 'main' ? view : null
+  const currentEntry = role ? entries[role] : null
+  const menuModels: LaneMenuModel[] = groups.flatMap((group) => group.models.map((model) => ({ ...model, company: group.company })))
+  const nameOf = (company: string, model: string | null): string => {
+    if (!model) return '—'
+    return menuModels.find((item) => item.company === company && item.model === model)?.name ?? model
+  }
+  const labelEntry = (entry: PlacementEntries[keyof PlacementEntries]): string => {
+    if (!entry) return '—'
+    if (entry.how === 'main') return '주 모델'
+    return `${nameOf(entry.company, entry.model)}${entry.effort ? ` · ${entry.effort}` : ''}`
+  }
+  const rowIds = Object.keys(LANE_TABLE).filter((id) => id !== 'free-only') as LaneRowId[]
+  const choiceForView = view === 'main' ? choice && { company: provider, ...choice }
+    : currentEntry?.model ? { company: currentEntry.company, model: currentEntry.model, effort: currentEntry.effort } : null
+  const savePlacement = async (next: PlacementEntries, origin: PlacementOrigin): Promise<boolean> => {
+    if (!root || !snapshot || snapshot.root !== root || laneBusy) return false
+    setLaneBusy(true)
+    setLaneError(null)
+    try {
+      const result = await laneActions().setPlacement(root, snapshot.version, next, origin)
+      if (useProject.getState().root !== root) return false
+      if ('error' in result || result.value.outcome !== 'applied') {
+        setLaneError('배치를 적용하지 못했어요. 다시 확인해 주세요.')
+        await useLanes.getState().load(root)
+        return false
+      }
+      return true
+    } finally { setLaneBusy(false) }
+  }
+  const selectRoleModel = (model: LaneMenuModel): void => {
+    if (!role) return
+    const company = groups.find((group) => group.company === model.company)?.company
+    if (!company) return
+    const effort = currentEntry?.effort && model.efforts.includes(currentEntry.effort) ? currentEntry.effort : null
+    void savePlacement({ ...entries, [role]: { company, model: model.model, effort, how: 'relay' } }, { kind: 'mine' })
   }
   return (
     <div className="pop-host composer-model-host" ref={host}>
-      <button type="button" className="model" ref={trigger} title={CHAT.modelChipTitle} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span>{PROVIDER_NAME[provider]} · {needsReselection ? MODEL_PICKER.reselectionTitle : state === 'connected' && choice ? (provider === 'free' ? modelName(choice.model) : selected?.name ?? choice.model) : connection}{provider !== 'free' && ` · ${MODEL_PICKER.depthChip(depth)}`}</span><Icon name="chevronDown" size={12} />
+      <button type="button" className="model" ref={trigger} title={CHAT.modelChipTitle} aria-haspopup="dialog" aria-expanded={open} onClick={() => { setView('top'); setOpen(!open) }}>
+        <span>{mainLabel} · Team {laneView?.mode === 'on' ? 'on' : 'off'}</span><Icon name="chevronDown" size={12} />
       </button>
       <Popover open={open} onClose={close} align="left" placement={direction} label={CHAT.modelChipTitle}>
-        <div className="pop-scroll model-picker">
-          <PopHead>{MODEL_PICKER.companyTitle}</PopHead>
-          <AccountChooser onPicked={close} />
-          <PopSep />
-          <>
-            <div className="model-picker-heading"><PopHead>{MODEL_PICKER.modelsTitleFor(PROVIDER_NAME[provider])}</PopHead>
-              {state === 'connected' && <button type="button" className="quiet" aria-label={MODEL_PICKER.reload} onClick={() => void loadModels(provider)} disabled={loading || saving}><Icon name="refresh" size={14} /></button>}
-            </div>
-            {state !== 'connected' ? <p className="model-picker-note">{MODEL_PICKER.connectFirst}</p> : <>
-              {needsReselection && <p className="model-picker-note" role="alert">{MODEL_PICKER.reselectionRequired}</p>}
-              {provider !== 'free' && <button type="button" className={`pop-row model-option${!choice && !needsReselection ? ' cur' : ''}`} aria-pressed={!choice && !needsReselection} disabled={saving} onClick={() => void pick(null)}>
-                <span className="c"><b>{MODEL_PICKER.accountDefault}</b><small>{MODEL_PICKER.accountDefaultHintFor(PROVIDER_NAME[provider])}</small></span>
-                {!choice && !needsReselection && <Icon name="check" size={16} />}
-              </button>}
-              {loading && <p className="model-picker-note" role="status">{MODEL_PICKER.loading}</p>}
-              {listError ? <div className="model-picker-note" role="alert"><p>{MODEL_PICKER.listFailed}</p><small>{listError}</small><button type="button" onClick={() => void loadModels(provider)} disabled={loading}>{CHAT.recheck}</button></div>
-                : catalog?.map((m) => {
-                  const recommended = recommendations.byModel[m.model]
-                  return <button type="button" key={m.model} className={`pop-row model-option${choice?.model === m.model ? ' cur' : ''}`} aria-pressed={choice?.model === m.model} disabled={saving || loading} onClick={() => void pick({ model: m.model, effort: null })}>
-                    <span className="c"><b>{provider === 'free' ? modelName(m.model) : m.name}</b>{provider !== 'free' && <small>{recommended ? MODEL_PICKER.purpose(recommended.purpose) : m.description || MODEL_PICKER.otherModel}</small>}</span>
-                    {recommended && <span className="model-recommend">{MODEL_PICKER.recommended}</span>}
-                    {choice?.model === m.model && <Icon name="check" size={16} />}
-                  </button>
-                })}
-              {!loading && !listError && catalog?.length === 0 && <p className="model-picker-note">{MODEL_PICKER.empty}</p>}
-              {provider !== 'free' && <>
-                <PopSep />
-                <label className="model-depth"><span>{CHAT.depthTitle}</span>
-                  <select aria-label={CHAT.depthTitle} value={choice?.effort ?? ''} disabled={!selected || saving || loading || !!listError} onChange={(e) => { if (choice) void pick({ model: choice.model, effort: e.target.value || null }) }}>
-                    <option value="">{MODEL_PICKER.defaultDepth}</option>
-                    {selected?.efforts.map((e) => <option key={e} value={e}>{MODEL_PICKER.efforts[e] ?? e}</option>)}
-                  </select>
-                </label>
-                {!choice && <p className="model-picker-note">{MODEL_PICKER.chooseForDepth}</p>}
-              </>}
-              {saving && <p className="model-picker-note" role="status">{MODEL_PICKER.saving}</p>}
-              {saveError && <p className="model-picker-note" role="alert">{saveError}</p>}
-              <p className="model-picker-note">{MODEL_PICKER.sameConversationFor(PROVIDER_NAME[provider])}</p>
-              {provider === 'codex' && recommendations.lanes.some((l) => l.lane === 'review') && <p className="model-picker-note">{MODEL_PICKER.reviewNotice}</p>}
-            </>}
-          </>
-          {provider !== 'free' && <><PopSep /><p className="model-picker-note">{MODEL_PICKER.subscription}</p></>}
+        <div className="pop-scroll model-picker" onBlur={(event) => { if (event.relatedTarget && !host.current?.contains(event.relatedTarget as Node)) setOpen(false) }}>
+          <LaneModelMenu view={view} main={mainLabel}
+            pending={laneView?.pendingDesign ? `${PROVIDER_NAME[laneView.pendingDesign.company]} ${nameOf(laneView.pendingDesign.company, laneView.pendingDesign.model)}${laneView.pendingDesign.effort ? ` · ${laneView.pendingDesign.effort}` : ''}` : null}
+            team={laneView?.mode === 'on'} source={laneView?.source.kind === 'recommended' ? LANE_TABLE[laneView.source.rowId].label : laneView?.source.kind === 'mine' ? '직접 고침' : ''}
+            roles={{ research: labelEntry(entries.research), writing: labelEntry(entries.writing), repeat: labelEntry(entries.repeat), review: labelEntry(entries.review) }}
+            models={menuModels} choice={choiceForView} recommendations={rowIds.map((id) => ({ id, label: LANE_TABLE[id].label, main: nameOf(LANE_TABLE[id].lanes.design.company, LANE_TABLE[id].lanes.design.model), review: nameOf(LANE_TABLE[id].lanes.review.company, LANE_TABLE[id].lanes.review.model) }))}
+            selectedRecommendation={laneView?.source.kind === 'recommended' ? laneView.source.rowId : null} busy={laneBusy || !root || !snapshot}
+            onView={setView} onTeam={() => { if (!root || !snapshot) return; if (laneView?.mode === 'on') { void laneActions().disable(root).then((error) => { if (error) setLaneError('배치를 적용하지 못했어요. 다시 확인해 주세요.') }) } else if (laneView?.recommendedRowId) { void savePlacement(entries, { kind: 'recommended', rowId: laneView.recommendedRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings() } }) } else setLaneError('추천 배치를 확인하지 못했어요.') }}
+            onModel={(model) => { if (view === 'main' && root) { const next = { model: model.model, effort: choice?.effort && model.efforts.includes(choice.effort) ? choice.effort : null }; void window.knuaf.chat.setModel(root, model.company, next).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else if (model.company === provider) { await loadModels(provider); await loadSettings() } }) } else selectRoleModel(model) }}
+            onEffort={(effort) => { if (view === 'main' && choice && root) void window.knuaf.chat.setModel(root, provider, { ...choice, effort }).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else { await loadModels(provider); await loadSettings() } }); else if (role && currentEntry) void savePlacement({ ...entries, [role]: { ...currentEntry, effort } }, { kind: 'mine' }) }}
+            onRecommendation={(id) => { void savePlacement(entries, { kind: 'recommended', rowId: id as LaneRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings(); setView('top') } }) }} />
+          {(laneError || saveError || listError) && <p className="model-picker-note" role="alert">{laneError || saveError || listError}</p>}
         </div>
       </Popover>
     </div>

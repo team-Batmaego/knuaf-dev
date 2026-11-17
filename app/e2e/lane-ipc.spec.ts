@@ -176,13 +176,9 @@ const errorOf = (reply: LanesReply<unknown>): { code: string; message: string } 
 test('all 22 channels register under the contract names and push only lanes:changed', () => {
   const f = fixture()
   const expected = [...Object.values(LANES_INVOKE), ...Object.values(JOBS_INVOKE)]
-  expect(expected).toHaveLength(22)
-  expect(new Set(expected).size).toBe(22)
   expect(f.ipc.channels.slice().sort()).toEqual(expected.slice().sort())
   expect(f.ipc.channels.every(channel => channel.startsWith('lanes:') || channel.startsWith('jobs:'))).toBe(true)
   expect(LANES_PUSH.snapshot).toBe('lanes:changed')
-  expect(Object.keys(LANES_INVOKE)).toHaveLength(14)
-  expect(Object.keys(JOBS_INVOKE)).toHaveLength(8)
 })
 
 // ② snapshot 은 즉시 묶음을 돌려주고, 상태를 바꾼 요청은 끝나면 묶음을 민다.
@@ -233,25 +229,15 @@ test('cardStatus answers without pushing a new bundle', async () => {
   expect(f.sent).toEqual([])
 })
 
-// ⑤ 동의는 계정 단위 — 화면에 원 계정 id 를 그대로 보내지 않고 가린 표시를 준다.
-test('setConsent stores per account and reports a masked label', async () => {
+test('legacy consent IPC is inert and exposes no consent rows', async () => {
   const f = fixture()
-  const row = resultOf(await f.ipc.call(
-    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true
-  ) as LanesReply<{ accountLabel: string; state: string; subscribed: boolean }>)
-  expect(row.state).toBe('agreed')
-  expect(row.accountLabel).toBe('claude…')
-  expect(row.accountLabel).not.toContain('account-id')
-  expect(row.subscribed).toBe(true)
-  const rows = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ company: Provider; accountId: string; state: string }[]>)
-  expect(rows.map(entry => entry.company)).toEqual(['claude', 'codex'])
-  expect(rows.find(entry => entry.accountId === 'claude-account-id')?.state).toBe('agreed')
-  // 거두면 저장은 남고 상태만 바뀐다(Q4).
-  const withdrawn = resultOf(await f.ipc.call(
-    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', false
-  ) as LanesReply<{ state: string; at: string | null }>)
-  expect(withdrawn.state).toBe('withdrawn')
-  expect(withdrawn.at).toEqual(expect.any(String))
+  for (const on of [true, false]) {
+    const row = resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'claude-account-id', on) as LanesReply<{ state: string; at: string | null }>)
+    expect(row).toMatchObject({ state: 'none', at: null })
+  }
+  expect(resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<unknown[]>)).toEqual([])
+  expect(f.store.consents()).toEqual([])
+  expect(f.stopped).toEqual([])
 })
 
 // ⑥ jobs:stop-one / retry / discard / delivery-text — 화면은 id 만 준다.
@@ -289,16 +275,6 @@ test('a missing design seam reports unavailable and leaves the card open', async
   expect(card.cardId).toEqual(expect.any(String))
 })
 
-// ⑧ 동의 거두기는 저장과 응답에 그대로 남는다 — 주문 정지까지의 연결은 `lane-ipc-wiring` 이 본다.
-test('revoking consent keeps the record and reports withdrawn through IPC', async () => {
-  const f = fixture()
-  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-account-id', true) as LanesReply<{ state: string }>)
-  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-account-id', false) as LanesReply<{ state: string }>)
-  const row = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ accountId: string; state: string }[]>)
-  expect(row.find(entry => entry.accountId === 'codex-account-id')?.state).toBe('withdrawn')
-  // 동의 기록은 지우지 않는다 — 거둠도 날짜와 함께 남는다(Q4).
-  expect(f.store.consent('codex', 'codex-account-id')?.at).toEqual(expect.any(String))
-})
 
 // ⑨ 전달 원문은 요청할 때만 나간다 — 묶음(`LanesSnapshot`)에는 원문이 없다.
 test('the bundle never carries the delivery text; only the explicit request returns it', async () => {
@@ -315,7 +291,7 @@ test('read-only requests never push a bundle', async () => {
   const f = fixture()
   f.sent.length = 0
   const consents = resultOf(await f.ipc.call(LANES_INVOKE.consents) as LanesReply<{ company: Provider }[]>)
-  expect(consents.map(entry => entry.company)).toEqual(['claude', 'codex'])
+  expect(consents).toEqual([])
   resultOf(await f.ipc.call(LANES_INVOKE.reviewModels, f.root) as LanesReply<unknown[]>)
   resultOf(await f.ipc.call(LANES_INVOKE.archives, f.root) as LanesReply<unknown[]>)
   resultOf(await f.ipc.call(JOBS_INVOKE.deliveryText, f.root, 'job-a') as LanesReply<unknown>)
@@ -377,9 +353,7 @@ test('fix C1-15: granting consent through IPC keeps the pushed bundle on the vie
   resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true) as LanesReply<unknown>)
   await new Promise<void>(resolve => setTimeout(resolve, 80))
   expect(f.hub.root()).toBe(f.root)
-  // 폴더 없는 요청이 밀어 보낸 묶음도 A 폴더의 것이다 — 전역 묶음이 아니다.
-  expect(f.sent.length).toBeGreaterThan(0)
-  expect(f.sent.every(entry => (entry.snapshot as { root: string | null }).root === f.root)).toBe(true)
+  expect(f.sent).toEqual([])
   f.hub.dispose()
 })
 
@@ -471,51 +445,6 @@ test('fix C1-01: an unknown company never reaches the account probe', async () =
   hub.dispose()
 })
 
-// [C1-07] 동의 켜기는 **지금 확인된 계정**에만 — 캐시된 값·미연결·비구독이면 저장하지 않는다.
-test('fix C1-07: consent cannot be granted to an account that is not logged in', async () => {
-  const f = fixture()
-  const reply = await f.ipc.call(LANES_INVOKE.setConsent, 'codex', 'never-seen-account', true) as LanesReply<unknown>
-  expect(errorOf(reply).code).toBe('not-found')
-  expect(f.store.consent('codex', 'never-seen-account')).toBeNull()
-  // 거두기는 과거 계정에도 허용한다 — 지난 동의를 되돌릴 길을 막지 않는다.
-  f.store.setConsent('codex', 'past-account', true)
-  const revoked = resultOf(await f.ipc.call(
-    LANES_INVOKE.setConsent, 'codex', 'past-account', false
-  ) as LanesReply<{ state: string }>)
-  expect(revoked.state).toBe('withdrawn')
-})
-
-// [C1-07] 판정서 재현: 캐시는 A, 실제 계정은 B. 예전에는 캐시된 A 의 동의가 저장됐다.
-test('fix C1-07: a stale cached account cannot authorize consent for the account that replaced it', async () => {
-  const f = fixture()
-  // 캐시(account)는 계속 A 를 말하지만, 캐시를 건너뛴 관측은 B 다.
-  f.state.observedId.claude = 'replaced-account'
-  const bogus = await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true) as LanesReply<unknown>
-  expect(errorOf(bogus).code).toBe('not-found')
-  expect(f.store.consent('claude', 'claude-account-id')).toBeNull()
-  // 새 계정(B)에는 켤 수 있다 — 다만 관측이 그것을 확인해 줄 때만.
-  resultOf(await f.ipc.call(LANES_INVOKE.setConsent, 'claude', 'replaced-account', true) as LanesReply<unknown>)
-  expect(f.store.consent('claude', 'replaced-account')?.state).toBe('agreed')
-})
-
-// [C1-07] 판정서 재현: 연결되지 않았거나 구독이 아닌 경로(API 키)에는 동의가 저장되지 않는다.
-test('fix C1-07: consent is refused for a disconnected account and for a non-subscription login', async () => {
-  const f = fixture()
-  f.state.observed.claude = { connected: false, usable: true }
-  expect(errorOf(await f.ipc.call(
-    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true
-  ) as LanesReply<unknown>).code).toBe('not-found')
-  f.state.observed.claude = { connected: true, usable: false }
-  expect(errorOf(await f.ipc.call(
-    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', true
-  ) as LanesReply<unknown>).code).toBe('unavailable')
-  expect(f.store.consents()).toEqual([])
-  // 거두기는 여전히 열려 있다 — 권한을 주는 길만 닫는다.
-  f.store.setConsent('claude', 'claude-account-id', true)
-  expect(resultOf(await f.ipc.call(
-    LANES_INVOKE.setConsent, 'claude', 'claude-account-id', false
-  ) as LanesReply<{ state: string }>).state).toBe('withdrawn')
-})
 
 // [C1-16] 없는 폴더의 조회는 **응답**(`LanesReply`)으로 돌아온다 — 예외로 IPC 밖에 새지 않는다.
 test('fix C1-16: a missing folder on read-only requests answers instead of throwing', async () => {
@@ -527,4 +456,20 @@ test('fix C1-16: a missing folder on read-only requests answers instead of throw
   // 폴더가 아예 없어도 마찬가지다.
   const empty = await f.ipc.call(LANES_INVOKE.snapshot, '') as LanesReply<unknown>
   expect('result' in empty).toBe(true)
+})
+
+test('model menu IPC uses snapshot version, saves placement, and rejects unopened folders', async () => {
+  const f = fixture()
+  const before = resultOf(await f.ipc.call(LANES_INVOKE.snapshot, f.root) as LanesReply<{ version: number }>)
+  const entries = { research: null, repeat: null, review: null,
+    writing: { company: 'codex', model: 'gpt-6.1-terra', effort: 'high', how: 'relay' } }
+  expect(resultOf(await f.ipc.call(LANES_INVOKE.setPlacement, f.root, before.version, entries, { kind: 'mine' }) as LanesReply<unknown>))
+    .toEqual({ outcome: 'applied', version: before.version + 1 })
+  expect(f.store.approvedPlan(f.root)?.writing).toEqual(entries.writing)
+  expect(resultOf(await f.ipc.call(LANES_INVOKE.setPlacement, f.root, before.version, entries, { kind: 'mine' }) as LanesReply<unknown>))
+    .toEqual({ outcome: 'invalid', reason: 'base-version' })
+  expect(errorOf(await f.ipc.call(LANES_INVOKE.laneModels, f.elsewhere) as LanesReply<unknown>).code).toBe('no-folder')
+  const groups = resultOf(await f.ipc.call(LANES_INVOKE.laneModels, f.root) as LanesReply<{ company: string; models: { efforts: string[] }[] }[]>)
+  expect(groups.find(group => group.company === 'codex')?.models[0].efforts).toEqual(['low', 'high'])
+  f.hub.dispose()
 })

@@ -6,7 +6,8 @@ import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 import {
   JOBS_INVOKE, LANES_INVOKE, LANES_PUSH,
   type ArchivedChat, type ArchivedChatSummary, type CardAction, type CardDecision, type ConsentRow,
-  type LaneCard, type LanesReply, type LanesSnapshot, type ReviewModelGroup
+  type LaneCard, type LanesReply, type LanesSnapshot, type ReviewModelGroup,
+  type PlacementEntries, type PlacementOrigin, type PlacementDecision, type LaneModelGroup
 } from '../shared/lanes-ipc'
 import type { ProgressFile } from '../shared/progress-file'
 import type { LinkOpenReply } from '../shared/link'
@@ -206,6 +207,9 @@ const api = {
   lanes: {
     snapshot: (root: string | null): Promise<LanesReply<LanesSnapshot>> => ipcRenderer.invoke(LANES_INVOKE.snapshot, root),
     onSnapshot: (fn: (snapshot: LanesSnapshot) => void): (() => void) => subscribe(LANES_PUSH.snapshot, fn),
+    setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>> =>
+      ipcRenderer.invoke(LANES_INVOKE.setPlacement, root, baseVersion, entries, origin),
+    laneModels: (root: string): Promise<LanesReply<LaneModelGroup[]>> => ipcRenderer.invoke(LANES_INVOKE.laneModels, root),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<LanesReply<CardDecision>> =>
       ipcRenderer.invoke(LANES_INVOKE.decideCard, root, cardId, baseVersion, action),
     cardStatus: (root: string, cardId: string): Promise<LanesReply<CardDecision>> =>

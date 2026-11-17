@@ -84,9 +84,8 @@ export function recommendation(
   const codexTier = tiers.find(tier => tier.company === 'codex')?.tier ?? null
   const rowId = selectLaneRow(claudeTier, codexTier) ?? (accounts.free?.connected ? 'free-only' : null)
   if (!rowId) return null
-  const catalog = Object.fromEntries(snapshots.map(account => [account.company, account.models])) as Partial<
-    Record<Provider, AccountSnapshot['models']>
-  >
+  const catalog = Object.fromEntries((['claude', 'codex', 'free'] as const).map(company => [company,
+    accounts[company]?.connected ? accounts[company]!.account.models : []]))
   const resolved = resolveLanes(rowId, {
     mainCompany,
     catalog,

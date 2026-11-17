@@ -66,74 +66,74 @@ export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
   ),
   'codex-low': row(
     'codex-low',
-    'ChatGPT 낮음만',
+    'ChatGPT 낮은 플랜만',
     lane('codex', 'terra', 'main'),
-    lane('codex', 'terra', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('codex', 'luna', 'relay'),
-    lane('codex', 'luna', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('codex', 'terra', 'relay', REVIEW_EFFORT)
   ),
   'codex-high': row(
     'codex-high',
-    'ChatGPT 높음만',
+    'ChatGPT 높은 플랜만',
     lane('codex', 'sol', 'main'),
     lane('codex', 'astra', 'relay'),
-    lane('codex', 'sol', 'relay'),
     lane('codex', 'terra', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('codex', 'astra', 'relay', REVIEW_EFFORT)
   ),
   'claude-low': row(
     'claude-low',
-    'Claude 낮음만',
+    'Claude 낮은 플랜만',
     lane('claude', 'sonnet', 'main'),
-    lane('claude', 'haiku', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('claude', 'sonnet', 'relay'),
-    lane('claude', 'haiku', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('claude', 'sonnet', 'relay', REVIEW_EFFORT)
   ),
   'claude-high': row(
     'claude-high',
-    'Claude 높음만',
+    'Claude 높은 플랜만',
     lane('claude', 'opus', 'main'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('claude', 'sonnet', 'relay'),
-    lane('claude', 'sonnet', 'relay'),
-    lane('claude', 'haiku', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('claude', 'opus', 'relay', REVIEW_EFFORT)
   ),
   'both-high': row(
     'both-high',
-    '둘 다 높음',
+    '둘 다 높은 플랜',
     lane('claude', 'opus', 'main'),
     lane('codex', 'astra', 'relay'),
-    lane('codex', 'sol', 'relay'),
     lane('codex', 'terra', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('codex', 'astra', 'relay', REVIEW_EFFORT)
   ),
   'claude-high-codex-low': row(
     'claude-high-codex-low',
-    'Claude 높음 + ChatGPT 낮음',
+    'Claude 높은 플랜 + ChatGPT 낮은 플랜',
     lane('claude', 'opus', 'main'),
-    lane('claude', 'sonnet', 'relay'),
     lane('codex', 'terra', 'relay'),
     lane('codex', 'luna', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('claude', 'opus', 'relay', REVIEW_EFFORT)
   ),
   'claude-low-codex-high': row(
     'claude-low-codex-high',
-    'Claude 낮음 + ChatGPT 높음',
+    'Claude 낮은 플랜 + ChatGPT 높은 플랜',
     lane('codex', 'sol', 'main'),
     lane('codex', 'astra', 'relay'),
-    lane('codex', 'sol', 'relay'),
     lane('codex', 'terra', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('claude', 'sonnet', 'relay', REVIEW_EFFORT)
   ),
   'both-low': row(
     'both-low',
-    '둘 다 낮음',
+    '둘 다 낮은 플랜',
     lane('claude', 'sonnet', 'main'),
     lane('codex', 'terra', 'relay'),
     lane('codex', 'luna', 'relay'),
-    lane('claude', 'haiku', 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
     lane('codex', 'terra', 'relay', REVIEW_EFFORT)
   )
 }
@@ -545,7 +545,7 @@ export function continueAfterLimit(
 ): LaneEntry | null {
   const isDesign = failedLane === 'design'
   if (failedEntry.company === 'free') return null
-  if (!otherAccount || (!isDesign && !otherState.consented) || !otherState.basicUsageAllowed) return null
+  if (!otherAccount || !otherState.basicUsageAllowed) return null
 
   const company = otherCompany(failedEntry.company)
   if (
