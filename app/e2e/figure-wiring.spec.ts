@@ -99,6 +99,33 @@ test('① 고리가 없으면 env 는 공급자 env 그대로다(그림 자리 �
   expect(Object.keys(captured!.env).some((k) => k.startsWith('KNUAF_FIGURE'))).toBe(false)
 })
 
+test('①-free free 공급자 본대화에는 그림 env 두 개가 없다(고리가 있어도)', async () => {
+  const { root, bundle } = scratch('free')
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env, KNUAF_TEST_BASE: '1' }
+  const g = globalThis as { __KNUAF_FREE_TOKEN__?: string }
+  const before = g.__KNUAF_FREE_TOKEN__
+  // 번들 define 이 넣는 무료 중계 출입증 자리를 흉내 낸다(모양만 맞는 가짜 값, 네트워크 호출 없음).
+  g.__KNUAF_FREE_TOKEN__ = 'kf1_' + 'A'.repeat(43)
+  let captured: AgentOptions | undefined
+  const svc = new ChatService({
+    skillSource: () => bundle, userData: mkdtempSync(join(tmpdir(), 'kd-figwire-ud-')),
+    env: baseEnv, emit: () => {}, openExternal: async () => {},
+    connectionFactory: (_provider, options) => { captured = options; return fake() },
+    figures: { env: { KNUAF_GUI: '1', ...FIGURE_ENV }, recordStudentMessage: async () => 1, beginTurn: async () => {}, endTurn: async () => {} }
+  })
+  try {
+    await svc.send(root, 'free', '안녕하세요', 'r-free')
+  } finally {
+    await svc.close()
+    if (before === undefined) delete g.__KNUAF_FREE_TOKEN__
+    else g.__KNUAF_FREE_TOKEN__ = before
+  }
+  expect(captured, 'free 본대화 연결을 만들었다').toBeDefined()
+  expect(captured!.env.KNUAF_FREE_RELAY, 'free 공급자 env 가 맞게 만들어졌다').toBe('1')
+  expect(captured!.env.KNUAF_GUI, 'free 에는 KNUAF_GUI 가 없다').toBeUndefined()
+  expect(captured!.env.KNUAF_FIGURE_HOME, 'free 에는 그림 저장소가 없다').toBeUndefined()
+})
+
 test('② 두 턴의 순서: 후보표 → beginTurn(turnId=requestId) → run → endTurn, 그리고 잠금 해제', async () => {
   const { root, bundle } = scratch('order')
   const log: string[] = []

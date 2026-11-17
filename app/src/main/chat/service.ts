@@ -768,9 +768,10 @@ export class ChatService {
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
         // 공급자별 env(v0.7: free 중계 열쇠 넣기·빼기)를 먼저 만들고, 그림 통로의 저장소 자리는 그 위에
-        // **메인 턴 엔진에만** 얹는다(학생이 고른 free 공급자 대화도 메인 턴이다 — v0.7 담당(relay)은
-        // 이 연결을 쓰지 않는다). 전역 연결(상태 확인·로그인)에는 얹지 않는다, 턴이 없으니까.
-        env: figureEnv ? { ...providerEnv(provider, env), ...figureEnv } : providerEnv(provider, env),
+        // **그림 통로가 지원하는 공급자(Claude·Codex 정식)의 메인 턴 엔진에만** 얹는다. free 공급자와
+        // v0.7 담당(relay)에는 주지 않는다(figures/turn.ts 머리 주석과 같은 경계) — 그쪽 스크립트는
+        // 통로 없음으로 즉시 실패한다. 전역 연결(상태 확인·로그인)에도 얹지 않는다, 턴이 없으니까.
+        env: figureEnv && provider !== 'free' ? { ...providerEnv(provider, env), ...figureEnv } : providerEnv(provider, env),
         openExternal: this.opts.openExternal, trusted: () => this.opts.isTrusted?.(root) ?? false,
         guard,
         // 설치본 내용이 동봉본과 같은지 자동 실행 전에 대조한다(C-01ⓒ) — 설치 때 쓴 원본과
