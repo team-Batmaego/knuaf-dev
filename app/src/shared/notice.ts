@@ -70,6 +70,8 @@ export interface NoticeRow {
   choices: NoticeChoice[]
   /** 이미 기록된 선택(없으면 null). */
   choice: NoticeChoiceValue | null
+  /** 확인 단추 이름은 알림이 준다. */
+  confirm: { label: string } | null
   /** 도구가 닫기를 허용했는가 — 기본 true. */
   dismissible: boolean
 }
@@ -191,6 +193,7 @@ function readNotice(raw: unknown, documentProjectId: string): NoticeRow | null {
     receiptPath: receiptPathInside(notice.receipt_path),
     choices: readChoices(notice.choices),
     choice: choiceValue(notice.choice),
+    confirm: (() => { const value = record(notice.confirm); const label = value && oneLine(value.label, LABEL_MAX); return label ? { label } : null })(),
     dismissible: notice.dismissible !== false
   }
 }
