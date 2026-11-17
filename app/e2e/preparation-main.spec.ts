@@ -1,7 +1,7 @@
 // Node-only registered IPC/ChatService regressions. No Electron or account process is launched.
 import { test, expect } from '@playwright/test'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -36,7 +36,10 @@ class ControlledSidecar extends EventEmitter {
   diagnose: () => Promise<Envelope> = async () => env(this.ready)
   install: () => Promise<Envelope> = async () => { this.ready = true; return env(true) }
   status(): SidecarInfo { return { python: '/bundled/python', kind: 'bundled', scriptsDir: join(source, 'scripts'), running: true } }
-  async configure(root: string) { this.configured.push(root); return this.status() }
+  async configure(root: string, _override?: string | null, permitted: () => boolean = () => true) {
+    if (permitted()) this.configured.push(root)
+    return this.status()
+  }
   isWrite(method: string) { return method === 'deps.ensure' }
   cancel(id: string) { this.cancelled.push(id) }
   ownedPids() { return this.stopped ? [] : [12345] }
@@ -125,6 +128,56 @@ for (const returnToA of [false, true]) {
       expect(worker.calls.filter(call => call.method === 'deps.ensure')).toHaveLength(1)
       await h.chat.send(h.root, 'codex', 'verified after return', 'resumed'); await flush()
       expect(h.sent).toEqual(['verified after return'])
+    } finally { install.resolve(env(true)); await h.cleanup() }
+  })
+}
+
+test('R1-01 pending B open keeps B runtime when A verification finishes first', async () => {
+  const main = new ControlledSidecar(), worker = new ControlledSidecar(), h = harness(main, worker)
+  const install = Promise.withResolvers<Envelope>(), opening = Promise.withResolvers<void>()
+  let lifecycle = Promise.resolve(), selected = ''
+  main.configure = (root, _override, permitted = () => true) => {
+    const result = lifecycle.then(async () => {
+      if (!permitted()) return main.status()
+      if (root === h.other) await opening.promise
+      selected = root
+      main.configured.push(root)
+      return main.status()
+    })
+    lifecycle = result.then(() => undefined)
+    return result
+  }
+  worker.install = async () => { await install.promise; worker.ready = true; return env(true) }
+  try {
+    await h.invoke('project:open', h.root)
+    const preparation = h.invoke('deps:ensure', h.root, 'A'); await flush()
+    const b = h.invoke('project:open', h.other); await flush()
+    install.resolve(env(true)); await flush()
+    opening.resolve(); await b; await preparation
+    expect(selected).toBe(h.other)
+    expect(main.configured).toEqual([h.root, h.other])
+    await h.invoke('rpc', 'deps.doctor', { root: h.other }, 'B-read')
+    expect(selected).toBe(h.other)
+  } finally { opening.resolve(); install.resolve(env(true)); await h.cleanup() }
+})
+
+for (const aliasKind of ['dot', 'symlink']) {
+  test(`R1-02 physical folder alias joins one installation: ${aliasKind}`, async () => {
+    const main = new ControlledSidecar(), worker = new ControlledSidecar(), h = harness(main, worker)
+    const install = Promise.withResolvers<Envelope>()
+    let installations = 0
+    worker.install = async () => { ++installations; await install.promise; worker.ready = true; return env(true) }
+    const alias = aliasKind === 'dot' ? h.root + '/.' : h.root + '-alias'
+    if (aliasKind === 'symlink') symlinkSync(h.root, alias, 'dir')
+    try {
+      await h.invoke('project:open', h.root)
+      const original = h.invoke('deps:ensure', h.root, 'original'); await flush()
+      await h.invoke('project:open', alias)
+      const joined = h.invoke('deps:ensure', alias, 'alias'); await flush()
+      const simultaneous = installations
+      install.resolve(env(true)); await original; await joined
+      expect(simultaneous).toBe(1)
+      expect(installations).toBe(1)
     } finally { install.resolve(env(true)); await h.cleanup() }
   })
 }

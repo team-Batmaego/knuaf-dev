@@ -117,6 +117,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const images = createPaperImages(() => currentRoot)
   /** `project:open` 요청 세대 — 늦게 성공한 옛 요청이 허용 기준을 되돌리지 않게. */
   let openSeq = 0
+  const configuringOpens = new Set<number>()
   /** renderer clientId → in-flight sidecar request, for `rpc:cancel` and the agent-busy gate. */
   const inflight = new Map<string, { id: string; method: string }>()
   const dependencyFlights = new Map<string, { clientId: string; cancelled: boolean; sidecar: Sidecar; promise: Promise<RpcResult<Envelope>> }>()
@@ -197,7 +198,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       dependencyDiagnoses.set(clientId, diagnosis)
       diagnosis.gate.phase = 'checking'
       // An install owns its whole check/install/recheck transaction, including concurrent reads.
-      if (!dependencyFlights.has(root!)) latestDependencyCheck = diagnosis
+      if (!dependencyFlights.has(canonical(root!))) latestDependencyCheck = diagnosis
     }
     try {
       const result = await sidecar.call(method, params, (event, data) => w?.webContents.send('rpc:event', { clientId, event, data }), (id) => {
@@ -215,7 +216,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     } finally {
       if (diagnosis) {
         if (dependencyDiagnoses.get(clientId) === diagnosis) dependencyDiagnoses.delete(clientId)
-        if (dependencyGate && dependencyGate === diagnosis.gate && latestDependencyCheck === diagnosis && !dependencyFlights.has(root!)) {
+        if (dependencyGate && dependencyGate === diagnosis.gate && latestDependencyCheck === diagnosis && !dependencyFlights.has(canonical(root!))) {
           dependencyGate.phase = diagnosedPhase
         }
       }
@@ -252,6 +253,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       return { error: { code: 'first_project_permission_required', message: '첫 논문 폴더의 전역 권한 방식을 골라 주세요.' } }
     }
     try {
+      configuringOpens.add(seq)
       const info = await sidecar.configure(root, settings.python_override)
       // 성공한 전환만 허용 기준을 바꾼다(검토 ATTACH-R1-05). 실패하면 이전 폴더가 그대로
       // 남아야 메인의 파일 검사 기준과 화면의 현재 폴더가 어긋나지 않는다. 늦게 성공한 옛
@@ -279,6 +281,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       // 실패한 **이 선택**의 python·kind 를 같이 돌려준다(PY-D1-03). renderer 의 store.sidecar 는
       // 성공 분기에서만 갱신되므로, 첫 실패에서 이전 프로젝트의 값으로 버튼을 판단하면 안 된다.
       return { error: ipcError(error), sidecar: sidecar.status(), startupFailed: true }
+    } finally {
+      configuringOpens.delete(seq)
     }
   })
 
@@ -893,7 +897,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('runtime:cancel', () => ({ result: cancelRuntimeInstall() }))
   ipcMain.handle('deps:ensure', (_e, root: string, clientId: string): Promise<RpcResult<Envelope>> => {
     if (root !== currentRoot) return Promise.resolve({ error: { code: 'project_changed', message: '현재 열린 논문 폴더가 아니에요.' } })
-    const existing = dependencyFlights.get(root)
+    const key = canonical(root)
+    const existing = dependencyFlights.get(key)
     if (existing) return existing.promise // Only the original client owns cancellation.
     if (agentBusy(root)) return Promise.resolve({ error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } })
     latestDependencyCheck = null
@@ -902,7 +907,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     const worker = createDependencySidecar()
     dependencySidecars.add(worker)
     const flight = { clientId, cancelled: false, sidecar: worker, promise }
-    const mine = (): boolean => currentRoot === root
+    const mine = (): boolean => currentRoot !== null && canonical(currentRoot) === key
     const live = (): void => {
       if (flight.cancelled) throw { code: 'cancelled', message: '준비를 취소했어요.' }
     }
@@ -950,11 +955,12 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
           if (!checked.ok || (checked.data as DependencyReport | null)?.ready !== true) {
             throw { code: 'deps_verify', message: '설치 뒤 프로젝트 .venv 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
           }
-          // A newer folder open owns the shared sidecar and its readiness gate.
+          // Decide authority inside the same lifecycle queue as project:open, not before enqueueing.
           const seq = openSeq
-          if (mine()) await sidecar.configure(root, loadSettings().python_override)
+          const permitted = (): boolean => mine() && seq === openSeq && !configuringOpens.has(openSeq)
+          await sidecar.configure(currentRoot ?? root, loadSettings().python_override, permitted)
           live()
-          if (dependencyGate && mine() && seq === openSeq) dependencyGate.phase = 'ready'
+          if (dependencyGate && permitted()) dependencyGate.phase = 'ready'
         } else if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
         hideAppDirs(root)
         return { result }
@@ -965,7 +971,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
           data: { phase, detail: failure.data } } }
       } finally {
         inflight.delete(clientId)
-        if (dependencyFlights.get(root) === flight) dependencyFlights.delete(root)
+        if (dependencyFlights.get(key) === flight) dependencyFlights.delete(key)
         try { await worker.stopForExit(); dependencySidecars.delete(worker) }
         catch (error) {
           console.error('[knuaf] dependency sidecar stop failed',
@@ -974,9 +980,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       }
     }
     // Reserve the physical operation before any await; keep source/activity ownership through verification.
-    dependencyFlights.set(root, flight)
+    dependencyFlights.set(key, flight)
     void agentActivity.run(() => skillSwitch.run(operation)).then(finish, error => {
-      dependencyFlights.delete(root)
+      dependencyFlights.delete(key)
       if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
       finish({ error: ipcError(error) as NonNullable<RpcResult['error']> })
     })
