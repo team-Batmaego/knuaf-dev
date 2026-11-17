@@ -1,11 +1,13 @@
 import type { AgentConnection, AgentEvents } from '../contracts'
-import type { Provider, WorkLane } from '../../../shared/chat'
+import type { Provider } from '../../../shared/chat'
 import type { AccountSnapshot, LaneEntry, LanePlan } from '../../../shared/lanes'
 import type { RelayIsolation } from './isolation'
 import type { TokenEvent } from './tokens'
+import type { ConversationOwner, JobLane, JobStatus, UsageState } from '../../../shared/lanes-ipc'
 
-export type JobLane = Exclude<WorkLane, 'design'>
-export type JobStatus = 'queued' | 'running' | 'completed' | 'limit' | 'unknown' | 'auth' | 'stopped' | 'interrupted' | 'rejected' | 'error' | 'violation'
+/** 화면도 읽는 타입은 정의를 `shared/lanes-ipc.ts` 한 곳에 두고 여기서는 재수출만 한다. */
+export type { ConversationOwner, JobLane, JobStatus, UsageState }
+
 export interface InputReference { sourceId: string; path: string; hash: string; section: string }
 export interface JobSpec {
   schema: number
@@ -30,8 +32,6 @@ export interface JobSpec {
   parent?: string
   cause?: 'student-continue-after-limit'
 }
-/** App-owned identity, never read from a job file or lanes.json. */
-export interface ConversationOwner { id: string; sessionId: string; company: Provider }
 export interface JobRecord {
   spec: JobSpec
   rootJobId: string
@@ -44,13 +44,14 @@ export interface JobRecord {
   actualEffort?: string | null
   status: JobStatus
   reason?: string
+  /** 실제 실행이 시작된 시각 — §2-1 "{n}분째"의 근거. 대기 중이면 없다. */
+  startedAt?: string
   accountId?: string
   proposalId?: string
   contentHash: string
   outputs: string[]
   createdAt: string
 }
-export type UsageState = 'allowed' | 'limit' | 'unknown' | 'auth'
 export interface ExecutionAccount {
   accountId: string
   connected: boolean
@@ -66,6 +67,13 @@ export interface JobEvents extends AgentEvents {
 /** An ordinary AgentConnection is deliberately insufficient: engines must enforce the relay contract. */
 export interface JobConnection extends AgentConnection {
   relayProtocol: 1
+  /**
+   * 첫 턴 안에서 사용량 신호를 재판정할 수 있다는 연결 쪽 선언(㉠).
+   * `true`인 연결만 턴 전 `usage:'unknown'`을 통과시켜 첫 턴을 연다;
+   * 없거나 거짓이면 현행(unknown 차단) 그대로다. 엔진 구현은 배선 A 몫이라
+   * 여기서 선언만 받고, 가짜 연결로 시험한다.
+   */
+  gateInTurn?: boolean
   availability(): Promise<ExecutionAccount>
   runJob(text: string, events: JobEvents): Promise<void>
 }

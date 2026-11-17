@@ -229,6 +229,9 @@ test('카드가 떠 있을 때 메뉴로 연 폴더에도 첫 메시지를 전�
   const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in', FAKE_CODEX_REPLY: replyFile(dir, '메뉴로 연 답변') })
   const { electronApp, page } = await launch({ onboarded: false, env })
   try {
+    // 앱 시작의 세션 기본 선택이 먼저 끝나도 첫 구독 전송은 저장해야 한다.
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    expect((await page.evaluate(() => window.knuaf.getSettings())).provider_choice).toBeNull()
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('기존 논문 이어 쓰기')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
@@ -239,6 +242,58 @@ test('카드가 떠 있을 때 메뉴로 연 폴더에도 첫 메시지를 전�
     await expect.poll(async () => (await page.evaluate(() => window.knuaf.getSettings())).provider_choice?.provider).toBe('codex')
   } finally { await electronApp.close() }
 })
+
+for (const route of ['menu', 'picker'] as const) {
+  test(`무료 첫 전송은 저장된 회사 선택으로 승격하지 않는다 (${route})`, async () => {
+    const dir = scratch()
+    const root = join(dir, '무료 논문')
+    mkdirSync(root)
+    const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-out' })
+    const { electronApp, page } = await launch({ onboarded: false, env })
+    try {
+      // 실제 중계·AI 호출 없이 IPC 경계에서 무료 연결과 응답만 제공한다.
+      await electronApp.evaluate(({ ipcMain, dialog }, path) => {
+        // Electron 시험용 핸들러 표는 공개 타입에 없어 경계에서만 타입을 붙인다.
+        const testIpc = ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
+        const handlers = testIpc._invokeHandlers
+        const status = (provider: unknown) => ({ result: { installed: true, connected: provider === 'free', version: null, detail: '' } })
+        handlers.set('connect:status', (_event, provider) => status(provider))
+        handlers.set('chat:status', (_event, _root, provider) => status(provider))
+        let snapshot = { root: path, provider: 'free', state: 'idle', messages: [] as { id: string; role: string; text: string; at: string }[] }
+        handlers.set('chat:snapshot', () => ({ result: snapshot }))
+        handlers.set('chat:send', (_event, target, provider, text) => {
+          if (target !== path || provider !== 'free' || typeof text !== 'string') throw new Error('무료 첫 전송의 폴더·회사·본문이 달라졌어요')
+          snapshot = { ...snapshot, messages: [
+            ...snapshot.messages,
+            { id: 'free-user', role: 'user', text, at: new Date().toISOString() },
+            { id: 'free-reply', role: 'assistant', text: '무료 첫 답변', at: new Date().toISOString() }
+          ] }
+          return { result: snapshot }
+        })
+        dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path], bookmarks: [] })) as typeof dialog.showOpenDialog
+      }, root)
+      await page.reload()
+      await page.locator('.splash').waitFor({ state: 'visible' })
+      await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
+      await page.keyboard.press('Escape')
+      await page.locator('.splash').waitFor({ state: 'detached' })
+      await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+      expect((await page.evaluate(() => window.knuaf.getSettings())).provider_choice).toBeNull()
+      await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('무료로 첫 요청')
+      await page.getByRole('button', { name: '보내기', exact: true }).click()
+      await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
+      if (route === 'menu') {
+        await electronApp.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('menu', { type: 'open-recent', root: path }), root)
+      } else {
+        await page.getByRole('button', { name: /내 폴더 고르기/ }).click()
+      }
+      await expect(page.getByText('무료 첫 답변')).toBeVisible({ timeout: 30000 })
+      await expect(page.locator('.chat-msg.user')).toHaveCount(1)
+      await expect(page.locator('.chat-msg.user')).toContainText('무료로 첫 요청')
+      expect((await page.evaluate(() => window.knuaf.getSettings())).provider_choice).toBeNull()
+    } finally { await electronApp.close() }
+  })
+}
 
 test('새 논문 시작을 누르면 폴더 카드와 이전 메시지가 지워진다', async () => {
   const dir = scratch()
