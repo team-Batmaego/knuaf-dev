@@ -14,7 +14,7 @@ import type { Provider } from '../../shared/chat'
 import type {
   AccountSnapshot, LaneEntry, LanePlan, LaneRequest, LaneRequestEntry
 } from '../../shared/lanes'
-import { LANE_TABLE, REVIEW_EFFORT, WORK_LANES, checkLaneRequest, isCrossProviderModelId, judgePlan, proposeLaneRequest, resolveLanes, type LaneProposal } from '../../shared/lanes'
+import { LANE_TABLE, REVIEW_EFFORT, WORK_LANES, checkLaneRequest, fitEffort, isCrossProviderModelId, judgePlan, proposeLaneRequest, resolveLanes, type LaneProposal } from '../../shared/lanes'
 import type {
   CardAction, CardDecision, CardInvalidReason, CardRow, CardState, CardVariant, FeeNotice, LaneCard,
   ModelRef, ReviewModelGroup, PlacementEntries, PlacementOrigin, PlacementDecision, LaneModelGroup
@@ -225,7 +225,11 @@ export async function setPlacement(
       } } }, snapshots)
       const accepted = checked.accepted[0]
       if (!accepted?.company || !accepted.model) throw new LaneFailure('unavailable', '추천 주 모델을 쓸 수 없어요.')
-      nextDesign = { company: accepted.company, model: accepted.model, effort: accepted.effort, how: 'main' }
+      const supported = snapshots.find(account => account.company === accepted.company)?.models
+        ?.find(model => model.model === accepted.model)?.efforts ?? []
+      const choice = deps.designChoice?.()
+      const currentEffort = choice ? choice.effort : deps.store.approvedPlan(folder)?.design?.effort ?? null
+      nextDesign = { company: accepted.company, model: accepted.model, effort: fitEffort(currentEffort, supported), how: 'main' }
     }
     const design = { company: deps.mainCompany, model: null, effort: null, ...deps.designChoice?.(), how: 'main' as const }
     let requested = entries
@@ -239,8 +243,7 @@ export async function setPlacement(
     for (const lane of lanes) {
       const entry = requested[lane]
       if (entry === null) continue
-      if (!entry || (entry.how !== 'main' && entry.how !== 'relay')
-        || (entry.how === 'main' && (entry.model !== null || entry.effort !== null))) {
+      if (!entry || (entry.how !== 'main' && entry.how !== 'relay')) {
         return { outcome: 'rejected', rejected: [{ lane, reason: 'malformed' }] }
       }
       request.lanes[lane] = entry.how === 'main' ? { main: true }

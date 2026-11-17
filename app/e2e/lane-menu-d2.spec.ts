@@ -28,7 +28,7 @@ test('D2 모델 메뉴: 꺼짐, 추천, 켜짐, 역할과 추론, 예약', async
         setPlacement: async (...args: unknown[]) => { Reflect.set(window, '__placementArgs', args); return { result: { outcome: 'applied', version: 2 } } },
         snapshot: async () => ({ result: value }), onSnapshot: () => () => undefined,
         laneModels: async () => ({ result: [{ company: 'codex', models: [
-          { model: 'gpt-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'high'] },
+          { model: 'gpt-sol', name: 'GPT-6.1 Sol', efforts: ['low'] },
           { model: 'gpt-astra', name: 'GPT-6 Astra', efforts: ['low', 'high'] }
         ] }] })
       }
@@ -58,6 +58,8 @@ test('D2 모델 메뉴: 꺼짐, 추천, 켜짐, 역할과 추론, 예약', async
     await expect(menu.getByText('추론', { exact: true })).toBeVisible()
     await expect(menu.getByRole('button', { name: 'high', exact: true })).toBeVisible()
     await shoot(page, 'd2-role-effort')
+    await menu.getByRole('button', { name: 'GPT-6.1 Sol', exact: true }).click()
+    await expect.poll(() => page.evaluate(() => { const args: unknown = Reflect.get(window, '__placementArgs'); if (!Array.isArray(args) || !args[2] || typeof args[2] !== 'object') return null; return Reflect.get(args[2], 'research') })).toMatchObject({ model: 'gpt-sol', effort: 'low', how: 'relay' })
     await menu.getByRole('button', { name: 'low', exact: true }).click()
     await expect.poll(() => page.evaluate(() => { const args: unknown = Reflect.get(window, '__placementArgs'); return Array.isArray(args) ? args[3] : null })).toEqual({ kind: 'mine' })
     await expect.poll(() => page.evaluate(() => { const args: unknown = Reflect.get(window, '__placementArgs'); if (!Array.isArray(args) || !args[2] || typeof args[2] !== 'object') return null; return Reflect.get(args[2], 'research') })).toMatchObject({ model: 'gpt-astra', effort: 'low', how: 'relay' })

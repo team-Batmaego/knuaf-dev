@@ -35,6 +35,23 @@ export interface LaneRow {
 
 export const REVIEW_EFFORT = 'high'
 
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+
+/** 지원하면 유지, 아니면 가장 가까운 아래 단계. 아래가 없으면 최저 지원 단계. */
+export function fitEffort(effort: string | null, supported: readonly string[]): string | null {
+  if (!supported.length || effort === null) return null
+  if (supported.includes(effort)) return effort
+  const rank = EFFORT_LEVELS.indexOf(effort as typeof EFFORT_LEVELS[number])
+  let lowest: string | null = null
+  let lower: string | null = null
+  for (const level of EFFORT_LEVELS) {
+    if (!supported.includes(level)) continue
+    lowest ??= level
+    if (EFFORT_LEVELS.indexOf(level) <= rank) lower = level
+  }
+  return lower ?? lowest
+}
+
 function lane(company: Provider, model: string, how: LaneHow, effort: string | null = null): LaneEntry {
   return { company, model, effort, how }
 }

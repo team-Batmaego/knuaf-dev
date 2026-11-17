@@ -7,7 +7,7 @@ import { laneModels, setPlacement, selectDesign, consumePendingDesign, disable, 
 import { laneInput } from '../src/main/lanes/source'
 import type { ExecutionAccount } from '../src/main/chat/jobs/types'
 import type { PlacementEntries } from '../src/shared/lanes-ipc'
-import { LANE_TABLE, FREE_DS_MODEL } from '../src/shared/lanes'
+import { LANE_TABLE, FREE_DS_MODEL, fitEffort } from '../src/shared/lanes'
 
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), 'placement-'))
@@ -116,7 +116,7 @@ test('cross-company recommendation reserves design through restart without chang
   } : original(company)
   expect((await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'recommended', rowId: 'both-high' })).outcome).toBe('applied')
   const restored = new JobStore(join(f.base, 'private'))
-  expect(restored.pendingDesign(f.root)).toEqual({ company: 'claude', model: 'opus', effort: null, how: 'main' })
+  expect(restored.pendingDesign(f.root)).toEqual({ company: 'claude', model: 'opus', effort: 'high', how: 'main' })
   expect(restored.approvedPlan(f.root)?.design?.company).toBe('codex')
   const input = await laneInput({ ...f.deps, store: restored, runner: null }, f.root)
   expect(input.settings.nextDesignCompany).toBe('claude')
@@ -166,4 +166,41 @@ test('Team off still exposes account recommendation and enables that exact row',
   f.deps.account = async () => null
   const disconnected = await laneInput({ ...f.deps, runner: null }, f.root)
   expect(disconnected.settings.recommendedRowId).toBeNull()
+})
+
+test('D-CODE-01 snapshot rows roundtrip accepts displayed main assignees when only writing changes', async () => {
+  const f = fixture()
+  f.entries.research = { company: 'codex', model: null, effort: null, how: 'main' }
+  expect((await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'mine' })).outcome).toBe('applied')
+  expect((await setPlacement(f.deps, f.root, 1, f.entries, { kind: 'recommended', rowId: 'codex-high' })).outcome).toBe('applied')
+  const input = await laneInput({ ...f.deps, runner: null }, f.root)
+  const entries = Object.fromEntries(input.settings.rows.map(row => [row.lane, row.entry])) as PlacementEntries
+  expect(entries.repeat).toMatchObject({ how: 'main', model: 'gpt-6.1-sol', effort: 'high' })
+  entries.writing = { company: 'codex', model: 'gpt-6-luna', effort: null, how: 'relay' }
+  expect(await setPlacement(f.deps, f.root, 2, entries, { kind: 'mine' })).toEqual({ outcome: 'applied', version: 3 })
+  expect(f.store.approvedPlan(f.root)?.repeat).toEqual({ company: 'codex', model: null, effort: null, how: 'main' })
+  expect(f.store.approvedPlan(f.root)?.writing).toEqual(entries.writing)
+})
+
+for (const [current, supported, expected] of [
+  ['high', ['low', 'high'], 'high'],
+  ['xhigh', ['high', 'low', 'medium'], 'high'],
+  ['low', ['high', 'medium'], 'medium'],
+  ['max', [], null],
+  [null, ['high'], null]
+] as const) test(`D-CODE-02 effort fit ${current} into ${supported.join(',')}`, () => {
+  expect(fitEffort(current, supported)).toBe(expected)
+})
+
+for (const [current, supported, expected] of [
+  ['high', ['low', 'high'], 'high'], ['xhigh', ['low', 'high'], 'high'], ['high', [], null]
+] as const) test(`D-CODE-02 recommended main keeps or fits ${current} to ${expected}`, async () => {
+  const f = fixture()
+  if (f.account.account.models) f.account.account.models[0].efforts = [...supported]
+  f.deps.designChoice = () => ({ model: 'gpt-6.1-sol', effort: current })
+  const applied: unknown[] = []
+  f.deps.applyDesign = async (_root, entry) => { applied.push(entry); return true }
+  expect((await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'recommended', rowId: 'codex-high' })).outcome).toBe('applied')
+  expect(applied).toEqual([{ company: 'codex', model: 'gpt-6.1-sol', effort: expected, how: 'main' }])
+  expect(f.store.approvedPlan(f.root)?.design?.effort).toBe(expected)
 })
