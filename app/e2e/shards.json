@@ -124,7 +124,8 @@
       "viewer-edit",
       "guard-codex-tool-lock",
       "kordoc-mcp-real",
-      "news-release-notes"
+      "news-release-notes",
+      "formula-notice-confirm"
     ],
     [
       "app-update-install-mode",
@@ -281,6 +282,7 @@
       "guard-scope",
       "notice-bubble",
       "notice-real-screen",
+      "formula-notice-confirm",
       "progress-list",
       "token-usage",
       "edits-store",

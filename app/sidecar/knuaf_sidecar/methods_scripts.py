@@ -276,6 +276,14 @@ NOTICE_REJECT_TEXT = {
     "source_ref_missing": "선택을 적을 자리를 정본에서 찾지 못했어요",
     "revision_conflict": "그사이 논문 폴더가 바뀌었어요. 화면을 새로 고친 뒤 다시 골라 주세요",
     "apply_rejected": "정본이 선택을 받아들이지 않았어요",
+    # 확인(`gg_notices.py confirm`)의 거절 사유 — 계약 §2-2.
+    "notice_stale": "알림을 본 뒤에 파일이 바뀌었어요. 다시 요청해 주시면 지금 상태로 다시 알려 드릴게요",
+    "record_not_active": "이 알림은 이미 처리됐어요",
+    "relayed_quote_missing": "학생에게서 받은 답을 함께 적어 주세요",
+    "confirm_source_missing": "확인한 경로를 함께 알려 주세요",
+    "confirm_source_invalid": "확인한 경로와 전달한 답이 서로 맞지 않아요",
+    "record_unwritable": "지금은 기록을 남길 수 없어요. 잠시 뒤 다시 눌러 주세요",
+    "lineage_id_collision": "기록 자리가 겹쳐 확인을 적지 못했어요. 다시 요청해 주세요",
 }
 
 
@@ -310,6 +318,43 @@ def notices_choose(ctx, params):
     return envelope
 
 
+def notices_confirm(ctx, params):
+    """`gg_notices.py confirm` — 바뀐 계산 칸 알림을 학생이 확인했다고 정본에 적는다.
+
+    출처(`--by`)는 도구가 **필수로** 받는다(기본값 없음 — 없으면 `confirm_source_missing`).
+    앱 단추 경로는 늘 `app_click` 하나이고, 전달 문장이 실려 오면 그 문장만 `--relayed-quote`
+    로 넘긴다. 둘을 함께 넘기면 `confirm_source_invalid` 이므로 **한 갈래만** 고른다.
+    """
+    identity = params.get("identity")
+    if not isinstance(identity, str) or not identity.strip():
+        raise RpcError("invalid_params", "identity(알림 식별자) 필요")
+    identity = identity.strip()
+    if identity.startswith("-"):
+        # argparse 가 값을 옵션으로 읽는다.
+        raise RpcError("invalid_params", "identity 값이 '-'로 시작할 수 없음")
+    quote = params.get("relayed_quote")
+    if quote is not None:
+        # 빈 문장은 "전달한 답 없음"과 구별되지 않는다 — 조용히 app_click 으로 내려가지 않는다.
+        if not isinstance(quote, str) or not quote.strip():
+            raise RpcError("invalid_params", "relayed_quote 는 비어 있지 않은 문자열이어야 함")
+        quote = quote.strip()
+    root = _root(params)
+    if not root.is_dir():
+        raise RpcError("invalid_params", "작업 폴더가 없음: %s" % root)
+    if not (_scripts_dir() / "gg_notices.py").is_file():
+        raise RpcError("notices_script_missing", "알림 기록 도구(gg_notices.py)가 이 앱에 없어 확인을 적지 못했어요")
+    # 하위 명령 → 폴더(위치 인자) → 플래그 순서. gg_notices.py 의 `confirm` 하위 파서가 그 순서다.
+    argv = ["confirm", str(root), "--identity", identity]
+    argv += ["--relayed-quote", quote] if quote is not None else ["--by", "app_click"]
+    envelope = _run(ctx, params, "gg_notices.py", argv)
+    if envelope.get("status") == "rejected":
+        data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+        reason = data.get("reason") or "apply_rejected"
+        envelope["ok"] = False
+        envelope["block_reason"] = NOTICE_REJECT_TEXT.get(reason, "확인을 적지 못했어요(%s)" % reason)
+    return envelope
+
+
 def register(server):
     for name, fn, write in (
         ("paper.generate", paper_generate, True),
@@ -331,5 +376,6 @@ def register(server):
         ("deps.doctor", deps_doctor, False),
         ("kordoc.ensure", kordoc_ensure, True),
         ("notices.choose", notices_choose, True),
+        ("notices.confirm", notices_confirm, True),
     ):
         server.register(name, fn, write=write)

@@ -91,6 +91,7 @@ function one(raw: unknown): NoticeRow {
 interface Paint {
   onDismiss?: (key: string) => void
   onChoose?: (value: string) => void
+  onConfirm?: () => void | Promise<void>
   onFootnote?: () => void
   forceOpen?: boolean
 }
@@ -667,6 +668,7 @@ interface StackApi {
   read: (root: string) => Promise<unknown>
   dismiss: (root: string, key: string) => Promise<unknown>
   choose: (root: string, identity: string, value: string) => Promise<unknown>
+  confirm: (root: string, identity: string) => Promise<unknown>
 }
 
 interface StackProps {
@@ -684,6 +686,7 @@ function stackApi(over: Partial<StackApi> = {}): StackApi {
     read: async () => ({ result: { notices: [], dismissed: [] } }),
     dismiss: async () => ({ result: [] }),
     choose: async () => ({ result: { ok: true, exit: 0, status: 'chosen' } }),
+    confirm: async () => ({ result: { ok: true, status: 'acknowledged' } }),
     ...over
   }
 }
@@ -1042,4 +1045,64 @@ test('사실 칸이 있으면 세 줄 + 칸 주소를 맨 아래에 그리고, �
   expect(legacy).toContain('class="notice-items"')
   expect(legacy).not.toContain('class="notice-easy"')
   expect(legacy).toContain('바로잡았어요 · 9.경비계획!B12')
+})
+
+test('확인 필드는 유효한 이름이 있을 때만 단추가 된다', () => {
+  const source = fruit as { project_id: string; notices: Array<Record<string, unknown>> }
+  const row = (confirm: unknown) => one({ ...source, notices: [{ ...source.notices[0], confirm }] })
+  expect(row(null).confirm).toBeNull()
+  expect(row({ label: 4 }).confirm).toBeNull()
+  expect(row({ label: '확인했어요' }).confirm).toEqual({ label: '확인했어요' })
+  expect(painted(row({ label: '확인했어요' }), { onConfirm: () => {} })).toContain('class="notice-confirm"')
+  expect(painted(row(null), { onConfirm: () => {} })).not.toContain('class="notice-confirm"')
+})
+
+test('확인 요청은 즉시 한 번 잠기고 새 열쇠에는 잠금이 전파되지 않는다', async () => {
+  await withHostDom(async (document, act) => {
+    const notice = { ...one(hortBefore), confirm: { label: '확인했어요' } }
+    const waiting = deferred()
+    let calls = 0
+    const confirm = () => { calls++; return waiting.promise }
+    const { host, root, render } = await paintLive(document, act, { notice, onConfirm: confirm })
+    const buttons = () => byClass(host, 'notice-confirm').flatMap((box) => walk(box, (node) => node.tagName === 'BUTTON'))
+    await act(async () => { pressChoice(buttons()[0]); pressChoice(buttons()[0]) })
+    expect(calls).toBe(1)
+    await render({ notice: revisedNotice(notice), onConfirm: confirm })
+    await act(async () => pressChoice(buttons()[0]))
+    expect(calls).toBe(2)
+    await act(async () => { waiting.resolve(); await waiting.promise })
+    await act(async () => root.unmount())
+  })
+})
+
+test('확인 거절은 문장을 보여 주고 다시 열며 성공하면 알림을 다시 읽는다', async () => {
+  await withHostDom(async (document, act) => {
+    const notice = { ...one(hortBefore), confirm: { label: '확인했어요' } }
+    let reads = 0, calls = 0
+    const { host, root } = await paintStack(document, act, { root: ROOT, api: stackApi({
+      read: async () => ({ result: { notices: ++reads === 1 ? [notice] : [], dismissed: [] } }),
+      confirm: async () => ++calls === 1
+        ? { result: { ok: false, status: 'rejected', block_reason: '파일이 바뀌었어요' } }
+        : { result: { ok: true, status: 'acknowledged' } }
+    }) })
+    const button = () => walk(byClass(host, 'notice-confirm')[0], (node) => node.tagName === 'BUTTON')[0]
+    await act(async () => pressChoice(button()))
+    expect(failedLines(host)[0].textContent).toContain('파일이 바뀌었어요')
+    await act(async () => pressChoice(button()))
+    expect(calls).toBe(2)
+    expect(reads).toBe(2)
+    expect(byClass(host, 'notice-card')).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+})
+
+test('멈춤 카드는 사유 코드 대신 문장과 칸만 보여 준다', () => {
+  const ResultCard = loadTsx(resolve(__dirname, '../src/renderer/src/components/ResultCard.tsx')).ResultCard as (props: unknown) => unknown
+  for (const reason of ['formula_cells_changed', 'formula_cell_conflict', 'formula_audit_unavailable', 'formula_cell_notice_record', 'lineage_id_collision']) {
+    const env = { ok: false, status: 'held', block_reason: reason, detail: { cells: ['투자계획!C8'] }, data: { reason }, stderr: reason, duration_ms: 1, exit: 2 }
+    const html = renderToStaticMarkup(createElement(ResultCard, { env }))
+    expect(html).toContain('result-held')
+    expect(html).toContain('<li>투자계획!C8</li>')
+    expect(html).not.toContain(reason)
+  }
 })
