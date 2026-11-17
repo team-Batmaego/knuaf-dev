@@ -130,6 +130,31 @@ function createWindow(): void {
       ...(hidden ? { backgroundThrottling: false } : {})
     }
   })
+  // Subscribe before navigation: Playwright may receive the window after preload has failed.
+  // No URL, console text, error message, settings value or document content enters this log.
+  if (diagEnabled()) {
+    const contents = win.webContents
+    trace('startup:window-created')
+    win.once('ready-to-show', () => trace('startup:ready-to-show'))
+    contents.on('did-start-loading', () => trace('startup:load-start'))
+    contents.on('dom-ready', () => trace('startup:dom-ready'))
+    contents.on('did-finish-load', () => trace('startup:load-finished'))
+    contents.on('did-stop-loading', () => trace('startup:load-stopped'))
+    contents.on('did-fail-load', (_event, code, _description, _url, mainFrame) => {
+      trace('startup:load-failed', `code=${code} mainFrame=${mainFrame}`)
+    })
+    contents.on('preload-error', () => trace('startup:preload-error'))
+    contents.on('render-process-gone', (_event, details) => {
+      trace('startup:renderer-gone', `reason=${details.reason} exitCode=${details.exitCode}`)
+    })
+    contents.on('unresponsive', () => trace('startup:renderer-unresponsive'))
+    contents.on('responsive', () => trace('startup:renderer-responsive'))
+    contents.on('console-message', (details) => {
+      if (details.level === 'error' || details.level === 'warning') {
+        trace('startup:renderer-console', `level=${details.level}`)
+      }
+    })
+  }
   if (!hidden) win.once('ready-to-show', () => win?.show())
   win.webContents.on('did-finish-load', () => { if (pendingOpen) { sendMenu({ type: 'open-recent', root: pendingOpen }); pendingOpen = null } })
   win.on('closed', () => { win = null })

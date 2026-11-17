@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -150,30 +150,51 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
    * 않으므로 리스너가 아예 없다** — 음성 시험은 `env: { KNUAF_E2E_TEST_HOOKS: '0' }` 로 끈다.
    */
   if (env.KNUAF_E2E_TEST_HOOKS === undefined) env.KNUAF_E2E_TEST_HOOKS = '1'
-  const electronApp = await electron.launch({
-    args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
-    env,
-    colorScheme: opts.colorScheme
-  })
-  const page = await electronApp.firstWindow()
-  /**
-   * 기본 시험은 사이드바와 대화·논문의 세 칸이 들어가는 폭에서 돌린다.
-   * 좁은 배치를 검증하는 시험은 `setWindowWidth`로 별도 폭을 지정한다.
-   */
-  await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, DEFAULT_WINDOW)
-  if (opts.colorScheme || opts.reducedMotion) await page.emulateMedia({ colorScheme: opts.colorScheme, reducedMotion: opts.reducedMotion })
-  // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
-  // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
-  await page.waitForSelector(opts.waitFor ?? '.titlebar')
-  const splash = page.locator('.splash')
-  if (opts.splash !== 'keep') {
-    await splash.waitFor({ state: 'visible', timeout: 30_000 })
-    // The skip key listener is attached before the first animation frame marks this node.
-    await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
-    await page.keyboard.press('Escape')
-    await splash.waitFor({ state: 'detached' })
+  const markStartup = (stage: string): void => {
+    if (!env.KNUAF_APP_LOG) return
+    try { appendFileSync(appLog, `${Date.now()} [test:startup] ${stage}\n`) } catch { /* Diagnosis must not replace the launch error. */ }
   }
-  return { electronApp, page, appLog }
+  try {
+    markStartup('electron-launch:start')
+    const electronApp = await electron.launch({
+      args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env,
+      colorScheme: opts.colorScheme
+    })
+    markStartup('electron-launch:done')
+    const page = await electronApp.firstWindow()
+    markStartup('first-window:done')
+    // Error kinds only: messages/stacks can include credentials, paths or student text.
+    if (env.KNUAF_APP_LOG) {
+      page.on('pageerror', () => markStartup('renderer:page-error'))
+      page.on('crash', () => markStartup('renderer:crash'))
+      page.on('domcontentloaded', () => markStartup('renderer:dom-content-loaded'))
+      page.on('load', () => markStartup('renderer:load'))
+    }
+    /** Default tests need room for the sidebar, chat and paper; narrow tests resize separately. */
+    await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, DEFAULT_WINDOW)
+    if (opts.colorScheme || opts.reducedMotion) await page.emulateMedia({ colorScheme: opts.colorScheme, reducedMotion: opts.reducedMotion })
+    // Both first-run connection/folder steps retain the titlebar readiness signal.
+    markStartup('titlebar-wait:start')
+    await page.waitForSelector(opts.waitFor ?? '.titlebar')
+    markStartup('titlebar-wait:done')
+    const splash = page.locator('.splash')
+    if (opts.splash !== 'keep') {
+      await splash.waitFor({ state: 'visible', timeout: 30_000 })
+      // The skip key listener is attached before the first animation frame marks this node.
+      await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
+      await page.keyboard.press('Escape')
+      await splash.waitFor({ state: 'detached' })
+    }
+    markStartup('launch:done')
+    return { electronApp, page, appLog }
+  } catch (error) {
+    markStartup('launch:failed')
+    if (env.KNUAF_APP_LOG && existsSync(appLog)) {
+      try { await test.info().attach('startup-log', { path: appLog, contentType: 'text/plain' }) } catch { /* Keep the original launch failure. */ }
+    }
+    throw error
+  }
 }
 
 /** 앱 화면이 준비됐다는 표시 — v5 에는 "내 논문" h1 이 없다(대화 칸 자체가 그 화면이다). */

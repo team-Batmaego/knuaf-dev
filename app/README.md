@@ -198,6 +198,14 @@ Playwright의 `close()`는 앱 종료가 아니라 **런치 래퍼 프로세스�
 브라우저를 실제로 띄우는 시험은 `stubExternal(electronApp)`을 `try` **안에서** 부릅니다(정리 누락 방지,
 기록을 남기지 않으므로 `shellCalls(log)`를 정확 배열로 단언하는 시험과 충돌하지 않습니다).
 
+기동 실패의 `startup-log` 첨부는 `app-log.txt` 사본입니다. `e2e/helpers.ts`는 Electron 시작,
+첫 창 인식, 제목줄 대기, splash 종료 단계와 renderer 오류 종류를 즉시 기록하고 기동 실패 시 첨부합니다.
+main은 `KNUAF_APP_LOG`가 지정된 경우에만 창/load/preload/renderer 이벤트를 구독하고
+`settings:get` 시작·성공·실패 시각을 기록합니다. 환경 변수 미지정 제품 실행에서는 구독·계측이 꺼집니다.
+원문 콘솔·오류 메시지/스택·URL·설정 값·학생 데이터는 기록하지 않습니다.
+제목줄 timeout·재시도·숨김 창 정책은 바꾸지 않습니다. 기존 실패 자료에는 renderer 관측이 없어
+제품 기동 결함인지 숨김 시험 환경 문제인지 미확정이며, 다음 Windows CI의 단계 기록으로 구분합니다.
+
 `pnpm -C app test:node`는 저장소 루트에서 실행하는 Node 전용 준비 상태·main IPC 회귀 명령입니다.
 별도 `playwright.node.config.ts`의 두 spec 고정 목록만 실행하고 build·Electron·브라우저를 시작하지 않습니다.
 `test:e2e`·기본 Playwright 설정은 GUI용입니다. `model-chip.spec.ts`처럼 GUI와 store가 섞인 파일은

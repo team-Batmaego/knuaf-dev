@@ -52,6 +52,7 @@ import { checkDocxZip } from './docx-zip'
 import { ensureSectionBaseline } from './review-baseline'
 import { readDismissed, readNotices, writeDismissed } from './notices'
 import { CHOICE_VALUES } from '../shared/notice'
+import { diag, diagEnabled } from './diagLog'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -568,7 +569,19 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   ipcMain.handle('window:info', () => windowInfo())
 
-  ipcMain.handle('settings:get', () => loadSettings())
+  ipcMain.handle('settings:get', () => {
+    if (!diagEnabled()) return loadSettings()
+    const started = Date.now()
+    diag('startup:settings-get:start')
+    try {
+      const settings = loadSettings()
+      diag(`startup:settings-get:done elapsed=${Date.now() - started}ms`)
+      return settings
+    } catch (error) {
+      diag(`startup:settings-get:error elapsed=${Date.now() - started}ms`)
+      throw error
+    }
+  })
   ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
