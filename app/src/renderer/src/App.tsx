@@ -137,7 +137,15 @@ export function App() {
     if (!settings || looked.current) return
     // 연결 확인은 폴더와 무관하게 앱 시작 시 한 번 한다.
     looked.current = true
-    void useConnect.getState().refreshAll()
+    void useConnect.getState().refreshAll().then(() => {
+      const state = useConnect.getState()
+      if (state.selected || useProject.getState().settings?.provider_choice) return
+      const preferred = useProject.getState().settings?.helper_mode === 'claude-chat' ? 'claude' : 'codex'
+      const other = preferred === 'claude' ? 'codex' : 'claude'
+      if (state[preferred].state === 'connected') state.select(preferred)
+      else if (state[other].state === 'connected') state.select(other)
+      else if (state.free.state === 'connected') state.select('free')
+    })
   }, [settings, root])
 
   const paperOnScreen = showsPaper(layout, paneView)

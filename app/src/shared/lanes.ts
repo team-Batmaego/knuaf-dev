@@ -1,4 +1,7 @@
-export type Provider = 'codex' | 'claude'
+export type Provider = 'codex' | 'claude' | 'free'
+
+export const FREE_DS_MODEL = 'deepseek-v4.1-flash-free'
+export const FREE_GLM_MODEL = 'glm-5.3-flash-free'
 export type WorkLane = 'design' | 'research' | 'writing' | 'repeat' | 'review'
 
 export type PlanTier = 'high' | 'low'
@@ -13,6 +16,7 @@ export type LaneRowId =
   | 'claude-high-codex-low'
   | 'claude-low-codex-high'
   | 'both-low'
+  | 'free-only'
 
 export interface LaneEntry {
   company: Provider
@@ -52,6 +56,14 @@ function row(
 }
 
 export const LANE_TABLE: Record<LaneRowId, LaneRow> = {
+  'free-only': row(
+    'free-only', '무료만',
+    lane('free', FREE_DS_MODEL, 'main'),
+    lane('free', FREE_DS_MODEL, 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
+    lane('free', FREE_DS_MODEL, 'relay'),
+    lane('free', FREE_GLM_MODEL, 'relay')
+  ),
   'codex-low': row(
     'codex-low',
     'ChatGPT 낮음만',
@@ -294,6 +306,7 @@ export type AccountSnapshot =
       accountType?: string | null
       models: readonly ModelCatalogEntry[] | null
     }
+  | { company: 'free'; models: readonly ModelCatalogEntry[] | null }
 
 export interface PlanJudgement extends SubscriptionVerdict {
   company: Provider
@@ -301,6 +314,7 @@ export interface PlanJudgement extends SubscriptionVerdict {
 }
 
 export function subscriptionCheck(account: AccountSnapshot): SubscriptionVerdict {
+  if (account.company === 'free') return { usable: true, reason: null }
   if (account.company === 'claude') {
     const keyed = Boolean(account.apiKeySource) && account.apiKeySource !== 'none'
     return keyed ? { usable: false, reason: 'claude-api-key' } : { usable: true, reason: null }
@@ -313,6 +327,7 @@ export function subscriptionCheck(account: AccountSnapshot): SubscriptionVerdict
 export function judgePlan(account: AccountSnapshot): PlanJudgement {
   const verdict = subscriptionCheck(account)
   if (!verdict.usable) return { ...verdict, company: account.company, tier: null }
+  if (account.company === 'free') return { ...verdict, company: 'free', tier: null }
   if (account.company === 'claude') {
     const tier: PlanTier = account.subscriptionType === 'max' ? 'high' : 'low'
     return { ...verdict, company: 'claude', tier }
@@ -333,7 +348,8 @@ export function selectLaneRow(claudeTier: PlanTier | null, codexTier: PlanTier |
 
 const SOLO_ROW: Record<Provider, Record<PlanTier, LaneRowId>> = {
   claude: { low: 'claude-low', high: 'claude-high' },
-  codex: { low: 'codex-low', high: 'codex-high' }
+  codex: { low: 'codex-low', high: 'codex-high' },
+  free: { low: 'free-only', high: 'free-only' },
 }
 
 function otherCompany(company: Provider): Provider {
@@ -351,7 +367,7 @@ function findCatalogModel(
 ): ModelCatalogEntry | undefined {
   const exact = models.find((entry) => entry.model === requested)
   if (exact) return isCrossProviderModelId(exact.model) ? undefined : exact
-  if (company === 'claude') return undefined
+  if (company !== 'codex') return undefined
   const resolved = resolveCodexAlias([...models], requested)
   if (!resolved || isCrossProviderModelId(resolved)) return undefined
   return models.find((entry) => entry.model === resolved)
@@ -488,7 +504,7 @@ export function checkLaneRequest(request: LaneRequest, accounts: readonly Accoun
       accepted.push({ lane: laneName, main: true, company: null, model: null, effort: null })
       continue
     }
-    if ((entry.company !== 'claude' && entry.company !== 'codex') || !entry.model) {
+    if ((entry.company !== 'claude' && entry.company !== 'codex' && entry.company !== 'free') || !entry.model) {
       rejected.push({ lane: laneName, reason: 'malformed', model: entry.model, effort: entry.effort ?? null })
       continue
     }
@@ -528,6 +544,7 @@ export function continueAfterLimit(
   otherCatalog: ModelCatalog
 ): LaneEntry | null {
   const isDesign = failedLane === 'design'
+  if (failedEntry.company === 'free') return null
   if (!otherAccount || (!isDesign && !otherState.consented) || !otherState.basicUsageAllowed) return null
 
   const company = otherCompany(failedEntry.company)

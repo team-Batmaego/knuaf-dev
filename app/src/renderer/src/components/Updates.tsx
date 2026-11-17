@@ -126,6 +126,7 @@ export function UpdateSettings() {
     : skill.phase === 'needs-app' ? UPDATE.needsApp
     : skill.phase === 'downloading' ? UPDATE.downloading
     : skill.phase === 'switching' ? UPDATE.switching
+    : skill.phase === 'idle' ? UPDATE.latest
     : skill.phase === 'error' || failure ? UPDATE.failed : UPDATE.ready
   const appMessage = !app || app.phase === 'checking' ? UPDATE.appChecking
     : app.phase === 'downloading' ? UPDATE.appDownloading
