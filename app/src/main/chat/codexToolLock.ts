@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, sep } from 'node:path'
 import { MCP_SERVER_NAME, READ_TOOLS, CODEX_STARTUP_TIMEOUT_SEC, CODEX_TOOL_TIMEOUT_SEC, codexKordocCollision, type KordocMcpSpec } from './kordocMcp'
-import { codeOf, diag } from '../diagLog'
+import { diag, logCodeOf } from '../diagLog'
 
 /** 목록 한 번에 받는 장 수 상한. 상한에 닿았는데 커서가 남으면 실패다(설계 '목록 읽기 규칙'). */
 export const LIST_PAGE_CAP = 50
@@ -296,7 +296,7 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
   try {
     installed = await req.rpc.request('plugin/installed', {})
   } catch (error) {
-    diag(`codex-lock stage=plugin-installed reason=enumeration-failed code=${codeOf(error)}`)
+    diag(`codex-lock stage=plugin-installed reason=enumeration-failed code=${logCodeOf(error)}`)
     return { ok: false, reason: 'enumeration-failed' }
   }
   const response = asRecord(installed)

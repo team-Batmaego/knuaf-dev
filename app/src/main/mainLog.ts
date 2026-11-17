@@ -1,8 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { constants } from 'node:os'
 import type { App, Event as ElectronEvent, RenderProcessGoneDetails, WebContents } from 'electron'
-import { appendScrubbed, codeOf, logFile, setDefaultLogFile } from './diagLog'
+import { appendScrubbed, isLogCode, logCodeOf, logFile, setDefaultLogFile } from './diagLog'
 
 /**
  * 출시판 파일 로그의 배선 - 설치된 앱은 콘솔이 없어서 `console.error` 55곳과 `diag()` 53곳이
@@ -87,8 +86,6 @@ const SAFE_FIELDS: Record<string, FieldKind> = {
 /** 알려진 앱 어휘만 저장한다. 새 이벤트의 진단 값은 이 목록에도 등록한다. */
 const ENUM_VALUE = /^(?:collect|collect-disabled|collect-skip|store|delivery-reconcile|deliver-drive|thesis-baseline|job-result|actual-model|stop-pending|student-continue-after-limit|conversation-continue-after-limit|lanes-ipc|lanes-snapshot|no-declaration|duplicate-id|no-plan|limit|rejected|queued|running|completed|stopped|interrupted|violation|error|allowed|invalid|superseded|base-version|not-found|already-handled|done|pending|review-main|malformed|cross-provider|not-subscribed|model-unverified|model-not-listed|effort-not-supported|claude-api-key|codex-not-chatgpt|claude|codex|free|main|research|writing|review|crashed|oom|killed|launch-failed|integrity-failure|abnormal-exit|clean-exit)$/
 
-/** 標準 오류 이름과 감시 origin. OS 오류 코드는 constants.errno 에서 별도로 판정한다. */
-const CODE_VALUE = /^(?:Error|TypeError|RangeError|SyntaxError|ReferenceError|TimeoutError|AbortError|unknown|string|uncaughtException|unhandledRejection)$/
 const TAG_WORD = /^(?:\[knuaf\]|\[shutdown\]|\[transport\]|\[sidecar\])$/
 const LABEL_WORD = /^(?:safeWrite:fail|safeWrite:retry|sidecar:warn|boot-check:fail|update:failed)$/
 
@@ -117,7 +114,7 @@ function machineValue(kind: FieldKind, value: unknown): string {
     case 'enum':
       return typeof value === 'string' && ENUM_VALUE.test(value) ? value : ''
     case 'code':
-      return typeof value === 'string' && (CODE_VALUE.test(value) || Object.hasOwn(constants.errno, value)) ? value : ''
+      return isLogCode(value) ? value : ''
   }
 }
 
@@ -191,7 +188,7 @@ export function consoleFields(args: readonly unknown[]): string {
     try {
       if (typeof arg === 'string') add(fieldsFromJson(arg) ?? fieldsFromText(arg))
       else if (arg instanceof Error) {
-        const code = machineValue('code', codeOf(arg))
+        const code = logCodeOf(arg)
         if (code) add([`code=${code}`])
       }
       // 그 밖의 객체·숫자·함수는 **읽지 않는다** - 직렬화 부작용도, 값 누출도 없다.
@@ -265,8 +262,8 @@ export function installMainLog(app: App): MainLogHandle {
     try {
       const target = logFile()
       if (!target) return
-      const where = machineValue('code', origin) || 'unknown'
-      const code = machineValue('code', codeOf(error)) || 'unknown'
+      const where = origin === 'uncaughtException' || origin === 'unhandledRejection' ? origin : 'unknown'
+      const code = logCodeOf(error)
       appendScrubbed(target, `${Date.now()} [uncaught] origin=${where} code=${code}`)
     } catch { /* 감시 훅은 원래 오류·종료 코드를 바꾸지 않는다 */ }
   }

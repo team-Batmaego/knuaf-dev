@@ -1,6 +1,6 @@
 import { assetUrl, MAX_BYTES, object, verifySkill, type VerifiedSkill } from './manifest'
 import type { UpdateConfig } from './keys'
-import { codeOf, diag } from '../diagLog'
+import { diag, logCodeOf } from '../diagLog'
 /**
  * `redirect: 'manual'` 의 뜻은 **전송 계층이** 3xx 를 따라가지 않고 응답으로 돌려준다는 것이다
  * (`netTransport.ts`). 3xx 를 응답으로 주지 않는 전송 계층(Electron `net.fetch`)은 쓸 수 없다 —
@@ -50,8 +50,8 @@ export async function boundedFetch(url: string, signal: AbortSignal, fetch: Tran
   } catch (error) {
     // 앱·규칙집 업데이트 실패는 진단 로그에 한 줄 남긴다 — 맥 실측에서 원인 단서가 0줄이었다.
     // 남기는 것은 **모양**뿐이다: 단계·호스트·상태 코드·오류 이름. 주소·쿼리 문자열은 싣지 않는다.
-    // `KNUAF_APP_LOG` 가 없으면 `diag` 는 완전 무동작이다(동작 불변).
-    diag(`update:failed stage=${stage} host=${host || '(없음)'} status=${status ?? '-'} error=${codeOf(error)}`)
+    // 출시판 기본 로그에도 같은 안전 오류 어휘만 남긴다.
+    diag(`update:failed stage=${stage} host=${host || '(없음)'} status=${status ?? '-'} error=${logCodeOf(error)}`)
     throw error
   }
 }

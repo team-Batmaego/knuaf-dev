@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { constants } from 'node:os'
 /**
  * 진단용 **파일** 로그 - 줄마다 즉시 쓴다.
  *
@@ -105,6 +106,18 @@ export function codeOf(error: unknown): string {
     if (typeof name === 'string' && name) return name
   } catch { /* 던지는 name accessor */ }
   return 'unknown'
+}
+
+/** 표준 오류 어휘의 공용 경계. console 필드와 직접 diag가 같은 허용목록을 쓴다. */
+export function isLogCode(value: unknown): value is string {
+  return typeof value === 'string' && (Object.hasOwn(constants.errno, value)
+    || /^(?:Error|TypeError|RangeError|SyntaxError|ReferenceError|TimeoutError|AbortError|unknown|string)$/.test(value))
+}
+
+/** 로그에 허용하는 코드. 앱 제어용 codeOf와 달리 임의 code/name은 보존하지 않는다. */
+export function logCodeOf(error: unknown): string {
+  const value = codeOf(error)
+  return isLogCode(value) ? value : 'unknown'
 }
 
 /**

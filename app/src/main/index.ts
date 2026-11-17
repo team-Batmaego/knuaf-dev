@@ -13,7 +13,7 @@ import { APP_NAME } from '../shared/name'
 import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
-import { codeOf, diag, diagEnabled } from './diagLog'
+import { codeOf, diag, diagEnabled, logCodeOf } from './diagLog'
 import { installMainLog } from './mainLog'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
@@ -241,7 +241,7 @@ else {
           trace(`task:${name}:start`)
           const p = start()
           // 거절 이유는 **코드/이름만** 남긴다 — `String(e)` 는 경로·본문·토큰을 실어 온다(검토 RT3 중요).
-          void p.then(() => trace(`task:${name}:done`), (e: unknown) => trace(`task:${name}:reject`, `code=${codeOf(e)}`))
+          void p.then(() => trace(`task:${name}:done`), (e: unknown) => trace(`task:${name}:reject`, `code=${logCodeOf(e)}`))
           return p
         }
       })

@@ -299,6 +299,39 @@ test('실제 파일 쓰기 실패의 학생 파일명과 오류 본문은 지속
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('직접 diag 오류 코드·이름의 학생값은 버리고 OS 코드와 표준 이름은 남긴다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kd-mainlog-code-'))
+  const file = join(dir, 'main.log')
+  const errors = [
+    Object.assign(new Error('PRIVATE_BODY'), { code: 'studentkim' }),
+    Object.assign(new Error('PRIVATE_BODY'), { name: 'PRIVATE_DRAFT_FRAGMENT' }),
+    Object.assign(new Error('PRIVATE_BODY'), { code: '김학생-초안.hwp', name: 'studentkim' }),
+    Object.assign(new Error('PRIVATE_BODY'), { code: 'EACCES' }),
+    new TypeError('PRIVATE_BODY')
+  ]
+  try {
+    withEnv({ KNUAF_APP_LOG: file }, () => {
+      for (const error of errors) {
+        const result = writeFileAtomic(join(dir, 'unused.txt'), 'PRIVATE_BODY', {
+          fs: {
+            readFileSync: () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) },
+            writeFileSync: () => { throw error }, renameSync: () => {}, unlinkSync: () => {}
+          }, delaysMs: [], log: () => {}
+        })
+        expect(result.ok).toBe(false)
+        expect(!result.ok && result.error).toBe(error)
+      }
+      const text = readFileSync(file, 'utf8')
+      for (const value of ['studentkim', 'PRIVATE_DRAFT_FRAGMENT', '김학생', '초안.hwp', 'PRIVATE_BODY']) {
+        expect(text).not.toContain(value)
+      }
+      expect(text).toContain('safeWrite:fail code=unknown')
+      expect(text).toContain('safeWrite:fail code=EACCES')
+      expect(text).toContain('safeWrite:fail code=TypeError')
+    })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('감시 훅이 던지지 않는다 - 던지는 code accessor 가 있어도 원래 오류와 종료 코드 1 이 그대로다', () => {
   // 중요2 는 "던지면 종료 코드가 1 → 7 로 바뀐다"는 자식 프로세스 실측이었다. 여기서도 자식에서 직접 잰다.
   const dir = mkdtempSync(join(tmpdir(), 'kd-mainlog-hook-'))

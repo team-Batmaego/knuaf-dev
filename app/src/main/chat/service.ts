@@ -34,7 +34,7 @@ import { FREE_MODELS, FreeRelayError, freeStatus, providerEnv } from '../free/pr
 import { skillSwitch } from '../update/switch'
 import { agentActivity } from '../update/activity'
 import { shutdownWithin } from '../shutdown'
-import { codeOf, diag, diagEnabled } from '../diagLog'
+import { codeOf, diag, diagEnabled, logCodeOf } from '../diagLog'
 /** 저장된 대화 기록을 읽고 모양을 확인한다 — 망가졌으면 던진다. */
 function parseChat(text: string, provider: Provider): ChatSnapshot {
   const v = JSON.parse(text) as ChatSnapshot
@@ -2103,7 +2103,7 @@ export class ChatService {
               // 거절도 함께 받는다: 성공 콜백만 달면 남은 턴의 거절이 unhandled 로 샌다.
               void run.then(
                 () => diag(`close:run:end ${name} elapsed=${Date.now() - startedAt}ms`),
-                (e: unknown) => diag(`close:run:reject ${name} code=${codeOf(e)} elapsed=${Date.now() - startedAt}ms`)
+                (e: unknown) => diag(`close:run:reject ${name} code=${logCodeOf(e)} elapsed=${Date.now() - startedAt}ms`)
               )
             }
             return run

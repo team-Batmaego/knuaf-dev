@@ -19,7 +19,7 @@ import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_IN
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
 import { appThreadLockPlan, appThreadLockVerify, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
-import { codeOf, diag } from '../diagLog'
+import { diag, logCodeOf } from '../diagLog'
 import { FREE_RELAY_URL, FREE_MODELS, FreeRelayError, freeStatus, freeExecutionAccount, freeRelayError } from '../free/provider'
 import { FREE_DS_MODEL } from '../../shared/lanes'
 
@@ -245,7 +245,7 @@ export class CodexConnection implements AgentConnection {
           const plan = await this.ensurePlan(rpc)
           return this.loadReply(await rpc.request('thread/start', { ...args, config: plan.config }))
         } catch (e) {
-          diag(`codex-lock stage=thread-start code=${codeOf(e)}`)
+          diag(`codex-lock stage=thread-start code=${logCodeOf(e)}`)
           return { ok: false, kind: 'error', message: text(e) }
         }
       },
@@ -255,7 +255,7 @@ export class CodexConnection implements AgentConnection {
           const plan = await this.ensurePlan(rpc)
           return this.loadReply(await rpc.request('thread/resume', { ...args, threadId, config: plan.config }))
         } catch (e) {
-          diag(`codex-lock stage=thread-resume code=${codeOf(e)}`)
+          diag(`codex-lock stage=thread-resume code=${logCodeOf(e)}`)
           const message = text(e)
           const kind = message.includes('already has an active writer')
             ? 'active-writer'
@@ -301,7 +301,7 @@ export class CodexConnection implements AgentConnection {
           }
           return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
-          diag(`codex-lock stage=verify code=${codeOf(e)}`)
+          diag(`codex-lock stage=verify code=${logCodeOf(e)}`)
           return { ok: false, detail: 'exception' }
         }
       },
