@@ -55,7 +55,9 @@ test('다른 회사로 바꾸기 전과 후에 맥락 손실을 알린다', asyn
     await chip.click()
     await expect(page.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.')).toBeVisible()
     await page.getByRole('button', { name: 'Claude로 바꾸기' }).click()
-    await expect(page.getByText(/Claude는 ChatGPT와 나눈 대화를 볼 수 없어요/)).toBeVisible()
+    const warning = page.getByRole('status').filter({ hasText: 'Claude는 다른 AI와 나눈 대화를 볼 수 없어요.' })
+    await expect(warning).toBeVisible()
+    await expect(warning).toHaveText('Claude는 다른 AI와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.')
   } finally { await electronApp.close() }
 })
 

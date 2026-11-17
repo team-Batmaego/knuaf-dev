@@ -22,16 +22,31 @@
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, sep } from 'node:path'
-import { MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
+import { MCP_SERVER_NAME, READ_TOOLS, CODEX_STARTUP_TIMEOUT_SEC, CODEX_TOOL_TIMEOUT_SEC, codexKordocCollision, type KordocMcpSpec } from './kordocMcp'
 import { codeOf, diag } from '../diagLog'
 
 /** 목록 한 번에 받는 장 수 상한. 상한에 닿았는데 커서가 남으면 실패다(설계 '목록 읽기 규칙'). */
 export const LIST_PAGE_CAP = 50
 
+interface KordocServerConfig {
+  enabled: true
+  command: string
+  args: string[]
+  env_vars: string[]
+  enabled_tools: string[]
+  startup_timeout_sec: number
+  tool_timeout_sec: number
+}
+
+function injectedKordocConfig(spec: KordocMcpSpec): KordocServerConfig {
+  return { enabled: true, command: spec.command, args: [...spec.args], env_vars: Object.keys(spec.env),
+    enabled_tools: [...READ_TOOLS], startup_timeout_sec: CODEX_STARTUP_TIMEOUT_SEC, tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC }
+}
+
 /** 앱이 스레드 `config` 로 넘기는 잠금 값(설계 §4.1-C 2번). 키 순서는 지문이 고정한다. */
 export interface LockConfig {
   features: { apps: false }
-  mcp_servers: Record<string, { enabled: false }>
+  mcp_servers: Record<string, { enabled: false } | KordocServerConfig>
   plugins: Record<string, { enabled: false }>
   project_doc_max_bytes: 0
 }
@@ -99,8 +114,7 @@ export interface AppThreadPlan {
   lockedNames: string[]
   lockedPlugins: string[]
   kordocAttached: boolean
-  /** 학생 층에 같은 이름이 있어 kordoc 을 껐을 때의 알림 문구(없으면 null) */
-  kordocCollision: string | null
+  kordocCollision: boolean
 }
 
 export interface AppThreadLock extends AppThreadPlan {
@@ -159,14 +173,15 @@ export function terminalRefusalCopy(details: TerminalRefusalDetail[]): string {
 // ── 지문 ──────────────────────────────────────────────────────────────────────
 
 /**
- * 잠금 지문 — "이 호출이 실은 잠금 `config`" 를 한 값으로. 이름 집합·Apps·프로젝트 문서 상한만
- * 넣는다(순서 무관, 값은 전부 고정). 같은 잠금이면 언제나 같은 지문이다.
+ * 잠금 지문 — 이름 집합·Apps·프로젝트 문서 상한과 앱 kordoc 실행표를 묶는다.
+ * 실행 명령/인자가 바뀌면 이전 잠금 장부와 다른 지문이어야 한다.
  */
 export function lockFingerprint(config: LockConfig): string {
   const serialized = JSON.stringify({
     apps: config.features.apps,
     mcp: Object.keys(config.mcp_servers).sort(),
     plugins: Object.keys(config.plugins).sort(),
+    kordoc: config.mcp_servers[MCP_SERVER_NAME]?.enabled === true ? config.mcp_servers[MCP_SERVER_NAME] : undefined,
     project_doc_max_bytes: config.project_doc_max_bytes
   })
   return createHash('sha256').update(serialized).digest('hex')
@@ -231,6 +246,7 @@ interface Enumeration {
   plugins: Record<string, unknown>
   /** 층마다 그 층 자신의 표에 적힌 이름 → 값 */
   layers: Record<LayerKind, Record<string, unknown>>
+  kordocCollision: boolean
   /** `plugin/installed` 가 알려 준 설치 id */
   installed: string[]
 }
@@ -306,7 +322,8 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
       if (row.installed || row.enabled) ids.push(row.id)
     }
   }
-  return { ok: true, value: { servers, plugins, layers, installed: ids } }
+  const spec = req.injected.find((i) => i.name === MCP_SERVER_NAME)?.spec
+  return { ok: true, value: { servers, plugins, layers, installed: ids, kordocCollision: !!spec && codexKordocCollision(read, spec) } }
 }
 
 /** 그 이름이 학생 층 어디엔가 있는가(N-01). 앱 주입 이름을 학생 서버로 오인하지 않기 위한 판정. */
@@ -374,39 +391,27 @@ function planTerminal(req: ToolLockRequest, enumeration: Enumeration): { ok: tru
 
 // ── 앱 스레드: config 산출 ────────────────────────────────────────────────────
 
-export const KORDOC_COLLISION_NOTE = '학생 설정에 같은 이름의 kordoc 서버가 있어 한글 문서 도구를 끄고 진행해요'
-
 interface AppPlan {
   config: LockConfig
   lockedNames: string[]
   lockedPlugins: string[]
   kordocAttached: boolean
-  kordocCollision: string | null
+  kordocCollision: boolean
 }
 
 function planAppThread(req: ToolLockRequest, enumeration: Enumeration): AppPlan {
   const config = emptyLockConfig()
   const lockedNames: string[] = []
   const lockedPlugins: string[] = []
-  const injected = new Set(req.injected.map((i) => i.name))
-  let kordocAttached = false
-  let kordocCollision: string | null = null
-
+  const appSpec = req.injected.find((i) => i.name === MCP_SERVER_NAME)?.spec
+  const kordocAttached = !!appSpec && !enumeration.kordocCollision
   for (const name of Object.keys(enumeration.servers)) {
-    if (injected.has(name)) {
-      // 앱이 붙이는 kordoc 은 그대로 둔다(§4.1-D). 같은 이름이 학생 층에도 있으면 충돌이다.
-      if (inAnyStudentLayer(enumeration, name)) {
-        config.mcp_servers[name] = { enabled: false }
-        lockedNames.push(name)
-        if (name === MCP_SERVER_NAME) kordocCollision = KORDOC_COLLISION_NOTE
-        continue
-      }
-      if (name === MCP_SERVER_NAME) kordocAttached = true
-      continue
-    }
+    if (name === MCP_SERVER_NAME && kordocAttached) continue
     config.mcp_servers[name] = { enabled: false }
     lockedNames.push(name)
   }
+  // thread config replaces the complete table: carry the app's exact command/args, never student values.
+  if (appSpec && kordocAttached) config.mcp_servers[MCP_SERVER_NAME] = injectedKordocConfig(appSpec)
 
   for (const id of new Set<string>([...Object.keys(enumeration.plugins), ...enumeration.installed])) {
     if (!id) continue
@@ -414,7 +419,7 @@ function planAppThread(req: ToolLockRequest, enumeration: Enumeration): AppPlan 
     lockedPlugins.push(id)
   }
 
-  return { config, lockedNames, lockedPlugins, kordocAttached, kordocCollision }
+  return { config, lockedNames, lockedPlugins, kordocAttached, kordocCollision: enumeration.kordocCollision }
 }
 
 // ── 결과 대조 ─────────────────────────────────────────────────────────────────
@@ -511,10 +516,14 @@ async function checkAppThreadResult(req: ToolLockRequest, plan: AppPlan): Promis
   const check = req.check
   if (!check || typeof check.threadId !== 'string' || !check.threadId) return { ok: false, reason: 'no-thread', detail: 'threadId 없이 대조할 수 없어요', remaining: [] }
 
-  // 0.164/0.169 omit app-owned kordoc from thread-scoped status after the thread
-  // MCP table override. Its startup/read-only safety is checked separately (§3.3).
-  // Student names (including a kordoc collision) still require a disabled row.
-  const expected = Object.keys(plan.config.mcp_servers)
+  const appSpec = req.injected.find((i) => i.name === MCP_SERVER_NAME)?.spec
+  const enabled = Object.entries(plan.config.mcp_servers).filter(([, row]) => row.enabled !== false)
+  if (enabled.some(([name, row]) => name !== MCP_SERVER_NAME || !appSpec
+    || JSON.stringify(row) !== JSON.stringify(injectedKordocConfig(appSpec)))
+    || plan.kordocAttached !== (enabled.length === 1) || (plan.kordocCollision && enabled.length > 0)) {
+    return { ok: false, reason: 'result-check', detail: '앱 주입 MCP 잠금 표가 달라요', remaining: enabled.map(([name]) => name) }
+  }
+  const expected = Object.keys(plan.config.mcp_servers).filter((name) => plan.config.mcp_servers[name].enabled === false)
   const polls = Math.max(1, req.retry?.polls ?? RESULT_POLLS)
   const gap = RESULT_POLL_MS
   const sleep = req.retry?.sleep ?? defaultSleep
@@ -582,6 +591,7 @@ export async function appThreadLockPlan(req: ToolLockRequest): Promise<{ ok: tru
 
 /** 앱 스레드 잠금 2단계 — 결과 대조(§4.1-C 4번·§4.1-D·§4.1-E). 통과하지 못하면 턴을 열지 않는다. */
 export async function appThreadLockVerify(req: ToolLockRequest, plan: AppThreadPlan): Promise<{ ok: true } | LockFailure> {
+  if (lockFingerprint(plan.config) !== plan.fingerprint) return lockFailure('result-check', APP_THREAD_RESULT_REFUSAL_COPY)
   const verified = await checkAppThreadResult(req, plan)
   if (verified.ok) return { ok: true }
   // 결과 대조 실패는 "끄지 못했다"로 알린다. 목록을 못 읽은 갈래는 설정을 못 읽은 것이다.
