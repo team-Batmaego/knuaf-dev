@@ -306,6 +306,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     start: number
     end: number
     block: string
+    revision: number
+    draftHash: string
     /** 그대로 `replaceInBlock` 에 넘길 입력 — 위치를 두 번 계산하지 않는다. */
     input: SelectionInput
     value: string
@@ -325,7 +327,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
    * 지문(`hash`)과 견주면 단위가 달라 늘 '바뀐 것'으로 보인다.
    */
   const samewordStamps = useRef<Record<string, string> | null>(null)
-  const noteOwnEdit = useProject((s) => s.noteOwnEdit)
+  // Own-edit fingerprints are registered by the save store before its follow-up reads.
   const refreshProject = useProject((s) => s.refresh)
 
   /** 이 선택을 지금 원고에서 고칠 수 있는가 — 못 하면 그 이유(§3-1). */
@@ -351,6 +353,8 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     if (editProblem(live)) return
     const doc = docs[live.sectionId]
     if (!doc) return
+    const row = (sections ?? []).find((x) => x.id === live.sectionId)
+    if (!row || !pStatus) return
     const found = locateSelection({
       draft: doc.draft, blockIndex: live.blockIndex,
       renderedBlock: live.renderedBlock, renderedBefore: live.renderedBefore, selectionText: live.text
@@ -359,6 +363,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     setSlot({
       sectionId: live.sectionId, blockIndex: live.blockIndex,
       start: found.start, end: found.end, block: found.before_block,
+      revision: pStatus.revision, draftHash: row.draft_hash,
       input: {
         draft: doc.draft, blockIndex: live.blockIndex, renderedBlock: live.renderedBlock,
         renderedBefore: live.renderedBefore, selectionText: live.text
@@ -372,7 +377,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     setSameword([])
     samewordStamps.current = null
     window.getSelection()?.removeAllRanges()
-  }, [docs, editProblem, liveSelection])
+  }, [docs, sections, pStatus, editProblem, liveSelection])
 
   /**
    * 편집칸을 닫는다 — 닫을 때 본문을 한 번 다시 읽는다(§4-5-8 06).
@@ -400,9 +405,6 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const now = slot
     const rootNow = root
     if (!now || !rootNow) return
-    const row = (sections ?? []).find((x) => x.id === now.sectionId)
-    const live = pStatus
-    if (!row || !live) return
     // 문단 전·후는 검증된 순수 함수로 만든다 — 위치 찾기를 다시 하지 않고, 표 `|`·줄바꿈·
     // 빈 문단 거절도 같은 규칙을 쓴다(§4-1 4, §3-2).
     const built = replaceInBlock({ ...now.input, replacement: now.value }, renderMarkdown)
@@ -411,12 +413,11 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
       return
     }
     const outcome = await saveEdit(rootNow, {
-      kind: 'one', id: now.sectionId, expected_revision: live.revision,
-      expected_draft_hash: row.draft_hash, before_block: built.before_block, after_block: built.after_block
+      kind: 'one', id: now.sectionId, expected_revision: now.revision,
+      expected_draft_hash: now.draftHash, before_block: built.before_block, after_block: built.after_block
     })
     if (!outcome.ok) { setFailure({ message: outcome.message, detail: outcome.detail }); return }
-    // 채팅 이벤트 줄 억제 + 즉시 다시 읽기(§3-3).
-    noteOwnEdit(now.sectionId, outcome.result.draft_hash)
+    // The save store has already registered the committed fingerprints.
     setSlot(null)
     slotRef.current = null
     setFailure(null)
@@ -440,7 +441,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
       Object.entries(afterDocs).map(([id, d]) => [id, d.draft])
     )
     await refreshProject({ quiet: true })
-  }, [slot, root, sections, pStatus, docs, saveEdit, noteOwnEdit, refreshProject])
+  }, [slot, root, docs, saveEdit, refreshProject])
 
   /** `같이 고치기` — 한 개정에 묶음 저장(§3-4). */
   const saveBatch = useCallback(async (edits: BatchEdit[]) => {
@@ -450,13 +451,10 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const payload = edits.map((e) => ({ section_id: e.section_id, before_block: e.before_block, after_block: e.after_block }))
     const outcome = await saveEdit(rootNow, { kind: 'batch', expected_revision: live.revision, edits: payload })
     if (!outcome.ok) { setFailure({ message: outcome.message, detail: outcome.detail }); return }
-    // 묶음은 절마다 정확한 지문이 필요하다 — sidecar 가 더한 `draft_hashes` 를 쓴다(§4-5-8 05).
-    // 그것이 없는 응답(옛 sidecar)이면 **기억하지 않는다** — 절 ID 만으로 빼면 도우미 변경을 삼킨다.
-    for (const [sid, hash] of Object.entries(outcome.result.draft_hashes ?? {})) noteOwnEdit(sid, hash)
     setSameword([])
     samewordStamps.current = null
     await refreshProject({ quiet: true })
-  }, [root, pStatus, saveEdit, noteOwnEdit, refreshProject])
+  }, [root, pStatus, saveEdit, refreshProject])
 
   /**
    * 막대가 다시 보이는 순간(아래 칸이 입력칸일 때) 담아 둔 선택을 **살아 있는 선택과 대조**한다.
