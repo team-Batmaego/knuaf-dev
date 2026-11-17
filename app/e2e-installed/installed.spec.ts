@@ -87,6 +87,20 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
     expect(await electronApp.evaluate(() => process.env.KNUAF_PYTHON ?? null)).toBeNull()
     expect(await electronApp.evaluate(() => process.env.KNUAF_SCRIPTS_DIR ?? null)).toBeNull()
 
+    // 이 userData 는 '앱을 쓰던 학생, 새 소식 확인 기록 없음'이다 — 큰 판 글이 동봉돼 있으면
+    // 새 소식 창이 한 번 뜨는 게 의도다(A1). 뜨면 동봉 판 글로 떴는지 보고 '확인했어요'로 닫는다.
+    // 뜨지 않는 판(작은 판만 있는 경우)도 그대로 통과한다.
+    const news = await page.evaluate(() => window.knuaf.news.state())
+    const newsDialog = page.locator('dialog.news-dialog[open]')
+    if (news.mode === 'dialog') {
+      expect(news.unread.length, '창을 띄운 새 소식이 비어 있다').toBeGreaterThan(0)
+      await expect(newsDialog).toBeVisible()
+      await newsDialog.getByRole('button', { name: '확인했어요' }).click()
+      await expect(newsDialog).toHaveCount(0)
+    } else {
+      await expect(newsDialog).toHaveCount(0)
+    }
+
     // 동봉 실행기 선택을 보므로 개발용 .venv seed와 준비 완료 대기를 제외한다.
     await openProject(page, root, (p) => paperReady(p, '600평'), { preparation: 'pending' })
 
