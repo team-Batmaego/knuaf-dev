@@ -10,6 +10,7 @@ process.once('exit', cleanupTmpdir)
 export default defineConfig({
   testDir: 'e2e',
   // v0.6.4: 진행 파일·링크 열기 시험(배포 갈래) + 가드 시험(배포 갈래) + 표·사진·배치 시험(main) + 뷰어 편집 시험(이 갈래) + 오류 보고 정제 시험(오류 보고 갈래)을 함께 둔다.
+  // v0.7: 레인(Node VM 더블) 시험 넷을 더한다 — 화면 없이 store·IPC 계약만 도는 스펙이다.
   testMatch: [
     'preparation-main.spec.ts',
     'preparation-state.spec.ts',
@@ -35,6 +36,10 @@ export default defineConfig({
     'guard-codex-connection.spec.ts',
     'guard-claude-skill-host.spec.ts',
     'notice-bubble.spec.ts',
+    'lanes-lines.spec.ts',
+    'lanes-store.spec.ts',
+    'lanes-settings-card.spec.ts',
+    'lanes-chat.spec.ts',
     'crash-sanitise.spec.ts'
   ],
   timeout: 30_000,

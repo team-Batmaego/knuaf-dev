@@ -87,11 +87,24 @@ export class SkillStore {
     } catch { /* Unusable store never prevents trusted bundled operation. */ }
     return this.bundled
   }
+  private matchesBundle(p: VerifiedSkill): boolean {
+    try {
+      const manifest = object(JSON.parse(readFileSync(join(this.bundled, 'install-manifest.json'), 'utf8')))
+      exact(manifest, ['schema', 'files'])
+      if (manifest.schema !== 'knuaf-doc/install-manifest@1') return false
+      const files = object(manifest.files), signedFiles = p.manifest.files
+      const names = Object.keys(files)
+      return Object.keys(signedFiles).length === names.length + 1 &&
+        signedFiles['install-manifest.json'] === sha256(readFileSync(join(this.bundled, 'install-manifest.json'))) &&
+        names.every(name => files[name] === signedFiles[name])
+    } catch { return false }
+  }
   disposition(p: VerifiedSkill): 'new' | 'repair' | 'kept' {
     const m = p.manifest, s = this.state()
     if (!compatible(m, this.appVersion)) throw new Error('이 규칙집은 앱 새 판이 필요해요.')
     const floor = [this.bundledVersion, s.active, s.highest?.version].filter((v): v is string => !!v).sort(compare).at(-1)!
     if (compare(m.version, floor) > 0) return 'new'
+    if (compare(m.version, this.bundledVersion) === 0 && (!s.highest || compare(s.highest.version, m.version) < 0) && (!s.active || compare(s.active, m.version) < 0) && this.matchesBundle(p)) return 'kept'
     if (s.highest?.version === m.version && s.highest.manifest === p.digest && compare(m.version, this.bundledVersion) >= 0) return s.kept[m.version] === p.digest && this.valid(m.version, p.digest) ? 'kept' : 'repair'
     throw new Error('이전 판이거나 같은 판의 내용이 달라서 받지 않아요.')
   }

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { ConnectionStatus, Provider } from '../../../shared/chat'
+import { describeFreeRelayError } from '../copy'
 
 /**
  * 폴더 밖에서 보는 AI 연결 상태(IMPL-PLAN §4-3, R5 §6.3).
@@ -29,7 +30,7 @@ const INITIAL: ConnInfo = { state: 'checking', detail: '', version: null }
  * `probe`(확인 실패 구분)가 없으면 `'ok'` 로 읽는다: 기존 호출자와 같은 뜻이다.
  */
 export function connInfoOf(status: ConnectionStatus): ConnInfo {
-  const info = { detail: status.detail ?? '', version: status.version ?? null }
+  const info = { detail: status.errorKind ? describeFreeRelayError(status.errorKind).title : status.detail ?? '', version: status.version ?? null }
   if (!status.installed) return { ...info, state: 'no-tool' }
   if (status.probe === 'failed') return { ...info, state: 'failed' }
   if (status.connected) return { ...info, state: 'connected' }
@@ -229,6 +230,7 @@ export function nextProvider(selected: Provider | null, order: readonly Provider
 interface ConnectState {
   codex: ConnInfo
   claude: ConnInfo
+  free: ConnInfo
   /** 학생이 고른 공급자. 온보딩 1단계·설정 라디오가 기록한다. */
   selected: Provider | null
   /** 로그인 창을 띄워 둔 공급자 — displayState 가 이 값을 쓴다. */
@@ -249,14 +251,15 @@ interface ConnectState {
 
 /** 계산된 키로 한 공급자만 갈아 끼우는 patch — zustand 의 set 에 넘긴다. */
 function one(provider: Provider, info: ConnInfo): Partial<ConnectState> {
-  return provider === 'codex' ? { codex: info } : { claude: info }
+  return { [provider]: info }
 }
 
 export const useConnect = create<ConnectState>((set, get) => ({
   codex: INITIAL,
   claude: INITIAL,
+  free: INITIAL,
   selected: null,
-  loggingIn: { codex: false, claude: false },
+  loggingIn: { codex: false, claude: false, free: false },
   select: (selected) => set({ selected }),
   observeChat: (provider, info) => {
     const previous = get()[provider]
@@ -274,7 +277,7 @@ export const useConnect = create<ConnectState>((set, get) => ({
     }
     set(one(provider, connInfoOf(r.result)))
   },
-  refreshAll: async () => { await Promise.all([get().refresh('codex'), get().refresh('claude')]) },
+  refreshAll: async () => { await Promise.all([get().refresh('codex'), get().refresh('claude'), get().refresh('free')]) },
   login: async (provider) => {
     // 시도 번호와 타이머는 **그 공급자 것만** 건드린다(W2 D1) — 다른 쪽 로그인을 시작해도
     // 진행 중이던 로그인의 응답이 무효가 되거나 그 감시가 사라지지 않는다.

@@ -25,12 +25,12 @@ export function useStage(): Stage {
     root: s.root, hasProject: s.hasProject, status: s.status,
     sections: s.sections, artifacts: s.artifacts, buildTree: s.buildTree, projectLoad: s.projectLoad
   })))
-  const { selected, codex, claude } = useConnect(useShallow((s) => ({ selected: s.selected, codex: s.codex, claude: s.claude })))
+  const { selected, codex, claude, free } = useConnect(useShallow((s) => ({ selected: s.selected, codex: s.codex, claude: s.claude, free: s.free })))
   const settings = useProject((s) => s.settings)
   const preparation = usePrep(s => root ? s.dependencies[root] : undefined)
 
   const provider = chosenProvider(selected, settings) ?? chatProvider(resolveChatMode(null, settings))
-  const info = provider === 'codex' ? codex : claude
+  const info = { codex, claude, free }[provider]
   const connState = displayState(info, false)
   const facts = stageInputs(status, sections ?? [], buildTree, artifacts ? { items: artifacts } : null, projectLoad)
   const inputs: StageInputs = {

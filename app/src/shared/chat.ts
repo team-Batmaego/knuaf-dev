@@ -40,6 +40,7 @@ export interface ChatModels {
  * 둘을 한 상태로 쓰면 화면이 멀쩡히 살아 있는 앱을 두고 "종료됐어요"라고 말한다(GUI-05).
  */
 export type RunState = 'idle' | 'running' | 'permission' | 'interrupted' | 'stopped' | 'error'
+export type FreeRelayErrorKind = 'free-unavailable' | 'free-busy' | 'free-minute-limit' | 'free-daily-limit' | 'free-off' | 'free-auth' | 'free-error'
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string
   delivery?: 'pending' | 'sent' | 'uncertain'
@@ -57,6 +58,7 @@ export interface ChatSnapshot {
   skillHash?: string; skillLoaded?: boolean
   /** 전송 중 확인된 인증 실패. 상태 조회의 옛 로그인 정보보다 우선한다. */
   authRequired?: boolean
+  errorKind?: FreeRelayErrorKind
 }
 /**
  * 연결 도구의 상태. `connected` 하나로는 "로그인이 필요해요"와 "확인하지 못했어요"를
@@ -67,7 +69,7 @@ export interface ChatSnapshot {
  * `'failed'` = 실행 실패·시간 초과·파싱 실패라 **연결 여부를 알 수 없다**.
  * 값이 없으면 `'ok'` 로 읽는다 — 기존 호출자의 동작이 그대로다.
  */
-export interface ConnectionStatus { installed: boolean; connected: boolean; version: string | null; detail: string; probe?: 'ok' | 'failed' }
+export interface ConnectionStatus { installed: boolean; connected: boolean; version: string | null; detail: string; probe?: 'ok' | 'failed'; errorKind?: FreeRelayErrorKind }
 export interface Artifact { path: string; name: string; kind: 'docx' | 'xlsx' | 'pdf'; modified: number }
 export interface Material { path: string; role: 'manuscript' | 'finance' | 'reference'; name: string }
 export type Preview = { kind: 'pdf'; url: string } | { kind: 'xlsx'; sheets: { name: string; rows: string[][]; truncated: boolean }[] } | { kind: 'unavailable'; reason: string }

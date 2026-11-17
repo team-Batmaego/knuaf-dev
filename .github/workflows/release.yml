@@ -193,6 +193,37 @@ jobs:
           IN_APPLE_ID: ${{ secrets.APPLE_ID }}
           IN_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           IN_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # 무료 중계(DS·GLM) 출입증. 저장소가 공개라 값은 소스에 없고 여기(태그 릴리스)에서만
+          # 빌드 환경으로 들어간다. `electron.vite.config.ts` 가 메인 define 으로 접어 넣는다.
+          KNUAF_FREE_RELAY_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
+
+      # 무료 모델은 이 출입증이 설치본에 박혀야만 뜬다. 값이 비면 앱은 조용히 '무료 회사 없음'으로
+      # 동작하므로(설계상 정상) 릴리스가 멀쩡해 보인다 — 그래서 빌드가 스스로 확인하고 죽는다.
+      # 값을 로그에 찍지 않는다(grep -q / Contains 만 쓴다).
+      - name: 무료 중계 출입증 주입 확인
+        working-directory: app
+        env:
+          IN_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
+        run: |
+          if [ -z "${IN_TOKEN:-}" ]; then
+            echo "::error::KNUAF_FREE_RELAY_TOKEN 시크릿이 비어 있습니다 - 무료 모델이 전부 막힌 설치본이 나갑니다"
+            exit 1
+          fi
+          if [ ! -f out/main/index.js ]; then
+            echo "::error::out/main/index.js 가 없습니다"; exit 1
+          fi
+          if grep -qF '__KNUAF_FREE_TOKEN__' out/main/index.js; then
+            echo "::error::메인 묶음에 define 식별자가 남았습니다(치환 실패)"; exit 1
+          fi
+          asar=$(find dist -name app.asar -print -quit)
+          if [ -z "$asar" ]; then echo "::error::app.asar 를 찾지 못했습니다"; exit 1; fi
+          node -e 'const fs = require("node:fs"); const token = process.env.IN_TOKEN; const files = process.argv.slice(1); const contains = (path) => fs.statSync(path).isDirectory() ? fs.readdirSync(path).some((name) => contains(`${path}/${name}`)) : fs.readFileSync(path).includes(token); if (!contains(files[0])) { console.error("::error::출입증이 메인 묶음(app.asar)에 없습니다 - define 이 빌드에 전달되지 않았습니다"); process.exit(1); } for (const dir of files.slice(1)) { if (contains(dir)) { console.error(`::error::${dir} 에 출입증이 들어갔습니다(화면 번들 유출)`); process.exit(1); } }' "$asar" out/renderer out/preload
+          for d in out/renderer out/preload; do
+            if grep -rqE 'kf1_[A-Za-z0-9_-]{43}' "$d" || grep -rqF '__KNUAF_FREE_TOKEN__' "$d"; then
+              echo "::error::$d 에 출입증이 들어갔습니다(화면 번들 유출)"; exit 1
+            fi
+          done
+          echo "출입증 확인: app.asar 메인에 주입됨, out/renderer·out/preload 엔 없음 ($(basename "$asar"))"
 
       # 서명이 실제로 붙었는지 기록에 남긴다. adhoc 이면 릴리스 본문이 해제 안내를 달고,
       # 정식 서명이면 그 문단을 뺀다 — 안내가 사실과 어긋나지 않게 빌드가 직접 판정한다.
@@ -289,6 +320,41 @@ jobs:
       - name: 설치본 빌드
         working-directory: app
         run: pnpm dist:win
+        env:
+          # 무료 중계 출입증 — 맥 job 과 같은 이유로 빌드 환경에만 넣는다.
+          KNUAF_FREE_RELAY_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
+
+      # 맥 job 과 같은 검사(출입증이 설치본 메인에 박혔는지, 화면 번들엔 없는지).
+      # 값을 로그에 찍지 않는다 - Select-String/-Contains 의 참·거짓만 쓴다.
+      - name: 무료 중계 출입증 주입 확인
+        working-directory: app
+        shell: pwsh
+        env:
+          IN_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:IN_TOKEN)) {
+            Write-Host "::error::KNUAF_FREE_RELAY_TOKEN 시크릿이 비어 있습니다 - 무료 모델이 전부 막힌 설치본이 나갑니다"
+            exit 1
+          }
+          $main = 'out/main/index.js'
+          if (-not (Test-Path $main)) { Write-Host "::error::$main 가 없습니다"; exit 1 }
+          if ((Get-Content -Raw $main).Contains('__KNUAF_FREE_TOKEN__')) {
+            Write-Host "::error::메인 묶음에 define 식별자가 남았습니다(치환 실패)"; exit 1
+          }
+          $asar = Get-ChildItem -Path dist -Filter app.asar -Recurse -File | Select-Object -First 1
+          if (-not $asar) { Write-Host "::error::app.asar 를 찾지 못했습니다"; exit 1 }
+          $bytes = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($asar.FullName))
+          if (-not $bytes.Contains($env:IN_TOKEN)) {
+            Write-Host "::error::출입증이 메인 묶음(app.asar)에 없습니다 - define 이 빌드에 전달되지 않았습니다"; exit 1
+          }
+          foreach ($d in @('out/renderer', 'out/preload')) {
+            $hit = Get-ChildItem -Path $d -Recurse -File | Where-Object {
+              $t = Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue
+              $null -ne $t -and ($t.Contains($env:IN_TOKEN) -or $t.Contains('__KNUAF_FREE_TOKEN__') -or $t -match 'kf1_[A-Za-z0-9_-]{43}')
+            } | Select-Object -First 1
+            if ($hit) { Write-Host "::error::$d 에 출입증이 들어갔습니다(화면 번들 유출): $($hit.Name)"; exit 1 }
+          }
+          Write-Host "출입증 확인: app.asar 메인에 주입됨, out/renderer·out/preload 엔 없음"
 
       - name: 체크섬 생성
         working-directory: app/dist

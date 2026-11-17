@@ -1,5 +1,6 @@
 // Shared between main, preload and renderer.
 import type { ModelChoice } from './chat'
+import type { Provider } from './lanes'
 export type RpcEvent = { event: string; data: unknown }
 export type RpcError = { code: string; message: string; data?: unknown }
 export type RpcResult<T = unknown> = { result?: T; error?: RpcError }
@@ -168,13 +169,14 @@ export interface Settings {
   /**
    * 학생이 **직접 고른** 대화 공급자. `helper_mode` 는 고른 적이 없어도 기본값이 채워지고
    * 저장되므로 선택의 증거가 아니다(IMPL-R1-02). 이 키가 있으면 대화 공급자는 이 값을
-   * 따르고, 없으면(null) 고른 적이 없다는 뜻이라 첫 화면에서 한 번 고르게 한다.
-   * 기존 사용자의 `helper_mode` 를 여기로 승격하지 않는다 — 그건 선택이 아니었다.
+   * 따르고, 없으면(null) 실행 때 연결된 구독 회사를 우선한다. 구독 연결이 없고 무료가
+   * 쓸 수 있으면 무료로 시작한다. 저장값을 자동 승격하지 않는다.
+   * 기존 사용자의 `helper_mode` 를 여기로 승격하지 않는다.
    */
   /**
-   * 학생이 **직접 고른** 대화 공급자. 값이 없으면 처음 연결 흐름에서 한 번 고르게 한다.
+   * 학생이 **직접 고른** 대화 공급자. 미선택(null)은 실행 시 연결 상태로 판정한다.
    */
-  provider_choice?: { provider: 'codex' | 'claude'; at: string } | null
+  provider_choice?: { provider: Provider; at: string } | null
   /**
    * 첫 논문 폴더에서 권한 방식을 고른 시각. 기존 사용자는 키가 없어 첫 새 폴더에서 한 번 고른다.
    */
@@ -206,7 +208,7 @@ export interface Settings {
    * (`.knuaf-gui/chat-*.json`)은 그대로이고, 이 값은 계정 취향이라 설정에 남는다.
    * 없으면(null/키 없음) 지금까지처럼 모델·effort 를 보내지 않는다.
    */
-  chat_models?: Partial<Record<'codex' | 'claude', ModelChoice | null>> | null
+  chat_models?: Partial<Record<Provider, ModelChoice | null>> | null
   /**
    * 오류 자동 보고 동의 — `'unset'`(아직 안 물음) · `'on'` · `'off'`.
    * **키가 없으면 `unset`** 으로 읽고, `unset` 은 보내지 않는다. 값이 없을 때 전송으로
