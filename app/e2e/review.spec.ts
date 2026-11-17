@@ -9,12 +9,21 @@ import { expect, test, type Page } from '@playwright/test'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, openProject, python, rewriteSection, scripts, synthProject, PROGRESS } from './helpers'
+import { assertApplySucceeded, launch, openProject, python, rewriteSection, scripts, synthProject, PROGRESS } from './helpers'
 import { fakeCodexEnv, questionMessage, questionProject, scratch, seedChat } from './fixtures/fake-codex'
 import { CHAT } from '../src/renderer/src/copy'
 
 const COMPOSER = `textarea[aria-label="${CHAT.placeholder}"]`
 const BODY_800 = '농장A의 재배 면적은 800평이다. 정읍 일대 기후를 고려해 작목을 선택했다.'
+
+test('apply exit 3 is accepted only with a matching committed-cleanup receipt', () => {
+  const receipt = { commit_state: 'committed_cleanup_pending', revision: 2, request_id: 'e2e:p3:sec-01:rw' }
+  expect(() => assertApplySucceeded({ status: 3, stdout: JSON.stringify(receipt), stderr: '' }, receipt.request_id, 1)).not.toThrow()
+  expect(() => assertApplySucceeded({ status: 3, stdout: JSON.stringify({ ...receipt, revision: 1 }), stderr: '' }, receipt.request_id, 1)).toThrow()
+  expect(() => assertApplySucceeded({ status: 3, stdout: JSON.stringify({ ...receipt, request_id: 'other' }), stderr: '' }, receipt.request_id, 1)).toThrow()
+  expect(() => assertApplySucceeded({ status: 3, stdout: JSON.stringify({ ...receipt, commit_state: 'indeterminate' }), stderr: '' }, receipt.request_id, 1)).toThrow()
+  expect(() => assertApplySucceeded({ status: 2, stdout: JSON.stringify(receipt), stderr: '' }, receipt.request_id, 1)).toThrow()
+})
 
 /** 파싱된 챗 로그의 학생 메시지 텍스트들 — 가짜 서버가 받은 그대로다. */
 function userTexts(root: string): string[] {

@@ -34,15 +34,16 @@ export function synthProject(opts: { withContent?: boolean; financeGate?: boolea
   writeFileSync(join(root, 'sources', 'answers.md'), '# 원답변\n\n재배 면적: 600평\n', 'utf-8')
   writeFileSync(join(root, 'sections', '01.md'), '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n농장A의 재배 면적은 600평이다. 정읍 일대 기후를 고려해 작목을 선택했다.\n<!-- gg:draft:end -->\n', 'utf-8')
   const change = join(root, 'change.json')
-  writeFileSync(change, JSON.stringify({ request_id: 'e2e:1', ops: [
+  const requestId = 'e2e:1'
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
     { collection: 'sources', value: { id: 'src-answers', path: 'sources/answers.md', claims: {} } },
     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } },
     { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } },
     ...syntheticMajor(root),
     ...(opts.financeGate === false ? [] : syntheticFinanceGate(root))
   ] }), 'utf-8')
-  const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
-  if (a.status !== 0) throw new Error(a.stdout + a.stderr)
+   const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
+  assertApplySucceeded(a, requestId, 0)
   return root
 }
 
@@ -546,6 +547,27 @@ export async function openPreset(page: Page, preset: string): Promise<void> {
 }
 
 
+/** Accept exit 3 only when its JSON receipt proves this exact revision was committed. */
+export function assertApplySucceeded(
+  result: { status: number | null; stdout: string; stderr: string },
+  requestId: string,
+  expectedRevision: number
+): void {
+  if (result.status === 0) return
+  if (result.status === 3) {
+    try {
+      const receipt = JSON.parse(result.stdout) as Record<string, unknown>
+      if (receipt.commit_state === 'committed_cleanup_pending'
+        && receipt.revision === expectedRevision + 1
+        && receipt.request_id === requestId) return
+    } catch {
+      // Malformed or non-JSON output is not proof that the canonical state changed.
+    }
+  }
+  throw new Error(result.stdout + result.stderr)
+}
+
+
 /** 절 하나를 등록하고 그 절에 본문을 써 넣는다 — "본문이 있는 장"이 하나 생긴다. */
 export function addSectionBody(root: string, opts: { id?: string; title?: string; body?: string; expected?: number } = {}): void {
   const id = opts.id ?? 'sec-01'
@@ -554,11 +576,13 @@ export function addSectionBody(root: string, opts: { id?: string; title?: string
   mkdirSync(join(root, 'sections'), { recursive: true })
   writeFileSync(join(root, 'sections', `${id}.md`), `# ${title}\n\n<!-- gg:draft:start -->\n${body}\n<!-- gg:draft:end -->\n`, 'utf-8')
   const change = join(root, `change-${id}.json`)
-  writeFileSync(change, JSON.stringify({ request_id: `e2e:p3:${id}`, ops: [
+  const requestId = `e2e:p3:${id}`
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
     { collection: 'sections', value: { id, title, order: 1, path: `sections/${id}.md`, status: 'drafting' } }
   ] }), 'utf-8')
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(opts.expected ?? 0)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  const expected = opts.expected ?? 0
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
+  assertApplySucceeded(r, requestId, expected)
 }
 
 /** 절 본문을 갈아 끼운다 — 기록이 오르고 "방금 저장된 문단"이 생긴다. */
@@ -566,11 +590,12 @@ export function rewriteSection(root: string, opts: { id?: string; body?: string;
   const id = opts.id ?? 'sec-01'
   writeFileSync(join(root, 'sections', `${id}.md`), `# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n${opts.body ?? ''}\n<!-- gg:draft:end -->\n`, 'utf-8')
   const change = join(root, `change-${id}-rewrite.json`)
-  writeFileSync(change, JSON.stringify({ request_id: `e2e:p3:${id}:rw`, ops: [
+  const requestId = `e2e:p3:${id}:rw`
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
     { collection: 'sections', value: { id, title: 'Ⅰ. 머리말', order: 1, path: `sections/${id}.md`, status: 'drafting' } }
   ] }), 'utf-8')
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(opts.expected)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  assertApplySucceeded(r, requestId, opts.expected)
 }
 
 /**
@@ -580,11 +605,13 @@ export function rewriteSection(root: string, opts: { id?: string; body?: string;
 export function markSectionReady(root: string, opts: { id?: string; expected?: number } = {}): void {
   const id = opts.id ?? 'sec-01'
   const change = join(root, `change-${id}-ready.json`)
-  writeFileSync(change, JSON.stringify({ request_id: `e2e:p3:${id}:ready`, ops: [
+  const requestId = `e2e:p3:${id}:ready`
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
     { collection: 'sections', value: { id, title: 'Ⅰ. 머리말', order: 1, path: `sections/01.md`, status: 'review_ready' } }
   ] }), 'utf-8')
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(opts.expected ?? 1)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  const expected = opts.expected ?? 1
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
+  assertApplySucceeded(r, requestId, expected)
 }
 
 /** 창 크기를 실제로 바꾼다 — 폭 경계는 창 폭이라 `page.setViewportSize` 로는 안 바뀐다. */
