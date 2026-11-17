@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
+import type { ChatSnapshot } from '../src/shared/chat'
 
 const option = (model: string, name: string, hidden = false) => ({
   id: model, model, displayName: name, hidden, description: `${name} 모델 설명`,
@@ -76,8 +77,24 @@ for (const tier of ['low', 'high'] as const) {
 test('폴더 없이 모델·깊이를 고르고 다음 메시지부터 같은 대화에서 바꾸거나 해제한다', async () => {
   const dir = scratch()
   const log = join(dir, 'turns.jsonl')
-  const { electronApp, page } = await scene(highModels, 'light', { FAKE_CODEX_TURN_LOG: log })
+  const { electronApp, page } = await scene(highModels, 'light', {
+    FAKE_CODEX_TURN_LOG: log,
+    // app-server 재기동 뒤에도 같은 대화의 모델·깊이는 남는다(실제 서버 계약).
+    FAKE_CODEX_THREAD_STATE: join(dir, 'thread.json')
+  })
   const root = synthProject({ withContent: false })
+  const chatFile = join(root, '.knuaf-gui', 'chat-codex.json')
+  const snapshot = () => JSON.parse(readFileSync(chatFile, 'utf8')) as ChatSnapshot
+  const turns = () => readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  const waitForTurn = async (text: string, count: number) => {
+    // 답변 표시·요청 도착은 턴 완료가 아니다. 해당 메시지의 정상 종료와 저장을 기다린다.
+    await expect.poll(() => {
+      const chat = snapshot()
+      const users = chat.messages.filter((message) => message.role === 'user')
+      return { state: chat.state, count: users.length, text: users.at(-1)?.text, delivery: users.at(-1)?.delivery }
+    }).toEqual({ state: 'idle', count, text, delivery: 'sent' })
+    await expect(page.getByRole('button', { name: '보내기', exact: true })).toBeVisible()
+  }
   try {
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toContainText('연결됨')
@@ -94,27 +111,30 @@ test('폴더 없이 모델·깊이를 고르고 다음 메시지부터 같은 �
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('전체 설계를 해 주세요')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('작업을 마쳤어요.', { exact: true })).toBeVisible()
-    const first = JSON.parse(readFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), 'utf8')) as { sessionId: string }
+    await waitForTurn('전체 설계를 해 주세요', 1)
+    expect(turns()).toEqual([{ model: 'gpt-sol', effort: 'high' }])
+    const first = snapshot()
     await chip.click()
     await popup.getByRole('button', { name: /^Terra / }).click()
     await expect(chip).toContainText('Terra · 생각 깊이 기본')
     await page.keyboard.press('Escape')
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('이어서 써 주세요')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
-    await expect.poll(() => readFileSync(log, 'utf8').trim().split('\n').length).toBe(2)
-    await expect(page.getByRole('button', { name: '중단', exact: true })).toHaveCount(0)
+    await waitForTurn('이어서 써 주세요', 2)
+    expect(turns()).toEqual([{ model: 'gpt-sol', effort: 'high' }, { model: 'gpt-terra', effort: 'medium' }])
     await chip.click()
     await popup.getByRole('button', { name: /안 고름/ }).click()
     await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
     await page.keyboard.press('Escape')
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('계정 기본으로 이어 주세요')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
-    await expect.poll(() => readFileSync(log, 'utf8').trim().split('\n').length).toBe(3)
-    expect(readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l))).toEqual([
+    await waitForTurn('계정 기본으로 이어 주세요', 3)
+    expect(turns()).toEqual([
       { model: 'gpt-sol', effort: 'high' }, { model: 'gpt-terra', effort: 'medium' }, { model: 'gpt-default', effort: 'medium' }
     ])
-    const last = JSON.parse(readFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), 'utf8')) as { sessionId: string }
+    const last = snapshot()
     expect(last.sessionId).toBe(first.sessionId)
+    expect(last.sessionId).toBeTruthy()
   } finally { await electronApp.close() }
 })
 
