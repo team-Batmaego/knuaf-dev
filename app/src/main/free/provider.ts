@@ -45,6 +45,8 @@ export function freeExecutionAccount(): ExecutionAccount {
 /** CLI wraps the relay JSON body in its error message; retain only known codes, never the body. */
 export function freeRelayError(value: unknown): FreeRelayError {
   const text = value instanceof Error ? value.message : JSON.stringify(value) ?? ''
+  // Codex 0.164 ResponseIncomplete exposes this reason only in turn.error.message.
+  if (/\bmax_output_tokens\b/.test(text)) return new FreeRelayError('free-context-full')
   const codes: [string, FreeRelayErrorKind][] = [
     ['free_model_off', 'free-off'], ['busy', 'free-busy'], ['slow_down', 'free-minute-limit'],
     ['daily_limit', 'free-daily-limit'], ['invalid_token', 'free-auth']
