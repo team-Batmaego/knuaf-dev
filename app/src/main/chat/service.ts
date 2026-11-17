@@ -968,6 +968,7 @@ export class ChatService {
     // item-N/msg_* id가 달라 중복으로 들어온다.
     const replayHistory = !s.messages.some(m => m.role === 'assistant')
     const authGeneration = this.authGeneration[s.provider]
+    let answered = false
     /**
      * 답장이 오기 시작했으면 전달된 것이다. 예전에는 run() 이 끝나야 'sent' 로 바꿨는데,
      * 에이전트 턴은 몇 분씩 가므로 도우미가 눈앞에서 말하는 내내 학생 메시지에
@@ -990,6 +991,7 @@ export class ChatService {
         session: id => { s.sessionId = id; this.publish(s) },
         skill: () => { s.skillLoaded = true; this.publish(s) },
         message: (id, text) => {
+          if (text.trim()) answered = true
           const old = s.messages.find(m => m.id === id)
           if (old) old.text = text
           else s.messages.push({ id, role: 'assistant', text, at: new Date().toISOString() })
@@ -1014,7 +1016,13 @@ export class ChatService {
           delivered(); this.publish(s)
         }
       }, replayHistory)
-      delivered(); s.state = 'idle'
+      delivered()
+      // 정상 종료는 답변 도착을 보장하지 않는다. 원인(문맥 소진 등)은 단정하지 않는다.
+      // 중단·복구·승인 대기는 기존 상태를 유지하고 무료 본대화에만 안내한다.
+      if (s.provider === 'free' && s.state === 'running' && !answered && !s.permission) {
+        throw new FreeRelayError('free-no-answer')
+      }
+      if (s.provider !== 'free' || s.state === 'running') s.state = 'idle'
     } catch (e) {
       // 이미 답장이 왔다면 전달은 된 것이다 — 그 뒤에 실패한 것은 턴이지 전송이 아니다.
       const sentMsg = s.messages.find(m => m.id === requestId)!
