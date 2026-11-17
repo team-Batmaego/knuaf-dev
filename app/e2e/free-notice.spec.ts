@@ -178,8 +178,10 @@ test('free-context-full: Codex incomplete 이유만 새 안내로 분류하고 �
     ['Incomplete response returned, reason: content_filter', 'free-error'],
     ['Incomplete response returned, reason: max_output_tokens_extra', 'free-error'],
     ['prefixmax_output_tokens', 'free-error'],
+    ['Invalid parameter: max_output_tokens', 'free-error'],
     ['busy', 'free-busy'], ['daily_limit', 'free-daily-limit'], ['401 unauthorized', 'free-auth']
   ]) expect(freeRelayError(new Error(message)).kind).toBe(kind)
+  expect(freeRelayError({ message: 'busy', param: 'max_output_tokens' }).kind).toBe('free-busy')
 })
 
 for (const provider of ['free', 'codex'] as const) {
