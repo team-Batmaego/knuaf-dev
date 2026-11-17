@@ -172,7 +172,7 @@ test('free-context-full: Codex incomplete 이유만 새 안내로 분류하고 �
     expect(error.kind).toBe('free-context-full')
     expect(error.message).toBe('free-context-full')
     const copy = describeFreeRelayError(error.kind)
-    expect(copy.title).toBe('무료 모델의 기억 용량이 찼어요. Claude나 ChatGPT로 바꿔서 이어 가 주세요.')
+    expect(copy.title).toBe('무료 모델이 이번 답을 끝까지 쓰지 못했어요. 한 번 더 보내 보거나, Claude나 ChatGPT로 바꿔 주세요.')
     expect(copy.action).toBeNull()
     expect(copy.raw).toBe('')
   }
@@ -216,7 +216,7 @@ for (const provider of ['free', 'codex'] as const) {
       expect(snapshot.messages.find(m => m.id === 'progress')?.text).toContain('확인하겠습니다.')
       if (provider === 'free') {
         expect(snapshot.errorKind).toBe('free-context-full')
-        expect(describeFreeRelayError(snapshot.errorKind!).title).toBe('무료 모델의 기억 용량이 찼어요. Claude나 ChatGPT로 바꿔서 이어 가 주세요.')
+        expect(describeFreeRelayError(snapshot.errorKind!).title).toBe('무료 모델이 이번 답을 끝까지 쓰지 못했어요. 한 번 더 보내 보거나, Claude나 ChatGPT로 바꿔 주세요.')
       } else {
         expect(snapshot.errorKind).toBeUndefined()
         expect(snapshot.error).toBe(message)

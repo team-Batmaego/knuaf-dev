@@ -332,7 +332,7 @@ export function describeFreeRelayError(kind: FreeRelayErrorKind): DescribedError
     'free-off': '무료 모델이 꺼져 있어요. 나중에 다시 시도해 주세요.',
     'free-auth': '무료 모델에 연결할 수 없어요. 나중에 다시 시도해 주세요.',
     'free-error': '무료 모델이 답하지 못했어요. 잠시 후 다시 시도해 주세요.',
-    'free-context-full': '무료 모델의 기억 용량이 찼어요. Claude나 ChatGPT로 바꿔서 이어 가 주세요.',
+    'free-context-full': '무료 모델이 이번 답을 끝까지 쓰지 못했어요. 한 번 더 보내 보거나, Claude나 ChatGPT로 바꿔 주세요.',
     // 오류 코드가 아니라 앱이 판정한 증상이다 — 원인(문맥 소진 등)을 단정하지 않고,
     // 학생이 할 수 있는 일만 말한다. 앱에는 이 대화를 비우는 단추가 없다.
     'free-no-answer': '답이 나오기 전에 대화가 끝났어요.'
