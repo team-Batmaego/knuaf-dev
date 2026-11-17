@@ -243,7 +243,7 @@ export function runtimeFromEnsureEnvelope(
  *
  * 규칙: `rootReal = realpath(root)`, `fileReal = realpath(resolve(root, v))`.
  * **해석 실패(ENOENT·EACCES·루프)는 거짓** — 읽기 도구는 존재하는 파일만 뜻이 있다.
- * 두 값을 각각 NFC로 정규화한 뒤 `같음 || rootReal + sep 로 시작` — macOS의 NFD 파일명 차이를 흡수한다.
+ * `realpath` 결과를 그대로 비교한다. Unicode 정규화·대소문자 접기는 서로 다른 실제 폴더를 합칠 수 있다.
  */
 export function insideRootReal(
   root: string,
@@ -255,10 +255,8 @@ export function insideRootReal(
   let fileReal: string
   try { rootReal = fs.realpathSync(root) } catch { return false }
   try { fileReal = fs.realpathSync(resolve(root, value)) } catch { return false }
-  const a = rootReal.normalize('NFC')
-  const b = fileReal.normalize('NFC')
-  const prefix = a.endsWith(sep) ? a : a + sep
-  return b === a || b.startsWith(prefix)
+  const prefix = rootReal.endsWith(sep) ? rootReal : rootReal + sep
+  return fileReal === rootReal || fileReal.startsWith(prefix)
 }
 
 export type McpPolicyVerdict = { behavior: 'allow' } | { behavior: 'deny'; message: string }
