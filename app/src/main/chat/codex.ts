@@ -118,6 +118,8 @@ export class CodexConnection implements AgentConnection {
   /** 마지막 `model/list` 결과 — 고른 모델의 기본 생각 깊이를 찾는 데 쓴다. */
   private catalog?: ChatModelInfo[]
   private waiter?: { resolve: () => void; reject: (error: Error) => void }
+  /** 무료 모델의 phase=null 호환: 마지막 도구 완료 뒤에 완성된 말이 있어야 답이다. */
+  private freeAnswered = false
   private approvals = new Map<string, number | string>()
   private messages = new Map<string, string>()
   private fileChanges = new Map<string, PermissionFileChange[]>()
@@ -507,6 +509,22 @@ export class CodexConnection implements AgentConnection {
       // 대화에 섞지 않고 기록·알림으로만 남긴다(§3.2 Codex, §5-7, §8).
       if (method === 'item/started' || method === 'item/completed') this.observeSubagent(p)
       if (p?.threadId && p.threadId !== this.thread) return
+      if (this.free && this.waiter && method === 'item/completed') {
+        const item = p.item
+        if (item?.type === 'agentMessage') {
+          this.freeAnswered = typeof item.text === 'string' && item.text.trim() !== '' &&
+            (item.phase == null || item.phase === 'final_answer')
+        } else {
+          // 0.164.0 ThreadItem의 도구/작업 항목. reasoning·plan 등은 답을 무효화하지 않는다.
+          switch (item?.type) {
+            case 'commandExecution': case 'fileChange': case 'mcpToolCall':
+            case 'dynamicToolCall': case 'collabAgentToolCall': case 'functionCallOutput':
+            case 'webSearch': case 'imageView': case 'imageGeneration': case 'sleep':
+            case 'contextCompaction':
+              this.freeAnswered = false
+          }
+        }
+      }
       if (method === 'item/started' && p.item?.type === 'fileChange') {
         this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
       } else if (method === 'item/fileChange/patchUpdated') {
@@ -535,7 +553,10 @@ export class CodexConnection implements AgentConnection {
       else if (method === 'turn/completed') {
         this.fileChanges.clear(); this.pendingFileApprovals.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
-        if (p.turn.status === 'completed') w?.resolve()
+        if (p.turn.status === 'completed') {
+          if (this.free && !this.freeAnswered) w?.reject(new FreeRelayError('free-no-answer'))
+          else w?.resolve()
+        }
         else if (this.free) w?.reject(freeRelayError(p.turn.error))
         else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
         // 한도는 **구조 코드** `usageLimitExceeded` 만 인정한다(설계 §1-2, p1X 11-11).
@@ -571,7 +592,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.7' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.7.0' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
@@ -860,6 +881,7 @@ export class CodexConnection implements AgentConnection {
       model: turnModel.params.model ?? this.threadModel ?? this.options.env.KNUAF_CODEX_MODEL ?? '',
       effort: turnModel.params.effort ?? this.threadEffort ?? this.options.env.KNUAF_CODEX_EFFORT ?? null
     }
+    this.freeAnswered = false
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {
@@ -1455,7 +1477,7 @@ export class CodexRelayConnection implements JobConnection {
     }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.6.7' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.7.0' }, capabilities: { experimentalApi: true } })
     } catch (error) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})

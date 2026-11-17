@@ -13,7 +13,7 @@ import { openChatLink } from './open-link'
  * - `linkify: false` — 맨 주소를 저절로 링크로 만들지 않는다.
  * - `typographer: false` — 따옴표·하이픈을 몰래 바꾸지 않는다.
  * - `breaks: true` — 답변의 줄바꿈을 그대로 살린다(지금 `.prose` 의 `pre-wrap` 과 같은 뜻).
- * - 이미지는 alt 글자만 — 앱이 원격 주소를 부르면 PRIVACY_NOTE 가 사실이 아니게 된다.
+ * - 이미지는 alt 글자만 남긴다.
  *
  * 파일 링크는 예전 `Chat.tsx` 의 `withLinks` 와 같은 규칙을 이 파일 안에 둔다. 누르면
  * `onFile(상대경로)` 이고, 화면 이동 표식은 `data-focus-key="chat-link:<messageId>:<relative>"` 로 같다.

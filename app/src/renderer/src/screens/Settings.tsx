@@ -9,7 +9,7 @@ import { Feedback } from '../components/Feedback'
 import { RuntimeSetup } from '../components/RuntimeFix'
 import { OutputsTools } from './Outputs'
 import { TroubleshootSections } from './Troubleshoot'
-import { CREDIT, HELPER, PRIVACY_NOTE, PROVIDER_NAME, SETTINGS, describeError, type DescribedError } from '../copy'
+import { CREDIT, HELPER, PROVIDER_NAME, SETTINGS, describeError, type DescribedError } from '../copy'
 import { useShallow } from 'zustand/react/shallow'
 import { APP_NAME } from '../../../shared/name'
 import { UpdateSettings } from '../components/Updates'
@@ -229,7 +229,6 @@ export function SettingsScreen() {
           <button onClick={() => void window.knuaf.folderOpen('logs')}>로그 폴더 열기</button>
           {buildCopy === 'failed' && <span role="alert" className="caption">{SETTINGS.buildInfoCopyFailed}</span>}
         </div>}
-        <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>{PRIVACY_NOTE}</p>
       </section>
       </div>
 
