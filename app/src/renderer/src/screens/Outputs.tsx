@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import { rpc } from '../rpc'
 import { Feedback } from '../components/Feedback'
@@ -9,7 +9,7 @@ import { EmptyState } from '../components/EmptyState'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { ResultCard } from '../components/ResultCard'
 import { useRunner } from '../components/useRunner'
-import { COMPLETION, EMPTY, FIELD_HINT, FIELD_LABEL, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, NO_OVERWRITE_NOTE, describeError, officeHint, type DescribedError } from '../copy'
+import { COMPLETION, EMPTY, FIELD_HINT, FIELD_LABEL, FORMULA_HELD, INDEPENDENT_REVIEW_MISSING, NOT_APPROVAL_NOTE, NO_OVERWRITE_NOTE, NOTICE, describeError, officeHint, type DescribedError } from '../copy'
 import { useShallow } from 'zustand/react/shallow'
 
 /** Next free sibling name (…-v2, -v3): outputs are never overwritten. */
@@ -35,6 +35,13 @@ export function OutputsTools() {
   const [kind, setKind] = useState('review')
   const [exportResult, setExportResult] = useState<{ path: string } | null>(null)
   const [exportErr, setExportErr] = useState<DescribedError | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
+  const runnerBusy = useRef(runner.busy)
+  runnerBusy.current = runner.busy
+  const toolsBusy = runner.busy || confirmBusy
+  const [confirmError, setConfirmError] = useState<string | null>(null)
+  const confirmLock = useRef(false)
+  const pendingClear = useRef<{ env: NonNullable<typeof runner.env>; params: Record<string, unknown> } | null>(null)
   const [form, setForm] = useState<Record<string, string>>({ paper_in: 'paper-input.json', paper_out: 'build/검토전_본문.md', docx_in: 'build/검토전_본문.md', docx_out: 'build/검토전_논문.docx', font: '신명조', xl_source: '', xl_map: 'build/template-review/source-map.json', xl_blank: 'build/template-review/blank-v1.xlsx', xl_values: '', xl_writemap: '', xl_filled: 'build/template-review/filled-v1.xlsx', xl_final: '', xl_receipts: '', of_input: '', of_out: 'build/native' })
   const existing = useMemo(() => {
     const s = new Set<string>()
@@ -61,6 +68,45 @@ export function OutputsTools() {
   const reveal = (p: string) => window.knuaf.reveal(joinPath(root, p))
   const vOut = (k: string, ext: string[]) => validateOutPath(form[k], ext, (p) => existing.has(p))
   const done = (m: string) => runner.env?.ok && runner.env.argv.some((a) => a.endsWith(m))
+
+  const clear = async () => {
+    if (confirmLock.current || runner.busy) return
+    confirmLock.current = true
+    setConfirmError(null)
+    const pending = pendingClear.current
+    try {
+      if (pending && pending.params.root === root && pending.env === runner.env && pending.env.block_reason === 'formula_cells_changed') {
+        const detail = pending.env.detail as Record<string, unknown> | null
+        const identity = detail?.notice_identity
+        if (typeof identity === 'string' && identity) {
+          setConfirmBusy(true)
+          const reply = await window.knuaf.notices.confirm(root, identity)
+          if (reply.error || !reply.result?.ok || reply.result.status !== 'acknowledged') {
+            setConfirmError(reply.result?.block_reason || NOTICE.confirmFailed)
+            if ((reply.result?.data as { reason?: unknown } | null)?.reason === 'notice_stale') {
+              pendingClear.current = null
+              void window.knuaf.notices.read(root).catch(() => {})
+            }
+            return
+          }
+          // 확인 중 논문을 바꾸었다면 이전 논문의 사본을 이 화면에서 실행하지 않는다.
+          if (useProject.getState().root !== root || runnerBusy.current) return
+          pendingClear.current = null
+          const env = await runner.run('excel.clear', pending.params)
+          pendingClear.current = env ? { env, params: pending.params } : null
+          return
+        }
+      }
+      const params = { root, source: form.xl_source, map: form.xl_map, out: form.xl_blank, receipt: form.xl_blank.replace(/\.xlsx$/, '-receipt.json') }
+      const env = await runner.run('excel.clear', params)
+      pendingClear.current = env ? { env, params } : null
+    } catch {
+      setConfirmError(NOTICE.confirmFailed)
+    } finally {
+      confirmLock.current = false
+      setConfirmBusy(false)
+    }
+  }
 
   return (
     <div>
@@ -92,7 +138,7 @@ export function OutputsTools() {
         <p>겉표지부터 감사의 글, Ⅰ~Ⅵ 골격을 만들어요. 아직 모르는 값은 <code>[확인 필요]</code>로 남아요.</p>
         <Field id="paper_in" label={FIELD_LABEL.paper_input} help={FIELD_HINT.paper_input}><input id="paper_in" value={form.paper_in} onChange={set('paper_in')} /></Field>
         <Disclosure label="고급"><Field id="paper_out" label={FIELD_LABEL.out_path} invalid={vOut('paper_out', ['.md'])} trailing={<button onClick={rename('paper_out')}>다른 이름으로</button>}><input id="paper_out" value={form.paper_out} onChange={set('paper_out')} aria-invalid={!!vOut('paper_out', ['.md'])} /></Field></Disclosure>
-        <div className="row" style={{ marginTop: 'var(--sp-3)' }}><button className="primary" disabled={runner.busy || !!vOut('paper_out', ['.md']) || !form.paper_in} onClick={() => runner.run('paper.generate', { root, input: form.paper_in, out: form.paper_out })}>골격 만들기</button></div>
+        <div className="row" style={{ marginTop: 'var(--sp-3)' }}><button className="primary" disabled={toolsBusy || !!vOut('paper_out', ['.md']) || !form.paper_in} onClick={() => runner.run('paper.generate', { root, input: form.paper_in, out: form.paper_out })}>골격 만들기</button></div>
       </Disclosure>
 
       <Disclosure label="DOCX 만들기" preset="tools:docx">
@@ -103,7 +149,7 @@ export function OutputsTools() {
           <Field id="docx_out" label={FIELD_LABEL.out_path} invalid={vOut('docx_out', ['.docx'])} trailing={<button onClick={rename('docx_out')}>다른 이름으로</button>}><input id="docx_out" value={form.docx_out} onChange={set('docx_out')} aria-invalid={!!vOut('docx_out', ['.docx'])} /></Field>
           <Field id="font" label={FIELD_LABEL.font} help={FIELD_HINT.font}><input id="font" value={form.font} onChange={set('font')} /></Field>
         </Disclosure>
-        <div className="row" style={{ marginTop: 'var(--sp-3)' }}><button className="primary" disabled={runner.busy || !!vOut('docx_out', ['.docx'])} onClick={() => runner.run('docx.build', { root, in: form.docx_in, out: form.docx_out, font: form.font })}>DOCX 만들기</button></div>
+        <div className="row" style={{ marginTop: 'var(--sp-3)' }}><button className="primary" disabled={toolsBusy || !!vOut('docx_out', ['.docx'])} onClick={() => runner.run('docx.build', { root, in: form.docx_in, out: form.docx_out, font: form.font })}>DOCX 만들기</button></div>
         <p className="caption" style={{ marginTop: 'var(--sp-3)' }}>글꼴 신명조 확인, 여백, 페이지 번호는 한글에서 사람이 마무리해요.</p>
       </Disclosure>
 
@@ -115,14 +161,14 @@ export function OutputsTools() {
             <div className="head"><strong>1. 원본 검사</strong>{done('gg_excel_template.py') && runner.env?.argv.includes('inspect') && <StatusBadge status="pass" label="완료" />}</div>
             <Field id="xl_source" label={FIELD_LABEL.xl_source} help={FIELD_HINT.xl_source} trailing={<button onClick={pick('xl_source', [{ name: 'Excel', extensions: ['xlsx'] }])}>선택…</button>}><input id="xl_source" value={form.xl_source} onChange={set('xl_source')} placeholder="비우면 학생 재무 파일 또는 동봉 기준 양식" /></Field>
             <Disclosure label="고급"><Field id="xl_map" label={FIELD_LABEL.xl_map} help={FIELD_HINT.xl_map}><input id="xl_map" value={form.xl_map} onChange={set('xl_map')} /></Field></Disclosure>
-            <div style={{ marginTop: 'var(--sp-2)' }}><button className="primary" disabled={runner.busy} onClick={() => runner.run('excel.inspect', { root, source: form.xl_source, out_map: form.xl_map, report: form.xl_map.replace(/\.json$/, '-report.json') })}>검사</button></div>
+            <div style={{ marginTop: 'var(--sp-2)' }}><button className="primary" disabled={toolsBusy} onClick={() => runner.run('excel.inspect', { root, source: form.xl_source, out_map: form.xl_map, report: form.xl_map.replace(/\.json$/, '-report.json') })}>검사</button></div>
           </li>
           <li className="item">
             <div className="head"><strong>2. 사본 만들기</strong></div>
             <Field id="xl_blank" label={FIELD_LABEL.xl_blank} invalid={vOut('xl_blank', ['.xlsx'])} trailing={<button onClick={rename('xl_blank')}>다른 이름으로</button>}><input id="xl_blank" value={form.xl_blank} onChange={set('xl_blank')} aria-invalid={!!vOut('xl_blank', ['.xlsx'])} /></Field>
             <div className="row" style={{ marginTop: 'var(--sp-2)' }}>
-              <button className="primary" disabled={runner.busy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => runner.run('excel.create', { root, source: form.xl_source, out: form.xl_blank })}>사본 만들기</button>
-              <button disabled={runner.busy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => runner.run('excel.clear', { root, source: form.xl_source, map: form.xl_map, out: form.xl_blank, receipt: form.xl_blank.replace(/\.xlsx$/, '-receipt.json') })}>검토한 셀 지도대로 비우기</button>
+              <button className="primary" disabled={toolsBusy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => runner.run('excel.create', { root, source: form.xl_source, out: form.xl_blank })}>사본 만들기</button>
+              <button disabled={toolsBusy || !!vOut('xl_blank', ['.xlsx'])} onClick={() => void clear()}>검토한 셀 지도대로 비우기</button>
             </div>
           </li>
           <li className="item">
@@ -130,14 +176,14 @@ export function OutputsTools() {
             <Field id="xl_writemap" label={FIELD_LABEL.xl_writemap} help={FIELD_HINT.xl_writemap}><input id="xl_writemap" value={form.xl_writemap} onChange={set('xl_writemap')} /></Field>
             <Field id="xl_values" label={FIELD_LABEL.xl_values} help={FIELD_HINT.xl_values}><input id="xl_values" value={form.xl_values} onChange={set('xl_values')} /></Field>
             <Field id="xl_filled" label={FIELD_LABEL.xl_filled} invalid={vOut('xl_filled', ['.xlsx'])} trailing={<button onClick={rename('xl_filled')}>다른 이름으로</button>}><input id="xl_filled" value={form.xl_filled} onChange={set('xl_filled')} aria-invalid={!!vOut('xl_filled', ['.xlsx'])} /></Field>
-            <div style={{ marginTop: 'var(--sp-2)' }}><button className="primary" disabled={runner.busy || !form.xl_writemap || !form.xl_values || !!vOut('xl_filled', ['.xlsx'])} onClick={() => runner.run('excel.fill', { root, template: form.xl_blank, map: form.xl_writemap, values: form.xl_values, out: form.xl_filled, receipt: form.xl_filled.replace(/\.xlsx$/, '-receipt.json') })}>값 채우기</button></div>
+            <div style={{ marginTop: 'var(--sp-2)' }}><button className="primary" disabled={toolsBusy || !form.xl_writemap || !form.xl_values || !!vOut('xl_filled', ['.xlsx'])} onClick={() => runner.run('excel.fill', { root, template: form.xl_blank, map: form.xl_writemap, values: form.xl_values, out: form.xl_filled, receipt: form.xl_filled.replace(/\.xlsx$/, '-receipt.json') })}>값 채우기</button></div>
             <p className="caption" style={{ marginTop: 'var(--sp-2)' }}>채운 뒤에는 실제 Excel 재계산(Office 렌더)과 본문 대조가 필요해요. 빈 사본만으로 재무 완료가 아니에요.</p>
           </li>
           <li className="item">
             <div className="head"><strong>4. 계보 확인</strong></div>
             <Field id="xl_final" label={FIELD_LABEL.xl_final} trailing={<button onClick={pick('xl_final', [{ name: 'Excel', extensions: ['xlsx'] }])}>선택…</button>}><input id="xl_final" value={form.xl_final} onChange={set('xl_final')} /></Field>
             <Field id="xl_receipts" label={FIELD_LABEL.xl_receipts} help={FIELD_HINT.xl_receipts}><input id="xl_receipts" value={form.xl_receipts} onChange={set('xl_receipts')} /></Field>
-            <div style={{ marginTop: 'var(--sp-2)' }}><button disabled={runner.busy || !form.xl_final || !form.xl_receipts} onClick={() => runner.run('office.verify_lineage', { root, input: form.xl_final, receipts: form.xl_receipts.split(/\s+/).filter(Boolean) })}>계보 확인</button></div>
+            <div style={{ marginTop: 'var(--sp-2)' }}><button disabled={toolsBusy || !form.xl_final || !form.xl_receipts} onClick={() => runner.run('office.verify_lineage', { root, input: form.xl_final, receipts: form.xl_receipts.split(/\s+/).filter(Boolean) })}>계보 확인</button></div>
           </li>
         </ol>
       </Disclosure>
@@ -148,8 +194,8 @@ export function OutputsTools() {
         <Field id="of_input" label={FIELD_LABEL.of_input} trailing={<button onClick={pick('of_input', [{ name: 'Office', extensions: ['docx', 'xlsx'] }])}>선택…</button>}><input id="of_input" value={form.of_input} onChange={set('of_input')} /></Field>
         <Field id="of_out" label={FIELD_LABEL.of_out} invalid={vOut('of_out', [])} trailing={<button onClick={rename('of_out')}>다른 이름으로</button>}><input id="of_out" value={form.of_out} onChange={set('of_out')} /></Field>
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
-          <button disabled={runner.busy} onClick={() => runner.run('office.doctor', { root })}>환경 진단</button>
-          <button className="primary" disabled={runner.busy || !form.of_input || !!vOut('of_out', [])} onClick={() => runner.run(form.of_input.toLowerCase().endsWith('.xlsx') ? 'office.excel' : 'office.word', { root, input: form.of_input, out_dir: form.of_out })}>변환 실행</button>
+          <button disabled={toolsBusy} onClick={() => runner.run('office.doctor', { root })}>환경 진단</button>
+          <button className="primary" disabled={toolsBusy || !form.of_input || !!vOut('of_out', [])} onClick={() => runner.run(form.of_input.toLowerCase().endsWith('.xlsx') ? 'office.excel' : 'office.word', { root, input: form.of_input, out_dir: form.of_out })}>변환 실행</button>
         </div>
       </Disclosure>
 
@@ -173,8 +219,10 @@ export function OutputsTools() {
       </Disclosure>
 
       {runner.err && <div style={{ marginTop: 'var(--sp-4)' }}>{(() => { const d = describeError({ code: null, message: runner.err }); return <Feedback kind="error" title={d.title} body={d.action} details={<code>{runner.err}</code>} /> })()}</div>}
+      {confirmError && <p className="notice-failed" role="alert">{confirmError}</p>}
       {runner.cancelled && <div style={{ marginTop: 'var(--sp-4)' }}><Feedback kind="status" title={COMPLETION.cancelled} /></div>}
-      <ProgressPanel busy={runner.busy} phase={runner.phase} elapsedMs={runner.elapsedMs} lines={runner.lines} onCancel={runner.cancel} />
+      {/* 멈춤의 원본 JSON에는 학생에게 보여 주지 않는 사유 코드가 있다. */}
+      {!(runner.env && !runner.env.ok && runner.env.block_reason && Object.hasOwn(FORMULA_HELD, runner.env.block_reason)) && <ProgressPanel busy={runner.busy} phase={runner.phase} elapsedMs={runner.elapsedMs} lines={runner.lines.filter(({ line }) => !Object.keys(FORMULA_HELD).some((code) => line.includes(code)))} onCancel={runner.cancel} />}
       {runner.env && !runner.busy && (() => { const h = officeHint(runner.env.block_reason ?? (runner.env.data as any)?.engine_stderr); return h ? <div style={{ marginTop: 'var(--sp-4)' }}><Feedback kind="warning" title={h.title} body={h.body} /></div> : null })()}
       {runner.env && !runner.busy && <ResultCard env={runner.env} onReveal={reveal} onOpen={(p) => openPreview(joinPath(root, p))} />}
     </div>
