@@ -56,6 +56,9 @@ for (const output of [null, '', ' \n\t']) {
       const snapshot = await finish(svc, root, 'free')
       expect(snapshot.state).toBe('error')
       expect(snapshot.errorKind).toBe('free-no-answer')
+      const copy = describeFreeRelayError(snapshot.errorKind!)
+      expect(copy.title).toBe('답이 나오기 전에 대화가 끝났어요.')
+      expect(copy.action).toBe('한 번 더 보내 보거나, Claude나 ChatGPT로 바꿔 주세요.')
       expect(snapshot.messages.find(m => m.id === 'empty-turn')?.delivery).toBe('sent')
     } finally { await svc.close() }
   })
@@ -169,7 +172,7 @@ test('free-context-full: Codex incomplete 이유만 새 안내로 분류하고 �
     expect(error.kind).toBe('free-context-full')
     expect(error.message).toBe('free-context-full')
     const copy = describeFreeRelayError(error.kind)
-    expect(copy.title).toBe('용량이 찼어요. Claude나 Codex로 바꿔 주세요.')
+    expect(copy.title).toBe('무료 모델의 기억 용량이 찼어요. Claude나 ChatGPT로 바꿔서 이어 가 주세요.')
     expect(copy.action).toBeNull()
     expect(copy.raw).toBe('')
   }
@@ -213,7 +216,7 @@ for (const provider of ['free', 'codex'] as const) {
       expect(snapshot.messages.find(m => m.id === 'progress')?.text).toContain('확인하겠습니다.')
       if (provider === 'free') {
         expect(snapshot.errorKind).toBe('free-context-full')
-        expect(describeFreeRelayError(snapshot.errorKind!).title).toBe('용량이 찼어요. Claude나 Codex로 바꿔 주세요.')
+        expect(describeFreeRelayError(snapshot.errorKind!).title).toBe('무료 모델의 기억 용량이 찼어요. Claude나 ChatGPT로 바꿔서 이어 가 주세요.')
       } else {
         expect(snapshot.errorKind).toBeUndefined()
         expect(snapshot.error).toBe(message)
