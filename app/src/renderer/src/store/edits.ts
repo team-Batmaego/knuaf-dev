@@ -3,6 +3,7 @@ import { rpc, RpcFailure } from '../rpc'
 import { recheckPlan, splitRecheck, withRecheck, type RecheckPlan } from '../../../shared/recheck'
 import type { EditNotice, EditResult, EditRow } from '../../../shared/types'
 import { usePrep } from './prep'
+import { useProject } from './project'
 
 /**
  * 뷰어 직접 수정 — 목록·알림·저장 호출 (설계 §3-3, §4-5-3, §5).
@@ -247,6 +248,14 @@ export const useEdits = create<EditState>((set, get) => ({
             expected_draft_hash: expectedHashOf(root, e.section_id, e.expected_draft_hash, params.expected_revision) ?? null
           }))
         })
+      // Register at the commit response, before any awaited list read can let polling overtake us.
+      if (useProject.getState().root === root) {
+        const hashes = result.draft_hashes ?? {}
+        for (const [id, hash] of Object.entries(hashes)) useProject.getState().noteOwnEdit(id, hash)
+        if (params.kind === 'one' && !(params.id in hashes)) {
+          useProject.getState().noteOwnEdit(params.id, result.draft_hash)
+        }
+      }
       // 이 개정은 우리가 방금 만들었다 — 다음 저장은 최소 이 번호로 나가야 한다. 응답이 개정을
       // 안 알려 주는 옛 sidecar 면 `undefined` 라 여기서 아무것도 기억하지 않는다(그때는 지금처럼).
       // 개정은 논문마다 따로 센다 — 다른 논문의 번호와 견주지 않고 그 논문 것으로 갈아 끼운다.
