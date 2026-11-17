@@ -90,7 +90,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
     await navTo(page, '설정')
     await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     await section.getByRole('button', { name: '이전 규칙집으로' }).click()
-    await expect(section).toContainText(`현재 규칙집 ${bundled}`)
+    await expect(section.locator('p[role="status"]')).toHaveText('규칙집을 사용하고 있어요.')
     needsApp = true
     await section.getByRole('button', { name: '지금 확인' }).click()
     await expect(section).toContainText('이 규칙집은 앱 새 판이 필요해요')

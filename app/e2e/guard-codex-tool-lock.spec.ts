@@ -11,10 +11,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   codexToolLock, appThreadLockPlan, appThreadLockVerify, lockFingerprint, emptyLockConfig, terminalRefusalCopy,
-  TERMINAL_REFUSAL_HEAD, TERMINAL_ENUM_FAILED_COPY, APP_THREAD_RESULT_REFUSAL_COPY, KORDOC_COLLISION_NOTE, LIST_PAGE_CAP,
+  TERMINAL_REFUSAL_HEAD, TERMINAL_ENUM_FAILED_COPY, APP_THREAD_RESULT_REFUSAL_COPY, LIST_PAGE_CAP,
   type LockConfig, type ToolLockOutcome
 } from '../src/main/chat/codexToolLock'
-import { MCP_SERVER_NAME } from '../src/main/chat/kordocMcp'
+import { MCP_SERVER_NAME, READ_TOOLS, type KordocMcpSpec } from '../src/main/chat/kordocMcp'
+
+const appSpec: KordocMcpSpec = { command: '/app/node', args: ['/app/mcp.js'], env: { KORDOC_ROOT: '/tmp/kd-lock-root', KORDOC_OFFLINE: '1' }, version: '4.17.1' }
+const appInjected = [{ name: MCP_SERVER_NAME, spec: appSpec }]
+const ownServer = { command: appSpec.command, args: appSpec.args, env_vars: Object.keys(appSpec.env),
+  enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+const ownConfig = (others: Record<string, unknown> = {}) => ({
+  config: { mcp_servers: { ...others, kordoc: { ...ownServer, enabled: true, environment_id: 'local' } }, plugins: {} },
+  layers: [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc: ownServer } } }]
+})
 
 // ── 가짜 연결 ─────────────────────────────────────────────────────────────────
 
@@ -253,28 +262,28 @@ test('§10-20 지문은 이름 순서에 무관하고 플러그인이 늘면 바
 
 test('§4.1-D 앱이 붙인 kordoc 은 끄지 않고, 학생 층에 같은 이름이 없으면 충돌도 아니다', async () => {
   const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, other: { command: 'o' } } }),
+    'config/read': () => ownConfig({ other: { command: 'o' } }),
     'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status([{ name: 'kordoc', runtimeStatus: 'connected' }, disabled('other')]),
     'app/list': () => status([])
   })
-  const out = expectOk(await appThread(f, { injected: [{ name: MCP_SERVER_NAME }] }))
+  const out = expectOk(await appThread(f, { injected: appInjected }))
   if (out.form !== 'app-thread') throw new Error('앱 스레드가 아니에요')
-  expect(out.config.mcp_servers).toEqual({ other: { enabled: false } })
+  expect(out.config.mcp_servers.other).toEqual({ enabled: false })
+  expect(out.config.mcp_servers.kordoc).toMatchObject({ enabled: true, command: appSpec.command, args: appSpec.args })
   expect(out.kordocAttached).toBe(true)
-  expect(out.kordocCollision).toBeNull()
 })
 
 for (const student of [false, true]) test(`v066 app-owned kordoc may be absent from thread status (student MCP=${student})`, async () => {
   // Mac 0.169: data:[]; G0 0.164: only node_repl disabled. Process status
   // lists kordoc separately, but cannot prove this thread's student MCP cutoff.
   const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, ...(student ? { node_repl: { command: 'node' } } : {}) } }),
+    'config/read': () => ownConfig(student ? { node_repl: { command: 'node' } } : {}),
     'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status(student ? [{ name: 'node_repl', runtimeStatus: 'disabled', tools: {}, resources: [], resourceTemplates: [], authStatus: 'unsupported' }] : []),
     'app/list': () => status([])
   })
-  const req = { root: '/tmp/kd-lock-root', form: 'app-thread' as const, injected: [{ name: MCP_SERVER_NAME }], rpc: f.rpc, retry: { sleep: noSleep } }
+  const req = { root: '/tmp/kd-lock-root', form: 'app-thread' as const, injected: appInjected, rpc: f.rpc, retry: { sleep: noSleep } }
   const planned = await appThreadLockPlan(req)
   if (!planned.ok) throw new Error('plan refused')
   expect(planned.plan.kordocAttached).toBe(true)
@@ -293,38 +302,57 @@ for (const collision of [false, true]) test(`v066 absent kordoc row is still ref
 
 test('v066 app-owned kordoc absence never excuses another missing student MCP', async () => {
   const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' }, node_repl: { command: 'node' } } }),
+    'config/read': () => ownConfig({ node_repl: { command: 'node' } }),
     'plugin/installed': () => installed([]),
     'mcpServerStatus/list': () => status([])
   })
-  const out = expectFail(await appThread(f, { injected: [{ name: MCP_SERVER_NAME }] }), 'result-check')
+  const out = expectFail(await appThread(f, { injected: appInjected }), 'result-check')
   expect(out.remaining).toEqual(['node_repl'])
 })
 
 test('v066 app-owned kordoc absence does not bypass Apps or instruction checks', async () => {
   for (const bad of ['apps', 'instructions']) {
     const f = fakeRpc({
-      'config/read': () => configRead({ servers: { kordoc: { command: 'node' } } }),
+      'config/read': () => ownConfig(),
       'plugin/installed': () => installed([]),
       'mcpServerStatus/list': () => status([]),
       'app/list': () => status(bad === 'apps' ? [{ id: 'foreign' }] : [])
     })
-    expectFail(await appThread(f, { injected: [{ name: MCP_SERVER_NAME }], ...(bad === 'instructions' ? { check: { threadId: 't-1', instructionSources: null } } : {}) }), 'result-check')
+    expectFail(await appThread(f, { injected: appInjected, ...(bad === 'instructions' ? { check: { threadId: 't-1', instructionSources: null } } : {}) }), 'result-check')
   }
 })
 
-test('§4.1-D 학생 층에 같은 이름의 kordoc 이 있으면 끄고 알린다', async () => {
-  const f = fakeRpc({
-    'config/read': () => configRead({ servers: { kordoc: { command: 'node' } }, layers: { user: { kordoc: { command: 'student' } } } }),
-    'plugin/installed': () => installed([]),
-    'mcpServerStatus/list': () => status([disabled('kordoc')]),
-    'app/list': () => status([])
+for (const type of ['user', 'project', 'system', 'profile', 'plugin', 'sessionFlags', 'futureLayer']) {
+  test(`C-01 동명 ${type} 설정의 env/cwd는 앱 실행표로 덮지 않고 잠근다`, async () => {
+    const f = fakeRpc({
+      'config/read': () => ({ config: { mcp_servers: { kordoc: { command: appSpec.command }, other: {} }, plugins: {} },
+        layers: [{ name: { type }, config: { mcp_servers: { kordoc: { command: appSpec.command, args: appSpec.args,
+          env: { KORDOC_OFFLINE: '0', NODE_OPTIONS: '--require student.cjs' }, cwd: '/student' } } } }] }),
+      'plugin/installed': () => installed([]),
+      'mcpServerStatus/list': () => status([disabled('kordoc'), disabled('other')]), 'app/list': () => status([])
+    })
+    const out = expectOk(await appThread(f, { injected: appInjected }))
+    if (out.form !== 'app-thread') throw new Error('not app thread')
+    expect(out.config.mcp_servers).toEqual({ kordoc: { enabled: false }, other: { enabled: false } })
+    expect(out.kordocAttached).toBe(false)
+    expect(out.kordocCollision).toBe(true)
   })
-  const out = expectOk(await appThread(f, { injected: [{ name: MCP_SERVER_NAME }] }))
-  if (out.form !== 'app-thread') throw new Error('앱 스레드가 아니에요')
-  expect(out.config.mcp_servers).toEqual({ kordoc: { enabled: false } })
-  expect(out.kordocAttached).toBe(false)
-  expect(out.kordocCollision).toBe(KORDOC_COLLISION_NOTE)
+}
+
+test('v067 지문과 verify는 앱 실행표 변조나 다른 살아 있는 MCP를 허용하지 않는다', async () => {
+  const f = fakeRpc({ 'config/read': () => ownConfig(), 'plugin/installed': () => installed([]),
+    'mcpServerStatus/list': () => status([{ name: 'kordoc', runtimeStatus: 'connected' }, { name: 'foreign', runtimeStatus: 'connected' }]) })
+  const req = { root: '/tmp/kd-lock-root', form: 'app-thread' as const, injected: appInjected, rpc: f.rpc, retry: { sleep: noSleep } }
+  const result = await appThreadLockPlan(req)
+  if (!result.ok) throw new Error('plan refused')
+  const plan = result.plan
+  expect(await appThreadLockVerify({ ...req, check: { threadId: 't-1', instructionSources: [] } }, plan)).toMatchObject({ ok: false, remaining: ['foreign'] })
+  const row = plan.config.mcp_servers.kordoc
+  if (!row.enabled) throw new Error('missing app server')
+  row.args = ['/student/write.js']
+  expect(lockFingerprint(plan.config)).not.toBe(plan.fingerprint)
+  plan.fingerprint = lockFingerprint(plan.config)
+  expect(await appThreadLockVerify({ ...req, check: { threadId: 't-1', instructionSources: [] } }, plan)).toMatchObject({ ok: false })
 })
 
 test('§4.1-D 앱이 kordoc 을 붙이지 않은 연결에서는 kordoc 도 보통 이름과 같이 분류한다', async () => {

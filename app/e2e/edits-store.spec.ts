@@ -7,6 +7,7 @@
 import { expect, test } from '@playwright/test'
 import { useEdits } from '../src/renderer/src/store/edits'
 import { useProject } from '../src/renderer/src/store/project'
+import { usePrep, waitKind } from '../src/renderer/src/store/prep'
 
 /** `window.knuaf` 를 메모리 모형으로 바꾸고, 끝나면 되돌린다. */
 async function withWindow<T>(model: Record<string, unknown>, run: () => Promise<T>): Promise<T> {
@@ -385,6 +386,71 @@ function editResult(revision: number) {
     revision, draft_hash: 'h', draft_hashes: {}, needs_check: false, new_issues: [],
     reviews_staled: 0, recheck_before_submit: false, edit_id: `edit-${revision}`
   }
+}
+
+for (const kind of ['one', 'batch'] as const) {
+  test(`저장 완료 경계 — ${kind} 성공을 알리기 전에 재확인 목록을 반영한다`, async () => {
+    const listing = Promise.withResolvers<unknown>()
+    const requested = Promise.withResolvers<void>()
+    const model = { knuaf: { call: async (method: string) => {
+      if (method === 'section.edits') { requested.resolve(); return { result: await listing.promise } }
+      return { result: { ...editResult(2), needs_check: true } }
+    } } }
+    await withWindow(model, async () => {
+      let done = false
+      const params = kind === 'one'
+        ? { kind, id: 'sec-01', expected_revision: 1, before_block: '가', after_block: '나' }
+        : { kind, expected_revision: 1, edits: [{ section_id: 'sec-01', before_block: '가', after_block: '나' }] }
+      const saving = useEdits.getState().save('/A', params).then((result) => { done = true; return result })
+      await requested.promise
+      await flush()
+      try {
+        expect(done).toBe(false)
+        expect(waitKind(usePrep.getState(), '/A')).toBe('write')
+      } finally {
+        listing.resolve({ edits: [editRow('edit-2', 'pending')], notices: [] })
+        await saving
+      }
+      expect(useEdits.getState().attach('저장 직후 보내기').ids).toEqual(['edit-2'])
+      expect(waitKind(usePrep.getState(), '/A')).toBeNull()
+    })
+  })
+}
+
+for (const failLatest of [false, true]) {
+  test(`R1-01 — 저장 목록이 revision 읽기에 밀려도 최신 게시까지 기다린다 (${failLatest ? '읽기 실패' : '성공'})`, async () => {
+    const first = Promise.withResolvers<unknown>()
+    const latest = Promise.withResolvers<unknown>()
+    const started = Promise.withResolvers<void>()
+    let reads = 0
+    const model = { knuaf: { call: async (method: string) => {
+      if (method !== 'section.edits') return { result: { ...editResult(2), needs_check: true } }
+      if (++reads === 1) { started.resolve(); return { result: await first.promise } }
+      return { result: await latest.promise }
+    } } }
+    await withWindow(model, async () => {
+      let done = false
+      const saving = useEdits.getState().save('/A', {
+        kind: 'one', id: 'sec-01', expected_revision: 1, before_block: '가', after_block: '나'
+      }).then((result) => { done = true; return result })
+      await started.promise
+      const revisionRead = useEdits.getState().load('/A')
+      first.resolve({ edits: [editRow('edit-2', 'pending')], notices: [] })
+      await flush()
+      try {
+        expect(done).toBe(false)
+        expect(waitKind(usePrep.getState(), '/A')).toBe('write')
+      } finally {
+        if (failLatest) latest.reject(new Error('목록 읽기 실패'))
+        else latest.resolve({ edits: [editRow('edit-2', 'pending')], notices: [] })
+        await revisionRead
+        await saving
+      }
+      const outcome = await saving
+      expect(outcome.ok).toBe(!failLatest)
+      if (!failLatest) expect(useEdits.getState().attach('바로 보내기').ids).toEqual(['edit-2'])
+    })
+  })
 }
 
 test('연속 저장 — 화면이 옛 개정을 들고 있어도 다음 저장은 앞 저장이 알려 준 개정으로 나간다', async () => {

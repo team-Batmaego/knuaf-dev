@@ -145,6 +145,39 @@ test('unknown signed fields and unsupported app/API are rejected before download
     expect(store.state().highest).toBeNull()
   }
 })
+test('a signed channel skill matching the bundled version and files is latest at startup and on explicit check', async () => {
+  const { root, bundled } = setup('1.0.1')
+  const entries: Entry[] = [
+    { name: 'SKILL.md', data: Buffer.from('# bundle 1.0.1') },
+    { name: 'skill.json', data: Buffer.from(JSON.stringify({ version: '1.0.1', api: 1 })) },
+    { name: 'scripts/example.py', data: Buffer.from("print('1.0.1')\n") }
+  ]
+  writeFileSync(join(bundled, 'SKILL.md'), entries[0].data)
+  writeFileSync(join(bundled, 'skill.json'), entries[1].data)
+  mkdirSync(join(bundled, 'scripts'), { recursive: true })
+  writeFileSync(join(bundled, 'scripts', 'example.py'), entries[2].data)
+  const files = Object.fromEntries(entries.map(e => [e.name, sha256(e.data)]))
+  const installManifest = Buffer.from(JSON.stringify({ files, schema: 'knuaf-doc/install-manifest@1' }, null, 2) + '\n')
+  writeFileSync(join(bundled, 'install-manifest.json'), installManifest)
+  entries.push({ name: 'install-manifest.json', data: installManifest })
+  const signedFiles = Object.fromEntries(entries.map(e => [e.name, sha256(e.data)]))
+  const zip = zipEntries(entries)
+  const manifest: SkillManifest = { schema: 1, name: 'knuaf-dev', version: '1.0.1', api: 1, minApp: '0.5.1', url: `${ASSET_PREFIX}skill-v1.0.1/knuaf-dev-skill-1.0.1.zip`, size: zip.length, sha256: sha256(zip), files: signedFiles }
+  const f = { manifest, signed: envelope(manifest) }
+  const store = new SkillStore(root, bundled, '0.5.1', keys)
+  const { updates } = channelUpdater(store, () => ({ schema: 1, skill: channelSkill(f) }))
+  // ipc.ts performs this check at startup; the second check is the user's explicit retry/check.
+  expect((await updates.check()).phase).toBe('idle')
+  expect((await updates.check()).phase).toBe('idle')
+  expect(store.state().highest).toBeNull()
+  const changed = fixture('1.0.1', {}, entries => entries.map(e => e.name === 'scripts/example.py' ? { ...e, data: Buffer.from("print('different')\n") } : e))
+  const mismatched = channelUpdater(store, () => ({ schema: 1, skill: channelSkill(changed) }))
+  expect((await mismatched.updates.check()).phase).toBe('error')
+})
+test('an older signed channel below the bundled version remains rejected', () => {
+  const { store } = setup('1.0.2')
+  expect(() => store.disposition(fixture('1.0.1').verified())).toThrow(/이전 판/)
+})
 
 test('removing the only skill channel entry returns idle and clears its candidate', async () => {
   const { store } = setup(), f = fixture('1.0.1')
