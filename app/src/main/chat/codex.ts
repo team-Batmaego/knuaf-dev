@@ -15,7 +15,7 @@ import type { ChatModelInfo, ConnectionStatus, PermissionFileChange, PermissionR
 import { isCrossProviderModelId, resolveCodexAlias } from '../../shared/chat'
 import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
-import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
+import { codexMcpArgs, codexMcpEnv, mcpPolicy, MCP_TOOL_PREFIX, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
 import { appThreadLockPlan, appThreadLockVerify, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
@@ -566,7 +566,31 @@ export class CodexConnection implements AgentConnection {
       } else if (method === 'item/tool/requestUserInput') {
         // The unmodified interview contract requires chat text, not tool popups.
         rpc.send({ id, result: { answers: {} } })
-      } else rpc.send({ id, error: { code: -32601, message: '이 요청은 GUI에서 지원하지 않습니다. 질문은 채팅 텍스트로 제시하세요.' } })
+      } else if (method === 'mcpServer/elicitation/request') {
+        // Codex 0.169 mcp_tool_call.rs: tool approval is a form with an empty object
+        // schema and codex_approval_kind=mcp_tool_call. Never accept arbitrary MCP forms.
+        const meta = p?._meta
+        const schema = p?.requestedSchema
+        const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+        const allow = this.rpc === rpc && this.verifiedOn === rpc && !rpc.closed && !!this.mcpSpec
+          && this.turnActive && !!this.turn && p?.threadId === this.thread && p?.turnId === this.turn
+          && p?.serverName === MCP_SERVER_NAME && p?.mode === 'form' && typeof p?.message === 'string'
+          && record(schema) && schema.type === 'object' && record(schema.properties)
+          && Object.keys(schema.properties).length === 0
+          && Object.keys(schema).every((key) => key === 'type' || key === 'properties')
+          && record(meta) && meta.codex_approval_kind === 'mcp_tool_call'
+          && meta.codex_requires_user_input !== true && meta.codex_sensitive_action !== true
+          && typeof meta.tool_name === 'string' && record(meta.tool_params)
+          && mcpPolicy(this.options.root, MCP_TOOL_PREFIX + meta.tool_name, meta.tool_params)?.behavior === 'allow'
+        // One call only: no persist/session metadata and no student-config writes.
+        rpc.send({ id, result: { action: allow ? 'accept' : 'decline', content: null, _meta: null } })
+      } else if (method === 'item/permissions/requestApproval') {
+        rpc.send({ id, result: { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
+      } else {
+        // Method only: request parameters may contain student text, paths or secrets.
+        diag(`codex-request unsupported method=${JSON.stringify(method.slice(0, 160))}`)
+        rpc.send({ id, error: { code: -32601, message: '이 요청은 GUI에서 지원하지 않습니다. 질문은 채팅 텍스트로 제시하세요.' } })
+      }
     }
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
