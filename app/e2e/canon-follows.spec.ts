@@ -13,7 +13,7 @@ import { expect, test } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, navTo, openProject, python, scripts, synthProject } from './helpers'
+import { assertApplySucceeded, launch, navTo, openProject, python, scripts, synthProject } from './helpers'
 
 test('도우미가 저장하면 점검 화면이 새로고침 없이 따라온다 (발견 13)', async () => {
   const root = synthProject()
@@ -32,11 +32,12 @@ test('도우미가 저장하면 점검 화면이 새로고침 없이 따라온�
     // 도우미가 한 것과 같은 일 — 절을 하나 더 등록해 정본을 2번째 기록으로 올린다.
     writeFileSync(join(root, 'sections', '02.md'), '# Ⅱ. 농장 현황\n\n<!-- gg:draft:start -->\n농장A는 정읍에 있다.\n<!-- gg:draft:end -->\n', 'utf-8')
     const change = join(root, 'change2.json')
-    writeFileSync(change, JSON.stringify({ request_id: 'e2e:2', ops: [
+    const requestId = 'e2e:2'
+    writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
       { collection: 'sections', value: { id: 'sec-02', title: 'Ⅱ. 농장 현황', order: 2, path: 'sections/02.md', status: 'drafting' } }
     ] }), 'utf-8')
     const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '1'], { encoding: 'utf-8' })
-    expect(a.status, a.stdout + a.stderr).toBe(0)
+    assertApplySucceeded(a, requestId, 1)
 
     // 새로고침을 누르지 않는다.
     await openRecord()

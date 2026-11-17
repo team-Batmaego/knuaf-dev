@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { python, scripts, synthProject } from '../helpers'
+import { assertApplySucceeded, python, scripts, synthProject } from '../helpers'
 
 const WIN = process.platform === 'win32'
 
@@ -75,13 +75,15 @@ export function fakeCodexEnv(dir: string, extra: Record<string, string> = {}): R
 export function questionProject(): string {
   const root = synthProject()
   const change = join(root, '.knuaf-gui-question.json')
+  const requestId = 'e2e:task'
   writeFileSync(change, JSON.stringify({
-    request_id: 'e2e:task',
+    request_id: requestId,
     ops: [{ collection: 'tasks', value: { id: 'task-interview', user_owned: true, required_fields: ['market.channel'], description: '판매처 확인' } }]
   }), 'utf-8')
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '1'], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  assertApplySucceeded(r, requestId, 1)
   return root
+
 }
 
 export function questionMessage(id = 'a-q1', text = QUESTION_1): Record<string, unknown> {

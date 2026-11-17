@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, openProject, python, scripts, synthProject } from './helpers'
+import { assertApplySucceeded, launch, openProject, python, scripts, synthProject } from './helpers'
 import { fakeCodexEnv, questionMessage, questionProject, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 
 const OUT = process.env.KNUAF_QA2_SHOTS_DIR ?? resolve('/Users/nara/knuaf-dev/docs/design/gui-2026-10-opus-v5/impl/shots-qa2')
@@ -111,7 +111,9 @@ for (const scheme of ['light', 'dark'] as const) {
     writeFileSync(join(mroot, 'sources', longName), '# 원자료\n', 'utf-8')
     const chg = join(mroot, 'change-long.json')
     writeFileSync(chg, JSON.stringify({ request_id: 'e2e:long', ops: [{ collection: 'sources', value: { id: 'src-long', path: `sources/${longName}`, claims: {} } }] }), 'utf-8')
-    spawnSync(python, [join(scripts, 'gg.py'), 'apply', mroot, '--change', chg, '--expected-revision', '1'], { encoding: 'utf-8' })
+    const requestId = 'e2e:long'
+    const applied = spawnSync(python, [join(scripts, 'gg.py'), 'apply', mroot, '--change', chg, '--expected-revision', '1'], { encoding: 'utf-8' })
+    assertApplySucceeded(applied, requestId, 1)
     const mats = await launch({ colorScheme: scheme, env })
     try {
       await mats.page.setViewportSize({ width: 1280, height: 800 })

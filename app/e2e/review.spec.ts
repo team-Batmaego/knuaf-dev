@@ -67,11 +67,12 @@ async function selectText(page: Page, needle: string): Promise<void> {
 /** 절 **제목만** 바꾼다(id·본문 경로·본문 내용은 그대로) — 본문 해시가 같아 묵은 선택이 살아남는 경로. */
 function retitleSection(root: string, title: string, expected: number): void {
   const change = join(root, `change-retitle-${expected}.json`)
-  writeFileSync(change, JSON.stringify({ request_id: `e2e:retitle:${expected}`, ops: [
+  const requestId = `e2e:retitle:${expected}`
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
     { collection: 'sections', value: { id: 'sec-01', title, order: 1, path: 'sections/01.md', status: 'drafting' } }
   ] }), 'utf-8')
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  assertApplySucceeded(r, requestId, expected)
 }
 
 test('종이에서 문장을 고르면 행동 막대가 뜨고, 고쳐 달라기가 인용을 붙여 보낸다', async () => {

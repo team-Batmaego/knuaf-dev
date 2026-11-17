@@ -2,16 +2,18 @@ import { expect, test } from '@playwright/test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, navTo, openProject, python, scripts, synthProject } from './helpers'
+import { assertApplySucceeded, launch, navTo, openProject, python, scripts, synthProject } from './helpers'
 
 const OUT = resolve(__dirname, 'artifacts')
 
 /** Apply a second change on top of the synth project (revision 1 → 2). */
 function applyChange(root: string, change: object, expected: number): void {
   const file = join(root, `change-${expected}.json`)
+  if (!('request_id' in change) || typeof change.request_id !== 'string') throw new Error('apply change requires request_id')
+  const requestId = change.request_id
   writeFileSync(file, JSON.stringify(change), 'utf-8')
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', file, '--expected-revision', String(expected)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  assertApplySucceeded(r, requestId, expected)
 }
 
 const intakeFact = (id: string, field: string, value: string | null, state: string, extra: object = {}) => ({

@@ -11,7 +11,7 @@
  */
 import { expect, test, type Page } from '@playwright/test'
 import { join } from 'node:path'
-import { launch, openProject, paperReady, synthProject } from './helpers'
+import { assertApplySucceeded, launch, openProject, paperReady, python, scripts, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 
 /**
@@ -36,11 +36,12 @@ function bumpRevision(root: string, expected: number): void {
   const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
   const { python, scripts } = require('./helpers') as typeof import('./helpers')
   const change = join(root, `change-bump-${expected}.json`)
-  writeFileSync(change, JSON.stringify({ request_id: `e2e:bump:${expected}`, ops: [
-    { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
-  ] }), 'utf-8')
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  const requestId = `e2e:bump:${expected}`
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
+     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
+   ] }), 'utf-8')
+   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
+  require('./helpers').assertApplySucceeded(r, requestId, expected)
 }
 
 /** 그 글자를 담은 문단을 고른다(화면 선택과 같은 경로 — `mouseup` 이 선택을 읽는다). */
@@ -432,7 +433,9 @@ test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (
   const fingerprint = probe.stdout.trim()
   expect(fingerprint.length).toBeGreaterThan(0)
   const revision = (JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }).revision
-  writeFileSync(join(root, 'change-review.json'), JSON.stringify({ request_id: 'e2e:review', ops: [
+  const requestId = 'e2e:review'
+  const change = join(root, 'change-review.json')
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
     { collection: 'reviews', value: {
       id: 'rev-01', review_kind: 'content', author_id: 'a', reviewer_id: 'b',
       target_refs: [{ collection: 'sections', id: 'sec-01' }],
@@ -440,8 +443,9 @@ test('제출 전 점검이 필요한 고침은 저장 뒤 한 줄에 보인다 (
       path: 'sections/01.md', coverage: [{ axis: 'content', locator: '전체' }]
     } }
   ] }), 'utf-8')
-  spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-review.json'),
-    '--expected-revision', String(revision)], { encoding: 'utf-8' })
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change,
+     '--expected-revision', String(revision)], { encoding: 'utf-8' })
+  assertApplySucceeded(r, requestId, revision)
 
   const { electronApp, page } = await launchEdit()
   try {
@@ -564,15 +568,16 @@ test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (
     // 고유 요청 ID 로 직접 등록한다(그러지 않으면 정본이 바뀌지 않아 이 시험이 다른 것을 잰다).
     const { spawnSync } = await import('node:child_process')
     const { writeFileSync } = await import('node:fs')
-    const { python, scripts } = await import('./helpers')
+    const requestId = `e2e:drop:${revision()}`
     writeFileSync(join(root, 'sections', '01.md'),
-      '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n남길 재배 문장.\n\n꼬리 재배 문장.\n<!-- gg:draft:end -->\n', 'utf-8')
-    writeFileSync(join(root, 'change-drop.json'), JSON.stringify({ request_id: `e2e:drop:${revision()}`, ops: [
-      { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
-    ] }), 'utf-8')
-    const dropped = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-drop.json'),
-      '--expected-revision', String(revision())], { encoding: 'utf-8' })
-    expect(dropped.status, dropped.stdout + dropped.stderr).toBe(0)
+       '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n남길 재배 문장.\n\n꼬리 재배 문장.\n<!-- gg:draft:end -->\n', 'utf-8')
+    const change = join(root, 'change-drop.json')
+    writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
+       { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
+     ] }), 'utf-8')
+    const dropped = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change,
+       '--expected-revision', String(revision())], { encoding: 'utf-8' })
+    assertApplySucceeded(dropped, requestId, revision())
     await expect(page.locator('.sameword')).toHaveCount(0, { timeout: 30_000 })
   } finally {
     await electronApp.close()
@@ -621,10 +626,11 @@ test('검토가 낡은 장은 목록 머리에 남고, 검토가 다시 유효�
   // 두 op 를 한 번에 보내면 검증에서 거절되므로(같은 apply 안의 상호 참조) 차례로 보낸다.
   const applyOps = (ops: unknown[]): void => {
     const project = JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }
-    writeFileSync(join(root, 'change-ready.json'), JSON.stringify({ request_id: `e2e:ready:${project.revision}`, ops }), 'utf-8')
+    const requestId = `e2e:ready:${project.revision}`
+    writeFileSync(join(root, 'change-ready.json'), JSON.stringify({ request_id: requestId, ops }), 'utf-8')
     const out = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', join(root, 'change-ready.json'),
-      '--expected-revision', String(project.revision)], { encoding: 'utf-8' })
-    expect(out.status, out.stdout + out.stderr).toBe(0)
+       '--expected-revision', String(project.revision)], { encoding: 'utf-8' })
+    assertApplySucceeded(out, requestId, project.revision)
   }
   const readProject = (): { sections: Record<string, Record<string, unknown>> } =>
     JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { sections: Record<string, Record<string, unknown>> }

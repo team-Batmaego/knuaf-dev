@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, openProject, python, scripts, splitReady, synthProject } from './helpers'
+import { assertApplySucceeded, launch, openProject, python, scripts, splitReady, synthProject } from './helpers'
 import { fakeCodexEnv, questionMessage, questionProject, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 import { CHAT } from '../src/renderer/src/copy'
 
@@ -205,11 +205,12 @@ test('자료 팝오버의 긴 이름은 한 줄로 줄고 가로로 넘치지 �
   const longName = '농장별_원자료_2026년_검토를_위한_긴_참고자료_이름_재배면적과_판매처_답변_정리.md'
   writeFileSync(join(root, 'sources', longName), '# 원자료\n\n재배 면적: 600평\n', 'utf-8')
   const change = join(root, 'change-long.json')
-  writeFileSync(change, JSON.stringify({ request_id: 'e2e:long', ops: [
-    { collection: 'sources', value: { id: 'src-long', path: `sources/${longName}`, claims: {} } }
-  ] }), 'utf-8')
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '1'], { encoding: 'utf-8' })
-  expect(r.status, r.stdout + r.stderr).toBe(0)
+  const requestId = 'e2e:long'
+  writeFileSync(change, JSON.stringify({ request_id: requestId, ops: [
+     { collection: 'sources', value: { id: 'src-long', path: `sources/${longName}`, claims: {} } }
+   ] }), 'utf-8')
+   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '1'], { encoding: 'utf-8' })
+  assertApplySucceeded(r, requestId, 1)
 
   const { electronApp, page } = await launch()
   try {

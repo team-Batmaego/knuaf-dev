@@ -8,7 +8,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { launch, openProject, paperReady, python, rewriteSection, scripts, synthProject } from './helpers'
+import { assertApplySucceeded, launch, openProject, paperReady, python, rewriteSection, scripts, synthProject } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 import { PAPER_PANE_COPY } from '../src/renderer/src/copy-paper'
 import { CHAT } from '../src/renderer/src/copy'
@@ -28,7 +28,7 @@ function setBody(root: string, body: string, requestId: string, expected: number
     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
   ] }), 'utf-8')
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
-  if (r.status !== 0) throw new Error(r.stdout + r.stderr)
+  assertApplySucceeded(r, requestId, expected)
 }
 
 /** 파싱된 챗 로그의 학생 메시지들 — 가짜 서버가 받은 그대로다. */
