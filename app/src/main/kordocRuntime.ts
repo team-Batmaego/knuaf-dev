@@ -19,7 +19,7 @@ import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdir
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { KordocRuntime } from './chat/kordocMcp'
-import { diag } from './diagLog'
+import { codeOf, diag } from './diagLog'
 import {
   SHIM_NAME,
   insideDir,
@@ -434,7 +434,7 @@ export function installKordocRuntime(onEvent?: (event: Progress) => void): Promi
     try {
       if (!writeKordocHostFile(dir, state.spec, state.target)) removeKordocHostFile()
     } catch (error) {
-      diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+      diag(`kordoc 안내 파일 쓰기 실패 code=${codeOf(error)}`)
       removeKordocHostFile()
     }
     return dir
@@ -513,7 +513,7 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
         try {
           if (!writeKordocHostFile(dir, state.spec, state.target)) refreshHostFileForUsableRuntime()
         } catch (error) {
-          diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+          diag(`kordoc 안내 파일 쓰기 실패 code=${codeOf(error)}`)
           refreshHostFileForUsableRuntime()
         }
       } else removeKordocHostFile()
@@ -532,7 +532,7 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
       // ② 설치 — 온라인일 때만(§4.7).
       if (!dir && typeof net?.isOnline === 'function' && net.isOnline()) kickInstall()
     })().catch((error: unknown) => {
-      diag(`kordoc 시작 작업 실패: ${String(error)}`)
+      diag(`kordoc 시작 작업 실패 code=${codeOf(error)}`)
       if (!refreshHostFileForUsableRuntime()) removeKordocHostFile()
     })
   }, delayMs)
@@ -561,7 +561,7 @@ export function withManagedKordoc(
             try {
               if (!writeKordocHostFile(dirname(managed.nodeArgs[1]), state.spec, state.target)) refreshHostFileForUsableRuntime()
             } catch (error) {
-              diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+              diag(`kordoc 안내 파일 쓰기 실패 code=${codeOf(error)}`)
               refreshHostFileForUsableRuntime()
             }
           }

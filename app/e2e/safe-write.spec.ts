@@ -428,10 +428,12 @@ test('종료 경로의 초안 flush 는 막힌 쓰기에서도 짧게 끝난다 
   expect(Date.now() - again).toBeLessThan(1000)            // 같은 이유 — 판별은 위 쓰기 시도 0회
 })
 
-test('저장 실패 진단에는 절대 경로·오류 본문이 아니라 이름과 코드만 남는다 (RT3 중요)', () => {
+test('저장 실패 파일 진단에는 경로·파일명·오류 본문 없이 코드만 남는다 (RT3·R279)', () => {
   // 검토 RT3 중요: 진단 파일은 Playwright 산출물로 CI 에 올라간다. `SafeWriteFs` 오류의
   // `message` 에는 논문 폴더 절대 경로와 토큰이 실릴 수 있었고, 예전 `fail()` 은 그 문자열과
   // `${file}`(절대 경로)을 그대로 남겼다 — 실제로 마커가 파일에 닿는 것을 검토가 관측했다.
+  // R279: 설치판 상시 파일 로그에서는 파일명도 학생 식별값일 수 있어 버린다.
+  // 기존 화면 문구는 유지하되 지속 파일 사본에 이름이 저장되지 않는 계약이다.
   const dir = mkdtempSync(join(tmpdir(), 'kd-safe-diag-'))
   const log = join(dir, 'app-log.txt')
   const before = process.env.KNUAF_APP_LOG
@@ -452,10 +454,10 @@ test('저장 실패 진단에는 절대 경로·오류 본문이 아니라 이�
     expect(text, '진단이 아예 기록되지 않았다').toContain('safeWrite:')
     expect(text, '절대 경로가 진단 파일에 닿았다').not.toContain(marker)
     expect(text, '오류 본문의 토큰이 진단 파일에 닿았다').not.toContain('MARKERTOKEN')
-    // 남아야 하는 것: 파일 이름과 오류 코드(그게 진단의 목적이다).
-    expect(text).toContain('chat.json')
+    // 지속 로그에는 오류 코드만 보존한다. 학생 파일명은 경로와 별도로도 남기지 않는다.
+    expect(text, '파일명이 지속 로그에 닿았다').not.toContain('chat.json')
     expect(text).toContain('code=EACCES')
-    // 화면 로그(stderr)도 같은 규칙이다 — 여기는 `scrub` 이 아니라 **경로를 넣지 않는 것**으로 막는다.
+    // 기존 화면 문구는 파일명을 유지한다. 절대 경로·오류 본문은 여기에도 넣지 않는다.
     expect(shown.join('\n'), '화면 로그가 절대 경로를 그대로 읽었다').not.toContain(marker)
     expect(shown.join('\n'), '화면 로그가 오류 본문을 그대로 읽었다').not.toContain('MARKERTOKEN')
     expect(shown.join('\n')).toContain('chat.json')

@@ -45,7 +45,9 @@ test('설치판 기본 경로(logs/main.log)에 기동 줄과 지워진 콘솔 �
     const text = read()
     expect(text, '콘솔 사본에 토큰이 그대로 남았다').not.toContain(TOKEN_MARK)
     expect(text, '콘솔 사본에 논문 폴더 경로가 그대로 남았다').not.toContain(PATH_MARK)
-    expect(text, '오류 코드까지 지웠다 - 로그가 진단에 쓸모없어진다').toContain('token=<값>')
+    // 값 자리는 구조 필터가 줄째 버린다 - `token=<값>` 으로 남기면 다음 값이 샌다(검토 roh-1 중요1).
+    expect(text, '토큰 필드를 살렸다 - 이름만 보고 값을 남기면 안 된다').not.toContain('token=')
+    expect(text, '경로 필드를 살렸다').not.toContain(`path=/Users`)
   } finally {
     await electronApp.close()
   }

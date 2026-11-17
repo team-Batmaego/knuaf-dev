@@ -51,7 +51,7 @@ export function diagEnabled(): boolean { return logFile() !== '' }
 const MAX_LINE = 400
 
 /** 회전 상한. 넘으면 `.1` 로 물러나고 새 파일로 시작한다. */
-const MAX_FILE_BYTES = 1024 * 1024
+export const MAX_FILE_BYTES = 1024 * 1024
 
 /**
  * 지울 것 - **값**만 지우고 진단에 필요한 모양(이름·숫자·코드)은 남긴다.
@@ -87,12 +87,24 @@ export function scrub(text: string): string {
   return out
 }
 
-/** 오류는 코드/이름만 남긴다 - `error.message` 에는 경로·토큰·본문이 들어올 수 있다. */
+/**
+ * 오류는 코드/이름만 남긴다 - `error.message` 에는 경로·토큰·본문이 들어올 수 있다.
+ *
+ * **던지지 않는다.** 이 함수는 `uncaughtExceptionMonitor` 안에서도 불린다 - accessor 가 던지는
+ * `code`/`name` 을 그대로 읽으면 감시 훅이 원래 오류를 가리고 종료 코드를 바꾼다(검토 roh-1 중요2).
+ * 읽기는 전부 `try` 안에서 하고, 실패한 자리는 건너뛴다.
+ */
 export function codeOf(error: unknown): string {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code
-  if (typeof code === 'string' && code) return code
-  const name = (error as { name?: unknown } | undefined)?.name
-  return typeof name === 'string' && name ? name : typeof error === 'string' ? 'string' : 'unknown'
+  if (typeof error === 'string') return 'string'
+  try {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
+    if (typeof code === 'string' && code) return code
+  } catch { /* 던지는 code accessor - name 으로 내려간다 */ }
+  try {
+    const name = (error as { name?: unknown } | undefined)?.name
+    if (typeof name === 'string' && name) return name
+  } catch { /* 던지는 name accessor */ }
+  return 'unknown'
 }
 
 /**
@@ -103,7 +115,7 @@ export function appendScrubbed(file: string, text: string): void {
   const line = scrub(text)
   try {
     mkdirSync(dirname(file), { recursive: true })
-    const bytes = Buffer.byteLength(line, 'utf-8')
+    const bytes = Buffer.byteLength(line, 'utf-8') + 1 // + 개행 1바이트 - 쓰는 양과 재는 양이 같아야 한다
     let size = 0
     try {
       size = statSync(file).size
