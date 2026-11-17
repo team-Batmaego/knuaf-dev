@@ -11,8 +11,7 @@ import { encodeImageSrc, localImagePath } from '../../shared/paper-image'
  * - `linkify: false` — 맨 주소를 링크로 만들지 않는다.
  * - 링크는 **열지 않는다**(GUI-12). `[글](주소)` 는 `글` 만 남기고 앵커를 만들지 않는다.
  * - 그림은 **논문 폴더 안 상대 경로만** 그린다. 원격·`file:`·`data:`·`//host`·절대 경로는 지금처럼
- *   alt 글자만 남긴다 — 종이 칸이 인터넷 주소를 부르면 "앱은 그 밖 어디에도 보내지 않아요"
- *   (PRIVACY_NOTE)가 사실이 아니게 된다.
+ *   alt 글자만 남긴다.
  *
  * 그림 주소는 여기서 **만들기만** 한다(`knuaf-img://paper/<상대 경로>`). 실제 파일 읽기·폴더 안 판정은
  * main이 한다(`main/paper-images/`) — 렌더러는 경로를 열 수 없고, 동기 렌더 계약도 그대로다.
