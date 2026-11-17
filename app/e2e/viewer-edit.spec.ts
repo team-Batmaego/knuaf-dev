@@ -568,7 +568,8 @@ test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (
     // 고유 요청 ID 로 직접 등록한다(그러지 않으면 정본이 바뀌지 않아 이 시험이 다른 것을 잰다).
     const { spawnSync } = await import('node:child_process')
     const { writeFileSync } = await import('node:fs')
-    const requestId = `e2e:drop:${revision()}`
+    const expectedRevision = revision()
+    const requestId = `e2e:drop:${expectedRevision}`
     writeFileSync(join(root, 'sections', '01.md'),
        '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n남길 재배 문장.\n\n꼬리 재배 문장.\n<!-- gg:draft:end -->\n', 'utf-8')
     const change = join(root, 'change-drop.json')
@@ -576,8 +577,8 @@ test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (
        { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } }
      ] }), 'utf-8')
     const dropped = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change,
-       '--expected-revision', String(revision())], { encoding: 'utf-8' })
-    assertApplySucceeded(dropped, requestId, revision())
+      '--expected-revision', String(expectedRevision)], { encoding: 'utf-8' })
+    assertApplySucceeded(dropped, requestId, expectedRevision)
     await expect(page.locator('.sameword')).toHaveCount(0, { timeout: 30_000 })
   } finally {
     await electronApp.close()
