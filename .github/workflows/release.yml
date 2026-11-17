@@ -315,7 +315,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
         working-directory: app
-
       # 서명 없음 — CSC_*/APPLE_* 를 넘기지 않는다(formac job 과 달리 env 자체가 없다).
       - name: 설치본 빌드
         working-directory: app
@@ -323,6 +322,9 @@ jobs:
         env:
           # 무료 중계 출입증 — 맥 job 과 같은 이유로 빌드 환경에만 넣는다.
           KNUAF_FREE_RELAY_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
+      - name: Verify staged skill against signed channel manifest
+        working-directory: app
+        run: node scripts/verify-skill-staging.mjs
 
       # 맥 job 과 같은 검사(출입증이 설치본 메인에 박혔는지, 화면 번들엔 없는지).
       # 값을 로그에 찍지 않는다 - Select-String/-Contains 의 참·거짓만 쓴다.

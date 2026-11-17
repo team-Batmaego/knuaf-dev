@@ -173,10 +173,74 @@ test('a signed channel skill matching the bundled version and files is latest at
   const changed = fixture('1.0.1', {}, entries => entries.map(e => e.name === 'scripts/example.py' ? { ...e, data: Buffer.from("print('different')\n") } : e))
   const mismatched = channelUpdater(store, () => ({ schema: 1, skill: channelSkill(changed) }))
   expect((await mismatched.updates.check()).phase).toBe('error')
+  await expect(updates.install()).rejects.toThrow(/먼저 업데이트/)
+  // A previously installed channel must not prevent the new bundle from being latest.
+  const old = fixture('1.0.0'), previousBundle = join(root, 'previous-bundle')
+  mkdirSync(previousBundle)
+  writeFileSync(join(previousBundle, 'skill.json'), JSON.stringify({ version: '0.9.0', api: 1 }))
+  const previous = new SkillStore(root, previousBundle, '0.5.1', keys)
+  previous.publish(old.verified(), old.zip)
+  previous.select('1.0.0')
+  const before = store.state()
+  expect(await updates.check()).toMatchObject({ phase: 'idle', current: '1.0.1', available: null })
+  await expect(updates.install()).rejects.toThrow(/먼저 업데이트/)
+  expect(store.state()).toEqual(before)
 })
-test('an older signed channel below the bundled version remains rejected', () => {
-  const { store } = setup('1.0.2')
-  expect(() => store.disposition(fixture('1.0.1').verified())).toThrow(/이전 판/)
+for (const previouslyInstalled of [false, true]) test(`a channel behind the upgraded bundle is latest without installation (previously installed: ${previouslyInstalled})`, async () => {
+  const { root, bundled, store: previous } = setup(previouslyInstalled ? '1.0.12' : '1.0.14')
+  const old = fixture('1.0.13')
+  if (previouslyInstalled) {
+    previous.publish(old.verified(), old.zip)
+    previous.select('1.0.13')
+    writeFileSync(join(bundled, 'skill.json'), JSON.stringify({ version: '1.0.14', api: 1 }))
+  }
+  const store = new SkillStore(root, bundled, '0.5.1', keys), before = store.state()
+  const newer = fixture('1.0.15')
+  let channel = newer
+  const { updates, requests } = channelUpdater(store, () => ({ schema: 1, skill: channelSkill(channel) }))
+  expect(await updates.check()).toMatchObject({ phase: 'available', available: '1.0.15' })
+  channel = old
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect(await updates.check()).toMatchObject({ phase: 'idle', current: '1.0.14', bundled: true, available: null })
+    await expect(updates.install()).rejects.toThrow(/먼저 업데이트/)
+  }
+  expect(() => store.disposition(old.verified())).toThrow(/이전 판/)
+  expect(() => store.publish(old.verified(), old.zip)).toThrow(/이전 판/)
+  expect(store.state()).toEqual(before)
+  expect(store.resolveSkillSource()).toBe(bundled)
+  expect(store.rollbackTarget()).toBeNull()
+  expect(requests).toEqual([CHANNEL_URL, CHANNEL_URL, CHANNEL_URL])
+})
+
+test('an upgraded bundle does not conceal replay or changed highest contents', async () => {
+  const { root, bundled, store: previous } = setup('1.0.11'), old = fixture('1.0.13')
+  previous.publish(old.verified(), old.zip)
+  previous.select('1.0.13')
+  writeFileSync(join(bundled, 'skill.json'), JSON.stringify({ version: '1.0.14', api: 1 }))
+  const store = new SkillStore(root, bundled, '0.5.1', keys), before = store.state()
+  for (const f of [fixture('1.0.12'), fixture('1.0.13', { minApp: '0.5.0' })]) {
+    const { updates, requests } = updater(store, f)
+    expect(await updates.check()).toMatchObject({ phase: 'error', available: null })
+    await expect(updates.install()).rejects.toThrow(/먼저 업데이트/)
+    expect(requests).toEqual([CHANNEL_URL])
+  }
+  expect(store.state()).toEqual(before)
+})
+
+test('an unreachable channel remains an error and clears a previously available candidate', async () => {
+  const { store } = setup('1.0.14'), f = fixture('1.0.15'), requests: string[] = []
+  let offline = false
+  const updates = new SkillUpdates(store, { config: config(), restartSidecar: async () => {}, fetch: async url => {
+    requests.push(url)
+    if (offline) throw new Error('channel unreachable')
+    return new Response(JSON.stringify({ schema: 1, skill: channelSkill(f) }))
+  } })
+  expect((await updates.check()).phase).toBe('available')
+  offline = true
+  expect(await updates.check()).toMatchObject({ phase: 'error', available: null, message: 'channel unreachable' })
+  await expect(updates.install()).rejects.toThrow(/먼저 업데이트/)
+  expect(requests).toEqual([CHANNEL_URL, CHANNEL_URL])
+  expect(store.state()).toEqual({ active: null, kept: {}, highest: null })
 })
 
 test('removing the only skill channel entry returns idle and clears its candidate', async () => {

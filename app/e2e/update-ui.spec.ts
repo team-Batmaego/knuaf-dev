@@ -44,13 +44,16 @@ test('signed local channel: install, rollback, incompatible app and offline', as
   const bundled = metadata.version
   const [major, minor, patch] = bundled.split('.').map(Number)
   const updated = `${major}.${minor}.${patch + 1}`
+  const bundledFiles = { ...files }
+  const older = patch > 0 ? `${major}.${minor}.${patch - 1}` : minor > 0 ? `${major}.${minor - 1}.0` : `${major - 1}.0.0`
   files['SKILL.md'] = Buffer.concat([files['SKILL.md'], Buffer.from('\n<!-- W3 test update -->\n')])
   files['skill.json'] = Buffer.from(JSON.stringify({ ...metadata, version: updated }))
   const archive = zip(files), url = `https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v${updated}/skill.zip`
-  let needsApp = false, offline = false, appLatest = '0.5.1'
+  let needsApp = false, offline = false, appLatest = '0.5.1', channelVersion = updated
   const server = createServer((_req, res) => {
     if (offline) { res.writeHead(503).end(); return }
-    const m = { schema: 1, name: 'knuaf-dev', version: updated, api: needsApp ? 2 : 1, minApp: '0.5.1', url, size: archive.length, sha256: sha(archive), files: Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, sha(bytes)])) }
+    const channelFiles = channelVersion === bundled ? bundledFiles : files
+    const m = { schema: 1, name: 'knuaf-dev', version: channelVersion, api: needsApp ? 2 : 1, minApp: '0.5.1', url, size: archive.length, sha256: sha(archive), files: Object.fromEntries(Object.entries(channelFiles).map(([path, bytes]) => [path, sha(bytes)])) }
     const bytes = Buffer.from(JSON.stringify(m))
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify({ schema: 1, skill: { manifest: bytes.toString('base64'), sig: sign(null, bytes, pair.privateKey).toString('base64') }, app: { latest: appLatest, page: `https://github.com/team-Batmaego/knuaf-dev/releases/tag/v${appLatest}` } }))
@@ -75,6 +78,16 @@ test('signed local channel: install, rollback, incompatible app and offline', as
     await navTo(page, '설정')
     await page.locator('dialog[open] nav').getByRole('button', { name: '앱 정보', exact: true }).click()
     const section = page.getByRole('region', { name: '업데이트' })
+    await expect(section).toContainText(`새 규칙집 ${updated}이 있어요`)
+    for (const version of [older, bundled]) {
+      channelVersion = version
+      await section.getByRole('button', { name: '지금 확인' }).click()
+      await expect(section.locator('p[role="status"]')).toHaveText('최신이에요. 지금 규칙집을 사용하고 있어요.')
+      await expect(section.getByRole('button', { name: '업데이트', exact: true })).toHaveCount(0)
+      await expect(section).toContainText(`현재 규칙집 ${bundled}`)
+    }
+    channelVersion = updated
+    await section.getByRole('button', { name: '지금 확인' }).click()
     await expect(section).toContainText(`새 규칙집 ${updated}이 있어요`)
     for (const colorScheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme })
