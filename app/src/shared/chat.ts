@@ -40,7 +40,11 @@ export interface ChatModels {
  * 둘을 한 상태로 쓰면 화면이 멀쩡히 살아 있는 앱을 두고 "종료됐어요"라고 말한다(GUI-05).
  */
 export type RunState = 'idle' | 'running' | 'permission' | 'interrupted' | 'stopped' | 'error'
-export type FreeRelayErrorKind = 'free-unavailable' | 'free-busy' | 'free-minute-limit' | 'free-daily-limit' | 'free-off' | 'free-auth' | 'free-error'
+/**
+ * `free-no-answer`는 무료 턴 종료 시 답을 확인하지 못했다는 증상이다.
+ * 마지막 도구 실행 뒤 답이 없는 경우도 포함한다. 문맥 소진 원인 확정은 아니다.
+ */
+export type FreeRelayErrorKind = 'free-unavailable' | 'free-busy' | 'free-minute-limit' | 'free-daily-limit' | 'free-off' | 'free-auth' | 'free-error' | 'free-no-answer' | 'free-context-full'
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string
   delivery?: 'pending' | 'sent' | 'uncertain'
