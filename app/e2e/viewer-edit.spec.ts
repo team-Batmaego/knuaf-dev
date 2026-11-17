@@ -12,7 +12,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { launch, openProject, paperReady, synthProject, rewriteSection } from './helpers'
+import { addSectionBody, launch, openProject, paperReady, synthProject, rewriteSection } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 import type { RpcResult, SectionRow, Status } from '../src/shared/types'
 
@@ -153,6 +153,36 @@ test('드래그 → 직접 수정 → 저장하면 그 글자만 바뀌고 "고�
     await expect(page.getByRole('button', { name: '되돌리기' })).toHaveCount(0)
     // 채팅에 "고쳤어요" 이벤트 줄이 생기지 않는다(§3-3 noteOwnEdit).
     await expect(page.locator('.chat-pane')).not.toContainText('곳을 고쳤어요')
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('직접 수정 저장에 정리 경고가 있으면 반영된 본문과 함께 경고를 보인다', async () => {
+  const root = synthProject()
+  const { electronApp, page } = await launchEdit()
+  try {
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    await electronApp.evaluate(({ ipcMain }) => {
+      type Handler = (...args: unknown[]) => Promise<RpcResult<Record<string, unknown>>>
+      const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, Handler> }
+      const real = ipc._invokeHandlers.get('rpc')!
+      ipcMain.removeHandler('rpc')
+      ipcMain.handle('rpc', async (...args: unknown[]) => {
+        const reply = await real(...args)
+        if (args[1] === 'section.edit' && reply.result) return { ...reply, result: { ...reply.result, cleanup_warning: 'release_cleanup_failed' } }
+        return reply
+      })
+    })
+    await selectText(page, '600평', '600평')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await input.fill('700평')
+    await input.press('Enter')
+    await expect(page.locator('.paperpane .sheet')).toContainText('700평', { timeout: 30_000 })
+    await expect(page.locator('.paper-fb .make-fb.warning')).toContainText('작업은 반영됐지만 정리가 남았어요.')
+    await expect(page.locator('.paper-fb .make-fb.warning')).toContainText('같은 작업을 바로 반복하지 말고')
   } finally {
     await electronApp.close()
   }
@@ -406,6 +436,40 @@ test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치�
     await list.getByRole('button', { name: '1군데 고치기' }).click()
     await expect(page.locator('.paperpane .sheet')).toContainText('경작 관리도 함께 적는다.', { timeout: 30_000 })
     await expect(page.locator('.paper-fb.edit-line[role="alert"]')).toHaveCount(0)
+  } finally {
+    await electronApp.close()
+  }
+})
+
+test('같이 고치기 저장에 정리 경고가 있으면 반영된 본문과 함께 경고를 보인다', async () => {
+  const root = synthProject()
+  const { electronApp, page } = await launchEdit()
+  try {
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    await openProject(page, root)
+    await paperReady(page, '600평')
+    await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
+    await electronApp.evaluate(({ ipcMain }) => {
+      type Handler = (...args: unknown[]) => Promise<RpcResult<Record<string, unknown>>>
+      const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, Handler> }
+      const real = ipc._invokeHandlers.get('rpc')!
+      ipcMain.removeHandler('rpc')
+      ipcMain.handle('rpc', async (...args: unknown[]) => {
+        const reply = await real(...args)
+        if (args[1] === 'section.edit_batch' && reply.result) return { ...reply, result: { ...reply.result, cleanup_warning: 'release_cleanup_failed' } }
+        return reply
+      })
+    })
+    await selectText(page, '재배 면적은 600평이다', '재배 면적')
+    await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+    const input = page.locator('.edit-slot-input')
+    await input.fill('경작 면적')
+    await input.press('Enter')
+    await page.locator('.sameword').getByRole('button', { name: '같이 고치기' }).click()
+    await page.locator('.sameword-list').getByRole('button', { name: '1군데 고치기' }).click()
+    await expect(page.locator('.paperpane .sheet')).toContainText('경작 관리도 함께 적는다.', { timeout: 30_000 })
+    await expect(page.locator('.paper-fb .make-fb.warning')).toContainText('작업은 반영됐지만 정리가 남았어요.')
+    await expect(page.locator('.paper-fb .make-fb.warning')).toContainText('같은 작업을 바로 반복하지 말고')
   } finally {
     await electronApp.close()
   }
