@@ -387,6 +387,47 @@ function editResult(revision: number) {
     reviews_staled: 0, recheck_before_submit: false, edit_id: `edit-${revision}`
   }
 }
+for (const kind of ['one', 'batch'] as const) {
+  test(`Windows — ${kind} 저장 응답 전 시작한 폴링은 자체 고침을 채팅 사건으로 만들지 않는다`, async () => {
+    const committed = Promise.withResolvers<unknown>()
+    const listing = Promise.withResolvers<unknown>()
+    const started = Promise.withResolvers<void>()
+    let hash = 'before'
+    const model = { knuaf: { call: async (method: string) => {
+      if (method === 'project.sections') return { result: [sectionRow('sec-win', hash)] }
+      if (method === 'section.read_all') return { result: [{ id: 'sec-win', title: '장', path: 'sec-win.md', draft: hash }] }
+      if (method === 'section.edits') { started.resolve(); return { result: await listing.promise } }
+      return { result: await committed.promise }
+    } } }
+    await withWindow(model, async () => {
+      useProject.setState({ root: '/win', sections: null, events: [] })
+      await useProject.getState().loadSections()
+      useProject.setState({ events: [] })
+      const params = kind === 'one'
+        ? { kind, id: 'sec-win', expected_revision: 1, before_block: 'before', after_block: 'student' }
+        : { kind, expected_revision: 1, edits: [{ section_id: 'sec-win', before_block: 'before', after_block: 'student' }] }
+      const saving = useEdits.getState().save('/win', params)
+      hash = 'student' // Disk commit is visible, but its response is held.
+      const polling = useProject.getState().loadSections()
+      committed.resolve({ ...editResult(2), draft_hash: hash, draft_hashes: { 'sec-win': hash } })
+      await started.promise
+      await flush()
+      try {
+        expect(useProject.getState().events).toEqual([])
+      } finally {
+        listing.resolve({ edits: [], notices: [] })
+        await saving
+        await polling
+      }
+      expect(useProject.getState().sections?.find((row) => row.id === 'sec-win')?.draft_hash).toBe('student')
+      expect(useProject.getState().events).toEqual([])
+      hash = 'assistant'
+      await useProject.getState().loadSections()
+      expect(useProject.getState().events.map((event) => event.sectionId)).toEqual(['sec-win'])
+      useProject.setState({ root: null, sections: null, events: [] })
+    })
+  })
+}
 
 for (const kind of ['one', 'batch'] as const) {
   test(`저장 완료 경계 — ${kind} 성공을 알리기 전에 재확인 목록을 반영한다`, async () => {

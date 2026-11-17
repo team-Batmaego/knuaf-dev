@@ -11,8 +11,14 @@
  */
 import { expect, test, type Page } from '@playwright/test'
 import { join } from 'node:path'
-import { launch, openProject, paperReady, synthProject } from './helpers'
+import { readFileSync } from 'node:fs'
+import { launch, openProject, paperReady, synthProject, rewriteSection } from './helpers'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
+import type { RpcResult, SectionRow, Status } from '../src/shared/types'
+
+type ViewerEditProbe = { reads: number; sent: Record<string, unknown> | null }
+type ViewerEditHost = typeof globalThis & { __viewerEdit: ViewerEditProbe }
+type SavePollHost = typeof globalThis & { __savePoll: { held: boolean; statusReads: number; release: () => void } }
 
 /**
  * 도우미 연결이 **확인된** 상태로 앱을 띄운다. 막대(`.selbar`)는 연결이 끊겨 있으면 서지 않는다 —
@@ -83,6 +89,7 @@ test('드래그 → 직접 수정 → 저장하면 그 글자만 바뀌고 "고�
   const root = synthProject()
   const { electronApp, page } = await launchEdit()
   try {
+    await page.clock.install()
     await openProject(page, root)
     await paperReady(page, '600평')
 
@@ -104,7 +111,38 @@ test('드래그 → 직접 수정 → 저장하면 그 글자만 바뀌고 "고�
     await expect(input).toBeFocused()
 
     await input.fill('700평')
+    // Hold the real committed edit response and explicitly run the renderer's polling timer.
+    await electronApp.evaluate(({ ipcMain }) => {
+      type Handler = (...args: unknown[]) => Promise<unknown>
+      // Electron's private registry is the existing IPC interception seam.
+      const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, Handler> }
+      const real = ipc._invokeHandlers.get('rpc')!
+      const gate = Promise.withResolvers<void>()
+      const state = { held: false, statusReads: 0, release: gate.resolve }
+      const host = globalThis as SavePollHost
+      host.__savePoll = state
+      ipcMain.removeHandler('rpc')
+      ipcMain.handle('rpc', async (...args: unknown[]) => {
+        const reply = await real(...args)
+        if (args[1] === 'section.edit') { state.held = true; await gate.promise }
+        if (args[1] === 'project.status' && state.held) state.statusReads++
+        return reply
+      })
+    })
     await input.press('Enter')
+    await expect.poll(() => electronApp.evaluate(() => {
+      const host = globalThis as SavePollHost
+      return host.__savePoll.held
+    })).toBe(true)
+    await page.clock.runFor(2100)
+    await expect.poll(() => electronApp.evaluate(() => {
+      const host = globalThis as SavePollHost
+      return host.__savePoll.statusReads
+    })).toBeGreaterThan(0)
+    await electronApp.evaluate(() => {
+      const host = globalThis as SavePollHost
+      host.__savePoll.release()
+    })
 
     // 저장 → 편집칸이 닫히고 종이에 새 글자가 보인다.
     await expect(page.locator('.edit-slot-input')).toHaveCount(0, { timeout: 30_000 })
@@ -247,10 +285,12 @@ test('고친 부분 보기를 켜면 직접 수정이 흐려지고 이유를 말
   }
 })
 
-test('저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다', async () => {
+for (const externalBody of [false, true]) {
+test(`저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다 (${externalBody ? '같은 장 바깥 수정' : '개정만 변경'})`, async () => {
   const root = synthProject()
   const { electronApp, page } = await launchEdit()
   try {
+    await page.clock.install()
     await openProject(page, root)
     await paperReady(page, '600평')
     await selectText(page, '600평', '600평')
@@ -258,23 +298,75 @@ test('저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다'
     const input = page.locator('.edit-slot-input')
     await expect(input).toBeVisible({ timeout: 15_000 })
     await input.fill('700평')
+    // Observe the real IPC payload; advance the actual renderer poll before pressing save.
+    const initial = await electronApp.evaluate(async ({ ipcMain }, folder) => {
+      type Handler = (...args: unknown[]) => Promise<unknown>
+      // Electron's existing private handler registry is the in-process test seam.
+      const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, Handler> }
+      const real = ipc._invokeHandlers.get('rpc')!
+      const status = await real({}, 'project.status', { root: folder }) as RpcResult<Status>
+      const sections = await real({}, 'project.sections', { root: folder }) as RpcResult<SectionRow[]>
+      if (!status.result || !sections.result) throw new Error('initial project snapshot failed')
+      const probe: ViewerEditProbe = { reads: 0, sent: null }
+      const host = globalThis as ViewerEditHost
+      host.__viewerEdit = probe
+      ipcMain.removeHandler('rpc')
+      ipcMain.handle('rpc', async (...args: unknown[]) => {
+        if (args[1] === 'section.edit') probe.sent = args[2] as Record<string, unknown>
+        const reply = await real(...args)
+        if (args[1] === 'project.sections') probe.reads++
+        return reply
+      })
+      return { revision: status.result.revision, hash: sections.result.find((row) => row.id === 'sec-01')!.draft_hash }
+    }, root)
 
     // 그사이 정본이 앞서 나간다 — 저장은 `stale_view` 로 거절되고 원고는 그대로다.
-    bumpRevision(root, 1)
+    if (externalBody) {
+      rewriteSection(root, { body: '농장A의 재배 면적은 900평이다. 바깥에서 고친 원고다.', expected: initial.revision })
+    } else bumpRevision(root, initial.revision)
+    // rewriteSection rebinds sec-01 to sections/sec-01.md; follow the canonical row, not its old path.
+    const currentPath = await electronApp.evaluate(async ({ ipcMain }, folder) => {
+      type Handler = (...args: unknown[]) => Promise<unknown>
+      // Same in-process Electron handler registry used above.
+      const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, Handler> }
+      const real = ipc._invokeHandlers.get('rpc')!
+      const reply = await real({}, 'project.sections', { root: folder }) as RpcResult<SectionRow[]>
+      const row = reply.result?.find((section) => section.id === 'sec-01')
+      if (!row) throw new Error('current canonical section missing')
+      return row.path
+    }, root)
+    const beforeSave = readFileSync(join(root, currentPath), 'utf-8')
+    expect(beforeSave).toContain(externalBody ? '900평' : '600평')
+    const readsBeforePoll = await electronApp.evaluate(() => {
+      const host = globalThis as ViewerEditHost
+      return host.__viewerEdit.reads
+    })
+    await page.clock.runFor(2100)
+    await expect.poll(() => electronApp.evaluate(() => {
+      const host = globalThis as ViewerEditHost
+      return host.__viewerEdit.reads
+    })).toBeGreaterThan(readsBeforePoll)
+    await page.clock.runFor(32)
     await input.press('Enter')
 
     const failure = page.locator('.paper-fb.edit-line[role="alert"]')
     await expect(failure).toContainText('그사이 글이 바뀌었어요', { timeout: 30_000 })
-    // 원고는 편집칸의 글자로 덮이지 않았다 — 디스크의 원고는 600평 그대로이고,
-    // 편집칸은 열린 채 남아 학생이 다시 시도할 수 있다(§3-5: 원고는 그대로).
-    const fs = await import('node:fs')
-    const { join } = await import('node:path')
-    expect(fs.readFileSync(join(root, 'sections', '01.md'), 'utf-8')).toContain('600평')
+    expect(await electronApp.evaluate(() => {
+      const host = globalThis as ViewerEditHost
+      return host.__viewerEdit.sent
+    })).toMatchObject({
+      expected_revision: initial.revision, expected_draft_hash: initial.hash
+    })
+    // A refused save must preserve the entire external canonical draft, byte for byte.
+    const disk = readFileSync(join(root, currentPath), 'utf-8')
+    expect(disk).toBe(beforeSave)
+    expect(disk).not.toContain('700평')
     await expect(page.locator('.edit-slot-input')).toHaveValue('700평')
   } finally {
     await electronApp.close()
   }
 })
+}
 
 test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치기로 한 번에 저장된다', async () => {
   const { addSectionBody } = await import('./helpers')
