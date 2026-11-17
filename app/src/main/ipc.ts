@@ -572,11 +572,19 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('settings:get', () => loadSettings())
   ipcMain.handle('settings:set', async (_e, patch) => {
     const provider = patch?.provider_choice?.provider
-    if (currentRoot && provider && provider !== loadSettings().provider_choice?.provider) {
-      await consumePendingDesign(chat.lanesStore(), currentRoot, provider, async pending => {
+    const root = currentRoot
+    const visit = currentVisit
+    const assertCurrent = (): void => {
+      if (currentRoot !== root || currentVisit !== visit) throw new Error('논문 폴더가 바뀌어 주 모델을 바꾸지 않았어요.')
+    }
+    if (root && provider && provider !== loadSettings().provider_choice?.provider) {
+      await consumePendingDesign(chat.lanesStore(), root, provider, async pending => {
+        assertCurrent()
         if (!pending.model) throw new Error('예약 모델이 없어요.')
-        await chat.setModel(currentRoot, provider, { model: pending.model, effort: pending.effort })
+        await chat.setModel(root, provider, { model: pending.model, effort: pending.effort }, assertCurrent)
+        assertCurrent()
       })
+      assertCurrent()
     }
     const s = saveSettings(patch); onRecentsChanged(); return s
   })

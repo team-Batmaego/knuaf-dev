@@ -800,8 +800,10 @@ export class ChatService {
    * 선택은 마지막 것이 이긴다: 호출마다 번호를 올리고, 목록을 기다리는 동안 더 새 선택이
    * 들어왔으면 저장하지 않고 **지금 설정값**을 돌려준다. 해제(null)는 목록을 기다리지 않으므로
    * 느린 선택 검증이 그 뒤에 끝나도 해제를 되살리지 못한다(검토 MC1-03).
+   * `beforeStore`는 예약 소비 호출자의 폴더 방문 검사다. 모델 목록 await 뒤 실제 설정 쓰기
+   * 직전에 검사하므로 다른 폴더로 이동한 요청은 전역 모델 선택을 바꾸지 않는다.
    */
-  async setModel(root: string | null, provider: Provider, choice: ModelChoice | null): Promise<ModelChoice | null> {
+  async setModel(root: string | null, provider: Provider, choice: ModelChoice | null, beforeStore?: () => void): Promise<ModelChoice | null> {
     return agentActivity.run(async () => {
     const seq = (this.selectionSeq.get(provider) ?? 0) + 1
     this.selectionSeq.set(provider, seq)
@@ -818,6 +820,7 @@ export class ChatService {
     const picked = effectiveModelChoice(choice, list.models)
     if (!picked) throw new Error('이 계정에서 쓸 수 없는 모델이에요. 목록을 다시 불러와 주세요.')
     if (choice.effort && !picked.effort) throw new Error('이 모델은 그 생각 깊이를 지원하지 않아요.')
+    beforeStore?.()
     this.opts.storeModelChoice?.(provider, picked)
     return picked
     })
