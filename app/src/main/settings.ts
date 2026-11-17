@@ -55,7 +55,7 @@ function normalisePermissionMode(raw: unknown): Settings['permission_mode'] {
 function normaliseProviderChoice(raw: unknown): Settings['provider_choice'] {
   if (!raw || typeof raw !== 'object') return null
   const p = (raw as { provider?: unknown }).provider
-  if (p !== 'codex' && p !== 'claude') return null
+  if (p !== 'codex' && p !== 'claude' && p !== 'free') return null
   const at = (raw as { at?: unknown }).at
   return { provider: p, at: typeof at === 'string' ? at : '' }
 }

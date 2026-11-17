@@ -302,7 +302,7 @@ function isStoredProgress(v: unknown): v is StoredProgress {
   if (typeof v !== 'object' || v === null) return false
   const o = v as Record<string, unknown>
   if (typeof o.messageId !== 'string' || o.messageId === '') return false
-  if (o.provider !== 'codex' && o.provider !== 'claude') return false
+  if (o.provider !== 'codex' && o.provider !== 'claude' && o.provider !== 'free') return false
   if (typeof o.at !== 'string' || Number.isNaN(Date.parse(o.at))) return false
   if (typeof o.block !== 'object' || o.block === null) return false
   const b = o.block as Record<string, unknown>

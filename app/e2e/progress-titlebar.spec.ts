@@ -93,7 +93,9 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     await page.getByTitle('이 논문의 도우미').click()
     await expect(page.getByText(/AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요/)).toBeVisible({ timeout: 30_000 })
     await page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
-    await expect(page.getByText(/ChatGPT는 Claude와 나눈 대화를 볼 수 없어요/)).toBeVisible({ timeout: 30_000 })
+    const warning = page.getByRole('status').filter({ hasText: 'ChatGPT는 다른 AI와 나눈 대화를 볼 수 없어요.' })
+    await expect(warning).toBeVisible({ timeout: 30_000 })
+    await expect(warning).toHaveText('ChatGPT는 다른 AI와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.')
     // 대화가 Codex로 바뀌었더라도...
     await expect(page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
     // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.

@@ -48,12 +48,8 @@ extraResources:
   # 앱은 resources/codex/vendor/<target>/bin 을 PATH 앞에 둔다(src/main/agent.ts).
   - from: resources/codex
     to: codex
-  # 번들 안 파일명은 ASCII만 쓴다. 한글 이름은 APFS 에 NFC 로 저장되는데 dmg 볼륨(HFS+)이
-  # NFD 로 바꾸고, 서명은 NFC 로 봉인돼 있어 codesign 이 같은 파일을 "added"이자 "missing"
-  # 으로 본다 — "a sealed resource is missing or invalid". zip 은 멀쩡하고 dmg 만 깨진다.
-  # 공증까지 가면 이건 실행 자체가 막히는 문제가 된다.
-  #
-  # 겸사겸사 학생에게 필요한 것만 싣는다. 나머지 docs/ 는 저장소 문서다.
+  # 학생 안내서는 저장소 문서와 분리해 ASCII 배포 이름을 유지한다.
+  # 스킬 원본의 한글 파일명·manifest는 그대로 싣고, 아래 dmg.filesystem으로 봉인을 보존한다.
   - from: ../docs/학생용-사용안내.pdf
     to: docs/student-guide.pdf
   - from: ../docs/학생용-사용안내.html
@@ -119,6 +115,9 @@ nsis:
   uninstallDisplayName: 창업논문 도우미 ${version}
   include: build/installer.nsh
 dmg:
+  # HFS+는 NFC 리소스 이름을 NFD로 바꿔 서명 봉인을 깨뜨린다.
+  # APFS는 원본 이름을 보존한다(스킬 파일명·manifest 해시를 바꾸지 않는다).
+  filesystem: APFS
   title: 창업논문 도우미
   iconSize: 96
   window:
