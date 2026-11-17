@@ -14,12 +14,21 @@ import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
+import { installMainLog } from './mainLog'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
 // 표시이름이 바뀌며 생긴 옛 userData 폴더에서 설정을 이어 받는다(userdata.ts).
 // 테스트(KNUAF_USER_DATA 지정)에서는 돌리지 않는다.
 else migrateUserDataDir(app.getPath('userData'), LEGACY_USERDATA_NAMES.map((n) => join(app.getPath('appData'), n)))
+
+/**
+ * 파일 로그 배선. 설치판에는 콘솔이 없어 `console.error`·`diag()` 가 전부 증발했다
+ * (inv-logs/RESULT.md) - 이제 `app.getPath('logs')/main.log` 에 남는다. `KNUAF_APP_LOG` 는
+ * 시험·임시 진단용 덮어쓰기로 남는다. 아래 `diagEnabled()` 가드보다 **먼저** 불러야
+ * 기동 단계(`stage=boot`)와 heartbeat 가 파일에 남는다.
+ */
+installMainLog(app)
 
 let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
