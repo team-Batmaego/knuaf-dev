@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { createServer } from 'node:http'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { launch, navTo, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, userDataWith } from './fixtures/fake-codex'
@@ -29,31 +29,29 @@ test('signed local channel: install, rollback, incompatible app and offline', as
   test.skip(process.platform !== 'darwin', 'macOS page action; Windows installer is not run in this test')
   const pair = generateKeyPairSync('ed25519')
   const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
-  const files: Record<string, Buffer> = {}
-  const collect = (dir: string, prefix = ''): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const name = prefix ? `${prefix}/${entry.name}` : entry.name
-      if (entry.isDirectory()) collect(join(dir, entry.name), name)
-      else if (entry.isFile()) files[name] = readFileSync(join(dir, entry.name))
-    }
-  }
-  // 서명할 묶음은 정식 동봉 입력(`pnpm build`의 stage:skill 산출물)을 쓴다.
-  // 저장소 안 스킬 사본은 P0-2b에서 제거됐고, 이 시험은 build 뒤에 돈다.
-  collect(resolve(__dirname, '..', 'resources', 'skill'))
+  const skillRoot = resolve(__dirname, '..', 'resources', 'skill')
+  const installManifest = JSON.parse(readFileSync(join(skillRoot, 'install-manifest.json'), 'utf8')) as { schema: string; files: Record<string, string> }
+  const files = Object.fromEntries(Object.keys(installManifest.files).map(path => [path, readFileSync(join(skillRoot, path))])) as Record<string, Buffer>
+  const signatureFiles = (payload: Record<string, Buffer>, manifest: Buffer): Record<string, string> => ({
+    ...Object.fromEntries(Object.entries(payload).map(([path, bytes]) => [path, sha(bytes)])),
+    'install-manifest.json': sha(manifest)
+  })
+  const bundledFiles = signatureFiles(files, readFileSync(join(skillRoot, 'install-manifest.json')))
   const metadata = JSON.parse(files['skill.json'].toString('utf8')) as { version: string; api: number }
   const bundled = metadata.version
   const [major, minor, patch] = bundled.split('.').map(Number)
   const updated = `${major}.${minor}.${patch + 1}`
-  const bundledFiles = { ...files }
   const older = patch > 0 ? `${major}.${minor}.${patch - 1}` : minor > 0 ? `${major}.${minor - 1}.0` : `${major - 1}.0.0`
   files['SKILL.md'] = Buffer.concat([files['SKILL.md'], Buffer.from('\n<!-- W3 test update -->\n')])
   files['skill.json'] = Buffer.from(JSON.stringify({ ...metadata, version: updated }))
-  const archive = zip(files), url = `https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v${updated}/skill.zip`
+  installManifest.files = Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, sha(bytes)]))
+  const updatedInstallManifest = Buffer.from(JSON.stringify(installManifest, null, 2) + '\n')
+  const archive = zip({ ...files, 'install-manifest.json': updatedInstallManifest }), updatedFiles = signatureFiles(files, updatedInstallManifest), url = `https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v${updated}/skill.zip`
   let needsApp = false, offline = false, appLatest = '0.5.1', channelVersion = updated
   const server = createServer((_req, res) => {
     if (offline) { res.writeHead(503).end(); return }
-    const channelFiles = channelVersion === bundled ? bundledFiles : files
-    const m = { schema: 1, name: 'knuaf-dev', version: channelVersion, api: needsApp ? 2 : 1, minApp: '0.5.1', url, size: archive.length, sha256: sha(archive), files: Object.fromEntries(Object.entries(channelFiles).map(([path, bytes]) => [path, sha(bytes)])) }
+    const channelFiles = channelVersion === bundled ? bundledFiles : updatedFiles
+    const m = { schema: 1, name: 'knuaf-dev', version: channelVersion, api: needsApp ? 2 : 1, minApp: '0.5.1', url, size: archive.length, sha256: sha(archive), files: channelFiles }
     const bytes = Buffer.from(JSON.stringify(m))
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify({ schema: 1, skill: { manifest: bytes.toString('base64'), sig: sign(null, bytes, pair.privateKey).toString('base64') }, app: { latest: appLatest, page: `https://github.com/team-Batmaego/knuaf-dev/releases/tag/v${appLatest}` } }))
