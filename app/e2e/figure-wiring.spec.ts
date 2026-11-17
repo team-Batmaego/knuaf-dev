@@ -15,6 +15,7 @@ import { readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { ChatService } from '../src/main/chat/service'
+import { providerEnv } from '../src/main/free/provider'
 import type { AgentConnection, AgentOptions } from '../src/main/chat/contracts'
 import { startFigureChannel } from '../src/main/figures'
 import { figurePaths } from '../src/main/figures/storage'
@@ -82,7 +83,7 @@ test('① 그림 env 는 메인 엔진에만 얹힌다', async () => {
   expect(global[0].env.KNUAF_FIGURE_HOME, '로그인·상태 확인에는 그림 자리가 없다').toBeUndefined()
 })
 
-test('① 고리가 없으면 env 는 넘긴 객체 그대로다', async () => {
+test('① 고리가 없으면 env 는 공급자 env 그대로다(그림 자리 없음)', async () => {
   const { root, bundle } = scratch('noenv')
   const baseEnv: NodeJS.ProcessEnv = { ...process.env, KNUAF_TEST_BASE: '1' }
   let captured: AgentOptions | undefined
@@ -92,7 +93,9 @@ test('① 고리가 없으면 env 는 넘긴 객체 그대로다', async () => {
     connectionFactory: (_provider, options) => { captured = options; return fake() }
   })
   try { await svc.send(root, 'codex', '안녕하세요', 'r-plain') } finally { await svc.close() }
-  expect(captured?.env, '고리가 없으면 같은 객체').toBe(baseEnv)
+  // v0.7부터 공급자 env(providerEnv)가 free 중계 열쇠를 빼느라 늘 복사본이다 — 같은 객체가 아니라
+  // 같은 내용을 본다. 고리가 없으면 그 위에 아무것도 얹지 않는다.
+  expect(captured?.env, '고리가 없으면 공급자 env 그대로').toEqual(providerEnv('codex', baseEnv))
   expect(Object.keys(captured!.env).some((k) => k.startsWith('KNUAF_FIGURE'))).toBe(false)
 })
 

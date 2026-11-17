@@ -60,7 +60,7 @@ export function flushTokenRecords(): Promise<void> {
   return chain
 }
 
-export function appendTokenRecord(root: string, provider: 'claude' | 'codex', entry: TokenEntry): void {
+export function appendTokenRecord(root: string, provider: 'claude' | 'codex' | 'free', entry: TokenEntry): void {
   if (!root) return
   // 느린 기록이 쌓여 대화를 밀지 않도록, 줄이 차면 이번 기록은 버린다.
   if (pending >= MAX_PENDING) return

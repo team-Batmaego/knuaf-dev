@@ -23,8 +23,9 @@ export const MENUS = {
   reportNoFolder: '신고는 논문을 연 뒤 대화에서 할 수 있어요.'
 } as const
 
-export type SettingsSection = 'helper' | 'folder' | 'trouble' | 'tools' | 'python' | 'info'
+export type SettingsSection = 'helper' | 'lanes' | 'folder' | 'trouble' | 'tools' | 'python' | 'info'
 export function settingsSectionForFocus(focus: string | null): SettingsSection {
+  if (focus?.startsWith('lanes:')) return 'lanes'
   if (focus?.startsWith('tools:')) return 'tools'
   if (focus?.startsWith('fix:')) return 'trouble'
   if (focus?.startsWith('folder:')) return 'folder'

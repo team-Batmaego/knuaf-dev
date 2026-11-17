@@ -42,6 +42,8 @@ async function sendText(page: Page, text: string): Promise<void> {
   await expect(composer).toBeVisible({ timeout: 30_000 })
   await expect(send).toHaveAttribute('aria-label', CHAT.send, { timeout: 30_000 })
   await composer.fill(text)
+  // enabled가 잠깐 보였어도 의존성 준비가 시작될 수 있다. 준비/쓰기 완료 상태를 먼저 기다린다.
+  await expect(page.locator('.chat-zone .zline.wait')).toHaveCount(0, { timeout: 30_000 })
   await expect(send).toBeEnabled({ timeout: 30_000 })
   await send.click()
 }
@@ -223,3 +225,87 @@ test('목록의 다시 확인 요청 — 그 건이 확인 전으로 돌아가 �
     await electronApp.close()
   }
 })
+
+for (const input of ['click', 'Enter', 'prep+write'] as const) {
+  test(`준비 중 ${input} 전송은 막히고 준비 완료 뒤 사용자 입력만 전달된다`, async () => {
+    const dir = scratch()
+    const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
+    const root = synthProject()
+    const { electronApp, page } = await launch({ env })
+    type Probe = { held: boolean; writeHeld: boolean; release: () => void; releaseWrite: () => void }
+    type Host = typeof globalThis & { __recheckPrep: Probe }
+    try {
+      // 실제 의존성을 먼저 준비한다. 이 회귀는 설치 속도가 아니라 재진단 중 입력 유실을 잠근다.
+      await openProject(page, root)
+      await electronApp.evaluate(({ ipcMain }) => {
+        type Handler = (...args: unknown[]) => Promise<unknown>
+        // Electron 공개 타입에는 기존 시험이 쓰는 내부 handler registry가 없다.
+        const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, Handler> }
+        const real = ipc._invokeHandlers.get('rpc')!
+        const gate = Promise.withResolvers<void>()
+        const writeGate = Promise.withResolvers<void>()
+        const probe: Probe = { held: false, writeHeld: false, release: gate.resolve, releaseWrite: writeGate.resolve }
+        const host = globalThis as Host // 이 evaluate 호출이 아래 probe를 직접 소유한다.
+        host.__recheckPrep = probe
+        ipcMain.removeHandler('rpc')
+        ipcMain.handle('rpc', async (...args: unknown[]) => {
+          const reply = await real(...args)
+          if (args[1] === 'deps.doctor') { probe.held = true; await gate.promise }
+          if (args[1] === 'section.edit') { probe.writeHeld = true; await writeGate.promise }
+          return reply
+        })
+      })
+      await openProject(page, root, undefined, { preparation: 'pending' })
+      await expect.poll(() => electronApp.evaluate(() => {
+        const host = globalThis as Host // 위 evaluate가 만든 실행별 probe.
+        return host.__recheckPrep.held
+      })).toBe(true)
+      const composer = page.locator(COMPOSER)
+      await composer.fill('준비가 끝나면 이 문장을 보내 줘')
+      const button = page.getByRole('button', { name: CHAT.send, exact: true })
+      if (input === 'prep+write') {
+        await selectText(page, '600평', '600평')
+        await page.locator('.selbar').getByRole('button', { name: '직접 수정' }).click()
+        await page.locator('.edit-slot-input').fill('700평')
+        await page.locator('.edit-slot-input').press('Enter')
+        await expect.poll(() => electronApp.evaluate(() => {
+          const host = globalThis as Host // 이 시험이 만든 gate 상태.
+          return host.__recheckPrep.writeHeld
+        })).toBe(true)
+        try {
+          await expect(button).toBeDisabled()
+        } finally {
+          await electronApp.evaluate(() => {
+            const host = globalThis as Host // 이 시험이 만든 gate 상태.
+            host.__recheckPrep.releaseWrite()
+          })
+        }
+        await expect(page.locator('.paper-fb.edit-line')).toContainText('고쳤어요')
+      }
+      await expect(button).toBeDisabled()
+      await composer.press('Enter')
+      expect(userTexts(root)).toEqual([])
+      await electronApp.evaluate(() => {
+        const host = globalThis as Host // 위 evaluate가 만든 실행별 probe.
+        host.__recheckPrep.release()
+      })
+      await expect(button).toBeEnabled()
+      expect(userTexts(root)).toEqual([])
+      if (input === 'Enter') await composer.press('Enter')
+      else await button.click()
+      if (input === 'prep+write') {
+        await expect.poll(() => userTexts(root)).toHaveLength(1)
+        expect(userTexts(root)[0]).toContain('준비가 끝나면 이 문장을 보내 줘')
+        expect(userTexts(root)[0]).toContain(RECHECK_MARK)
+      } else await expect.poll(() => userTexts(root)).toEqual(['준비가 끝나면 이 문장을 보내 줘'])
+      await expect(composer).toHaveValue('')
+    } finally {
+      await electronApp.evaluate(() => {
+        const host = globalThis as Partial<Host> // 초기 설치 실패도 정리한다.
+        host.__recheckPrep?.release()
+        host.__recheckPrep?.releaseWrite()
+      })
+      await electronApp.close()
+    }
+  })
+}

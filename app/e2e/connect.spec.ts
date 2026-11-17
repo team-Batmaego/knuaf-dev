@@ -398,7 +398,7 @@ test('한 공급자의 로그인 시작은 다른 공급자의 폴링·시도 �
     expect(clock.timers.size, 'GPT 로그인의 감시가 생기지 않았다').toBe(1)
     const claudeRun = store.login('claude')
     await new Promise((r) => setTimeout(r, 0))
-    expect(useConnect.getState().loggingIn, '두 로그인이 동시에 진행 중이어야 한다').toEqual({ codex: true, claude: true })
+    expect(useConnect.getState().loggingIn, '두 로그인이 동시에 진행 중이어야 한다').toEqual({ codex: true, claude: true, free: false })
     expect(clock.timers.size, 'Claude 시작이 GPT 감시를 지웠다').toBe(2)
 
     ipc.release('codex', { result: true })
