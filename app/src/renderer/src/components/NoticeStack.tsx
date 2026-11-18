@@ -90,7 +90,10 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set())
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
   // 생산자는 내용이 바뀌면 identity도 바꾸므로, 직전 읽기의 표시 자리와 비교한다.
-  const previousCards = useRef<{ root: string; keys: string[] } | null>(null)
+  // **폴더별로** 보관한다 — 한 목록만 들면 A→B→A 왕복 뒤 A 의 직전 목록을 잃어 바뀐 카드가 안 펼쳐진다
+  // (R280-02). 접기·펼치기 집합은 이미 `[root, cardKey]` 로 폴더에 묶여 있다.
+  const previousCards = useRef<Map<string, string[]> | null>(null)
+  const cardsByRoot = previousCards.current ??= new Map<string, string[]>()
   // X 로 닫은 **그 다시 보기 요청**의 열쇠 — 요청이 끝났으니 목록에 남아 있어도 다시 그리지 않는다.
   // 요청은 "열쇠가 `forceOpenKeys` 에 없었다가 새로 들어옴"이다(아래 render-phase 비교).
   const [consumed, setConsumed] = useState<readonly string[]>([])
@@ -140,9 +143,9 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
       const keys = next.notices.filter((notice) => notice.choicePolicy === 'none')
         .sort((a, b) => Number(!!b.blocking) - Number(!!a.blocking))
         .slice(0, 3).map((notice) => JSON.stringify([root, notice.cardKey]))
-      const previous = previousCards.current
-      const changed = previous?.root === root ? keys.filter((key, index) => previous.keys[index] !== undefined && previous.keys[index] !== key && !previous.keys.includes(key)) : []
-      previousCards.current = { root, keys }
+      const previous = cardsByRoot.get(root)
+      const changed = previous ? keys.filter((key, index) => previous[index] !== undefined && previous[index] !== key && !previous.includes(key)) : []
+      cardsByRoot.set(root, keys)
       if (changed.length > 0) {
         setExpanded((prev) => new Set([...prev, ...changed]))
         setFolded((prev) => { const nextFolded = new Set(prev); changed.forEach((key) => nextFolded.delete(key)); return nextFolded })

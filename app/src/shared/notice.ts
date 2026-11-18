@@ -171,10 +171,15 @@ function readItems(raw: unknown): { items: NoticeItem[]; omitted: number } {
 
 function readChoices(raw: unknown, card: boolean): NoticeChoice[] {
   if (!Array.isArray(raw)) return []
+  /**
+   * 계약 §8-1 — 카드 단추는 `fix`·`proceed`·`later` 셋뿐이고 일반 알림은 `direct_tell`·`footnote` 둘뿐이다.
+   * 섞여 들어온 값은 버린다: 고르면 무엇이 기록될지 계약이 말하지 않는다(R280-03).
+   */
+  const allowed: readonly NoticeActionValue[] = card ? ['fix', 'proceed', 'later'] : ['direct_tell', 'footnote']
   const out: NoticeChoice[] = []
   for (const entry of raw) {
     const choice = record(entry)
-    const value = choice ? (card && (choice.value === 'fix' || choice.value === 'proceed' || choice.value === 'later') ? choice.value : choiceValue(choice.value)) : null
+    const value = choice ? allowed.find((item) => choice.value === item) ?? null : null
     if (!choice || !value) continue // 모르는 값은 그리지 않는다 — 누르면 무엇이 기록될지 말할 수 없다.
     if (out.some((c) => c.value === value)) continue
     out.push({ value, label: oneLine(choice.label, LABEL_MAX) || value })
@@ -191,7 +196,14 @@ function readNotice(raw: unknown, documentProjectId: string): NoticeRow | null {
   // 열쇠가 없으면 "닫으면 다시 안 뜸"을 지킬 수 없다 — 그런 알림은 띄우지 않는다.
   if (!title || !identity || !projectId) return null
   const { items, omitted } = readItems(notice.items)
+  // 재무 카드 판정 — `choice_policy:"none"` + 재무 종류 + **유효한 `card_key`**(계약 §8-4).
+  // 접기 키는 `card_key` 로만 갈리므로, 없거나 비었거나 문자열이 아니면 카드마다 같은 키를 나눠 쓰게 된다
+  // (한 장을 접으면 다른 카드도 접힌다 — R280-01). 그런 행은 카드로도 일반 알림으로도 그리지 않는다:
+  // 일반 알림으로 떨어뜨리면 선택지가 `direct_tell`·`footnote` 로 재해석되고 X 가 생겨 계약 밖이 된다.
   const card = notice.choice_policy === 'none' && (notice.kind === 'finance_hole_figure' || notice.kind === 'finance_hole_deficit')
+  const rawCardKey = card ? notice.card_key : undefined
+  const cardKey = typeof rawCardKey === 'string' ? rawCardKey.trim() : ''
+  if (card && !cardKey) return null
   return {
     key: noticeKey(projectId, identity),
     title,
@@ -204,7 +216,7 @@ function readNotice(raw: unknown, documentProjectId: string): NoticeRow | null {
     dismissible: card ? false : notice.dismissible !== false,
     ...(card ? {
       choicePolicy: 'none' as const,
-      cardKey: typeof notice.card_key === 'string' ? notice.card_key : '',
+      cardKey,
       blocking: notice.blocking === true,
       talkMessage: typeof notice.talk_message === 'string' ? notice.talk_message : '',
       proceedMessage: typeof notice.proceed_message === 'string' ? notice.proceed_message : ''

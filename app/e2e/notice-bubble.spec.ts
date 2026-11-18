@@ -91,6 +91,7 @@ function one(raw: unknown): NoticeRow {
 interface Paint {
   onDismiss?: (key: string) => void
   onChoose?: (value: string) => void
+  onCardAction?: (value: string) => void
   onConfirm?: () => void | Promise<void>
   onFootnote?: () => void
   forceOpen?: boolean
@@ -1223,6 +1224,122 @@ test('기본 접힌 둘째 카드의 내용 변경도 펼친다', async () => {
     cards = ['a', 'b2'].map(makeCard)
     await render({ ...props, reloadKey: 1 })
     expect(visibleChoices(byClass(host, 'notice-card')[1])).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+})
+
+/* ── 04: Roh 1회째 검토 지적(R280-01·02·03)의 재현 시험 ────────────────────────
+ * 셋 다 **고치기 전 코드에서 빨강**이어야 한다:
+ * ① card_key 가 없거나 빈 재무 카드가 그려지고, 같은 폴더의 그런 행들이 `[root, ""]` 접기 키 하나를
+ *    나눠 썼다(R280-01).
+ * ② previousCards 가 폴더별이 아니라 A→B→A 왕복 뒤 A 의 직전 목록을 잃어, 바뀐 둘째 카드가 접힌 채였다
+ *    (R280-02).
+ * ③ 카드 판정이 `direct_tell`·`footnote` 까지 통과시켜 카드에 일반 알림 선택지가 섞였다(R280-03).
+ */
+
+interface CardDoc { schema: string; project_id: string; notices: Array<Record<string, unknown>> }
+
+/** 재무 카드 한 행 — `card_key` 만 갈아 끼워 시험한다(계약 §8 모양 그대로). */
+function cardRow(patch: Record<string, unknown>): CardDoc {
+  return {
+    schema: 'knuaf.notices/1',
+    project_id: 'project',
+    notices: [{
+      project_id: 'project', notice_identity: 'identity', kind: 'finance_hole_figure',
+      choice_policy: 'none', blocking: true, dismissible: false, title: '확인해 주세요',
+      choices: [{ value: 'fix', label: '고치기' }, { value: 'later', label: '나중에' }], items: [],
+      ...patch
+    }]
+  }
+}
+
+test('재무 카드는 유효한 card_key 가 없으면 그리지 않는다', () => {
+  // 없음 · 빈 문자열 · 공백 · 문자열 아님 — 전부 버린다.
+  for (const cardKey of [undefined, '', '   ', '\n\t', 0, 7, null, true, {}, [], ['a']]) {
+    expect(document(cardRow(cardKey === undefined ? {} : { card_key: cardKey })), String(cardKey)).toEqual([])
+  }
+  // 유효한 열쇠는 앞뒤 공백을 잘라 접기 키로 쓴다.
+  expect(one(cardRow({ card_key: '  a1  ' })).cardKey).toBe('a1')
+})
+
+test('card_key 없는 재무 카드가 여럿이어도 하나도 남지 않는다 — 접기 키를 나눠 쓰지 않는다', () => {
+  const base = cardRow({}).notices[0]
+  const missing = [1, 2, 3].map((n) => ({ ...base, title: `누락 ${n}` }))
+  const rows = document({ schema: 'knuaf.notices/1', project_id: 'project', notices: [...missing, { ...base, title: '정상', card_key: 'ok' }] })
+  // 누락 행은 카드로도 일반 알림으로도 서지 않는다(일반 알림으로 떨어지면 X·다른 선택지가 생긴다).
+  expect(rows.map((row) => row.title)).toEqual(['정상'])
+  expect(rows[0].cardKey).toBe('ok')
+  expect(rows.every((row) => row.choicePolicy === 'none')).toBe(true)
+})
+
+test('카드 선택지는 fix·proceed·later 뿐이다 — 일반 알림 값이 섞여도 버린다', () => {
+  const mixed = one(cardRow({
+    card_key: 'a1',
+    choices: [
+      { value: 'direct_tell', label: '교수님께 직접' },
+      { value: 'fix', label: '고치기' },
+      { value: 'footnote', label: '각주로' },
+      { value: 'proceed', label: '이대로 진행' },
+      { value: 'bogus', label: '모르는 값' },
+      { value: 'later', label: '나중에' },
+      { value: 'fix', label: '고치기(중복)' }
+    ]
+  }))
+  expect(mixed.choices.map((choice) => choice.value)).toEqual(['fix', 'proceed', 'later'])
+  expect(mixed.choices[0].label).toBe('고치기')
+
+  // 허용 값이 하나도 없으면 단추 없이 **카드 행은 남는다**(막는 알림을 숨기지 않는다).
+  const legacyOnly = one(cardRow({
+    card_key: 'a2',
+    choices: [{ value: 'direct_tell', label: '직접' }, { value: 'footnote', label: '각주' }]
+  }))
+  expect(legacyOnly.choices).toEqual([])
+  expect(legacyOnly.choicePolicy).toBe('none')
+  expect(painted(legacyOnly, { onCardAction: () => {} })).not.toContain('class="notice-choice"')
+})
+
+test('폴더를 왕복해 돌아오면 바뀐 둘째 카드를 펼치고, 같은 내용이면 접힌 채로 둔다', async () => {
+  await withHostDom(async (document, act) => {
+    const makeCard = (key: string): NoticeRow => one({
+      schema: 'knuaf.notices/1', project_id: 'project', notices: [{
+        project_id: 'project', notice_identity: key, card_key: key, kind: 'finance_hole_figure',
+        choice_policy: 'none', blocking: true, dismissible: false, title: key,
+        choices: [{ value: 'fix', label: '고치기' }, { value: 'later', label: '나중에' }], items: []
+      }]
+    })
+    const folderA = `${ROOT}/A`
+    const folderB = `${ROOT}/B`
+    let cardsA = ['a1', 'b1']
+    const cardsB = ['x1']
+    const api = stackApi({
+      read: async (at) => ({ result: { notices: (at === folderB ? cardsB : cardsA).map(makeCard), dismissed: [] } })
+    })
+    const props = (at: string) => ({ root: at, api })
+    const { host, root, render } = await paintStack(document, act, props(folderA))
+    const displayed = () => byClass(host, 'notice-card')
+    const titles = () => byClass(host, 'notice-title').map((node) => node.textContent)
+    const open = () => walk(displayed()[1], (node) => node.tagName === 'BUTTON')[0]
+
+    // A: 둘째 카드를 [나중에]로 접는다.
+    await act(async () => pressChoice(open()))
+    await act(async () => pressChoice(visibleChoices(displayed()[1])[1]))
+    expect(visibleChoices(displayed()[1])).toHaveLength(0)
+
+    // A 를 떠나 있는 동안 A 의 둘째 카드가 바뀐다 — 돌아왔을 때 펼쳐야 한다.
+    cardsA = ['a1', 'b2']
+    await render(props(folderB))
+    expect(displayed()).toHaveLength(1)
+    await render(props(folderA))
+    expect(titles()).toEqual(['a1', 'b2'])
+    expect(visibleChoices(displayed()[1])).toHaveLength(2)
+
+    // 다시 접고 같은 내용으로 왕복하면 접힌 채다 — 왕복만으로 펼쳐지지 않는다.
+    await act(async () => pressChoice(visibleChoices(displayed()[1])[1]))
+    expect(visibleChoices(displayed()[1])).toHaveLength(0)
+    await render(props(folderB))
+    await render(props(folderA))
+    expect(titles()).toEqual(['a1', 'b2'])
+    expect(visibleChoices(displayed()[1])).toHaveLength(0)
     await act(async () => root.unmount())
   })
 })
