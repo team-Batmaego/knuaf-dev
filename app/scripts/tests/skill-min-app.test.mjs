@@ -5,6 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { jsonBytes, VERSION } from '../compose-skill.mjs'
 import { SKILL_MIN_APP, signedChannel } from '../sign-skill.mjs'
 import { checkSkillReleaseWorkflow } from './check-skill-workflow.mjs'
@@ -46,7 +47,7 @@ function fixture(t) {
   writeFileSync(join(overlay, 'overlay.json'),
     jsonBytes({ schema: 1, name: 'knuaf-dev', remove: ['tests/', 'install-manifest.json'], append: null }))
   const expectedOverlay = execFileSync(process.execPath, ['--input-type=module', '-e',
-    `const { overlayHash } = await import(${JSON.stringify(composer)});` +
+    `const { overlayHash } = await import(${JSON.stringify(pathToFileURL(composer).href)});` +
     `process.stdout.write(overlayHash(${JSON.stringify(overlay)}))`], { encoding: 'utf8' })
 
   const channelPath = join(root, 'channel.json')
