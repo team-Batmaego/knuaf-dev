@@ -93,6 +93,15 @@ function sameJson(a: unknown, b: unknown): boolean {
   return false
 }
 
+/**
+ * 승인 요청 `_meta` 에서 이름을 아는 키 — 실물 0.164.0 다섯 개와 옛 모양·위험 플래그 셋.
+ * 진단은 이 목록에 없는 키를 **개수로만** 남긴다(미지 키 이름에 경로·자유문이 실릴 수 있다).
+ */
+const KNOWN_META_KEYS: readonly string[] = [
+  'codex_approval_kind', 'persist', 'tool_description', 'tool_params', 'tool_params_display',
+  'tool_name', 'codex_requires_user_input', 'codex_sensitive_action'
+]
+
 function readFileChanges(value: unknown): PermissionFileChange[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined
   const changes: PermissionFileChange[] = []
@@ -629,9 +638,11 @@ export class CodexConnection implements AgentConnection {
         // schema and codex_approval_kind=mcp_tool_call. Never accept arbitrary MCP forms.
         // 승인 대상은 `_meta` 가 아니라 같은 턴의 진행 중 `mcpToolCall` 에서 특정한다(0.164.0 실물).
         const verdict = this.mcpApprovalVerdict(rpc, p ?? {})
-        // 키 이름·판정만 남긴다 — 값·경로·학생 글은 남기지 않는다.
-        const metaKeys = Object.keys(plainObject(p?._meta) ?? {}).sort()
-        diag(`codex-mcp-approval verdict=${verdict.allow ? 'accept' : 'decline'} reason=${verdict.reason} meta_keys=${metaKeys.join(',')}`)
+        // 개수만 남긴다 — 미지 키의 **이름**에도 자유문·경로가 실릴 수 있어 이름 자체를 쓰지 않는다.
+        const metaKeys = Object.keys(plainObject(p?._meta) ?? {})
+        const unknownKeys = metaKeys.filter((key) => !KNOWN_META_KEYS.includes(key)).length
+        diag(`codex-mcp-approval verdict=${verdict.allow ? 'accept' : 'decline'} reason=${verdict.reason}`
+          + ` meta_key_count=${metaKeys.length} unknown_key_count=${unknownKeys}`)
         // One call only: no persist/session metadata and no student-config writes.
         rpc.send({ id, result: { action: verdict.allow ? 'accept' : 'decline', content: null, _meta: null } })
       } else if (method === 'item/permissions/requestApproval') {
@@ -709,12 +720,19 @@ export class CodexConnection implements AgentConnection {
     if (meta.codex_requires_user_input === true || meta.codex_sensitive_action === true) return no('risk-flag')
     const params = plainObject(meta.tool_params)
     if (!params) return no('no-params')
-    const named = typeof meta.tool_name === 'string' && meta.tool_name ? meta.tool_name : undefined
+    // 이름이 있으면 **키가 있는지**와 **값이 맞는지**를 나눈다: 키가 없으면 생략(실물 0.164.0),
+    // 키가 있는데 빈 문자열·비문자열이면 불일치다 — 생략으로 봐 주면 이름 위조가 통한다.
+    const hasName = Object.hasOwn(meta, 'tool_name')
+    const named = typeof meta.tool_name === 'string' && meta.tool_name !== '' ? meta.tool_name : undefined
+    if (hasName && !named) return no('bad-name')
+    // 이름으로 후보를 **먼저** 줄이지 않는다 — 같은 인자의 다른 도구 두 건이 이름 하나로 1건이 되면
+    // 어느 호출을 승인하는지 정해지지 않은 채 정책만 통과한다(검토 차단 1).
     const matches = [...this.mcpCalls.values()].filter((call) => call.thread === p.threadId && call.turn === p.turnId
-      && call.server === p.serverName && sameJson(call.args, params) && (!named || call.tool === named))
+      && call.server === p.serverName && sameJson(call.args, params))
     if (matches.length === 0) return no('no-call')
     if (matches.length > 1) return no('ambiguous-call')
     const call = matches[0]
+    if (named && call.tool !== named) return no('name-mismatch')
     const verdict = mcpPolicy(this.options.root, MCP_TOOL_PREFIX + call.tool, params)
     if (verdict?.behavior !== 'allow') return no(verdict ? 'policy' : 'not-mcp')
     return { allow: true, reason: named ? 'call+named' : 'call' }
