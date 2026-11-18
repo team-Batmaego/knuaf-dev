@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, openProject, synthProject } from './helpers'
+import { expectConnected, launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 import type { ChatSnapshot } from '../src/shared/chat'
 
@@ -22,46 +22,64 @@ async function scene(models = highModels, colorScheme: 'light' | 'dark' = 'light
   return { ...app, dir, userData }
 }
 
+test('폴더를 고르기 전 주 모델과 추론 단계를 고르고 첫 전송에 적용한다', async () => {
+  const dir = scratch()
+  const log = join(dir, 'turns.jsonl')
+  const { electronApp, page } = await scene(highModels, 'light', { FAKE_CODEX_TURN_LOG: log })
+  const root = synthProject({ withContent: false })
+  try {
+    await expectConnected(page)
+    const chip = page.getByTitle('이 논문의 도우미')
+    await chip.click()
+    const popup = page.locator('.composer-model-host .popover')
+    await expect(popup.getByRole('switch', { name: /Team/ })).toBeDisabled()
+    await popup.locator('[data-submenu="true"]').first().click()
+    await popup.getByRole('button', { name: 'Sol', exact: true }).click()
+    await popup.getByRole('button', { name: 'high', exact: true }).click()
+    await expect(chip).toContainText('Sol · high')
+    await page.keyboard.press('Escape')
+    await openProject(page, root)
+    await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('첫 요청')
+    await page.getByRole('button', { name: '보내기', exact: true }).click()
+    await expect.poll(() => existsSync(log) ? readFileSync(log, 'utf8').trim() : '').toBe(JSON.stringify({ model: 'gpt-sol', effort: 'high' }))
+  } finally { await electronApp.close() }
+})
+
 for (const tier of ['low', 'high'] as const) {
   for (const theme of ['light', 'dark'] as const) {
-    test(`${tier} 계정 · ${theme}: 추천은 이용 가능한 모델만 보이고 1440·1024 창 안에 맞는다`, async ({}, info) => {
+    test(`${tier} 계정 · ${theme}: 모델과 추천 배치가 1440·1024 창 안에 맞는다`, async ({}, info) => {
       const { electronApp, page } = await scene(tier === 'low' ? lowModels : highModels, theme)
       const root = synthProject()
       seedChat(root, [{ id: 'a0', role: 'assistant', text: 'Ⅰ. 머리말을 저장했어요.', at: new Date().toISOString() }])
       try {
         await openProject(page, root)
         const chip = page.getByTitle('이 논문의 도우미')
-        await expect(chip).toContainText('연결됨')
+        await expectConnected(page)
         for (const width of [1440, 1024]) {
           await electronApp.evaluate(({ BrowserWindow }, w) => BrowserWindow.getAllWindows()[0].setBounds({ width: w, height: 900 }), width)
           await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width)
           await chip.click()
           const popup = page.locator('.composer-model-host .popover')
-          const rows = popup.locator('.model-option')
-          await expect(rows).toHaveCount(tier === 'low' ? 3 : 5)
-          await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
-          if (tier === 'low') {
-            await expect(rows.filter({ hasText: 'Terra' })).toContainText('설계 · 자료 찾기 · 검토(새 대화)에 추천')
-            await expect(rows.filter({ hasText: 'Luna' })).toContainText('글쓰기 · 반복 작업에 추천')
-            await expect(rows.filter({ hasText: 'Sol' })).toHaveCount(0)
-          } else {
-            await expect(rows.filter({ hasText: 'Sol' })).toContainText('설계 · 글쓰기에 추천')
-            await expect(rows.filter({ hasText: 'Astra' })).toContainText('자료 찾기 · 검토(새 대화)에 추천')
-            await expect(rows.filter({ hasText: 'Terra' })).toContainText('반복 작업에 추천')
-            await expect(rows.filter({ hasText: 'Luna' }).locator('.model-recommend')).toHaveCount(0)
-          }
-          await expect(popup).toContainText('검토는 새 대화로 하세요.')
+          await popup.locator('[data-submenu="true"]').first().click()
+          await expect(popup.getByRole('button', { name: 'Terra', exact: true })).toBeVisible()
+          await expect(popup.getByRole('button', { name: 'Luna', exact: true })).toBeVisible()
+          if (tier === 'low') await expect(popup.getByRole('button', { name: 'Sol', exact: true })).toHaveCount(0)
+          else await expect(popup.getByRole('button', { name: 'Sol', exact: true })).toBeVisible()
+          await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
+          await expect(popup.getByRole('button', { name: '모델 목록 새로고침', exact: true })).toHaveCount(0)
+          await popup.getByRole('button', { name: '주 모델', exact: true }).click()
+          await popup.getByRole('button', { name: '추천 배치', exact: true }).click()
+          await expect(popup.getByRole('button', { name: /ChatGPT 낮은 플랜만/ })).toContainText('주 모델')
+          await expect(popup.getByRole('button', { name: /ChatGPT 높은 플랜만/ })).toContainText('검토')
           const bounds = await popup.boundingBox()
           expect(bounds).not.toBeNull()
           expect(bounds!.x).toBeGreaterThanOrEqual(0)
           expect(bounds!.y).toBeGreaterThanOrEqual(0)
           expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width)
           expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(900)
-          // 마지막 안내도 스크롤로 도달할 수 있어야 한다.
-          const footer = popup.getByText('앱은 AI를 팔지 않아요. 내 구독 계정을 써요.')
+          const footer = popup.getByRole('button', { name: /둘 다 낮은 플랜/ })
           await footer.scrollIntoViewIfNeeded()
           await expect(footer).toBeVisible()
-          await popup.locator('.pop-scroll').evaluate((el) => { el.scrollTop = 0 })
           const captureDir = process.env.KNUAF_CHIP_CAPTURE_DIR
           if (captureDir) mkdirSync(captureDir, { recursive: true })
           await page.screenshot({ path: captureDir ? join(captureDir, `chip-${tier}-${theme}-${width}.png`) : info.outputPath(`chip-${width}.png`) })
@@ -74,7 +92,7 @@ for (const tier of ['low', 'high'] as const) {
   }
 }
 
-test('폴더 없이 모델·깊이를 고르고 다음 메시지부터 같은 대화에서 바꾸거나 해제한다', async () => {
+test('폴더 없이 모델·깊이를 고르고 다음 메시지부터 같은 대화에서 바꾼다', async () => {
   const dir = scratch()
   const log = join(dir, 'turns.jsonl')
   const { electronApp, page } = await scene(highModels, 'light', {
@@ -97,14 +115,14 @@ test('폴더 없이 모델·깊이를 고르고 다음 메시지부터 같은 �
   }
   try {
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
-    await popup.getByRole('button', { name: /^Sol / }).click()
-    await expect(popup.getByRole('button', { name: /^Sol / })).toHaveAttribute('aria-pressed', 'true')
-    await popup.getByLabel('생각 깊이').selectOption('high')
-    await expect(chip).toContainText('Sol · 생각 깊이 높게')
-    await expect(popup.getByLabel('생각 깊이')).toBeEnabled()
+    await popup.locator('[data-submenu="true"]').first().click()
+    await popup.getByRole('button', { name: 'Sol', exact: true }).click()
+    await expect(popup.getByRole('button', { name: 'Sol', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await popup.getByRole('button', { name: 'high', exact: true }).click()
+    await expect(chip).toContainText('Sol · high')
     await page.keyboard.press('Escape')
     // 폴더 선택으로 모델 설정이 바뀌지 않는다. 이후 실제 IPC 전송값을 확인한다.
     await openProject(page, root)
@@ -115,30 +133,25 @@ test('폴더 없이 모델·깊이를 고르고 다음 메시지부터 같은 �
     expect(turns()).toEqual([{ model: 'gpt-sol', effort: 'high' }])
     const first = snapshot()
     await chip.click()
-    await popup.getByRole('button', { name: /^Terra / }).click()
-    await expect(chip).toContainText('Terra · 생각 깊이 기본')
+    await popup.locator('[data-submenu="true"]').first().click()
+    await popup.getByRole('button', { name: 'Terra', exact: true }).click()
+    await expect(chip).toContainText('Terra')
     await page.keyboard.press('Escape')
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('이어서 써 주세요')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await waitForTurn('이어서 써 주세요', 2)
-    expect(turns()).toEqual([{ model: 'gpt-sol', effort: 'high' }, { model: 'gpt-terra', effort: 'medium' }])
+    expect(turns()).toEqual([{ model: 'gpt-sol', effort: 'high' }, { model: 'gpt-terra', effort: 'high' }])
     await chip.click()
-    await popup.getByRole('button', { name: /안 고름/ }).click()
-    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
+    await popup.locator('[data-submenu="true"]').first().click()
+    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
     await page.keyboard.press('Escape')
-    await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('계정 기본으로 이어 주세요')
-    await page.getByRole('button', { name: '보내기', exact: true }).click()
-    await waitForTurn('계정 기본으로 이어 주세요', 3)
-    expect(turns()).toEqual([
-      { model: 'gpt-sol', effort: 'high' }, { model: 'gpt-terra', effort: 'medium' }, { model: 'gpt-default', effort: 'medium' }
-    ])
     const last = snapshot()
     expect(last.sessionId).toBe(first.sessionId)
     expect(last.sessionId).toBeTruthy()
   } finally { await electronApp.close() }
 })
 
-test('다른 공급자 모델은 칩 목록에도 추천에도 나오지 않는다 (DQA-01)', async () => {
+test('다른 공급자 모델은 주 모델 목록에 나오지 않는다 (DQA-01)', async () => {
   const mixed = [
     ...highModels,
     option('anthropic/claude-sonnet-4', 'Claude Sonnet 4'),
@@ -148,61 +161,49 @@ test('다른 공급자 모델은 칩 목록에도 추천에도 나오지 않는�
   const { electronApp, page } = await scene(mixed)
   try {
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
-    const rows = popup.locator('.model-option')
-    // OpenAI 네 개 + '안 고름'. 접두어 모델 두 개는 목록에 없다.
-    await expect(rows).toHaveCount(5)
+    await popup.locator('[data-submenu="true"]').first().click()
+    const rows = popup.locator('.pop-row[aria-pressed]')
+    await expect(rows).toHaveCount(4)
     await expect(rows.filter({ hasText: 'Claude Sonnet 4' })).toHaveCount(0)
-    // Terra is recommended for repeat in the high row; the foreign Terra alias remains filtered.
     await expect(rows.filter({ hasText: 'Terra' })).toHaveCount(1)
-    await expect(rows.filter({ hasText: 'Terra' })).toContainText('반복 작업에 추천')
   } finally { await electronApp.close() }
 })
 
-test('실측 순서의 같은 별칭 여러 세대 중 최신 모델에만 추천한다', async () => {
+test('여러 세대 모델을 주 모델 목록에서 각각 고를 수 있다', async () => {
   const names = ['GPT-6-Astra', 'GPT-6-Luna', 'GPT-6.1-Sol', 'GPT-5.5', 'GPT-5.6-Sol', 'GPT-5.6-Terra', 'GPT-5.6-Luna', 'GPT-6-Sol', 'GPT-6.1 Terra']
   const { electronApp, page } = await scene(names.map((name) => option(name, name)))
   try {
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await chip.click()
-    const rows = page.locator('.composer-model-host .popover .model-option')
-    await expect(rows).toHaveCount(10)
-    for (const [name, purpose] of [
-      ['GPT-6-Astra', '자료 찾기 · 검토(새 대화)에 추천'],
-      ['GPT-6.1-Sol', '설계 · 글쓰기에 추천'],
-      ['GPT-6.1 Terra', '반복 작업에 추천']
-    ]) {
-      const row = rows.filter({ has: page.getByText(name, { exact: true }) })
-      await expect(row).toContainText(purpose)
-      await expect(row.locator('.model-recommend')).toHaveCount(1)
-    }
-    for (const name of ['GPT-5.5', 'GPT-5.6-Sol', 'GPT-5.6-Terra', 'GPT-5.6-Luna', 'GPT-6-Sol']) {
-      await expect(rows.filter({ has: page.getByText(name, { exact: true }) }).locator('.model-recommend')).toHaveCount(0)
-    }
+    const popup = page.locator('.composer-model-host .popover')
+    await popup.locator('[data-submenu="true"]').first().click()
+    await expect(popup.locator('.pop-row[aria-pressed]')).toHaveCount(names.length)
+    for (const name of names) await expect(popup.getByRole('button', { name, exact: true })).toBeVisible()
   } finally { await electronApp.close() }
 })
 
 
-test('빈 목록도 기본값으로 둘 수 있고 Claude도 자기 모델 목록을 따로 받는다 (U1)', async () => {
+test('빈 목록에서 계정을 바꿔도 안 고름 줄을 표시하지 않는다 (U1)', async () => {
   const { electronApp, page } = await scene([])
   try {
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
-    await expect(popup).toContainText('이 계정에서 고를 수 있는 모델이 없어요.')
-    await expect(popup.getByLabel('생각 깊이')).toBeDisabled()
+    await popup.locator('[data-submenu="true"]').first().click()
+    await expect(popup.locator('.pop-row[aria-pressed]')).toHaveCount(0)
+    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
+    await popup.getByRole('button', { name: '주 모델', exact: true }).click()
+    await popup.getByRole('button', { name: 'AI 회사·로그인', exact: true }).click()
     await popup.getByRole('button', { name: 'Claude로 바꾸기' }).click()
-    await expect(chip).toContainText('Claude')
+    await expectConnected(page, 'claude')
     await chip.click()
-    // [U1] Claude 도 모델 칩을 갖는다 — ChatGPT 추천표(별칭 표)는 Claude 목록에 붙지 않고,
-    // 계정이 알려 준 모델만 그대로 보인다. writeFakeClaude 는 대화 통로가 없어 목록은 비어 있다.
-    await expect(popup).toContainText('Claude 모델')
-    await expect(popup.locator('.model-recommend')).toHaveCount(0)
-    await expect(popup.getByRole('button', { name: /안 고름/ })).toContainText('내 Claude 설정을 그대로 써요')
+    await popup.locator('[data-submenu="true"]').first().click()
+    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
   } finally { await electronApp.close() }
 })
 
@@ -212,13 +213,14 @@ test('목록 오류는 재조회로 복구하고 실패 중에도 계정 기본 
     const draft = page.getByRole('textbox', { name: '답변을 입력하세요' })
     await draft.fill('쓰던 문장은 남겨 주세요')
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
     await expect(popup.getByRole('alert')).toContainText('모델 목록을 불러오지 못했어요.')
-    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
-    await popup.getByRole('button', { name: '다시 확인', exact: true }).click()
-    await expect(popup.locator('.model-option')).toHaveCount(5)
+    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
+    await popup.getByRole('button', { name: '모델 목록 새로고침', exact: true }).click()
+    await expect(popup.getByRole('button', { name: '모델 목록 새로고침', exact: true })).toHaveCount(0)
+    await popup.locator('[data-submenu="true"]').first().click()
+    await expect(popup.locator('.pop-row[aria-pressed]')).toHaveCount(4)
     await expect(popup.getByRole('alert')).toHaveCount(0)
     await page.keyboard.press('Escape')
     await expect(draft).toHaveValue('쓰던 문장은 남겨 주세요')
@@ -235,19 +237,20 @@ test('긴 모델 목록은 제목줄 아래에서 시작하고 처음과 끝에 
     await openProject(page, root)
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
-    await expect(popup.locator('.model-option')).toHaveCount(25)
+    await popup.locator('[data-submenu="true"]').first().click()
+    const rows = popup.locator('.pop-row[aria-pressed]')
+    await expect(rows).toHaveCount(24)
+    await rows.first().scrollIntoViewIfNeeded()
+    await expect(rows.first()).toBeVisible()
     const captureDir = process.env.KNUAF_CHIP_CAPTURE_DIR
     if (captureDir) mkdirSync(captureDir, { recursive: true })
     await page.screenshot({ path: captureDir ? join(captureDir, 'long-models.png') : info.outputPath('long-models.png') })
-    const [header, panel, note] = await Promise.all([
-      page.locator('.titlebar').boundingBox(), popup.boundingBox(),
-      popup.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.').boundingBox()
+    const [header, panel] = await Promise.all([
+      page.locator('.titlebar').boundingBox(), popup.boundingBox()
     ])
-    expect(header && panel && note).toBeTruthy()
+    expect(header && panel).toBeTruthy()
     expect(panel!.y).toBeGreaterThanOrEqual(header!.y + header!.height)
-    expect(note!.y).toBeGreaterThanOrEqual(panel!.y)
-    const footer = popup.getByText('앱은 AI를 팔지 않아요. 내 구독 계정을 써요.')
-    await footer.scrollIntoViewIfNeeded()
-    await expect(footer).toBeVisible()
+    await rows.last().scrollIntoViewIfNeeded()
+    await expect(rows.last()).toBeVisible()
   } finally { await electronApp.close() }
 })

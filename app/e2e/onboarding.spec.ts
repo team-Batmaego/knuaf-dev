@@ -157,7 +157,7 @@ test('대화 연결 확인이 실패하면 칩에서 다시 확인한다 (A1-02)
     await page.getByRole('button', { name: '다시 확인' }).first().click()
     await expect(row(page, 'codex')).toContainText('연결됐어요', { timeout: 15000 })
     await page.keyboard.press('Escape')
-    await expectCodexConnected(page)
+    await expect(page.getByTitle('이 논문의 도우미')).not.toContainText('확인 실패', { timeout: 15000 })
   } finally { await electronApp.close() }
 })
 

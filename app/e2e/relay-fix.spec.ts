@@ -263,18 +263,15 @@ test('[차단 2] Codex 담당은 승인 심사자를 앱이 명시하고 돌려�
 })
 
 /**
- * [중요 1] 승인된 주문이 엔진 `consented:false` 때문에 거절되면 안 된다.
- *
- * 동의는 **앱 저장소**가 정본이다(설계 §3.5 규칙 1). 러너는 `options.account()`(앱 값)로 동의를
- * 판정하고, `availability()` 값은 **사용량·계정** 비교에만 쓴다. 그래서 지문 비교에서
- * `consented` 를 빼고(엔진은 그 값을 모른다), 동의는 앱 값으로만 본다.
+ * [중요 1] 승인된 주문은 엔진/앱의 구 consented 값과 무관하게 실행한다.
+ * r12j 뒤 동의 저장·검사는 없다. 계정·사용량 지문 검사는 그대로 유지한다.
  */
-test('[중요 1] 앱이 동의한 주문은 엔진 availability 의 consented:false 때문에 막히지 않는다', async () => {
+test('[중요 1] 승인된 주문은 엔진 availability 의 consented:false 때문에 막히지 않는다', async () => {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-fix-consent-')))
   const root = join(base, 'thesis'), stateDir = join(base, 'private')
   mkdirSync(root); writeFileSync(join(root, 'project.json'), '{"original":true}')
-  // research 가 Claude 담당인 줄 — 이 시험은 엔진 availability 의 consented:false 만 본다.
-  const plan = planFromRow('claude-high-codex-low')
+  // 새 표에서도 Claude가 맡는 writing으로 계정 생산자와 주문 회사를 일치시킨다.
+  const plan = planFromRow('claude-high')
   const models = ['opus', 'sonnet', 'haiku'].map(model => ({ model, name: model, efforts: ['low', 'high', 'medium', 'xhigh', 'max'] }))
   const baseOptions = { binary: 'fake', root, skill: '/fake/skill', env: {}, openExternal: async () => {} }
   // 실제 배선과 같은 생산자를 쓴다 — 앱과 엔진이 같은 값을 만들고, 다른 것은 `consented` 뿐이다.
@@ -299,12 +296,10 @@ test('[중요 1] 앱이 동의한 주문은 엔진 availability 의 consented:fa
   }
   const runner = new JobRunner(options)
   const id = 'fix-consent'
-  runner.enqueue(root, { schema: 1, id, lane: 'research', task: 'Read the source and write the result',
+  runner.enqueue(root, { schema: 1, id, lane: 'writing', task: 'Read the source and write the result',
     inputs: [{ sourceId: 'project', path: join(root, 'project.json'), hash: sha256(readFileSync(join(root, 'project.json'))), section: 'one' }],
-    research: { research_type: '생산량', questions: [{ id: 'Q1', target: '생산량', acceptance: '공식 통계' }],
-      routes: [{ doc: 'research-sources.md', id_or_name: 'KOSIS', url: 'https://kosis.kr/' }], keywords: ['생산량'], output_file: 'result.md' },
     outputs: ['result.md'], contractVersion: 'role-v1',
-    company: plan.research!.company, model: plan.research!.model!, effort: plan.research!.effort }, owner, 'author')
+    company: plan.writing!.company, model: plan.writing!.model!, effort: plan.writing!.effort }, owner, 'author')
   await runner.runQueued()
   expect({ status: runner.records()[0]?.status, reason: runner.records()[0]?.reason }).toEqual({ status: 'completed', reason: undefined })
   expect(runs).toBe(1)

@@ -12,7 +12,7 @@ async function expectConnected(page: Page): Promise<void> {
     await chip.click()
     await page.locator('.composer-model-host .popover').getByRole('button', { name: 'AI 회사·로그인' }).click()
   }
-  await expect(page.locator('.composer-model-host .popover [data-provider="codex"]')).toContainText('연결됐어요', { timeout: 30000 })
+  await expect(page.locator('.composer-model-host .popover [data-provider="codex"]')).toContainText('연결됐어요', { timeout: 10000 })
   if (!alreadyOpen) await page.keyboard.press('Escape')
 }
 

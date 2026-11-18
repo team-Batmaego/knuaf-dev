@@ -38,6 +38,16 @@ const waitCodexThread = async (page: Page): Promise<void> => {
     .toContainText('전공 바인딩을 정본에 등록하고 이어갑니다', { timeout: 30_000 })
 }
 
+/** D 메뉴의 회사 하위 화면에서 기존 회사 전환을 수행한다. */
+async function switchToCodex(page: Page): Promise<void> {
+  await page.getByTitle('이 논문의 도우미').click()
+  const menu = page.locator('.composer-model-host .lane-menu')
+  await menu.getByRole('button', { name: 'AI 회사·로그인', exact: true }).click()
+  await expect(menu.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.', { exact: true })).toBeVisible()
+  await expect(menu.locator('[data-provider="codex"]')).toContainText('연결됐어요')
+  await menu.getByRole('button', { name: 'ChatGPT로 바꾸기', exact: true }).click()
+}
+
 test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단계(옛날) → 제목줄 4/7 유지, 저장값도 4단계', async () => {
   // 앱을 두 번 띄운다 — 기본 90초는 느린 기계에서 종료 대기만으로도 바닥난다(맥 CI 실측:
   // close 한 번에 68초). 다른 다중 실행 시험과 같은 180초를 준다. 단정은 그대로다.
@@ -89,15 +99,11 @@ test('U-switch 같은 논문·공급자 전환 — Claude 4단계 → Codex 2단
     await expect(titlebar(page)).toContainText('4/7')
     await expect(titlebar(page)).toContainText('본문 Ⅰ~Ⅵ 초안')
 
-    // AI 회사 전환: "이 논문의 도우미" 칩 → "ChatGPT로 바꾸기"(Codex 표시 이름은 ChatGPT)
-    await page.getByTitle('이 논문의 도우미').click()
-    await expect(page.getByText(/AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요/)).toBeVisible({ timeout: 30_000 })
-    await page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
+    await switchToCodex(page)
     const warning = page.getByRole('status').filter({ hasText: 'ChatGPT는 다른 AI와 나눈 대화를 볼 수 없어요.' })
     await expect(warning).toBeVisible({ timeout: 30_000 })
     await expect(warning).toHaveText('ChatGPT는 다른 AI와 나눈 대화를 볼 수 없어요. 논문 파일과 진행 상황은 그대로 이어져요. 방금 한 답이 아직 논문에 안 들어갔다면 다시 말해 주세요.')
     // 대화가 Codex로 바뀌었더라도...
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
     // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.
     await waitCodexThread(page)
 
@@ -197,9 +203,7 @@ test('U-newreply 같은 내용 새 답(새 id·20:02) — 저장 시각 갱신, 
     expect(stored?.at).toBe(atNewClaude)
     expect(stored?.id).toBe('m-claude-2002')
 
-    await page.getByTitle('이 논문의 도우미').click()
-    await page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+    await switchToCodex(page)
     // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.
     await waitCodexThread(page)
     await expect(titlebar(page), '같은 내용 새 답 후 Codex 20:01 전환에 진행이 후퇴했다').toContainText('4/7')
@@ -502,9 +506,7 @@ test('U-stream 같은 messageId 텍스트 갱신 1단계→4단계 — 저장값
 
       // Codex전환 확인 전에도 localStorage는 4인지 확인한다.
       // ③ Codex 전환(옛날 2단계 대화) — 여전히 4/7.
-      await second.page.getByTitle('이 논문의 도우미').click()
-      await second.page.getByRole('button', { name: 'ChatGPT로 바꾸기' }).click()
-      await expect(second.page.getByTitle('이 논문의 도우미')).toContainText('ChatGPT', { timeout: 30_000 })
+      await switchToCodex(second.page)
       // Roh 권고 ①: 칩 표시만 보고 단정하면 Codex 대화가 붙기 전의 4/7 을 통과시킬 수 있다.
       await waitCodexThread(second.page)
       await expect(titlebar(second.page), '스트리밍 갱신 후 전환에 진행이 되돌아갔다').toContainText('4/7')

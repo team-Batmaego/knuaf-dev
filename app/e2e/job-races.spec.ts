@@ -10,6 +10,8 @@ import type { ExecutionAccount, JobRunnerOptions, JobSpec } from '../src/main/ch
 function setup() {
   const base = canonical(mkdtempSync(join(tmpdir(), 'knuaf-race-'))), root = join(base, 'thesis'); mkdirSync(root)
   const plan = planFromRow('both-high')
+  // Ownership races need a paid cross-company route; research now recommends free DS.
+  plan.writing = { company: 'codex', model: 'astra', effort: null, how: 'relay' }
   const claude: ExecutionAccount = { accountId: 'c', connected: true, consented: true, usage: 'allowed',
     account: { company: 'claude', apiKeySource: 'none', subscriptionType: 'max', models: [{ model: 'sonnet', name: 'Sonnet', efforts: ['high'] }] } }
   const codex: ExecutionAccount = { accountId: 'x', connected: true, consented: true, usage: 'limit',
@@ -21,8 +23,7 @@ function setup() {
     connectionFactory: request => { calls.push(request.jobId); throw new Error('must not start') },
     deliver: async (_owner, result) => { delivered.push(result) }, stopMain: async () => {}, diagnostic: () => {}, shellSandboxAvailable: false }
   const runner = new JobRunner(options)
-  const spec: JobSpec = { schema: 1, id: 'root-job', lane: 'research', task: 'task', inputs: [], outputs: ['result.md'], contractVersion: 'v1', company: 'codex', model: 'astra', effort: null }
-  spec.research = { research_type: '생산량', questions: [], routes: [], keywords: [], output_file: 'result.md' }
+  const spec: JobSpec = { schema: 1, id: 'root-job', lane: 'writing', task: 'task', inputs: [], outputs: ['result.md'], contractVersion: 'v1', company: 'codex', model: 'astra', effort: null }
   runner.enqueue(root, spec, { id: 'main', sessionId: 'main-session', company: 'claude' }, 'author')
   return { root, runner, options, delivered, calls, claude, read: (fn: typeof read) => { read = fn } }
 }

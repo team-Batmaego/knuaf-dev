@@ -5,7 +5,7 @@ import { Popover } from './Popover'
 import { Icon } from './Icon'
 import { useChat } from '../store/chat'
 import { useProject } from '../store/project'
-import { CHAT, PROVIDER_NAME } from '../copy'
+import { CHAT, MODEL_PICKER, PROVIDER_NAME } from '../copy'
 import { isCrossProviderModelId } from '../../../shared/chat'
 import { fitEffort, LANE_TABLE, type LaneRowId } from '../../../shared/lanes'
 import type { LaneModelGroup, PlacementEntries, PlacementOrigin } from '../../../shared/lanes-ipc'
@@ -49,7 +49,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   const accountDefault = !choice && !needsReselection ? catalog?.find((model) => model.isDefault) : undefined
   const displayModel = choice ? selected?.name ?? choice.model : accountDefault?.name
   const displayEffort = choice ? choice.effort : accountDefault?.defaultEffort
-  const mainLabel = state === 'connected' && displayModel ? `${displayModel}${displayEffort ? ` · ${displayEffort}` : ''}` : connection
+  const mainLabel = needsReselection ? MODEL_PICKER.reselectionTitle : state === 'connected' && displayModel ? `${displayModel}${displayEffort ? ` · ${displayEffort}` : ''}` : connection
   const close = (): void => { setOpen(false); trigger.current?.focus() }
 
   useEffect(() => {
@@ -95,7 +95,9 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   for (const row of laneView?.rows ?? []) entries[row.lane] = row.entry
   const role = view !== 'top' && view !== 'recommendations' && view !== 'account' && view !== 'main' ? view : null
   const currentEntry = role ? entries[role] : null
-  const menuModels: LaneMenuModel[] = groups.flatMap((group) => group.models.map((model) => ({ ...model, company: group.company })))
+  const menuModels: LaneMenuModel[] = !root && view === 'main'
+    ? (catalog ?? []).filter((model) => provider !== 'codex' || !isCrossProviderModelId(model.model)).map((model) => ({ ...model, company: provider }))
+    : groups.flatMap((group) => group.models.map((model) => ({ ...model, company: group.company })))
   const nameOf = (company: string, model: string | null): string => {
     if (!model) return '—'
     return menuModels.find((item) => item.company === company && item.model === model)?.name ?? model
@@ -142,12 +144,13 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
             team={laneView?.mode === 'on'} source={laneView?.source.kind === 'recommended' ? LANE_TABLE[laneView.source.rowId].label : laneView?.source.kind === 'mine' ? '직접 고침' : ''}
             roles={{ research: labelEntry(entries.research), writing: labelEntry(entries.writing), repeat: labelEntry(entries.repeat), review: labelEntry(entries.review) }}
             models={menuModels} choice={choiceForView} recommendations={rowIds.map((id) => ({ id, label: LANE_TABLE[id].label, main: nameOf(LANE_TABLE[id].lanes.design.company, LANE_TABLE[id].lanes.design.model), review: nameOf(LANE_TABLE[id].lanes.review.company, LANE_TABLE[id].lanes.review.model) }))}
-            selectedRecommendation={laneView?.source.kind === 'recommended' ? laneView.source.rowId : null} busy={laneBusy || !root || !snapshot} onAccountPicked={close}
+            selectedRecommendation={laneView?.source.kind === 'recommended' ? laneView.source.rowId : null} busy={laneBusy || (view !== 'main' && (!root || !snapshot))} onAccountPicked={close}
             onView={setView} onTeam={() => { if (!root || !snapshot) return; if (laneView?.mode === 'on') { void laneActions().disable(root).then((error) => { if (error) setLaneError('배치를 적용하지 못했어요. 다시 확인해 주세요.') }) } else if (laneView?.recommendedRowId) { void savePlacement(entries, { kind: 'recommended', rowId: laneView.recommendedRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings() } }) } else setLaneError('추천 배치를 확인하지 못했어요.') }}
-            onModel={(model) => { if (view === 'main' && root) { const next = { model: model.model, effort: fitEffort(displayEffort ?? null, model.efforts) }; void window.knuaf.chat.setModel(root, model.company, next).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else if (model.company === provider) { await loadModels(provider); await loadSettings() } }) } else selectRoleModel(model) }}
-            onEffort={(effort) => { if (view === 'main' && choice && root) void window.knuaf.chat.setModel(root, provider, { ...choice, effort }).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else { await loadModels(provider); await loadSettings() } }); else if (role && currentEntry) void savePlacement({ ...entries, [role]: { ...currentEntry, effort } }, { kind: 'mine' }) }}
+            onModel={(model) => { if (view === 'main') { const next = { model: model.model, effort: fitEffort(displayEffort ?? null, model.efforts) }; void window.knuaf.chat.setModel(root, model.company, next).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else if (model.company === provider) { await loadModels(provider); await loadSettings() } }) } else selectRoleModel(model) }}
+            onEffort={(effort) => { if (view === 'main' && choice) void window.knuaf.chat.setModel(root, provider, { ...choice, effort }).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else { await loadModels(provider); await loadSettings() } }); else if (role && currentEntry) void savePlacement({ ...entries, [role]: { ...currentEntry, effort } }, { kind: 'mine' }) }}
             onRecommendation={(id) => { void savePlacement(entries, { kind: 'recommended', rowId: id as LaneRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings(); setView('top') } }) }} />
           {(laneError || saveError || listError) && <p className="model-picker-note" role="alert">{laneError || saveError || listError}</p>}
+          {listError && <button type="button" className="pop-row" onClick={() => { void (async () => { await loadModels(provider); if (root) { const result = await laneActions().laneModels(root); if ('value' in result) setGroups(result.value); else setLaneError(result.error) } })() }}>{MODEL_PICKER.reload}</button>}
         </div>
       </Popover>
     </div>
