@@ -81,7 +81,9 @@
       "guard-codex-thread-lock",
       "kordoc-mcp-policy",
       "support-sidebar",
-      "finance-hole-card"
+      "finance-hole-card",
+      "figure-channel-app",
+      "figure-wiring"
     ],
     [
       "artifacts-states",
@@ -322,6 +324,7 @@
       "diagnosis-feedback",
       "docx-zip",
       "fetch-codex",
+      "figure-channel-app",
       "file-open-guard",
       "invariants",
       "job-a-gate",
@@ -396,7 +399,8 @@
       "kordoc-runtime",
       "news-release-notes",
       "news-storage-failure",
-      "empty-toc"
+      "empty-toc",
+      "figure-wiring"
     ]
   ]
 }

@@ -70,6 +70,25 @@ test('only additive app docs/assets and marked app section are accepted', t => {
   assert.throws(f.build, /only add/)
 })
 
+test('figure guidance is included only when bundled gg_figure.py supports --list', t => {
+  const f = fixture(t)
+  f.policy.append = 'app-section.md'
+  writeFileSync(join(f.overlay, 'overlay.json'), jsonBytes(f.policy))
+  writeFileSync(join(f.overlay, 'app-section.md'), '## 앱 안에서 쓸 때\n\n### 그림\n\nfetch --list 안내')
+
+  const oldRules = new Map(f.input)
+  oldRules.set('scripts/gg_figure.py', Buffer.from('fetch.add_argument("--image")\n'))
+  const oldSkill = composeFiles(oldRules, f.options).get('SKILL.md').toString()
+  assert.match(oldSkill, /## 앱 안에서 쓸 때/)
+  assert.doesNotMatch(oldSkill, /### 그림/)
+
+  const currentRules = new Map(f.input)
+  currentRules.set('scripts/gg_figure.py', Buffer.from('fetch.add_argument("--list")\n'))
+  const currentSkill = composeFiles(currentRules, f.options).get('SKILL.md').toString()
+  assert.match(currentSkill, /### 그림/)
+  assert.match(currentSkill, /fetch --list 안내/)
+})
+
 test('script patches, arbitrary deletion, links, unsafe paths and extraction limits fail closed', t => {
   const f = fixture(t)
   mkdirSync(join(f.overlay, 'files/scripts'), { recursive: true })

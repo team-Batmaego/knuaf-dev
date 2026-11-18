@@ -16,10 +16,11 @@ import type * as fetchTypes from './fetch'
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
+import { MessageChannel } from 'node:worker_threads'
 
 registerHooks({
   resolve(specifier, context, next) {
@@ -38,6 +39,7 @@ const storage = (await import(new URL('./storage.ts', import.meta.url).href)) as
 const choices = (await import(new URL('./choices.ts', import.meta.url).href)) as typeof import('./choices')
 
 const PAGE_URL = 'https://www.nongsaro.go.kr/portal/ps/psv/psvr/psvre/curationDtl.ps'
+const TEST_NOW = Date.UTC(2026, 10, 15, 12)
 const IMAGE_URL = 'https://www.nongsaro.go.kr/ps/img/curation/a.jpg'
 const IMAGE_URL_B = 'https://www.nongsaro.go.kr/ps/img/curation/b.jpg'
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00])
@@ -100,13 +102,16 @@ after(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-/** 조건이 참이 될 때까지 IO를 돌린다(실시간 잠 없음). */
-async function until(condition: () => Promise<boolean>, limit = 4_000): Promise<boolean> {
-  for (let index = 0; index < limit; index += 1) {
-    if (await condition()) return true
-    await new Promise<void>((resolve) => setImmediate(resolve))
-  }
-  return condition()
+/** 실제 unref 감시자를 시험한다. 완료 신호를 기다리는 동안만 메시지 포트로 실행기를 유지한다. */
+async function keepAliveUntil<T>(signal: Promise<T>): Promise<T> {
+  const { port1, port2 } = new MessageChannel()
+  port1.on('message', () => {})
+  try { return await signal } finally { port1.close(); port2.close() }
+}
+
+interface CompletionSignal {
+  promise: Promise<unknown>
+  resolve: (error: unknown) => void
 }
 
 async function readRes(path: string): Promise<Record<string, unknown> | null> {
@@ -126,6 +131,8 @@ interface Channel {
   folder: string
   skillSource: string
   resPath: (id: string) => string
+  /** 요청 파일 없음·조용한 취소까지 handler가 돌아온 시점. 결과 파일 존재와 독립적이다. */
+  finished: (id: string) => Promise<void>
 }
 
 const IDS = { a: 'req-aaaaaaaa', b: 'req-bbbbbbbb', c: 'req-cccccccc' } as const
@@ -136,6 +143,9 @@ async function makeChannel(
     fetchFn?: processTypes.FetchFn
     write?: processTypes.WriteSeam
     clearTurn?: (path: string) => Promise<void>
+    readRequest?: indexTypes.FigureChannelOptions['readRequest']
+    turnDraining?: (turnId: string, activeWrites: number) => void
+    now?: () => number
   } = {}
 ): Promise<Channel> {
   counter += 1
@@ -164,6 +174,16 @@ async function makeChannel(
   // 앱은 realpath를 넘긴다(계약 §2 folderHash) — 여기서도 같은 표기를 쓴다.
   const real = folder ? await realpath(folder) : folder
   const paths = storage.figurePaths(home)
+  const ready = Promise.withResolvers<void>()
+  const completions = new Map<string, CompletionSignal>()
+  const completion = (id: string): CompletionSignal => {
+    let signal = completions.get(id)
+    if (!signal) {
+      signal = Promise.withResolvers<unknown>()
+      completions.set(id, signal)
+    }
+    return signal
+  }
   const channel = index.startFigureChannel({
     figureHome: home,
     getFolder: () => real,
@@ -172,16 +192,28 @@ async function makeChannel(
     fetchFn: over.fetchFn ?? fetchFn,
     write: over.write,
     clearTurn: over.clearTurn,
+    readRequest: over.readRequest,
     scanMs: 5,
-    ttlMs: 60_000
+    ttlMs: 60_000,
+    now: over.now ?? (() => 0),
+    observe: {
+      ready: ready.resolve,
+      requestFinished: (id, error) => completion(id).resolve(error),
+      turnDraining: over.turnDraining
+    }
   })
+  await keepAliveUntil(ready.promise)
   return {
     channel,
     home,
     paths,
     folder: real as string,
     skillSource,
-    resPath: (id: string) => join(paths.res, `${id}.res.json`)
+    resPath: (id: string) => join(paths.res, `${id}.res.json`),
+    finished: async (id) => {
+      const error = await keepAliveUntil(completion(id).promise)
+      if (error !== undefined) throw error
+    }
   }
 }
 
@@ -191,13 +223,21 @@ async function putRequest(
   id: string,
   over: Record<string, unknown> = {},
   turnId = 'turn-1',
-  images: string[] = [IMAGE_URL]
+  images: string[] = [IMAGE_URL],
+  modifiedAt?: Date
 ): Promise<void> {
   await mkdir(requestFile.requestDir(folder), { recursive: true })
-  await writeFile(
-    requestFile.requestFile(folder, id),
+  // 감시자가 빈 파일·반쪽 JSON을 먼저 집지 않게 실제 생산자처럼 원자적으로 게시한다.
+  const path = requestFile.requestFile(folder, id)
+  const staged = modifiedAt ? `${path}.pending` : path
+  await storage.writeAtomic(
+    staged,
     JSON.stringify({ v: 1, id, turnId, slot: '3.2', page: PAGE_URL, images, ...over })
   )
+  if (modifiedAt) {
+    await utimes(staged, modifiedAt, modifiedAt)
+    await rename(staged, path)
+  }
 }
 
 /**
@@ -232,14 +272,16 @@ function diskSnapshot(c: Channel): DiskSnapshot {
  */
 function stallSeam(kind: 'atomic' | 'line'): {
   write: processTypes.WriteSeam
-  state: { hit: boolean }
+  entered: Promise<void>
   release: () => void
 } {
   const stall = Promise.withResolvers<void>()
-  const state = { hit: false }
+  const entered = Promise.withResolvers<void>()
+  let hit = false
   const hold = async (): Promise<void> => {
-    if (state.hit) return
-    state.hit = true
+    if (hit) return
+    hit = true
+    entered.resolve()
     await stall.promise
   }
   return {
@@ -259,7 +301,7 @@ function stallSeam(kind: 'atomic' | 'line'): {
         await storage.appendLine(path, value)
       }
     },
-    state,
+    entered: entered.promise,
     release: () => stall.resolve()
   }
 }
@@ -267,7 +309,6 @@ function stallSeam(kind: 'atomic' | 'line'): {
 describe('startFigureChannel', () => {
   it('저장소를 만들고 하트비트를 남긴다', async () => {
     const c = await makeChannel()
-    assert.equal(await until(async () => (await readRes(c.paths.channel)) !== null), true)
     const beat = await readRes(c.paths.channel)
     assert.deepEqual(Object.keys(beat ?? {}).sort(), ['pid', 'updatedAt', 'v'])
     await c.channel.stop()
@@ -279,7 +320,7 @@ describe('startFigureChannel', () => {
     const record = await readRes(c.paths.turn)
     assert.equal(record?.turnId, 'turn-1')
     assert.equal(record?.folder, c.folder)
-    await c.channel.endTurn()
+    await c.channel.endTurn('turn-1')
     assert.equal(await readRes(c.paths.turn), null)
     await c.channel.stop()
   })
@@ -288,7 +329,7 @@ describe('startFigureChannel', () => {
     const c = await makeChannel()
     await c.channel.beginTurn(c.folder, 'turn-1')
     await putRequest(c.folder, IDS.a)
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.status, 'done')
     assert.equal(res?.id, IDS.a)
@@ -301,13 +342,13 @@ describe('startFigureChannel', () => {
     const c = await makeChannel()
     await c.channel.beginTurn(c.folder, 'turn-1')
     await putRequest(c.folder, IDS.a, {}, 'turn-1', [IMAGE_URL, IMAGE_URL_B])
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.needsChoice, true)
 
     const hash = storage.folderHash(c.folder)
     const sheetPath = choices.choicePath(c.paths.choices, hash, '3.2')
-    assert.equal(await until(async () => (await choices.readChoiceSheet(sheetPath)) !== null), true)
+    assert.notEqual(await choices.readChoiceSheet(sheetPath), null)
     const updated = await c.channel.recordStudentMessage(c.folder, 'B')
     assert.equal(updated, 1)
     const sheet = await choices.readChoiceSheet(sheetPath)
@@ -316,15 +357,12 @@ describe('startFigureChannel', () => {
   })
 
   it('계약 밖 요청·만료 요청도 사유를 남기고 닫는다', async () => {
-    const c = await makeChannel()
+    const c = await makeChannel({ now: () => TEST_NOW })
     await c.channel.beginTurn(c.folder, 'turn-1')
-    await putRequest(c.folder, IDS.a, { extra: true })
-    await putRequest(c.folder, IDS.b)
-    const old = new Date(Date.now() - 120_000)
-    await utimes(requestFile.requestFile(c.folder, IDS.b), old, old)
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    await putRequest(c.folder, IDS.a, { extra: true }, 'turn-1', [IMAGE_URL], new Date(TEST_NOW))
+    await putRequest(c.folder, IDS.b, {}, 'turn-1', [IMAGE_URL], new Date(TEST_NOW - 120_000))
+    await Promise.all([c.finished(IDS.a), c.finished(IDS.b)])
     assert.equal((await readRes(c.resPath(IDS.a)))?.reason, 'invalid')
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.b))) !== null), true)
     assert.equal((await readRes(c.resPath(IDS.b)))?.reason, 'expired')
     await c.channel.stop()
   })
@@ -334,7 +372,7 @@ describe('startFigureChannel', () => {
     await c.channel.beginTurn(c.folder, 'turn-1')
     // 파일 이름은 IDS.a인데 본문은 IDS.b — 어느 쪽이 정본인지 알 수 없으니 아무것도 받지 않는다.
     await putRequest(c.folder, IDS.a, { id: IDS.b })
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.id, IDS.a)
     assert.equal(res?.status, 'rejected')
@@ -347,8 +385,8 @@ describe('startFigureChannel', () => {
   it('휴지 요청 내용이면 invalid(결과는 남는다)', async () => {
     const c = await makeChannel()
     await c.channel.beginTurn(c.folder, 'turn-1')
-    await writeFile(requestFile.requestFile(c.folder, IDS.c), 'not json')
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.c))) !== null), true)
+    await storage.writeAtomic(requestFile.requestFile(c.folder, IDS.c), 'not json')
+    await c.finished(IDS.c)
     const res = await readRes(c.resPath(IDS.c))
     assert.equal(res?.status, 'rejected')
     assert.equal(res?.reason, 'invalid')
@@ -359,7 +397,7 @@ describe('startFigureChannel', () => {
   it('턴이 없으면 cancelled — 대기 요청을 닫아 준다(도우미가 60초를 안 기다린다)', async () => {
     const c = await makeChannel()
     await putRequest(c.folder, IDS.a)
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.status, 'rejected')
     assert.equal(res?.reason, 'cancelled')
@@ -392,6 +430,7 @@ describe('startFigureChannel', () => {
         ]
       })
     )
+    const finished = Promise.withResolvers<void>()
     const channel = index.startFigureChannel({
       figureHome: home,
       getFolder: () => current,
@@ -399,32 +438,34 @@ describe('startFigureChannel', () => {
       decode: async () => ({ png: PNG, width: 8, height: 8 }),
       fetchFn,
       scanMs: 5,
-      ttlMs: 60_000
+      ttlMs: 60_000,
+      now: () => 0,
+      observe: { requestFinished: (id, error) => {
+        assert.equal(error, undefined)
+        assert.equal(id, IDS.a)
+        finished.resolve()
+      } },
     })
     const resPath = (id: string): string => join(storage.figurePaths(home).res, `${id}.res.json`)
 
     current = second
     await channel.beginTurn(second, 'turn-2')
     await putRequest(second, IDS.a, {}, 'turn-2')
-    assert.equal(await until(async () => (await readRes(resPath(IDS.a))) !== null), true)
+    await keepAliveUntil(finished.promise)
     assert.equal((await readRes(resPath(IDS.a)))?.status, 'done')
     await channel.stop()
   })
 
   it('이미 결과가 있는 id는 만료로 보여도 다시 닫지 않는다', async () => {
-    const c = await makeChannel()
+    const c = await makeChannel({ now: () => TEST_NOW })
     await c.channel.beginTurn(c.folder, 'turn-1')
     // 지난 실행이 남긴 결과 — 재시작 뒤 옛 요청 파일이 만료로 보여도 이 `done`을 덮으면 안 된다.
     await writeFile(
       c.resPath(IDS.a),
       JSON.stringify({ v: 1, id: IDS.a, status: 'done', slot: '3.2', needsChoice: false, images: [] })
     )
-    await putRequest(c.folder, IDS.a)
-    const old = new Date(Date.now() - 120_000)
-    await utimes(requestFile.requestFile(c.folder, IDS.a), old, old)
-    // 다른 요청이 닫히면 감시자가 IDS.a도 한 번 집은 뒤다.
-    await putRequest(c.folder, IDS.b)
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.b))) !== null), true)
+    await putRequest(c.folder, IDS.a, {}, 'turn-1', [IMAGE_URL], new Date(TEST_NOW - 120_000))
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.status, 'done')
     assert.equal(res?.reason, undefined)
@@ -440,9 +481,7 @@ describe('startFigureChannel', () => {
       JSON.stringify({ v: 1, id: IDS.a, status: 'done', slot: '3.2', needsChoice: false, images: [] })
     )
     await putRequest(c.folder, IDS.a)
-    // 다른 요청이 닫히면 감시자가 IDS.a도 집은 뒤다(만료가 아니라 정상 크기의 새 파일).
-    await putRequest(c.folder, IDS.b)
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.b))) !== null), true)
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.status, 'done')
     assert.equal(res?.reason, undefined)
@@ -456,19 +495,20 @@ describe('startFigureChannel', () => {
    */
   it('endTurn은 진행 중인 저장 쓰기를 기다린다(R-6)', async () => {
     const seam = stallSeam('atomic')
-    const c = await makeChannel({ write: seam.write })
+    const draining = Promise.withResolvers<number>()
+    const c = await makeChannel({ write: seam.write, turnDraining: (_id, active) => draining.resolve(active) })
     await c.channel.beginTurn(c.folder, 'turn-1')
     await putRequest(c.folder, IDS.a)
-    assert.equal(await until(async () => seam.state.hit), true)
+    await keepAliveUntil(seam.entered)
     let early: DiskSnapshot | null = null
-    const ended = c.channel.endTurn().then(() => {
+    const ended = c.channel.endTurn('turn-1').then(() => {
       early = diskSnapshot(c)
     })
-    await until(async () => early !== null, 50)
+    assert.equal(await draining.promise, 1)
     assert.equal(early, null)
     seam.release()
     await ended
-    await c.channel.idle()
+    await c.finished(IDS.a)
     assert.deepEqual(early, diskSnapshot(c))
     // 멈춰 있던 구간이 끝난 뒤라 저장소 PNG와 계수는 남고, 결과는 `cancelled`로 닫힌다.
     assert.equal((await readRes(c.resPath(IDS.a)))?.reason, 'cancelled')
@@ -478,19 +518,20 @@ describe('startFigureChannel', () => {
 
   it('endTurn이 돌아온 뒤에 증명 줄이 새로 생기지 않는다(R-6)', async () => {
     const seam = stallSeam('line')
-    const c = await makeChannel({ write: seam.write })
+    const draining = Promise.withResolvers<number>()
+    const c = await makeChannel({ write: seam.write, turnDraining: (_id, active) => draining.resolve(active) })
     await c.channel.beginTurn(c.folder, 'turn-1')
     await putRequest(c.folder, IDS.a)
-    assert.equal(await until(async () => seam.state.hit), true)
+    await keepAliveUntil(seam.entered)
     let early: DiskSnapshot | null = null
-    const ended = c.channel.endTurn().then(() => {
+    const ended = c.channel.endTurn('turn-1').then(() => {
       early = diskSnapshot(c)
     })
-    await until(async () => early !== null, 50)
+    assert.equal(await draining.promise, 1)
     assert.equal(early, null)
     seam.release()
     await ended
-    await c.channel.idle()
+    await c.finished(IDS.a)
     assert.deepEqual(early, diskSnapshot(c))
     // 이미 시작한 구간은 끝까지 간다 — 증명 한 줄과 `done` 결과가 `endTurn` 앞에서 닫힌다.
     assert.equal((await readRes(c.resPath(IDS.a)))?.status, 'done')
@@ -504,66 +545,40 @@ describe('startFigureChannel', () => {
    * 뒤에도 PNG·계수·증명·`done`이 새로 생긴다. 턴 지우기를 멈춰 그 틈을 실제로 만든다.
    */
   it('endTurn이 도는 동안 집힌 요청은 endTurn이 돌아온 뒤 산출물을 만들지 않는다(R-6 남은 경로)', async () => {
+    const clearEntered = Promise.withResolvers<void>()
     const clearGate = Promise.withResolvers<void>()
-    let clearHits = 0
-    const pageGate = Promise.withResolvers<void>()
-    let started = false
-    const gated: processTypes.FetchFn = async (url, options) => {
-      if (url === PAGE_URL) {
-        started = true
-        await pageGate.promise
-      }
-      return fetchFn(url, options)
-    }
+    let calls = 0
     const c = await makeChannel({
-      fetchFn: gated,
-      // 실제 지우기를 그대로 하되 첫 호출만 멈춘다 — 그동안 `turn.json`은 살아 있다.
+      now: () => 0,
+      fetchFn: async (url, options) => { calls += 1; return fetchFn(url, options) },
       clearTurn: async (path) => {
-        clearHits += 1
+        clearEntered.resolve()
         await clearGate.promise
         await rm(path, { force: true })
       }
     })
-    await c.channel.beginTurn(c.folder, 'turn-1')
-    // 진행 중인 요청이 없으니 배수는 즉시 끝나고, `endTurn`은 턴 지우기에서 멈춘다.
-    const ended = c.channel.endTurn()
-    assert.equal(await until(async () => clearHits === 1), true)
-    await putRequest(c.folder, IDS.a)
-    // 감시자가 집어 페이지 받기에 들어갔다 — 이 요청은 `endTurn`이 시작된 뒤에 시작했다.
-    assert.equal(await until(async () => started), true)
-    clearGate.resolve()
-    await ended
-    const early: DiskSnapshot & { res: Record<string, unknown> | null } = {
-      ...diskSnapshot(c),
-      res: await readRes(c.resPath(IDS.a))
-    }
-    pageGate.resolve()
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
-    await c.channel.idle()
-    const late: DiskSnapshot & { res: Record<string, unknown> | null } = {
-      ...diskSnapshot(c),
-      res: await readRes(c.resPath(IDS.a))
-    }
-    // `endTurn`이 돌아온 순간에도, 그 뒤에 끝난 순간에도 저장 산출물은 없어야 한다.
-    assert.deepEqual(early.store, [])
-    assert.equal(early.counters, null)
-    assert.equal(early.receipts, null)
-    assert.equal(early.res, null)
-    assert.deepEqual(late.store, [])
-    assert.equal(late.counters, null)
-    assert.equal(late.receipts, null)
-    // 결과는 `cancelled` 하나로만 닫힌다(게이트 밖 거절 결과라 `endTurn` 뒤에 써도 된다).
-    assert.equal(late.res?.status, 'rejected')
-    assert.equal(late.res?.reason, 'cancelled')
-    await c.channel.stop()
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      const ended = c.channel.endTurn('turn-1')
+      await clearEntered.promise
+      await putRequest(c.folder, IDS.a)
+      await c.finished(IDS.a)
+      assert.equal(calls, 0)
+      clearGate.resolve()
+      await ended
+      assert.deepEqual(diskSnapshot(c), { store: [], counters: null, receipts: null })
+      const res = await readRes(c.resPath(IDS.a))
+      assert.equal(res?.status, 'rejected')
+      assert.equal(res?.reason, 'limit_turn')
+    } finally { clearGate.resolve(); await c.channel.stop() }
   })
 
   it('턴이 처리 도중 끝나면 결과를 cancelled로 닫고 그림을 저장하지 않는다', async () => {
     const gate = Promise.withResolvers<void>()
-    let started = false
+    const entered = Promise.withResolvers<void>()
     const gated: processTypes.FetchFn = async (url, options) => {
       if (url === PAGE_URL) {
-        started = true
+        entered.resolve()
         await gate.promise
       }
       return fetchFn(url, options)
@@ -571,12 +586,10 @@ describe('startFigureChannel', () => {
     const c = await makeChannel({ fetchFn: gated })
     await c.channel.beginTurn(c.folder, 'turn-1')
     await putRequest(c.folder, IDS.a)
-    // 페이지 받기가 실제로 걸린 뒤에 턴을 끊는다 — 그 전에 끊으면 시작 검사만 보고 지나간다.
-    // 감시자 박자는 unref 타이머라 그냥 await하면 Electron Node 22의 시험 실행기가 부모 취소로 끊는다.
-    assert.equal(await until(async () => started), true)
-    await c.channel.endTurn()
+    await keepAliveUntil(entered.promise)
+    await c.channel.endTurn('turn-1')
     gate.resolve()
-    assert.equal(await until(async () => (await readRes(c.resPath(IDS.a))) !== null), true)
+    await c.finished(IDS.a)
     const res = await readRes(c.resPath(IDS.a))
     assert.equal(res?.status, 'rejected')
     assert.equal(res?.reason, 'cancelled')
@@ -591,5 +604,452 @@ describe('startFigureChannel', () => {
     await c.channel.stop()
     await c.channel.stop()
     await c.channel.idle()
+  })
+
+  /**
+   * I-01: 통로는 하나인데 턴은 폴더·공급자마다 있다. 소유자가 아닌 턴의 `endTurn` 이 새 턴의
+   * `turn.json` 을 지우면, 지금 도는 턴의 정상 요청이 전부 `stale`·`cancelled` 가 된다.
+   */
+  it('다른 턴의 endTurn은 지금 턴의 turn.json을 지우지 않는다(I-01)', async () => {
+    const c = await makeChannel()
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    // 다른 폴더·공급자의 턴이 같은 통로를 잡았다(소유권 이전).
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    await c.channel.endTurn('turn-a')
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b', '남의 턴 종료는 무시된다')
+    // 소유자 종료는 그대로 지운다.
+    await c.channel.endTurn('turn-b')
+    assert.equal(await readRes(c.paths.turn), null)
+    await c.channel.stop()
+  })
+
+  it('이미 닫힌 턴의 늦은 beginTurn은 turn.json을 되살리지 않는다(I-02 상한)', async () => {
+    const c = await makeChannel()
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    // 준비 상한으로 `endTurn` 이 먼저 도착하고, `beginTurn` 이 그 뒤에야 끝난 경우.
+    await c.channel.endTurn('turn-a')
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    assert.equal(await readRes(c.paths.turn), null, '끝난 턴이 파일을 남기면 감시자가 유령 턴을 본다')
+    // 다음 턴은 정상으로 열린다.
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b')
+    await c.channel.endTurn('turn-b')
+    await c.channel.stop()
+  })
+
+  it('남의 턴이 끝나도 지금 턴의 요청은 계속 처리된다(I-01)', async () => {
+    const c = await makeChannel()
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    await c.channel.endTurn('turn-a')
+    await putRequest(c.folder, IDS.a, {}, 'turn-b')
+    await c.finished(IDS.a)
+    const res = await readRes(c.resPath(IDS.a))
+    assert.equal(res?.status, 'done', '지금 턴의 요청은 stale 이 아니다')
+    await c.channel.endTurn('turn-b')
+    await c.channel.stop()
+  })
+
+  /**
+   * I-01 남은 경로: 소유 턴의 `endTurn` 이 진행 중인 쓰기를 기다리는 사이 새 턴이 열리면, 깨어난
+   * `endTurn` 이 그 새 `turn.json` 을 지우면 안 된다.
+   */
+  it('기다리는 사이 새 턴이 열리면 옛 endTurn은 turn.json을 지우지 않는다(I-01)', async () => {
+    const seam = stallSeam('atomic')
+    const c = await makeChannel({ write: seam.write })
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    await putRequest(c.folder, IDS.a, {}, 'turn-a')
+    await keepAliveUntil(seam.entered)
+    const ending = c.channel.endTurn('turn-a')
+    // 쓰기가 멈춘 사이(=`endTurn` 이 기다리는 사이) 새 폴더·공급자의 턴이 열린다.
+    await c.channel.beginTurn(c.folder, 'turn-b')
+    seam.release()
+    await ending
+    await c.finished(IDS.a)
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b', '새 턴의 turn.json 은 살아 있다')
+    await c.channel.endTurn('turn-b')
+    assert.equal(await readRes(c.paths.turn), null)
+    await c.channel.stop()
+  })
+
+  /**
+   * I-01 남은 경계(검토 VM 재현): 소유권 확인이 끝난 뒤의 **지우기**가 늦어지는 동안 새 턴이 열리면,
+   * 지우기가 새 턴의 `turn.json` 을 지운다. 확인만 앞에 두고 지우기를 늦추면 그 사이에 새 쓰기가 끼어
+   * 들기 때문이다. 그래서 확인과 지우기를 한 사슬 안에서 하고, 새 턴의 쓰기는 그 사슬 **뒤**에 선다.
+   */
+  it('지우기가 늦는 사이 새 턴이 열려도 옛 endTurn은 새 turn.json을 지우지 않는다(I-01 남은 경계)', async () => {
+    const clearGate = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    let cleared = false
+    const c = await makeChannel({
+      // 실제 지우기를 그대로 하되 첫 호출을 멈춘다 — 확인은 이미 통과한 상태다(검토 재현 그대로).
+      clearTurn: async (path) => {
+        entered.resolve()
+        await clearGate.promise
+        if (!cleared) assert.equal((await readRes(path))?.turnId, 'turn-a', '옛 삭제가 풀리기 전에는 새 turn.json을 쓰지 않는다')
+        await rm(path, { force: true })
+        cleared = true
+      }
+    })
+    await c.channel.beginTurn(c.folder, 'turn-a')
+    const ending = c.channel.endTurn('turn-a')
+    await entered.promise
+    // 삭제가 멈춘 사이 새 턴이 열린다 — 서비스 상한(3초)을 넘겨 실행된 경우와 같은 순서다.
+    const opening = c.channel.beginTurn(c.folder, 'turn-b').then(() => {
+      assert.equal(cleared, true, '새 턴 쓰기는 옛 삭제 완료 뒤에만 끝난다')
+    })
+    clearGate.resolve()
+    await ending
+    await opening
+    assert.equal((await readRes(c.paths.turn))?.turnId, 'turn-b', '새 턴의 turn.json 은 살아 있다')
+    // 새 턴도 정상으로 닫힌다.
+    await c.channel.endTurn('turn-b')
+    assert.equal(await readRes(c.paths.turn), null)
+    await c.channel.stop()
+  })
+
+  /**
+   * I-03 남은 경계(검토 실측): `figure-channel.json` 자리가 디렉터리면 첫 박자가 실패한다. 예전에는 그
+   * 실패를 삼키기만 해서 `beginTurn` 이 `turn.json` 을 쓰고 감시자가 계속 돌았다 — 결과를 받을 곳 없는
+   * 통로다. 이제 첫 박자 실패는 통로 시작 실패다: 턴 파일도, 감시자도 남지 않는다.
+   */
+  it('첫 하트비트가 실패하면 통로가 시작되지 않는다(I-03 남은 경계)', async () => {
+    const base = join(root, `case-beat-${++counter}`)
+    const home = join(base, 'home')
+    await mkdir(home, { recursive: true })
+    // 하트비트 파일 자리만 디렉터리로 막는다 — 저장소 준비(`prepareHome`)는 성공한다.
+    await mkdir(join(home, 'figure-channel.json'))
+    const folder = join(base, 'paper')
+    await mkdir(requestFile.requestDir(folder), { recursive: true })
+    const real = await realpath(folder)
+    const paths = storage.figurePaths(home)
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    const channel = index.startFigureChannel({
+      figureHome: home,
+      getFolder: () => real,
+      resolveSkillSource: () => null,
+      decode: async () => ({ png: PNG, width: 8, height: 8 }),
+      fetchFn,
+      scanMs: 5,
+      ttlMs: 60_000
+    })
+    try {
+      await channel.beginTurn(real, 'turn-1')
+      await putRequest(folder, IDS.a, {}, 'turn-1')
+      await channel.idle()
+      // 감시자가 살아 있었다면 이 요청이 결과 파일로 닫혔을 것이다.
+      for (let i = 0; i < 200; i += 1) await new Promise<void>((done) => setImmediate(done))
+      await channel.endTurn('turn-1')
+      await channel.stop()
+      await new Promise<void>((done) => setImmediate(done))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    assert.equal(await readRes(paths.turn), null, '턴 파일을 쓰지 않는다')
+    assert.equal(await readRes(join(paths.res, `${IDS.a}.res.json`)), null, '감시자도 돌지 않는다')
+    assert.deepEqual(seen, [], '첫 박자 실패가 비처리 거절로 새지 않는다')
+  })
+
+  /**
+   * I-03: 저장소 준비가 실패하면(여기서는 `tmp` 를 파일로 막는다) 그 거절이 밖으로 새지 않고
+   * 통로만 꺼진다. 예전에는 `void ensureRunner()`·첫 `void beat()` 가 비처리 거절이 되어 프로세스를
+   * 종료 코드 1 로 끝냈다.
+   */
+  it('저장소 준비가 실패하면 거절을 흘리지 않고 그림만 꺼진다(I-03)', async () => {
+    const base = join(root, `case-broken-${++counter}`)
+    const home = join(base, 'home')
+    await mkdir(base, { recursive: true })
+    // 저장소 자리를 **파일**로 막는다 — `prepareHome` 의 mkdir 과 하트비트의 쓰기가 모두 실패하고,
+    // 실패한 쓰기가 지워지는 도중에 다시 폴더를 만들지도 않는다(정리 경합 없음).
+    await writeFile(home, 'not a directory')
+    const seen: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { seen.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const channel = index.startFigureChannel({
+        figureHome: home,
+        getFolder: () => null,
+        resolveSkillSource: () => null,
+        scanMs: 5
+      })
+      await channel.beginTurn('/tmp/paper', 'turn-1')
+      await channel.recordStudentMessage('/tmp/paper', '안녕')
+      await channel.idle()
+      // 실패가 굳은 뒤에도 종료 경로는 안전하다.
+      await channel.endTurn('turn-1')
+      await channel.stop()
+      // 비처리 거절이 실제로 등록되었는지 보려면 한 틱은 돌려야 한다.
+      await new Promise<void>((done) => setImmediate(done))
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    assert.deepEqual(seen, [], '저장소 실패가 비처리 거절로 새지 않는다')
+  })
+})
+
+describe('P1.1 실제 통로의 턴 상한', () => {
+  it('목록·그림 합쳐 6건, 실패도 소비, 같은 turnId beginTurn은 새 세대 6건', async () => {
+    let calls = 0
+    const c = await makeChannel({ now: () => 0, fetchFn: async () => { calls += 1; return { ok: false, reason: 'timeout' } } })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      for (let i = 0; i < 7; i += 1) {
+        const id = `req-first-${i}`
+        await putRequest(c.folder, id, {}, 'turn-1', i % 2 ? [IMAGE_URL] : [])
+        await c.finished(id)
+        assert.equal((await readRes(c.resPath(id)))?.reason, i < 6 ? 'timeout' : 'limit_turn')
+      }
+      assert.equal(calls, 6)
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      for (let i = 0; i < 6; i += 1) {
+        const id = `req-second-${i}`
+        await putRequest(c.folder, id, {}, 'turn-1', [])
+        await c.finished(id)
+        assert.equal((await readRes(c.resPath(id)))?.reason, 'timeout')
+      }
+      assert.equal(calls, 12)
+      await c.channel.endTurn('turn-1')
+      await c.channel.beginTurn(c.folder, 'turn-2')
+      for (let i = 0; i < 6; i += 1) {
+        const id = `req-third-${i}`
+        await putRequest(c.folder, id, {}, 'turn-2', [])
+        await c.finished(id)
+        assert.equal((await readRes(c.resPath(id)))?.reason, 'timeout')
+      }
+      assert.equal(calls, 18)
+    } finally { await c.channel.stop() }
+  })
+
+  it('중복·턴 불일치·규칙 불일치는 페이지 예약을 쓰지 않는다', async () => {
+    let calls = 0
+    const c = await makeChannel({ now: () => 0, fetchFn: async () => { calls += 1; return okPage } })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      for (let i = 0; i < 10; i += 1) {
+        const id = `req-invalid-${i}`
+        if (i % 3 === 0) await storage.appendLine(c.paths.receipts, { reqId: id })
+        await putRequest(c.folder, id, i % 3 === 2 ? { page: 'https://outside.gov/x' } : {}, i % 3 === 1 ? 'stale' : 'turn-1', [])
+        await c.finished(id)
+        assert.equal((await readRes(c.resPath(id)))?.status, 'rejected')
+      }
+      for (let i = 0; i < 6; i += 1) {
+        const id = `req-valid-${i}`
+        await putRequest(c.folder, id, {}, 'turn-1', [])
+        await c.finished(id)
+        assert.equal((await readRes(c.resPath(id)))?.status, 'done')
+      }
+      assert.equal(calls, 6)
+    } finally { await c.channel.stop() }
+  })
+
+  it('limit_turn 100건은 거절 파일 24개, 다음 세대에 거절 예산을 새로 준다', async () => {
+    const c = await makeChannel({ now: () => 0, fetchFn: async () => okPage })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      const ids = Array.from({ length: 106 }, (_, i) => `req-limit-${String(i).padStart(4, '0')}`)
+      for (const id of ids) await putRequest(c.folder, id, {}, 'turn-1', [])
+      await Promise.all(ids.map((id) => c.finished(id)))
+      const names = await readdir(c.paths.res)
+      const results = await Promise.all(names.map((name) => readRes(join(c.paths.res, name))))
+      assert.equal(results.filter((res) => res?.status === 'done').length, 6)
+      assert.equal(results.filter((res) => res?.status === 'rejected').length, 24)
+      await c.channel.endTurn('turn-1')
+      await c.channel.beginTurn(c.folder, 'turn-2')
+      await putRequest(c.folder, 'req-next-reject', { page: 'https://outside.gov/x' }, 'turn-2', [])
+      await c.finished('req-next-reject')
+      assert.equal((await readRes(c.resPath('req-next-reject')))?.reason, 'rule_missing')
+    } finally { await c.channel.stop() }
+  })
+
+  it('재시작의 닫힌 게이트는 옛 turn.json이 있어도 GET 0, 목록 결과 파일 0', async () => {
+    let calls = 0
+    const c = await makeChannel({ now: () => 0, fetchFn: async () => { calls += 1; return okPage } })
+    try {
+      await storage.writeJson(c.paths.turn, { v: 1, turnId: 'turn-1', folder: c.folder, startedAt: 0 })
+      await putRequest(c.folder, 'req-closed-list', {}, 'turn-1', [])
+      await putRequest(c.folder, 'req-closed-image')
+      await Promise.all([c.finished('req-closed-list'), c.finished('req-closed-image')])
+      assert.equal(calls, 0)
+      assert.equal(await readRes(c.resPath('req-closed-list')), null)
+      assert.equal((await readRes(c.resPath('req-closed-image')))?.reason, 'limit_turn')
+      assert.deepEqual(await readdir(c.paths.store), [])
+    } finally { await c.channel.stop() }
+  })
+
+  for (const outcome of ['success', 'timeout', 'status'] as const) {
+    it(`endTurn 뒤 목록 GET ${outcome}은 모든 결과·그림 산출물 0`, async () => {
+      const entered = Promise.withResolvers<void>()
+      const resume = Promise.withResolvers<void>()
+      const c = await makeChannel({ now: () => 0, fetchFn: async () => {
+        entered.resolve(); await resume.promise
+        return outcome === 'success' ? okPage : { ok: false, reason: outcome }
+      } })
+      try {
+        await c.channel.beginTurn(c.folder, 'turn-1')
+        await putRequest(c.folder, IDS.a, {}, 'turn-1', [])
+        await keepAliveUntil(entered.promise)
+        await c.channel.endTurn('turn-1')
+        resume.resolve()
+        await c.finished(IDS.a)
+        assert.deepEqual(await readdir(c.paths.res), [])
+        assert.deepEqual(await readdir(c.paths.choices), [])
+        assert.deepEqual(diskSnapshot(c), { store: [], counters: null, receipts: null })
+      } finally { resume.resolve(); await c.channel.stop() }
+    })
+  }
+
+  it('이미 시작한 목록 결과 쓰기는 endTurn이 기다린다', async () => {
+    const entered = Promise.withResolvers<void>()
+    const draining = Promise.withResolvers<number>()
+    const resume = Promise.withResolvers<void>()
+    const c = await makeChannel({
+      now: () => 0,
+      turnDraining: (_id, active) => draining.resolve(active),
+      write: {
+        atomic: storage.writeAtomic, json: storage.writeJson, line: storage.appendLine,
+        jsonNew: async (path, value) => {
+          entered.resolve(); await resume.promise
+          return storage.writeJsonNew(path, value)
+        }
+      }
+    })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      await putRequest(c.folder, IDS.a, {}, 'turn-1', [])
+      await keepAliveUntil(entered.promise)
+      let ended = false
+      const ending = c.channel.endTurn('turn-1').then(() => { ended = true })
+      assert.equal(await draining.promise, 1)
+      assert.equal(ended, false)
+      resume.resolve()
+      await ending
+      await c.finished(IDS.a)
+      assert.equal((await readRes(c.resPath(IDS.a)))?.status, 'done')
+      assert.deepEqual(await readdir(c.paths.res), [`${IDS.a}.res.json`])
+    } finally { resume.resolve(); await c.channel.stop() }
+  })
+})
+
+describe('P1.1 거절 파일 보존 경계', () => {
+  it('닫힌 동안 거절은 실행당 24개, 새 턴을 거쳐도 닫힌 예산은 초기화 안 됨', async () => {
+    const c = await makeChannel({ now: () => 0 })
+    try {
+      const ids = Array.from({ length: 30 }, (_, i) => `req-closed-${String(i).padStart(3, '0')}`)
+      for (const id of ids) await putRequest(c.folder, id, { extra: true })
+      await Promise.all(ids.map((id) => c.finished(id)))
+      assert.equal((await readdir(c.paths.res)).length, 24)
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      await c.channel.endTurn('turn-1')
+      await putRequest(c.folder, 'req-final-closed', { extra: true })
+      await c.finished('req-final-closed')
+      assert.equal(await readRes(c.resPath('req-final-closed')), null)
+      assert.equal((await readdir(c.paths.res)).length, 24)
+    } finally { await c.channel.stop() }
+  })
+
+  it('시작 정리는 24시간 지난 rejected만 지우고 done·최근 거절·비결과는 보존', async () => {
+    const c = await makeChannel()
+    await c.channel.stop()
+    const old = new Date(TEST_NOW - 25 * 60 * 60 * 1000)
+    const fresh = new Date(TEST_NOW)
+    const cases = [
+      ['req-old-reject', 'rejected', true], ['req-old-done', 'done', true], ['req-new-reject', 'rejected', false]
+    ] as const
+    for (const [id, status, age] of cases) {
+      await storage.writeJson(c.resPath(id), { v: 1, id, status, images: [] })
+      await utimes(c.resPath(id), age ? old : fresh, age ? old : fresh)
+    }
+    const other = join(c.paths.res, 'unrelated.json')
+    await writeFile(other, '{"status":"rejected"}')
+    await utimes(other, old, old)
+    await symlink(c.resPath('req-old-reject'), c.resPath('req-linked-reject'))
+    const ready = Promise.withResolvers<void>()
+    const channel = index.startFigureChannel({
+      figureHome: c.home, getFolder: () => null, resolveSkillSource: () => null,
+      now: () => TEST_NOW, observe: { ready: ready.resolve }
+    })
+    try {
+      await keepAliveUntil(ready.promise)
+      assert.equal(await readRes(c.resPath('req-old-reject')), null)
+      assert.equal((await readRes(c.resPath('req-old-done')))?.status, 'done')
+      assert.equal((await readRes(c.resPath('req-new-reject')))?.status, 'rejected')
+      assert.equal(await readFile(other, 'utf8'), '{"status":"rejected"}')
+      assert.equal((await readdir(c.paths.res)).includes('req-linked-reject.res.json'), true)
+    } finally { await channel.stop() }
+  })
+})
+
+describe('P1.1 B-02 handler 앞 목록 거절', () => {
+  for (const active of [false, true]) {
+    it(`${active ? '살아 있는' : '종료한'} 턴의 만료·id 불일치·모양 오류 목록`, async () => {
+      let calls = 0
+      const c = await makeChannel({ now: () => TEST_NOW, fetchFn: async () => { calls += 1; return okPage } })
+      try {
+        await c.channel.beginTurn(c.folder, 'turn-1')
+        if (!active) await c.channel.endTurn('turn-1')
+        const cases = [
+          ['req-expired-list', {}, 'expired', new Date(TEST_NOW - 120_000)],
+          ['req-mismatch-list', { id: 'req-other-body' }, 'invalid', new Date(TEST_NOW)],
+          ['req-invalid-list', { extra: true }, 'invalid', new Date(TEST_NOW)]
+        ] as const
+        for (const [id, over, reason, at] of cases) {
+          await putRequest(c.folder, id, over, 'turn-1', [], at)
+          await c.finished(id)
+          const res = await readRes(c.resPath(id))
+          if (active) assert.equal(res?.reason, reason)
+          else assert.equal(res, null)
+        }
+        assert.equal(calls, 0)
+        assert.equal(await readRes(c.resPath('req-other-body')), null)
+        assert.equal((await readdir(c.paths.res)).length, active ? 3 : 0)
+      } finally { await c.channel.stop() }
+    })
+  }
+
+  for (const mismatch of [false, true]) {
+  it(`목록 읽기 중 턴 종료 뒤 옛 세대는 쓰지 않는다: ${mismatch ? 'handler 거절' : '정상 본문'}`, async () => {
+    const entered = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    const c = await makeChannel({ readRequest: async (path) => {
+      const read = await requestFile.readRequestFile(path)
+      entered.resolve()
+      await resume.promise
+      return read
+    } })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      await putRequest(c.folder, 'req-read-list', mismatch ? { id: 'req-other-body' } : {}, 'turn-1', [])
+      await keepAliveUntil(entered.promise)
+      await c.channel.endTurn('turn-1')
+      await c.channel.beginTurn(c.folder, 'turn-2')
+      resume.resolve()
+      await c.finished('req-read-list')
+      assert.deepEqual(await readdir(c.paths.res), [])
+    } finally { resume.resolve(); await c.channel.stop() }
+  })
+  }
+
+  it('목록 아닌 그림·읽을 수 없는 요청의 기존 닫힌 거절과 배타 생성은 유지', async () => {
+    const c = await makeChannel({ now: () => TEST_NOW })
+    try {
+      await c.channel.beginTurn(c.folder, 'turn-1')
+      const preserved = { v: 1, id: 'req-preserved-list', status: 'done', slot: '3.2', needsChoice: false, images: [] }
+      await storage.writeJson(c.resPath('req-preserved-list'), preserved)
+      await putRequest(c.folder, 'req-preserved-list', {}, 'turn-1', [], new Date(TEST_NOW - 120_000))
+      await c.finished('req-preserved-list')
+      assert.deepEqual(await readRes(c.resPath('req-preserved-list')), preserved)
+      await c.channel.endTurn('turn-1')
+      await putRequest(c.folder, 'req-expired-image', {}, 'turn-1', [IMAGE_URL], new Date(TEST_NOW - 120_000))
+      const invalidPath = requestFile.requestFile(c.folder, 'req-unreadable')
+      await storage.writeAtomic(`${invalidPath}.pending`, 'not json')
+      const fresh = new Date(TEST_NOW)
+      await utimes(`${invalidPath}.pending`, fresh, fresh)
+      await rename(`${invalidPath}.pending`, invalidPath)
+      await Promise.all([c.finished('req-expired-image'), c.finished('req-unreadable')])
+      assert.equal((await readRes(c.resPath('req-expired-image')))?.reason, 'expired')
+      assert.equal((await readRes(c.resPath('req-unreadable')))?.reason, 'invalid')
+    } finally { await c.channel.stop() }
   })
 })

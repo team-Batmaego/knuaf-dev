@@ -53,7 +53,7 @@ export function parseFigureRequest(body: string): RequestParse {
     return { ok: false, reason: 'slot' }
   }
   if (!text(obj.page, 2048)) return { ok: false, reason: 'page' }
-  if (!Array.isArray(obj.images) || obj.images.length < 1 || obj.images.length > 3) {
+  if (!Array.isArray(obj.images) || obj.images.length > 3) {
     return { ok: false, reason: 'images' }
   }
   if (!obj.images.every((url) => text(url, 2048))) return { ok: false, reason: 'images' }
@@ -88,6 +88,12 @@ export interface FigureResImage {
   label: string | null
 }
 
+/** 후보는 주소와 제3자 표기 예고만 싣는다. 사이트의 alt·제목은 전달하지 않는다. */
+export interface FigureCandidate {
+  url: string
+  credit: 'none' | 'credit'
+}
+
 export interface FigureRes {
   v: 1
   id: string
@@ -96,6 +102,11 @@ export interface FigureRes {
   slot: string
   needsChoice: boolean
   images: FigureResImage[]
+  /** 빈 images 목록 요청의 성공 결과에만 존재한다. */
+  kogl?: number | null
+  org?: string
+  candidates?: FigureCandidate[]
+  candidatesTruncated?: boolean
 }
 
 /** 승인 그림의 원고 토큰 — build_docx가 `store/<sha256>.png`로 푼다. */
