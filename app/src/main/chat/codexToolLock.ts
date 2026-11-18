@@ -306,7 +306,7 @@ async function enumerate(req: ToolLockRequest): Promise<{ ok: true; value: Enume
   }
   // A failed marketplace can hide installed IDs. Without a complete inventory, do not open a turn.
   if (response.marketplaceLoadErrors.length) {
-    diag(`codex-lock stage=plugin-installed reason=marketplace-load-errors count=${response.marketplaceLoadErrors.length}`)
+    diag('codex-lock stage=plugin-installed reason=marketplace-load-errors')
     return { ok: false, reason: 'enumeration-failed' }
   }
   const ids: string[] = []

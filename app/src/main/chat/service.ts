@@ -356,8 +356,7 @@ export class ChatService {
     // 진단: 이 함수는 before-quit 마다 동기로 돌고, 재시도 대기(safeWrite)를 안고 있다 — 멈춤 후보 1a.
     // 진단이 꺼져 있으면 시계 읽기·문자열 조립도 하지 않는다(검토 RT3 권고).
     const traced = diagEnabled() && this.draftPending.size > 0
-    const startedAt = traced ? Date.now() : 0
-    if (traced) diag(`drafts:flush:start n=${this.draftPending.size} shuttingDown=${this.shuttingDown}`)
+    if (traced) diag('drafts:flush:start')
     if (this.draftTimer) { clearTimeout(this.draftTimer); this.draftTimer = null }
     for (const [root, text] of this.draftPending) {
       const file = this.draftFile(root)
@@ -378,11 +377,10 @@ export class ChatService {
       try { mkdirSync(dirname(file), { recursive: true }) } catch { /* 아래 쓰기가 같은 이유로 실패한다 */ }
       // 던지지 않는 공용 쓰기(WIN-ONEDRIVE). **성공한 것만** 지운다 — 실패하면 대기 값으로 남겨
       // 다음 flush 가 다시 시도하고, 그 사이 `draft()` 는 최신 글을 계속 돌려준다.
-      const at = traced ? Date.now() : 0
       if (writeFileAtomic(file, text, { mode: 0o600, fs: this.writeFs, delaysMs: opts.delaysMs }).ok) this.draftPending.delete(root)
-      if (traced) diag(`drafts:flush:file elapsed=${Date.now() - at}ms pending=${this.draftPending.size}`)
+      if (traced) diag('drafts:flush:file')
     }
-    if (traced) diag(`drafts:flush:end elapsed=${Date.now() - startedAt}ms 남음=${this.draftPending.size}`)
+    if (traced) diag('drafts:flush:end')
   }
   /**
    * 대화 기록을 남기고 화면으로 내보낸다.
@@ -1874,20 +1872,19 @@ export class ChatService {
     // 진단: 예전에는 아래 두 기다림이 마감 밖이었다 — 멈춤 후보 1b. 진단이 꺼져 있으면
     // 시계도 문자열도 만들지 않는다(검토 RT3 권고) — 중단 버튼은 학생이 누르는 경로다.
     const traced = diagEnabled()
-    const startedAt = traced ? Date.now() : 0
     if (s && this.runs.has(key)) { s.state = 'stopped'; s.error = undefined; this.publish(s) }
     // 멈춘 연결은 버린다 — 다음 send/status 가 새 연결을 열어야 '다시 확인'이 살아난다.
     const connection = this.connections.get(key)
-    if (traced) diag(`stop:connection:start provider=${provider} has=${connection ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
+    if (traced) diag('stop:connection:start')
     if (connection) {
       // 마감을 넘긴 연결은 **재사용하지 않지만**(맵에서 지운다) 소유권은 남긴다 — 나중 `close()` 가
       // 그 자식까지 회수해야 한다(검토 RT3 차단).
       if (await this.stopConnectionWithin(`stop:${provider}`, connection, CLOSE_CONNECTION_DEADLINE_MS, '중단') === 'pending') this.reclaimPending.add(connection)
     }
     this.connections.delete(key)
-    if (traced) diag(`stop:connection:end provider=${provider} elapsed=${Date.now() - startedAt}ms`)
+    if (traced) diag('stop:connection:end')
     const run = this.runs.get(key)
-    if (traced) diag(`stop:run:start provider=${provider} has=${run ? 'y' : 'n'} elapsed=${Date.now() - startedAt}ms`)
+    if (traced) diag('stop:run:start')
     if (run) {
       // 턴도 상한을 둔다. 마감을 넘긴 턴은 상태가 이미 `stopped` 라 화면은 멈췄고,
       // 실행기 쪽 정리는 그 연결의 stop 이 맡는다 — 여기서 더 기다려 봐야 호출자만 막힌다.
@@ -1895,7 +1892,7 @@ export class ChatService {
       if (outcome.failed.length) throw outcome.failed[0].reason
       if (outcome.pending.length) console.error(`[shutdown] 중단: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 — ${outcome.pending.join(', ')}`)
     }
-    if (traced) diag(`stop:run:end provider=${provider} elapsed=${Date.now() - startedAt}ms`)
+    if (traced) diag('stop:run:end')
   }
   /** 학생이 중단: 진행 담당·열린 제안·본대화를 함께 멈춘다(설계 §3.5). */
   async stop(root: string, provider: Provider) {
@@ -1975,13 +1972,12 @@ export class ChatService {
       // 진단: 예전에는 이 기다림이 마감 밖이었다 — 멈춤 후보 1b.
       // 진단이 꺼져 있으면 시계도 문자열도 만들지 않는다(검토 RT3 권고).
       const traced = diagEnabled()
-      const startedAt = traced ? Date.now() : 0
       /**
        * 인계 전에 이미 마감을 넘겨 남아 있던 연결(`stop()` 타임아웃분). 이번 `list` 에는 없으므로
        * 따로 합쳐야 완료 판정이 "정말 다 정리됐는가"가 된다 — `close()` 와 같은 규칙이다.
        */
       const stranded = [...this.reclaimPending]
-      if (traced) diag(`closeForUpdate:stop:start n=${this.closingConnections.size} stranded=${stranded.length}`)
+      if (traced) diag('closeForUpdate:stop:start')
       // 이름(`stop:<i>`)을 같은 배열의 순번으로 되돌려야 한다 — 순회 대상은 한 번만 만든다.
       const list = [...this.closingConnections]
       const stopped = await shutdownWithin(
@@ -1996,7 +1992,7 @@ export class ChatService {
        * 넘긴 담당 연결은 `settleJobs` 가 `reclaimPending` 에 넣는다 — 완료 판정이 그대로 본다.
        */
       const jobsPending = await this.settleJobs(roots, Math.max(0, CLOSE_CONNECTION_DEADLINE_MS - stopped.elapsedMs))
-      if (traced) diag(`closeForUpdate:stop:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length} jobs=${jobsPending.length}`)
+      if (traced) diag('closeForUpdate:stop:end')
       if (stopped.pending.length) console.error(`[shutdown] 연결 정리: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
       const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
       for (const connection of pending) this.reclaimPending.add(connection)
@@ -2005,7 +2001,7 @@ export class ChatService {
       // 인계 판정도 이번 pending ∪ (아직 남아 있는) 호출 전 미회수 — 이전 `stop()` 타임아웃분이 있으면 완료가 아니다.
       const unreclaimed = [...this.reclaimPending]
       await confirmStopped()
-      if (traced) diag(`closeForUpdate:confirm:end elapsed=${Date.now() - startedAt}ms unreclaimed=${unreclaimed.length}`)
+      if (traced) diag('closeForUpdate:confirm:end')
       const failed = stopped.failed[0]
       if (failed) throw failed.reason
       // 확인까지 끝났고 마감을 넘긴 연결이 없을 때만 목록을 비운다.
@@ -2038,7 +2034,6 @@ export class ChatService {
   async close(): Promise<{ outcome: 'done' } | { outcome: 'pending'; pids: number[] }> {
     // 진단이 꺼져 있으면 시계·문자열 조립을 하지 않는다(검토 RT3 권고) — 종료 경로다.
     const traced = diagEnabled()
-    const startedAt = traced ? Date.now() : 0
     /**
      * **호출 전부터 남아 있던 미회수 연결.** `stop()`(학생 중단)이 3초 마감을 넘기면 그 연결을
      * `reclaimPending` 에 넣고 활성 맵에서 지운다 — 재사용하면 안 되기 때문이다. 그런데 이 목록을
@@ -2050,8 +2045,7 @@ export class ChatService {
      * 기다리면 종료만 늦어지고(검토자 실측 stop 호출 1회), 남은 자식은 `reclaimChildren` 이 pid 로
      * 회수한다. "남아 있다"는 사실 자체가 미완료다.
      */
-    const stranded = [...this.reclaimPending]
-    if (traced) diag(`close:start runs=${this.runs.size} connections=${this.connections.size} globals=${this.globals.size} closing=${this.closingConnections.size} stranded=${stranded.length}`)
+    if (traced) diag('close:start')
     this.beginShutdown()
     if (this.pendingTimer) { clearTimeout(this.pendingTimer); this.pendingTimer = null }
     // 러너를 먼저 멈춘다 — 진행 담당 연결이 본대화 연결 정리 뒤에 남지 않게.
@@ -2063,7 +2057,7 @@ export class ChatService {
      * 바깥 10초 마감이 걸리지 않았다: 연결 하나의 `stop()` 이 안 끝나면 정리 전체가 마감 없이
      * 매달렸다(멈춤 후보 1b). 정착한 거절은 종전처럼 나중에 다시 던진다.
      */
-    if (traced) diag(`close:connections:start n=${connections.size}`)
+    if (traced) diag('close:connections:start')
     // 이름(`stop:<i>`)을 같은 배열의 순번으로 되돌려야 한다 — 순회 대상은 한 번만 만든다.
     const list = [...connections]
     const stopped = await shutdownWithin(
@@ -2071,10 +2065,10 @@ export class ChatService {
       list.map((connection, i) => ({ name: `stop:${i}`, start: () => connection.stop() })),
       CLOSE_CONNECTION_DEADLINE_MS
     )
-    if (traced) diag(`close:connections:end elapsed=${Date.now() - startedAt}ms failed=${stopped.failed.length} pending=${stopped.pending.length}`)
+    if (traced) diag('close:connections:end')
     // 담당 정리 — 같은 마감의 남은 예산만 쓴다(REVIEW-C4 I-03). 넘긴 연결은 `reclaimPending` 에 들어간다.
     const jobsPending = await this.settleJobs(roots, Math.max(0, CLOSE_CONNECTION_DEADLINE_MS - stopped.elapsedMs))
-    if (traced && jobsPending.length) diag(`close:jobs:pending n=${jobsPending.length} elapsed=${Date.now() - startedAt}ms`)
+    if (traced && jobsPending.length) diag('close:jobs:pending')
     if (stopped.pending.length) console.error(`[shutdown] close: ${CLOSE_CONNECTION_DEADLINE_MS}ms 안에 끝나지 않은 연결 ${stopped.pending.length}건 — ${stopped.pending.join(', ')}`)
     const pending = list.filter((_, i) => stopped.pending.includes(`stop:${i}`))
     for (const connection of pending) this.reclaimPending.add(connection)
@@ -2089,7 +2083,7 @@ export class ChatService {
      * `snapshot()` 이 `running`/`permission` 상태를 `interrupted` 로 복구한다(service.ts:212-215).
      */
     const runs = [...this.runs.entries()]
-    if (traced) diag(`close:runs:start n=${runs.length} elapsed=${Date.now() - startedAt}ms`)
+    if (traced) diag('close:runs:start')
     const outcome = await shutdownWithin(
       runs.map(([key, run], i) => {
         // 이름에 논문 폴더 경로를 넣지 않는다(로그가 CI 산출물로 올라간다) — provider/role 만.
@@ -2099,11 +2093,11 @@ export class ChatService {
           start: () => {
             // 진단이 꺼져 있으면 문자열 조립도 구독도 만들지 않는다 — 이 함수는 종료 경로다.
             if (traced) {
-              diag(`close:run:start ${name} elapsed=${Date.now() - startedAt}ms`)
+              diag('close:run:start')
               // 거절도 함께 받는다: 성공 콜백만 달면 남은 턴의 거절이 unhandled 로 샌다.
               void run.then(
-                () => diag(`close:run:end ${name} elapsed=${Date.now() - startedAt}ms`),
-                (e: unknown) => diag(`close:run:reject ${name} code=${logCodeOf(e)} elapsed=${Date.now() - startedAt}ms`)
+                () => diag('close:run:end'),
+                (e: unknown) => diag(`close:run:reject code=${logCodeOf(e)}`)
               )
             }
             return run
@@ -2112,13 +2106,13 @@ export class ChatService {
       }),
       CLOSE_RUN_DEADLINE_MS
     )
-    if (traced) diag(`close:runs:end elapsed=${Date.now() - startedAt}ms done=${outcome.done.length} pending=${outcome.pending.length} 내부경과=${outcome.elapsedMs}ms`)
+    if (traced) diag('close:runs:end')
     if (outcome.pending.length) console.error(`[shutdown] close: ${CLOSE_RUN_DEADLINE_MS}ms 안에 끝나지 않은 턴 ${outcome.pending.length}건 — ${outcome.pending.join(', ')}`)
     this.connections.clear()
     this.globals.clear()
     // 마감을 넘긴 연결이 있으면 그 목록은 남긴다 — 소유권(pid)이 회수 경로까지 살아야 한다.
     if (!pending.length) this.closingConnections.clear()
-    if (traced) diag(`close:end elapsed=${Date.now() - startedAt}ms pendingConnections=${pending.length}`)
+    if (traced) diag('close:end')
     const failed = stopped.failed[0]
     if (failed) throw failed.reason
     /**
@@ -2127,7 +2121,7 @@ export class ChatService {
      */
     if (!unreclaimed.size) return { outcome: 'done' }
     const pids = [...new Set([...unreclaimed].flatMap((connection) => connection.ownedPids?.() ?? []))]
-    if (traced) diag(`close:pending pids=${pids.join(',') || '없음'} reclaimed=${unreclaimed.size}`)
+    if (traced) diag('close:pending')
     return { outcome: 'pending', pids }
   }
 }

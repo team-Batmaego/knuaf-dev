@@ -25,6 +25,8 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import { runInNewContext } from 'node:vm'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import { MAX_FILE_BYTES, appendScrubbed, diag, setDefaultLogFile } from '../src/main/diagLog'
 import { consoleFields, installMainLog } from '../src/main/mainLog'
@@ -330,6 +332,63 @@ test('직접 diag 오류 코드·이름의 학생값은 버리고 OS 코드와 �
       expect(text).toContain('safeWrite:fail code=TypeError')
     })
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('sidecar 종료와 kordoc 설치 실패의 임의 값은 지속 로그에 없다', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kd-mainlog-direct-'))
+  const file = join(dir, 'main.log')
+  const before = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = file
+  try {
+    const timers: (() => void)[] = []
+    const killer = new EventEmitter()
+    const child = Object.assign(new EventEmitter(), { pid: 123, stdin: { write() {} } })
+    const sideFile = join(__dirname, '../src/main/sidecar.ts')
+    const exports: Record<string, any> = {}
+    const realRequire = createRequire(sideFile)
+    const js = transpileModule(readFileSync(sideFile, 'utf8'), {
+      compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+    }).outputText
+    runInNewContext(js, {
+      exports, Promise, process: { platform: 'win32', env: {} },
+      setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout() {},
+      require: (name: string) => name === './diagLog' ? { diag }
+        : name === './python' ? { scriptsDir: () => '', sidecarDir: () => '' }
+        : name === 'node:child_process' ? { spawn: () => killer } : realRequire(name)
+    })
+    const sidecar = new exports.Sidecar()
+    sidecar.owner = { child, exited: false, closed: false, tree: 'normal' }
+    const stopped = sidecar.stopForExit().catch((error: unknown) => error)
+    timers[0]()
+    killer.emit('exit', 'PRIVATE_SIDECAR_CODE')
+    await stopped
+
+    const runtimeFile = join(__dirname, '../src/main/kordocRuntime.ts')
+    const runtimeRequire = createRequire(runtimeFile)
+    const runtimeExports: Record<string, any> = {}
+    const runtimeJs = transpileModule(readFileSync(runtimeFile, 'utf8'), {
+      compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+    }).outputText
+    runInNewContext(runtimeJs + '\ninstallKordocRuntime = async () => { throw { code: "PRIVATE_KORDOC_CODE" } }; exports.testKick = kickInstall;', {
+      exports: runtimeExports, process, console, AbortController,
+      setTimeout: () => ({ unref() {} }), clearTimeout() {}, __dirname: join(__dirname, '../src/main'),
+      require: (name: string) => name === 'electron' ? { app: { isPackaged: false } }
+        : name === './diagLog' ? { diag } : runtimeRequire(name)
+    })
+    runtimeExports.testKick()
+    const tick = Promise.withResolvers<void>()
+    setImmediate(tick.resolve)
+    await tick.promise
+    const text = readFileSync(file, 'utf8')
+    expect(text).toContain('sidecar:stop:')
+    expect(text).toContain('kordoc 설치 실패')
+    expect(text).not.toContain('PRIVATE_SIDECAR_CODE')
+    expect(text).not.toContain('PRIVATE_KORDOC_CODE')
+  } finally {
+    if (before === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = before
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('감시 훅이 던지지 않는다 - 던지는 code accessor 가 있어도 원래 오류와 종료 코드 1 이 그대로다', () => {

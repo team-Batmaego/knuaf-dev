@@ -712,7 +712,7 @@ test('시작 작업: isOnline 없는 호스트는 받지 않고, 배경 실패�
     const adapter = loadAdapter({
       electron: { app: { isPackaged: false }, net: { fetch: () => { downloads++; throw new Error('network forbidden') } } },
       './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
-      './diagLog': { diag: (text: string) => logs.push(text) },
+      './diagLog': { ...require('../src/main/diagLog'), diag: (text: string) => logs.push(text) },
       './kordocRuntimeCore': {
         ...require('../src/main/kordocRuntimeCore'),
         readSpecState: () => ({ kind: 'ok', spec: specOf(), targetKey: TARGET_KEY, target: targetOf(specOf()) }),
@@ -725,7 +725,8 @@ test('시작 작업: isOnline 없는 호스트는 받지 않고, 배경 실패�
     setImmediate(tick.resolve)
     await tick.promise
     expect(downloads).toBe(0)
-    expect(logs.some((text) => text.includes('verification unavailable'))).toBe(failReady)
+    expect(logs.some((text) => text.includes('kordoc 시작 작업 실패'))).toBe(failReady)
+    expect(logs.join('\n')).not.toContain('verification unavailable')
   }
 })
 
@@ -758,7 +759,7 @@ test('패키징 시작 작업의 예상 밖 예외는 unhandled rejection 이 �
   const adapter = loadAdapter({
     electron: { app: { isPackaged: true }, net: {} },
     './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
-    './diagLog': { diag() {} },
+    './diagLog': { diag() { throw new Error('diagnostic unavailable') } },
     'node:os': { homedir: () => root },
     './kordocRuntimeCore': {
       ...require('../src/main/kordocRuntimeCore'),
@@ -791,7 +792,7 @@ test('패키징 설치 실패: 사용 가능한 설치가 없으면 소유 안�
   const adapter = loadAdapter({
     electron: { app: { isPackaged: true }, net: {} },
     './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
-    './diagLog': { diag() {} },
+    './diagLog': { ...require('../src/main/diagLog'), diag() {} },
     'node:os': { homedir: () => root },
     './kordocRuntimeCore': {
       ...require('../src/main/kordocRuntimeCore'),
@@ -816,7 +817,7 @@ test('패키징 시작 검증 예외: 사용 가능한 설치가 없으면 소�
   const adapter = loadAdapter({
     electron: { app: { isPackaged: true }, net: {} },
     './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
-    './diagLog': { diag() {} },
+    './diagLog': { diag() { throw new Error('diagnostic unavailable') } },
     'node:os': { homedir: () => root },
     './kordocRuntimeCore': {
       ...require('../src/main/kordocRuntimeCore'),
@@ -850,7 +851,7 @@ test('패키징 안내 파일 rename 실패: 사용 가능한 설치가 없으�
   const adapter = loadAdapter({
     electron: { app: { isPackaged: true, getVersion: () => '0.6.7' }, net: {} },
     './runtime': { runtimeRoot: () => join(root, 'python'), targetTriple: () => TARGET_KEY },
-    './diagLog': { diag() {} },
+    './diagLog': { diag() { throw new Error('diagnostic unavailable') } },
     'node:os': { homedir: () => root },
     'node:fs': {
       ...require('node:fs'),

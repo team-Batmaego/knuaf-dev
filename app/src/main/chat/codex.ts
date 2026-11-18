@@ -201,7 +201,7 @@ export class CodexConnection implements AgentConnection {
       root: this.options.root, form: 'app-thread', injected, rpc, codexHome: this.codexHome()
     })
     if (!plan.ok) {
-      diag(`codex-lock stage=plan reason=${plan.reason}`)
+      diag('codex-lock stage=plan')
       throw new Error(plan.studentCopy)
     }
     // Restart without -c injection before any inventory/probe can start a contaminated MCP.
@@ -293,11 +293,7 @@ export class CodexConnection implements AgentConnection {
             }
           }
           if (!out.ok) {
-            // Exact product names only: kordocMcp.MCP_SERVER_NAME and bundled Codex's node_repl
-            // (scripts/fetch-codex.mjs). Even short user names can contain secrets or personal data.
-            let userMcp = 0
-            const names = out.remaining.map((name) => name === MCP_SERVER_NAME || name === 'node_repl' ? name : `user-mcp-${++userMcp}`)
-            diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length} names=${JSON.stringify(names)}`)
+            diag('codex-lock stage=verify failed=true')
           }
           return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
