@@ -189,3 +189,136 @@ sys.exit(1)
     assert result["exit"] == 1
     assert result["data"] == {"status": "failed"}
     assert result["block_reason"] is None
+
+
+# --- confirm: 바뀐 계산 칸 확인 ----------------------------------------------
+#
+# `gg_notices.py confirm` 은 출처를 **필수**로 받는다(`--by app_click` 또는 `--relayed-quote`).
+# 둘 다 없거나 둘 다 있으면 도구가 거절하므로, 사이드카가 갈래를 하나만 골라 넘기는지 잠근다.
+
+
+def test_confirm_is_registered_as_a_write():
+    """확인은 정본을 고친다 — 읽기로 등록되면 agentBusy 검사가 통째로 빠진다."""
+    server = Server()
+    methods_scripts.register(server)
+    assert server.methods["notices.confirm"][1] is True
+
+
+def test_confirm_without_a_quote_is_app_click(scripts, tmp_path, project):
+    seen = tmp_path / "argv.json"
+    write_stub(scripts, f"""
+import json, sys
+open({str(seen)!r}, "w", encoding="utf-8").write(json.dumps(sys.argv[1:], ensure_ascii=False))
+print(json.dumps({{"status": "acknowledged", "acknowledged_by": "app_click", "notice_identity": "abc123"}}))
+""")
+
+    result = methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": "abc123"})
+
+    assert result["ok"] is True
+    assert result["status"] == "acknowledged"
+    assert result["block_reason"] is None
+    # 하위 명령 → 폴더 → 플래그. `--by` 는 앱이 고르는 값이 아니라 늘 app_click 이다.
+    assert json.loads(seen.read_text(encoding="utf-8")) == [
+        "confirm", str(project), "--identity", "abc123", "--by", "app_click",
+    ]
+
+
+def test_confirm_with_a_quote_uses_only_the_relayed_flag(scripts, tmp_path, project):
+    """전달 문장이 있으면 `--relayed-quote` 만 — `--by` 를 함께 넘기면 도구가 confirm_source_invalid 로 거절한다."""
+    seen = tmp_path / "argv.json"
+    write_stub(scripts, f"""
+import json, sys
+open({str(seen)!r}, "w", encoding="utf-8").write(json.dumps(sys.argv[1:], ensure_ascii=False))
+print(json.dumps({{"status": "acknowledged", "acknowledged_by": "relayed"}}))
+""")
+
+    result = methods_scripts.notices_confirm(
+        Ctx(), {"root": str(project), "identity": "abc123", "relayed_quote": "  교수님이 그대로 두라고 하셨어요  "})
+
+    assert result["ok"] is True
+    argv = json.loads(seen.read_text(encoding="utf-8"))
+    assert argv == ["confirm", str(project), "--identity", "abc123", "--relayed-quote",
+                    "교수님이 그대로 두라고 하셨어요"]
+    assert "--by" not in argv
+
+
+@pytest.mark.parametrize("quote", ["", "   ", 5, ["문장"]])
+def test_confirm_refuses_an_unusable_quote_before_spawn(scripts, tmp_path, project, quote):
+    marker = tmp_path / "ran"
+    write_stub(scripts, f"""
+open({str(marker)!r}, "w").write("x")
+print(json.dumps({{"status": "acknowledged"}}))
+""")
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": "abc123", "relayed_quote": quote})
+    assert caught.value.code == "invalid_params"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("identity", ["", "   ", "-abc"])
+def test_confirm_identity_must_be_a_usable_value(scripts, project, identity):
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": identity})
+    assert caught.value.code == "invalid_params"
+
+
+def test_confirm_without_the_tool_is_a_loud_failure(scripts, project):
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": "abc123"})
+    assert caught.value.code == "notices_script_missing"
+
+
+def test_confirm_requires_a_real_folder(scripts, tmp_path):
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.notices_confirm(Ctx(), {"root": str(tmp_path / "없는폴더"), "identity": "abc123"})
+    assert caught.value.code == "invalid_params"
+
+
+@pytest.mark.parametrize("reason", [
+    "notice_stale", "record_not_active", "record_unwritable", "lineage_id_collision",
+    "notice_identity_unknown", "confirm_source_missing", "confirm_source_invalid", "relayed_quote_missing",
+])
+def test_confirm_rejection_keeps_the_code_and_adds_the_sentence(scripts, project, reason):
+    """화면과 e2e 는 `data.reason`(기계 코드)로 판단하고, 학생 문장은 `block_reason` 에만 있다."""
+    write_stub(scripts, f"""
+import json, sys
+print(json.dumps({{"status": "rejected", "reason": {reason!r}}}))
+sys.exit(1)
+""")
+
+    result = methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": "abc123"})
+
+    assert result["ok"] is False
+    assert result["status"] == "rejected"
+    assert result["data"] == {"status": "rejected", "reason": reason}
+    assert result["block_reason"] == methods_scripts.NOTICE_REJECT_TEXT[reason]
+
+
+def test_confirm_unknown_rejection_reason_still_gets_a_sentence(scripts, project):
+    write_stub(scripts, """
+import json, sys
+print(json.dumps({"status": "rejected", "reason": "something_new"}))
+sys.exit(1)
+""")
+
+    result = methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": "abc123"})
+
+    assert result["ok"] is False
+    assert result["data"] == {"status": "rejected", "reason": "something_new"}
+    assert result["block_reason"] == "확인을 적지 못했어요(something_new)"
+
+
+def test_confirm_success_with_a_cleanup_warning_stays_a_success(scripts, project):
+    """곁파일 정리 실패는 정본에 확인이 적힌 뒤의 경고다 — 성공을 거절로 뒤집지 않는다(계약 §2-1)."""
+    write_stub(scripts, """
+import json
+print(json.dumps({"status": "acknowledged", "acknowledged_by": "app_click",
+                  "cleanup_warning": {"reason": "lock_left", "cleanup_errors": ["잠금 파일"]}}))
+""")
+
+    result = methods_scripts.notices_confirm(Ctx(), {"root": str(project), "identity": "abc123"})
+
+    assert result["ok"] is True
+    assert result["status"] == "acknowledged"
+    assert result["block_reason"] is None
+    assert result["data"]["cleanup_warning"]["reason"] == "lock_left"

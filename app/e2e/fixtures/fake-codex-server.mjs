@@ -216,6 +216,11 @@ const SKILLS_LIST = jsonKnob('FAKE_CODEX_SKILLS_LIST')
 const HOOKS_LIST = jsonKnob('FAKE_CODEX_HOOKS_LIST')
 const DISABLED_PLUGIN_IDS = jsonKnob('FAKE_CODEX_DISABLED_PLUGIN_IDS')
 const REQUEST_LOG = process.env.FAKE_CODEX_REQUEST_LOG ?? ''
+/** Arbitrary server requests during a fake turn; collect replies before completing it. */
+const SERVER_REQUESTS = jsonKnob('FAKE_CODEX_SERVER_REQUESTS')
+const SERVER_REPLY_LOG = process.env.FAKE_CODEX_SERVER_REPLY_LOG ?? ''
+const pendingServerRequests = new Set()
+let serverRequestTurn
 /**
  * 턴 id 셈을 프로세스 밖에 둔다 — 앱이 프로세스를 갈아 끼워도(재시작 갈래) id 가 겹치지 않아야
  * 실제 서버와 같다. 파일이 없으면 예전처럼 프로세스 안에서만 센다.
@@ -347,6 +352,13 @@ const responseThreadId = (requested) => {
 function handle(message) {
   // Answerless notifications and responses from the app.
   if (message.method === undefined) {
+    if (pendingServerRequests.delete(message.id)) {
+      if (SERVER_REPLY_LOG) appendFileSync(SERVER_REPLY_LOG, `${JSON.stringify(message)}\n`)
+      if (pendingServerRequests.size === 0) out({ method: 'turn/completed', params: {
+        threadId: serverRequestTurn.threadId, turn: { id: serverRequestTurn.turnId, status: 'completed' }
+      } })
+      return
+    }
     if (DECISION_LOG && message.id !== undefined && message.result?.decision) {
       appendFileSync(DECISION_LOG, `${JSON.stringify({ decision: message.result.decision })}\n`)
     }
@@ -519,6 +531,15 @@ function handle(message) {
       const started = () => out({ method: 'turn/started', params: { threadId: turnThread, turn: { id: turnId } } })
       if (TURN_NOTIFY_DELAY_MS > 0) setTimeout(started, TURN_NOTIFY_DELAY_MS)
       else started()
+      if (SERVER_REQUESTS !== undefined) {
+        serverRequestTurn = { threadId: turnThread, turnId }
+        for (const request of SERVER_REQUESTS) {
+          const requestId = ++serverSeq
+          pendingServerRequests.add(requestId)
+          out({ id: requestId, method: request.method, params: { threadId: turnThread, turnId, ...request.params } })
+        }
+        return
+      }
       if (TURN_FAILURE && (!LOGIN_COMPLETE || !existsSync(LOGIN_COMPLETE))) {
         const message = TURN_FAILURE === 'refresh' ? 'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.'
           : TURN_FAILURE === '401' ? 'HTTP 401 Unauthorized: authentication failed'
