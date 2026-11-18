@@ -10,7 +10,7 @@ import type {
   LanesReply,
   LanesSnapshot,
   ReviewModelGroup,
-  LaneModelGroup,
+  LaneModelsResult,
   PlacementDecision,
   PlacementEntries,
   PlacementOrigin
@@ -36,7 +36,7 @@ type LanesApi = {
   settingsCard(root: string, kind: 'enable' | 'revert'): Promise<LanesReply<LaneCard>>
   disable(root: string): Promise<LanesReply<void>>
   setPlacement(root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>>
-  laneModels(root: string, fresh?: boolean): Promise<LanesReply<LaneModelGroup[]>>
+  laneModels(root: string, fresh?: boolean): Promise<LanesReply<LaneModelsResult>>
   reviewModels(root: string): Promise<LanesReply<ReviewModelGroup[]>>
   pickReview(root: string, company: Provider, model: string): Promise<LanesReply<LaneCard>>
   consents(): Promise<LanesReply<ConsentRow[]>>

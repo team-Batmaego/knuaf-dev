@@ -83,17 +83,26 @@ test('fresh account changes and A usage gate block placement without approval', 
 
 test('catalog exposes only observed per-model efforts and refuses API accounts', async () => {
   const f = fixture()
-  expect(await laneModels(f.deps)).toEqual([{ company: 'codex', models: f.account.account.models }])
+  expect(await laneModels(f.deps)).toEqual({ groups: [{ company: 'codex', models: f.account.account.models }], failed: [] })
   if (f.account.account.company === 'codex') f.account.account.accountType = 'apiKey'
-  expect(await laneModels(f.deps)).toEqual([])
+  expect(await laneModels(f.deps)).toEqual({ groups: [], failed: [] })
 })
 test('catalog refresh bypasses stale account results', async () => {
   const f = fixture()
   const stale = { ...f.account, connected: false }
   f.deps.account = async company => company === 'codex' ? stale : null
   f.deps.freshAccount = async company => company === 'codex' ? f.account : null
-  expect(await laneModels(f.deps)).toEqual([])
-  expect(await laneModels(f.deps, { fresh: true })).toEqual([{ company: 'codex', models: f.account.account.models }])
+  expect(await laneModels(f.deps)).toEqual({ groups: [], failed: [] })
+  expect(await laneModels(f.deps, { fresh: true })).toEqual({ groups: [{ company: 'codex', models: f.account.account.models }], failed: [] })
+})
+
+test('connected account with an unavailable catalog reports failure, disconnected does not', async () => {
+  const f = fixture()
+  const unavailable: ExecutionAccount = { ...f.account, account: { ...f.account.account, models: null } }
+  f.deps.account = async company => company === 'codex' ? unavailable : null
+  expect(await laneModels(f.deps)).toEqual({ groups: [], failed: ['codex'] })
+  unavailable.connected = false
+  expect(await laneModels(f.deps)).toEqual({ groups: [], failed: [] })
 })
 
 

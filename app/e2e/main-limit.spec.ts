@@ -373,6 +373,18 @@ test('계정 조회는 아직 없는 앱 전용 폴더에서도 연결과 모델
   expect(account?.account.models).toEqual(expect.arrayContaining([
     expect.objectContaining({ model: 'opus', name: 'Opus' })
   ]))
+
+  const bin = join(rig.dir, 'codex-bin')
+  const env = fakeCodexEnv(bin)
+  const codex = laneAccountProbe({
+    appDir: join(rig.dir, 'new-codex-data', 'relay'), env: () => ({ ...process.env, ...env }),
+    openExternal: async () => {}, binary: () => join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex')
+  })
+  const codexAccount = await codex('codex')
+  expect(codexAccount?.connected).toBe(true)
+  expect(codexAccount?.account.models).toEqual(expect.arrayContaining([
+    expect.objectContaining({ model: 'gpt-sol', name: 'Sol' })
+  ]))
 })
 
 test('handoff: 동시 두 제안의 첫 계정 조회는 1회', async () => {

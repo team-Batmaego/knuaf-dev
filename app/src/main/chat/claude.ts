@@ -919,7 +919,7 @@ const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 /** 모델 고르기가 저장된 선택을 되돌릴 수 없을 때의 문구(main·renderer 공통). */
 export const CLAUDE_MODEL_COPY = {
-  unsetNeedsChoice: '이 대화에서 모델을 골랐던 적이 있어서, "안 고름"으로 되돌리려면 계정 기본 모델을 알아야 해요. 지금은 그 값을 확인하지 못했어요. 모델 칩에서 모델을 하나 골라 주세요. (새 대화를 열면 계정 기본값을 다시 확인해요.)',
+  unsetNeedsChoice: '지금은 이 대화의 계정 기본 모델을 확인하지 못했어요. 모델 칩에서 모델을 하나 골라 주세요. (새 대화를 열면 계정 기본값을 다시 확인해요.)',
   defaultMismatch: (requested: string, actual: string) => `고른 모델(${requested})로 대화가 열리지 않았어요. 이 대화는 ${actual}로 진행되고 있어요. 모델 칩에서 다시 확인해 주세요.`
 }
 

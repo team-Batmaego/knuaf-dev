@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { expectConnected, launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 import type { ChatSnapshot } from '../src/shared/chat'
+import { MODEL_PICKER } from '../src/renderer/src/copy'
 
 const option = (model: string, name: string, hidden = false) => ({
   id: model, model, displayName: name, hidden, description: `${name} 모델 설명`,
@@ -207,6 +208,87 @@ test('빈 목록에서 계정을 바꿔도 안 고름 줄을 표시하지 않는
   } finally { await electronApp.close() }
 })
 
+test('채팅 목록은 정상이어도 메뉴 목록 실패 시 다시 불러와 모델을 고른다', async () => {
+  const { electronApp, page } = await scene()
+  const root = synthProject()
+  try {
+    await openProject(page, root)
+    await expect.poll(async () => (await page.evaluate(() => window.knuaf.chat.models(null, 'codex'))).result?.models.length).toBe(4)
+    await electronApp.evaluate(({ ipcMain }) => {
+      // Electron's private invoke-handler table is not exposed in its public types.
+      const testIpc = ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
+      const handlers = testIpc._invokeHandlers
+      const original = handlers.get('lanes:models')!
+      let failed = false
+      handlers.set('lanes:models', (...args) => {
+        if (!failed) { failed = true; return { error: { code: 'internal', message: '메뉴 목록 오류' } } }
+        return original(...args)
+      })
+    })
+    await page.getByTitle('이 논문의 도우미').click()
+    const popup = page.locator('.composer-model-host .popover')
+    await expect(popup.getByRole('alert')).toContainText(MODEL_PICKER.listFailed)
+    const reload = popup.getByRole('button', { name: '모델 목록 새로고침', exact: true })
+    await expect(reload).toBeVisible()
+    await reload.click()
+    await expect(reload).toHaveCount(0)
+    await expect(popup.getByRole('alert')).toHaveCount(0)
+    await popup.locator('[data-submenu="true"]').first().click()
+    await popup.getByRole('button', { name: 'Sol', exact: true }).click()
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText('Sol')
+  } finally { await electronApp.close() }
+})
+
+test('연결된 회사의 메뉴 목록만 빠지면 다시 불러와 복구한다', async () => {
+  const { electronApp, page } = await scene()
+  const root = synthProject()
+  try {
+    await openProject(page, root)
+    await electronApp.evaluate(({ ipcMain }) => {
+      // Electron's private invoke-handler table is not exposed in its public types.
+      const testIpc = ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
+      const handlers = testIpc._invokeHandlers
+      const original = handlers.get('lanes:models')!
+      let failed = false
+      handlers.set('lanes:models', (...args) => {
+        if (!failed) { failed = true; return { result: { groups: [], failed: ['codex'] } } }
+        return original(...args)
+      })
+    })
+    await page.getByTitle('이 논문의 도우미').click()
+    const popup = page.locator('.composer-model-host .popover')
+    await expect(popup.getByRole('alert')).toContainText(MODEL_PICKER.listFailed)
+    const reload = popup.getByRole('button', { name: MODEL_PICKER.reload, exact: true })
+    await reload.click()
+    await expect(reload).toHaveCount(0)
+    await expect(popup.getByRole('alert')).toHaveCount(0)
+    await popup.locator('[data-submenu="true"]').first().click()
+    await popup.getByRole('button', { name: 'Sol', exact: true }).click()
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText('Sol')
+  } finally { await electronApp.close() }
+})
+
+test('모델 목록이 정상이고 배치 저장만 실패하면 다시 불러오기가 없다', async () => {
+  const { electronApp, page } = await scene()
+  const root = synthProject()
+  try {
+    await openProject(page, root)
+    await electronApp.evaluate(({ ipcMain }) => {
+      // Electron's private invoke-handler table is not exposed in its public types.
+      const testIpc = ipcMain as unknown as { _invokeHandlers: Map<string, (...args: unknown[]) => unknown> }
+      testIpc._invokeHandlers.set('lanes:set-placement', () => ({ error: { code: 'internal', message: 'save failed' } }))
+    })
+    await page.getByTitle('이 논문의 도우미').click()
+    const popup = page.locator('.composer-model-host .popover')
+    await popup.getByRole('button', { name: /^추천 배치/ }).click()
+    const choice = popup.getByRole('button', { name: /ChatGPT 높은 플랜만/ })
+    await expect(choice).toBeEnabled()
+    await choice.click()
+    await expect(popup.getByRole('alert')).toContainText('배치를 적용하지 못했어요')
+    await expect(popup.getByRole('button', { name: MODEL_PICKER.reload, exact: true })).toHaveCount(0)
+  } finally { await electronApp.close() }
+})
+
 test('목록 오류는 재조회로 복구하고 실패 중에도 계정 기본 선택과 초안을 지킨다', async () => {
   const { electronApp, page } = await scene(highModels, 'light', { FAKE_CODEX_MODELS_FAIL_TIMES: '1' })
   try {
@@ -215,7 +297,7 @@ test('목록 오류는 재조회로 복구하고 실패 중에도 계정 기본 
     const chip = page.getByTitle('이 논문의 도우미')
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
-    await expect(popup.getByRole('alert')).toContainText('모델 목록 임시 오류')
+    await expect(popup.getByRole('alert')).toContainText(MODEL_PICKER.listFailed)
     await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
     await popup.getByRole('button', { name: '모델 목록 새로고침', exact: true }).click()
     await expect(popup.getByRole('button', { name: '모델 목록 새로고침', exact: true })).toHaveCount(0)

@@ -17,7 +17,7 @@ import type {
 import { LANE_TABLE, REVIEW_EFFORT, WORK_LANES, checkLaneRequest, fitEffort, isCrossProviderModelId, judgePlan, proposeLaneRequest, resolveLanes, type LaneProposal } from '../../shared/lanes'
 import type {
   CardAction, CardDecision, CardInvalidReason, CardRow, CardState, CardVariant, FeeNotice, LaneCard,
-  ModelRef, ReviewModelGroup, PlacementEntries, PlacementOrigin, PlacementDecision, LaneModelGroup
+  ModelRef, ReviewModelGroup, PlacementEntries, PlacementOrigin, PlacementDecision, LaneModelsResult
 } from '../../shared/lanes-ipc'
 import type { JobRunner } from '../chat/jobs'
 import type { ExecutionAccount } from '../chat/jobs/types'
@@ -187,16 +187,18 @@ export async function reviewModels(deps: Pick<CardDeps, 'account'>): Promise<Rev
 }
 
 /** 메뉴 목록도 승인과 같은 계정·모델 경계를 쓴다. */
-export async function laneModels(deps: Pick<CardDeps, 'account' | 'freshAccount'>, options?: { fresh?: boolean }): Promise<LaneModelGroup[]> {
-  const groups: LaneModelGroup[] = []
+export async function laneModels(deps: Pick<CardDeps, 'account' | 'freshAccount'>, options?: { fresh?: boolean }): Promise<LaneModelsResult> {
+  const groups: LaneModelsResult['groups'] = []
+  const failed: Provider[] = []
   for (const company of ['claude', 'codex', 'free'] as const) {
     const account = await (options?.fresh && deps.freshAccount ? deps.freshAccount(company) : deps.account(company))
     if (!account?.connected || !judgePlan(account.account).usable) continue
-    const models = account.account.models?.filter(entry => !isCrossProviderModelId(entry.model))
-      .map(entry => ({ model: entry.model, name: entry.name, efforts: [...entry.efforts] })) ?? []
+    if (account.account.models === null) { failed.push(company); continue }
+    const models = account.account.models.filter(entry => !isCrossProviderModelId(entry.model))
+      .map(entry => ({ model: entry.model, name: entry.name, efforts: [...entry.efforts] }))
     if (models.length) groups.push({ company, models })
   }
-  return groups
+  return { groups, failed }
 }
 
 /** 카드·끄기와 같은 잠금 안에서 전량 검사 후 한 번 저장한다. */

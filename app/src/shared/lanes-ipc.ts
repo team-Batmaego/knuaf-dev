@@ -462,6 +462,10 @@ export interface LaneModelGroup {
   company: Provider
   models: { model: string; name: string; efforts: string[] }[]
 }
+export interface LaneModelsResult {
+  groups: LaneModelGroup[]
+  failed: Provider[]
+}
 
 // ---------------------------------------------------------------- §5 설정
 
@@ -550,7 +554,7 @@ export interface ArchivedChat {
 export interface LanesApi {
   snapshot(root: string | null): Promise<LanesReply<LanesSnapshot>>
   setPlacement(root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>>
-  laneModels(root: string, fresh?: boolean): Promise<LanesReply<LaneModelGroup[]>>
+  laneModels(root: string, fresh?: boolean): Promise<LanesReply<LaneModelsResult>>
   /** 구독. 해제 함수를 돌려준다. */
   onSnapshot(fn: (snapshot: LanesSnapshot) => void): () => void
 

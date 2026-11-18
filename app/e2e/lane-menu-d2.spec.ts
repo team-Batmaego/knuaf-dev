@@ -27,10 +27,10 @@ test('D2 모델 메뉴: 꺼짐, 추천, 켜짐, 역할과 추론, 예약', async
       const lanes = {
         setPlacement: async (...args: unknown[]) => { Reflect.set(window, '__placementArgs', args); return { result: { outcome: 'applied', version: 2 } } },
         snapshot: async () => ({ result: value }), onSnapshot: () => () => undefined,
-        laneModels: async () => ({ result: [{ company: 'codex', models: [
+        laneModels: async () => ({ result: { groups: [{ company: 'codex', models: [
           { model: 'gpt-sol', name: 'GPT-6.1 Sol', efforts: ['low'] },
           { model: 'gpt-astra', name: 'GPT-6 Astra', efforts: ['low', 'high'] }
-        ] }] })
+        ] }], failed: [] } })
       }
       window.dispatchEvent(new CustomEvent('knuaf:lanes-seam-test', { detail: { lanes, jobs: {} } }))
     }, off)

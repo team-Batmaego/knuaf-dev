@@ -20,6 +20,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
   const [groups, setGroups] = useState<LaneModelGroup[]>([])
   const [laneBusy, setLaneBusy] = useState(false)
   const [laneError, setLaneError] = useState<string | null>(null)
+  const [menuListError, setMenuListError] = useState(false)
   const root = useProject((s) => s.root)
   const snapshot = useLanes((s) => s.snapshot)
   const laneView = snapshot?.root === root ? snapshot.settings : null
@@ -63,8 +64,8 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
     void useLanes.getState().load(root)
     void laneActions().laneModels(root).then((result) => {
       if (!current) return
-      if ('value' in result) setGroups(result.value)
-      else setLaneError(result.error)
+      if ('value' in result) { setGroups(result.value.groups); setMenuListError(result.value.failed.length > 0) }
+      else { setGroups([]); setMenuListError(true) }
     })
     return () => { current = false }
   }, [open, root])
@@ -149,8 +150,8 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
             onModel={(model) => { if (view === 'main') { const next = { model: model.model, effort: fitEffort(displayEffort ?? null, model.efforts) }; void window.knuaf.chat.setModel(root, model.company, next).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else if (model.company === provider) { await loadModels(provider); await loadSettings() } }) } else selectRoleModel(model) }}
             onEffort={(effort) => { if (view === 'main' && choice) void window.knuaf.chat.setModel(root, provider, { ...choice, effort }).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else { await loadModels(provider); await loadSettings() } }); else if (role && currentEntry) void savePlacement({ ...entries, [role]: { ...currentEntry, effort } }, { kind: 'mine' }) }}
             onRecommendation={(id) => { void savePlacement(entries, { kind: 'recommended', rowId: id as LaneRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings(); setView('top') } }) }} />
-          {(laneError || saveError || listError) && <p className="model-picker-note" role="alert">{laneError || saveError || listError}</p>}
-          {listError && <button type="button" className="pop-row" onClick={() => { void (async () => { await loadModels(provider); if (root) { const result = await laneActions().laneModels(root, true); if ('value' in result) setGroups(result.value); else setLaneError(result.error) } })() }}>{MODEL_PICKER.reload}</button>}
+          {(laneError || saveError || listError || menuListError) && <p className="model-picker-note" role="alert">{laneError || saveError || (listError || menuListError ? MODEL_PICKER.listFailed : '')}</p>}
+          {(listError || menuListError) && <button type="button" className="pop-row" onClick={() => { void (async () => { await loadModels(provider); if (root) { const result = await laneActions().laneModels(root, true); if ('value' in result) { setGroups(result.value.groups); setMenuListError(result.value.failed.length > 0) } else { setGroups([]); setMenuListError(true) } } })() }}>{MODEL_PICKER.reload}</button>}
         </div>
       </Popover>
     </div>

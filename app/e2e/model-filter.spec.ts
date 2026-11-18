@@ -115,7 +115,7 @@ test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조
   try {
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
-    await expect(popup.getByRole('alert')).toContainText('모델 목록 임시 오류')
+    await expect(popup.getByRole('alert')).toContainText(MODEL_PICKER.listFailed)
     await expect(page.getByTitle('이 논문의 도우미')).toContainText(MODEL_PICKER.reselectionTitle)
     await expect(page.getByTitle('이 논문의 도우미')).not.toContainText(rejected.model)
     expect((await send(page, root, 'failed-list')).error?.message).toBe(MODEL_PICKER.reselectionRequired)
