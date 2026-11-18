@@ -172,7 +172,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     ),
     setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin) => withFolder(root,
       folder => setPlacement(cards, folder, baseVersion, entries, origin)),
-    laneModels: (root: string) => withFolder(root, () => laneModels(cards), false),
+    laneModels: (root: string, fresh?: boolean) => withFolder(root, () => laneModels(cards, { fresh: fresh === true }), false),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) => withFolder(root,
       folder => decideCard(cards, folder, cardId, baseVersion, action)),
     cardStatus: (root: string, cardId: string) => withFolder(root,

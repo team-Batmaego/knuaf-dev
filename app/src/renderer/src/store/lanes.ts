@@ -36,7 +36,7 @@ type LanesApi = {
   settingsCard(root: string, kind: 'enable' | 'revert'): Promise<LanesReply<LaneCard>>
   disable(root: string): Promise<LanesReply<void>>
   setPlacement(root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>>
-  laneModels(root: string): Promise<LanesReply<LaneModelGroup[]>>
+  laneModels(root: string, fresh?: boolean): Promise<LanesReply<LaneModelGroup[]>>
   reviewModels(root: string): Promise<LanesReply<ReviewModelGroup[]>>
   pickReview(root: string, company: Provider, model: string): Promise<LanesReply<LaneCard>>
   consents(): Promise<LanesReply<ConsentRow[]>>
@@ -288,7 +288,7 @@ export function laneActions() {
       useLanes.getState().callValue(({ lanes }) => lanes.settingsCard(root, kind)),
     setPlacement: (root: string, version: number, entries: PlacementEntries, origin: PlacementOrigin) =>
       useLanes.getState().callValue(({ lanes }) => lanes.setPlacement(root, version, entries, origin)),
-    laneModels: (root: string) => useLanes.getState().callValue(({ lanes }) => lanes.laneModels(root)),
+    laneModels: (root: string, fresh?: boolean) => useLanes.getState().callValue(({ lanes }) => lanes.laneModels(root, fresh)),
     disable: (root: string) => ask(({ lanes }) => lanes.disable(root)),
     dismiss: (root: string, lineId: string) => ask(({ lanes }) => lanes.dismiss(root, lineId)),
     handoffContinue: (root: string, proposalId: string) => ask(({ lanes }) => lanes.handoffContinue(root, proposalId)),

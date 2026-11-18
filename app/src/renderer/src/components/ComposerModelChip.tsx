@@ -150,7 +150,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
             onEffort={(effort) => { if (view === 'main' && choice) void window.knuaf.chat.setModel(root, provider, { ...choice, effort }).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else { await loadModels(provider); await loadSettings() } }); else if (role && currentEntry) void savePlacement({ ...entries, [role]: { ...currentEntry, effort } }, { kind: 'mine' }) }}
             onRecommendation={(id) => { void savePlacement(entries, { kind: 'recommended', rowId: id as LaneRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings(); setView('top') } }) }} />
           {(laneError || saveError || listError) && <p className="model-picker-note" role="alert">{laneError || saveError || listError}</p>}
-          {listError && <button type="button" className="pop-row" onClick={() => { void (async () => { await loadModels(provider); if (root) { const result = await laneActions().laneModels(root); if ('value' in result) setGroups(result.value); else setLaneError(result.error) } })() }}>{MODEL_PICKER.reload}</button>}
+          {listError && <button type="button" className="pop-row" onClick={() => { void (async () => { await loadModels(provider); if (root) { const result = await laneActions().laneModels(root, true); if ('value' in result) setGroups(result.value); else setLaneError(result.error) } })() }}>{MODEL_PICKER.reload}</button>}
         </div>
       </Popover>
     </div>

@@ -87,6 +87,15 @@ test('catalog exposes only observed per-model efforts and refuses API accounts',
   if (f.account.account.company === 'codex') f.account.account.accountType = 'apiKey'
   expect(await laneModels(f.deps)).toEqual([])
 })
+test('catalog refresh bypasses stale account results', async () => {
+  const f = fixture()
+  const stale = { ...f.account, connected: false }
+  f.deps.account = async company => company === 'codex' ? stale : null
+  f.deps.freshAccount = async company => company === 'codex' ? f.account : null
+  expect(await laneModels(f.deps)).toEqual([])
+  expect(await laneModels(f.deps, { fresh: true })).toEqual([{ company: 'codex', models: f.account.account.models }])
+})
+
 
 test('approved eight recommendation model assignments match product decision', () => {
   const expected = [

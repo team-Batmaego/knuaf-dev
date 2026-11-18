@@ -214,7 +214,7 @@ const api = {
     onSnapshot: (fn: (snapshot: LanesSnapshot) => void): (() => void) => subscribe(LANES_PUSH.snapshot, fn),
     setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>> =>
       ipcRenderer.invoke(LANES_INVOKE.setPlacement, root, baseVersion, entries, origin),
-    laneModels: (root: string): Promise<LanesReply<LaneModelGroup[]>> => ipcRenderer.invoke(LANES_INVOKE.laneModels, root),
+    laneModels: (root: string, fresh?: boolean): Promise<LanesReply<LaneModelGroup[]>> => ipcRenderer.invoke(LANES_INVOKE.laneModels, root, fresh),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<LanesReply<CardDecision>> =>
       ipcRenderer.invoke(LANES_INVOKE.decideCard, root, cardId, baseVersion, action),
     cardStatus: (root: string, cardId: string): Promise<LanesReply<CardDecision>> =>

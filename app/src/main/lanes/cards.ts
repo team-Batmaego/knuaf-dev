@@ -187,10 +187,10 @@ export async function reviewModels(deps: Pick<CardDeps, 'account'>): Promise<Rev
 }
 
 /** 메뉴 목록도 승인과 같은 계정·모델 경계를 쓴다. */
-export async function laneModels(deps: Pick<CardDeps, 'account'>): Promise<LaneModelGroup[]> {
+export async function laneModels(deps: Pick<CardDeps, 'account' | 'freshAccount'>, options?: { fresh?: boolean }): Promise<LaneModelGroup[]> {
   const groups: LaneModelGroup[] = []
   for (const company of ['claude', 'codex', 'free'] as const) {
-    const account = await deps.account(company)
+    const account = await (options?.fresh && deps.freshAccount ? deps.freshAccount(company) : deps.account(company))
     if (!account?.connected || !judgePlan(account.account).usable) continue
     const models = account.account.models?.filter(entry => !isCrossProviderModelId(entry.model))
       .map(entry => ({ model: entry.model, name: entry.name, efforts: [...entry.efforts] })) ?? []
