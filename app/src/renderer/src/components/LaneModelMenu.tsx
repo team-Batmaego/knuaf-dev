@@ -1,5 +1,6 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react'
 import { Icon } from './Icon'
+import { AccountChooser } from './AccountChooser'
 import { PopHead, PopSep } from './Popover'
 import { PROVIDER_NAME } from '../copy'
 import type { Provider } from '../../../shared/chat'
@@ -16,7 +17,7 @@ const roles: { id: Exclude<LaneMenuRole, 'main'>; label: string }[] = [
 ]
 
 export function LaneModelMenu(props: {
-  view: 'top' | 'recommendations' | LaneMenuRole
+  view: 'top' | 'recommendations' | 'account' | LaneMenuRole
   main: string
   pending: string | null
   team: boolean
@@ -27,11 +28,12 @@ export function LaneModelMenu(props: {
   recommendations: readonly LaneMenuRecommendation[]
   selectedRecommendation: string | null
   busy: boolean
-  onView: (view: 'top' | 'recommendations' | LaneMenuRole) => void
+  onView: (view: 'top' | 'recommendations' | 'account' | LaneMenuRole) => void
   onTeam: () => void
   onModel: (model: LaneMenuModel) => void
   onEffort: (effort: string) => void
   onRecommendation: (id: string) => void
+  onAccountPicked: () => void
 }) {
   const { view } = props
   const menu = useRef<HTMLDivElement>(null)
@@ -57,7 +59,7 @@ export function LaneModelMenu(props: {
       efforts[(current + (event.key === 'ArrowRight' ? 1 : efforts.length - 1)) % efforts.length]?.focus()
     }
   }
-  const back = <button type="button" className="pop-row" onClick={() => props.onView('top')}><span aria-hidden="true">‹</span><span className="c"><b>{view === 'recommendations' ? '추천 배치' : view === 'main' ? '주 모델' : roles.find((r) => r.id === view)?.label}</b></span></button>
+  const back = <button type="button" className="pop-row" onClick={() => props.onView('top')}><span aria-hidden="true">‹</span><span className="c"><b>{view === 'account' ? 'AI 회사·로그인' : view === 'recommendations' ? '추천 배치' : view === 'main' ? '주 모델' : roles.find((r) => r.id === view)?.label}</b></span></button>
   if (view === 'top') return <div className="lane-menu" ref={menu} onKeyDown={keyDown}>
     <PopHead>주 모델</PopHead>
     <button type="button" className="pop-row" data-submenu="true" onClick={() => props.onView('main')}><span className="c">{props.main}</span><span className="lane-meta">›</span></button>
@@ -67,7 +69,10 @@ export function LaneModelMenu(props: {
     {props.team && roles.map((role) => <button type="button" className="pop-row" data-submenu="true" key={role.id} onClick={() => props.onView(role.id)}><span className="lane-label">{role.label}</span><span className="c">{props.roles[role.id]}</span><span className="lane-meta">›</span></button>)}
     <PopSep />
     <button type="button" className="pop-row" data-submenu="true" onClick={() => props.onView('recommendations')}><span className="c">추천 배치</span><span className="lane-meta">›</span></button>
+    <PopSep />
+    <button type="button" className="pop-row" data-submenu="true" onClick={() => props.onView('account')}><span className="c">AI 회사·로그인</span><span className="lane-meta">›</span></button>
   </div>
+  if (view === 'account') return <div className="lane-menu" ref={menu} onKeyDown={keyDown}>{back}<PopSep /><AccountChooser onPicked={props.onAccountPicked} /></div>
   if (view === 'recommendations') return <div className="lane-menu" ref={menu} onKeyDown={keyDown}>{back}<PopSep />{props.recommendations.map((rec) => <button type="button" key={rec.id} className={`pop-row${props.selectedRecommendation === rec.id ? ' cur' : ''}`} aria-pressed={props.selectedRecommendation === rec.id} disabled={props.busy} onClick={() => props.onRecommendation(rec.id)}><span className="c"><span>{rec.label}</span><small>주 모델 {rec.main} · 검토 {rec.review}</small></span>{props.selectedRecommendation === rec.id && <Icon name="check" size={16} />}</button>)}</div>
   const selected = props.models.find((m) => m.company === props.choice?.company && m.model === props.choice?.model)
   const companies = [...new Set(props.models.map((m) => m.company))]

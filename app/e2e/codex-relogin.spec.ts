@@ -1,9 +1,20 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { closeApp, launch, openProject, stubExternal, synthProject } from './helpers'
 import { captureAppLog } from './diag'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
+
+async function expectConnected(page: Page): Promise<void> {
+  const chip = page.getByTitle('이 논문의 도우미')
+  const alreadyOpen = await chip.getAttribute('aria-expanded') === 'true'
+  if (!alreadyOpen) {
+    await chip.click()
+    await page.locator('.composer-model-host .popover').getByRole('button', { name: 'AI 회사·로그인' }).click()
+  }
+  await expect(page.locator('.composer-model-host .popover [data-provider="codex"]')).toContainText('연결됐어요', { timeout: 30000 })
+  if (!alreadyOpen) await page.keyboard.press('Escape')
+}
 
 for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'external401', 'external-unauthorized', 'refresh-network', 'bare401', 'rate'] as const) {
   test(`ChatGPT ${failure}: 인증 실패만 로그인 필요로 바뀌고 실제 재로그인 완료까지 유지한다`, async ({}, info) => {
@@ -20,12 +31,12 @@ for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'e
       await stubExternal(electronApp)
       await openProject(page, root)
       const chip = page.getByTitle('이 논문의 도우미')
-      await expect(chip).toContainText('연결됨')
+      await expectConnected(page)
       await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('전송할 내용')
       await page.getByRole('button', { name: '보내기', exact: true }).click()
       await expect(page.getByText('보냈는지 확인하지 못했어요')).toBeVisible()
       if (failure !== 'refresh' && failure !== '401' && failure !== '401-with-secret-marker') {
-        await expect(chip).toContainText('연결됨')
+        await expectConnected(page)
         if (failure === 'refresh-network') await expect(page.getByText('네트워크 연결을 확인해 주세요.')).toBeVisible()
         if (failure === 'external-unauthorized' || failure === 'bare401') {
           await expect(page.getByText('요청 인증을 확인하지 못했어요.')).toBeVisible()
@@ -41,6 +52,7 @@ for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'e
       }
       await chip.click()
       const popup = page.locator('.composer-model-host .popover')
+      await popup.getByRole('button', { name: 'AI 회사·로그인' }).click()
       await expect(popup.locator('[data-provider="codex"]')).toContainText('로그인이 필요해요')
       await expect(popup.locator('[data-provider="claude"]')).toContainText('연결됐어요')
       const capture = process.env.KNUAF_CHIP_CAPTURE_DIR
@@ -54,7 +66,7 @@ for (const failure of ['refresh', '401', '401-with-secret-marker', 'network', 'e
       await expect(chip).toContainText('로그인 중')
       expect(existsSync(complete)).toBe(false)
       writeFileSync(complete, 'fake login completed')
-      await expect(chip).toContainText('연결됨', { timeout: 10000 })
+      await expectConnected(page)
       await page.keyboard.press('Escape')
       await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('다시 로그인한 뒤 이어서')
       await page.getByRole('button', { name: '보내기', exact: true }).click()
@@ -76,9 +88,10 @@ test('연결된 두 회사에서 다시 로그인을 시작하고 취소할 수 
   try {
     await stubExternal(electronApp)
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
+    await popup.getByRole('button', { name: 'AI 회사·로그인' }).click()
     const codex = popup.locator('[data-provider="codex"]'), claude = popup.locator('[data-provider="claude"]')
     await expect(codex.getByRole('button', { name: 'ChatGPT 다시 로그인' })).toBeVisible()
     await expect(claude.getByRole('button', { name: 'Claude 다시 로그인' })).toBeVisible()
@@ -104,10 +117,11 @@ test('로그인 응답 직후 도착한 완료 알림도 새 시도의 id에 맞
   try {
     await stubExternal(electronApp)
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await chip.click()
+    await page.getByRole('button', { name: 'AI 회사·로그인' }).click()
     await page.getByRole('button', { name: 'ChatGPT 다시 로그인' }).click()
-    await expect(chip).toContainText('연결됨', { timeout: 10000 })
+    await expectConnected(page)
   } finally {
     await closeApp(electronApp, log)
   }
@@ -126,12 +140,13 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
     await stubExternal(electronApp)
     await openProject(page, root)
     const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('기다리는 이전 요청')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByRole('button', { name: '중단', exact: true })).toBeVisible()
     await chip.click()
     const popup = page.locator('.composer-model-host .popover')
+    await popup.getByRole('button', { name: 'AI 회사·로그인' }).click()
     await popup.getByRole('button', { name: 'ChatGPT 다시 로그인' }).click()
     await expect(chip).toContainText('로그인 중')
     if (order === 'login-first') {
@@ -140,7 +155,7 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
       // (지킴이 열거가 턴 시작을 늦추면서 실제로 그 순서가 뒤집혔다 — 시험이 검증하려던 경쟁이 사라진다).
       await expect.poll(() => existsSync(turns) ? readFileSync(turns, 'utf8') : '').toContain('기다리는 이전 요청')
       writeFileSync(complete, 'complete fake login')
-      await expect(chip).toContainText('연결됨', { timeout: 10000 })
+      await expectConnected(page)
     }
     writeFileSync(release, 'release fake turn')
     await expect(page.getByText('보냈는지 확인하지 못했어요')).toBeVisible()
@@ -148,7 +163,7 @@ for (const order of ['failure-first', 'login-first'] as const) test(`작업 중 
       await expect(chip).toContainText('로그인 중')
       writeFileSync(complete, 'complete fake login')
     }
-    await expect(chip).toContainText('연결됨', { timeout: 10000 })
+    await expectConnected(page)
     await page.keyboard.press('Escape')
     const saved = JSON.parse(readFileSync(join(root, '.knuaf-gui', 'chat-codex.json'), 'utf8'))
     expect(saved.messages.filter((m: { role: string }) => m.role === 'user')).toHaveLength(1)
