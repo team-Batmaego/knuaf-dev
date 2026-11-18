@@ -18,6 +18,7 @@ export default defineConfig({
     'chat-markdown.spec.ts',
     'paper-images.spec.ts',
     'layout.spec.ts',
+    'outline-note.spec.ts',
     'edits-store.spec.ts',
     'recheck.spec.ts',
     'progress-list.spec.ts',

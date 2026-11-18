@@ -13,6 +13,46 @@ export interface AppUpdateStatus {
 }
 interface Pending { from: string; to: string; installer: string; at: string }
 const RELEASES_PAGE = 'https://github.com/team-Batmaego/knuaf-dev/releases'
+
+/**
+ * 몇 시간마다 다시 확인할지. 채널 문서는 수 KB 라 하루 ~48회 요청은 부담이 없다.
+ * (v0.6.8 A1-3 — 켜 둔 학생에게 새 판을 알리는 주기 확인)
+ */
+export const RECHECK_INTERVAL_MS = 30 * 60 * 1000
+
+export interface RecheckTimer {
+  /** 주기 확인을 멈춘다. 여러 번 불러도 안전하다. */
+  stop(): void
+  /** 이 타이머가 프로세스 종료를 붙잡고 있나 — 시험이 `unref` 를 확인할 때 쓴다. */
+  held(): boolean
+}
+
+/**
+ * `task` 를 `intervalMs` 마다 부른다. 첫 박자는 간격 뒤에 온다 — 켤 때 확인이 이미 한 번 돌기
+ * 때문이다. `task` 의 거절은 삼킨다: 주기 확인의 실패는 다음 박자에 다시 시도할 뿐이고,
+ * 학생 화면의 오류 표시는 `AppUpdates` 가 정한다.
+ *
+ * 별도 파일이 아니라 이 파일 안에 있는 이유: `app/e2e/app-update-security.spec.ts` 가
+ * `appService` 가 `require` 하는 모듈을 허용 목록으로 못 박아 두었다 — 새 의존을 만들면
+ * 보안 시험의 허용 목록을 넓혀야 하고, 그 목록은 넓히라고 있는 것이 아니다.
+ */
+export function startRecheckClock(intervalMs: number, task: () => Promise<unknown>): RecheckTimer {
+  let stopped = false
+  const timer = setInterval(() => {
+    if (!stopped) void task().catch(() => { /* 다음 박자에 다시 */ })
+  }, intervalMs)
+  // 돌고 있는 주기 확인 때문에 앱 종료가 늦어지면 안 된다(`figures/heartbeat.ts` 와 같은 이유).
+  timer.unref?.()
+  return {
+    stop() {
+      if (stopped) return
+      stopped = true
+      clearInterval(timer)
+    },
+    held: () => timer.hasRef()
+  }
+}
+
 const OWNER_FAILURES = new Set([
   'user_data_owner_mismatch', 'user_data_owner_administrators',
   'pinned_owner_mismatch', 'pinned_owner_administrators',
@@ -22,6 +62,11 @@ export class AppUpdates {
   private candidate: VerifiedApp | null = null
   private controller: AbortController | null = null
   private checking: Promise<AppUpdateStatus> | null = null
+  /** 주기 확인이 돌고 있나 — `install()` 이 진행 중 확인을 기다릴지 정할 때 쓴다. */
+  private quiet = false
+  /** 조용한 확인 직전의 상태 — 끝난 뒤 '실제로 달라졌나'를 비교하는 기준. */
+  private quietBefore: AppUpdateStatus | null = null
+  private recheckTimer: RecheckTimer | null = null
   private statusValue: AppUpdateStatus
   private storeOwnerBlocked = false
   readonly root: string
@@ -37,11 +82,38 @@ export class AppUpdates {
     this.ready = this.recover()
   }
   status(): AppUpdateStatus { return { ...this.statusValue } }
+  /**
+   * 주기 확인을 건다(기본 30분). 첫 박자는 간격 뒤다 — 켤 때 한 번 확인(`ipc.ts` 의
+   * `void appUpdates.check()`)이 이미 돈 뒤부터 센다. `intervalMs <= 0` 이면 아무것도 하지 않는다.
+   *
+   * 생성자가 아니라 이 메서드인 이유: `app/e2e/app-update-security.spec.ts` 는 이 클래스의
+   * transpile 결과를 `vm` 문맥에서 돌리는데 그 문맥에는 `setInterval` 이 없다 — 생성자가 타이머를
+   * 만들면 보안 시험이 통째로 깨진다. 만드는 쪽(`ipc.ts`)이 언제 켤지 정한다.
+   */
+  startRecheck(intervalMs: number = RECHECK_INTERVAL_MS): void {
+    if (intervalMs <= 0 || this.recheckTimer) return
+    this.recheckTimer = startRecheckClock(intervalMs, () => this.recheck())
+  }
+  /** 주기 확인을 멈춘다 — 앱이 닫히거나 시험이 정리할 때. */
+  stopRecheck(): void { this.recheckTimer?.stop(); this.recheckTimer = null }
+  /**
+   * 켜 둔 채 쓰는 학생을 위한 주기 확인 — 조용히(화면 흔들지 않고) 새 판이 있는지만 본다.
+   * 설치가 진행 중인 phase(받는 중·준비 중·다시 시작 중)에서는 손대지 않는다 — 진행률 화면을
+   * 확인이 덮으면 학생은 무엇이 일어나는지 잃는다. `controller` 가드가 같은 구간을 이미 막지만,
+   * phase 로 한 번 더 못 박아 둔다(진행률을 지키는 것이 이 함수의 계약).
+   */
+  recheck(): Promise<AppUpdateStatus> {
+    const phase = this.statusValue.phase
+    if (phase === 'downloading' || phase === 'preparing' || phase === 'launching') return Promise.resolve(this.status())
+    return this.check(true)
+  }
   private set(patch: Partial<AppUpdateStatus>): AppUpdateStatus {
     const latest = this.storeOwnerBlocked && this.candidate && compare(this.candidate.manifest.version, this.opts.current) > 0 ? this.candidate.manifest.version : null
     this.statusValue = { ...this.statusValue, reason: undefined, message: undefined, received: undefined, total: undefined, ...patch,
       ...(this.storeOwnerBlocked ? { phase: 'blocked', reason: 'store_owner', latest, page: latest ? releasePage(latest) : RELEASES_PAGE } as const : {}) }
-    this.opts.emit?.(this.status()); return this.status()
+    // 조용한 확인 중에는 여기서 알리지 않는다 — 끝난 뒤 실제로 달라졌을 때만 한 번 알린다.
+    if (!this.quiet) this.opts.emit?.(this.status())
+    return this.status()
   }
   private installer(v: string): string { version(v); return join(this.root, v, 'installer.exe') }
   private async inStore<T>(create: boolean, action: (store: StoreSession) => Promise<T>): Promise<T> {
@@ -78,11 +150,21 @@ export class AppUpdates {
       })
     } catch (error) { this.set({ phase: this.opts.config.keys.length ? 'error' : 'unavailable', message: error instanceof Error ? error.message : '설치 기록을 확인하지 못했어요.' }) }
   }
-  check(): Promise<AppUpdateStatus> {
+  check(silent = false): Promise<AppUpdateStatus> {
     if (this.checking) return this.checking
     if (this.controller) return Promise.resolve(this.status())
+    this.quiet = silent
+    this.quietBefore = silent ? this.statusValue : null
     const task = this.checkNow(); this.checking = task
-    void task.finally(() => { if (this.checking === task) this.checking = null })
+    void task.finally(() => {
+      if (this.checking !== task) return
+      this.checking = null
+      // 조용한 확인은 결과가 **실제로 달라졌을 때만** 한 번 알린다. 30분마다 같은 상태를 다시
+      // 뿌리면 화면이 깜빡이고, 새 판이 없을 때 학생이 볼 것도 없다.
+      const changed = this.quietBefore !== null && JSON.stringify(this.quietBefore) !== JSON.stringify(this.statusValue)
+      this.quiet = false; this.quietBefore = null
+      if (changed) this.opts.emit?.(this.status())
+    })
     return task
   }
   private async checkNow(): Promise<AppUpdateStatus> {
@@ -95,7 +177,8 @@ export class AppUpdates {
       this.candidate = interrupted.candidate
       return this.set({ phase: 'interrupted', latest: interrupted.status.latest, page: interrupted.status.page, message: interrupted.status.message })
     }
-    this.set({ phase: 'checking' })
+    // 조용한 확인은 '확인 중' 단계를 만들지 않는다 — 화면에 표시가 스치는 것도 흔들림이다.
+    if (!this.quiet) this.set({ phase: 'checking' })
     try {
       const channel = await readChannelDocument(this.opts.config, this.opts.fetch, AbortSignal.timeout(15_000))
       if (!Object.hasOwn(channel, 'app')) {
@@ -123,6 +206,9 @@ export class AppUpdates {
       if (compare(app.latest, this.opts.current) <= 0) return this.set({ phase: 'idle', latest: null, page: null })
       return this.set({ phase: 'available', latest: app.latest, page })
     } catch (error) {
+      // 조용한 확인의 실패(인터넷 끊김 등)는 오류 화면을 만들지 않고 이전 모습으로 되돌린다 -
+      // 다음 박자에 다시 본다. 되돌린 결과는 '달라지지 않음'이라 emit 도 없다.
+      if (this.quietBefore) { this.statusValue = this.quietBefore; return this.status() }
       return this.set({ phase: 'error', message: error instanceof Error ? error.message : '앱 업데이트를 확인하지 못했어요.' })
     }
   }
@@ -145,6 +231,9 @@ export class AppUpdates {
   async install(): Promise<void> {
     await this.ready
     if (this.opts.platform !== 'win32' || this.opts.arch !== 'x64') throw new Error('Windows x64 앱에서만 설치할 수 있어요.')
+    // 주기 확인이 스쳐 지나가는 중이면 기다린다 - 30분짜리 확인 하나 때문에 설치를 거절하면
+    // 학생에게는 '업데이트를 준비하고 있어요'라는 엉뚱한 오류가 된다. 사람이 누른 확인이면 그대로 막는다.
+    if (this.checking && this.quiet) { try { await this.checking } catch { /* 조용한 확인의 실패는 설치를 막지 않는다 */ } }
     if (this.controller || this.checking) throw new Error('이미 앱 업데이트를 준비하고 있어요.')
     if (!this.candidate) throw new Error('먼저 앱 업데이트를 확인해 주세요.')
     const p = verifyApp(this.candidate.envelope, this.opts.config.keys, this.opts.current), v = p.manifest.version, installer = this.installer(v)

@@ -108,7 +108,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
     await section.getByRole('button', { name: '내려받기 페이지 열기' }).click()
     await expect.poll(() => electronApp.evaluate(() => (globalThis as typeof globalThis & { openedUpdate?: string }).openedUpdate)).toBe('https://github.com/team-Batmaego/knuaf-dev/releases/tag/v99.0.0')
     await page.locator('dialog[data-screen="settings"] > .sheet-head button[aria-label="닫기"]').click()
-    await page.locator('.titlebar').getByRole('button', { name: '업데이트', exact: true }).click()
+    await page.locator('.sidebar-update-card').getByRole('button', { name: '업데이트', exact: true }).click()
     await expect(page.getByRole('dialog', { name: '새 앱 99.0.0이 나왔어요' })).toBeVisible()
     await page.getByRole('button', { name: '나중에' }).click()
   } finally {
@@ -178,7 +178,7 @@ test('app update progress remains reachable after closing the named dialog', asy
     }, phase)
     // A later fail-closed event must still remove the button; do not mask real states.
     await emit('available')
-    const titleButton = page.locator('.titlebar').getByRole('button', { name: '업데이트', exact: true })
+    const titleButton = page.locator('.sidebar-update-card').getByRole('button', { name: '업데이트', exact: true })
     await expect(titleButton).toBeVisible()
     await electronApp.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0].webContents.send('app-update:status', {

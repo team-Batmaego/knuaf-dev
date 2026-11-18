@@ -8,6 +8,7 @@
       "drawer-region",
       "file-change-render",
       "first-suggestions",
+      "free-notice",
       "in-app-preview",
       "job-handoff",
       "jobs",
@@ -33,7 +34,9 @@
       "win-reqa-layout",
       "guard-codex-marketplace",
       "guard-codex-connection",
-      "kordoc-mcp-lifecycle"
+      "kordoc-mcp-lifecycle",
+      "news-storage-failure",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -76,7 +79,9 @@
       "edits-store",
       "sameword",
       "guard-codex-thread-lock",
-      "kordoc-mcp-policy"
+      "kordoc-mcp-policy",
+      "support-sidebar",
+      "finance-hole-card"
     ],
     [
       "artifacts-states",
@@ -120,7 +125,9 @@
       "recheck",
       "viewer-edit",
       "guard-codex-tool-lock",
-      "kordoc-mcp-real"
+      "kordoc-mcp-real",
+      "news-release-notes",
+      "formula-notice-confirm"
     ],
     [
       "app-update-install-mode",
@@ -157,7 +164,9 @@
       "recheck-screen",
       "guard-claude-skill-host",
       "guard-key",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "app-update-recheck",
+      "empty-toc"
     ],
     [
       "agent",
@@ -219,6 +228,7 @@
       "file-change-render",
       "file-identity",
       "first-suggestions",
+      "free-notice",
       "free-relay",
       "helper",
       "in-app-preview",
@@ -277,6 +287,8 @@
       "guard-scope",
       "notice-bubble",
       "notice-real-screen",
+      "formula-notice-confirm",
+      "finance-hole-card",
       "progress-list",
       "token-usage",
       "edits-store",
@@ -287,7 +299,10 @@
       "guard-codex-tool-lock",
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "support-sidebar",
+      "app-update-recheck",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -382,7 +397,10 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "news-release-notes",
+      "news-storage-failure",
+      "empty-toc"
     ]
   ]
 }

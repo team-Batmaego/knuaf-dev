@@ -15,7 +15,7 @@ import type { ChatModelInfo, ConnectionStatus, PermissionFileChange, PermissionR
 import { isCrossProviderModelId, resolveCodexAlias } from '../../shared/chat'
 import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
 import { JobFailure, type ExecutionAccount, type JobConnection, type JobEvents, type RelayRequest, type UsageState } from './jobs/types'
-import { codexMcpArgs, codexMcpEnv, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
+import { codexMcpArgs, codexMcpEnv, mcpPolicy, MCP_TOOL_PREFIX, MCP_DOC_READ_INSTRUCTION, LEGACY_DOC_READ_INSTRUCTION, MCP_SERVER_NAME, type KordocMcpSpec } from './kordocMcp'
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
 import { appThreadLockPlan, appThreadLockVerify, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
@@ -118,6 +118,8 @@ export class CodexConnection implements AgentConnection {
   /** 마지막 `model/list` 결과 — 고른 모델의 기본 생각 깊이를 찾는 데 쓴다. */
   private catalog?: ChatModelInfo[]
   private waiter?: { resolve: () => void; reject: (error: Error) => void }
+  /** 무료 모델의 phase=null 호환: 마지막 도구 완료 뒤에 완성된 말이 있어야 답이다. */
+  private freeAnswered = false
   private approvals = new Map<string, number | string>()
   private messages = new Map<string, string>()
   private fileChanges = new Map<string, PermissionFileChange[]>()
@@ -507,6 +509,22 @@ export class CodexConnection implements AgentConnection {
       // 대화에 섞지 않고 기록·알림으로만 남긴다(§3.2 Codex, §5-7, §8).
       if (method === 'item/started' || method === 'item/completed') this.observeSubagent(p)
       if (p?.threadId && p.threadId !== this.thread) return
+      if (this.free && this.waiter && method === 'item/completed') {
+        const item = p.item
+        if (item?.type === 'agentMessage') {
+          this.freeAnswered = typeof item.text === 'string' && item.text.trim() !== '' &&
+            (item.phase == null || item.phase === 'final_answer')
+        } else {
+          // 0.164.0 ThreadItem의 도구/작업 항목. reasoning·plan 등은 답을 무효화하지 않는다.
+          switch (item?.type) {
+            case 'commandExecution': case 'fileChange': case 'mcpToolCall':
+            case 'dynamicToolCall': case 'collabAgentToolCall': case 'functionCallOutput':
+            case 'webSearch': case 'imageView': case 'imageGeneration': case 'sleep':
+            case 'contextCompaction':
+              this.freeAnswered = false
+          }
+        }
+      }
       if (method === 'item/started' && p.item?.type === 'fileChange') {
         this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
       } else if (method === 'item/fileChange/patchUpdated') {
@@ -535,7 +553,10 @@ export class CodexConnection implements AgentConnection {
       else if (method === 'turn/completed') {
         this.fileChanges.clear(); this.pendingFileApprovals.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
-        if (p.turn.status === 'completed') w?.resolve()
+        if (p.turn.status === 'completed') {
+          if (this.free && !this.freeAnswered) w?.reject(new FreeRelayError('free-no-answer'))
+          else w?.resolve()
+        }
         else if (this.free) w?.reject(freeRelayError(p.turn.error))
         else if (p.turn.error?.codexErrorInfo === 'unauthorized') w?.reject(new CodexAuthenticationError('ChatGPT 인증이 거절됐어요.'))
         // 한도는 **구조 코드** `usageLimitExceeded` 만 인정한다(설계 §1-2, p1X 11-11).
@@ -566,7 +587,31 @@ export class CodexConnection implements AgentConnection {
       } else if (method === 'item/tool/requestUserInput') {
         // The unmodified interview contract requires chat text, not tool popups.
         rpc.send({ id, result: { answers: {} } })
-      } else rpc.send({ id, error: { code: -32601, message: '이 요청은 GUI에서 지원하지 않습니다. 질문은 채팅 텍스트로 제시하세요.' } })
+      } else if (method === 'mcpServer/elicitation/request') {
+        // Codex 0.169 mcp_tool_call.rs: tool approval is a form with an empty object
+        // schema and codex_approval_kind=mcp_tool_call. Never accept arbitrary MCP forms.
+        const meta = p?._meta
+        const schema = p?.requestedSchema
+        const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+        const allow = this.rpc === rpc && this.verifiedOn === rpc && !rpc.closed && !!this.mcpSpec
+          && this.turnActive && !!this.turn && p?.threadId === this.thread && p?.turnId === this.turn
+          && p?.serverName === MCP_SERVER_NAME && p?.mode === 'form' && typeof p?.message === 'string'
+          && record(schema) && schema.type === 'object' && record(schema.properties)
+          && Object.keys(schema.properties).length === 0
+          && Object.keys(schema).every((key) => key === 'type' || key === 'properties')
+          && record(meta) && meta.codex_approval_kind === 'mcp_tool_call'
+          && meta.codex_requires_user_input !== true && meta.codex_sensitive_action !== true
+          && typeof meta.tool_name === 'string' && record(meta.tool_params)
+          && mcpPolicy(this.options.root, MCP_TOOL_PREFIX + meta.tool_name, meta.tool_params)?.behavior === 'allow'
+        // One call only: no persist/session metadata and no student-config writes.
+        rpc.send({ id, result: { action: allow ? 'accept' : 'decline', content: null, _meta: null } })
+      } else if (method === 'item/permissions/requestApproval') {
+        rpc.send({ id, result: { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
+      } else {
+        // Method only: request parameters may contain student text, paths or secrets.
+        diag(`codex-request unsupported method=${JSON.stringify(method.slice(0, 160))}`)
+        rpc.send({ id, error: { code: -32601, message: '이 요청은 GUI에서 지원하지 않습니다. 질문은 채팅 텍스트로 제시하세요.' } })
+      }
     }
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
@@ -860,6 +905,7 @@ export class CodexConnection implements AgentConnection {
       model: turnModel.params.model ?? this.threadModel ?? this.options.env.KNUAF_CODEX_MODEL ?? '',
       effort: turnModel.params.effort ?? this.threadEffort ?? this.options.env.KNUAF_CODEX_EFFORT ?? null
     }
+    this.freeAnswered = false
     await new Promise<void>((resolve, reject) => {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {

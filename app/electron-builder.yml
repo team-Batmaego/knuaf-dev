@@ -32,6 +32,8 @@ files:
   - kordoc-runtime.json
   - src/renderer/src/fonts/LICENSE-Pretendard.txt
 extraResources:
+  - from: release-notes
+    to: release-notes
   - from: sidecar
     to: sidecar
     filter: ["**/*.py"]

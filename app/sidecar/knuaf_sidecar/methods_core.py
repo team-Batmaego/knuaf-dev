@@ -95,6 +95,24 @@ def project_major(ctx, params):
     return dict(vars(binding), project_revision=project["revision"])
 
 
+def project_outline(ctx, params):
+    """The skill's outline state for this project; `unsupported` when the pinned skill predates `gg_outline`.
+
+    Read-only by contract (CONTRACT-A4 §2): the skill module answers from what it can observe and the
+    sidecar adds no state of its own. A missing `gg_outline` is an old skill pin, not a failure. A
+    dependency missing *inside* it stays an error — that is `deps_not_ready`, and swallowing it would
+    read as "이 전공은 학교 차례가 없다" on the paper title row.
+    """
+    root = _root(params)
+    try:
+        import gg_outline
+    except ImportError as error:
+        if getattr(error, "name", None) != "gg_outline":
+            raise
+        return {"state": "unsupported"}
+    return gg_outline.outline_state(str(root), _core().load(root))
+
+
 def project_status(ctx, params):
     core = _core()
     root = _root(params)
@@ -589,6 +607,7 @@ def register(server):
     server.register("project.init", project_init, write=True)
     server.register("project.load", project_load)
     server.register("project.major", project_major)
+    server.register("project.outline", project_outline)
     server.register("project.status", project_status)
     server.register("project.checks", project_checks)
     server.register("project.next", project_next)
