@@ -22,7 +22,7 @@ export function ProjectSidebar() {
     useProject.setState({
       root: null, hasProject: false, status: null, peek: null, sidecar: null,
       newProjectSeq: useProject.getState().newProjectSeq + 1,
-      sections: null, materials: null, artifacts: null, buildTree: null, projectLoad: null,
+      sections: null, outline: null, materials: null, artifacts: null, buildTree: null, projectLoad: null,
       events: [], focusedSection: null, paneView: 'chat', error: null, openFailure: null, retryFailed: null
     })
     useProject.getState().closeSheet()

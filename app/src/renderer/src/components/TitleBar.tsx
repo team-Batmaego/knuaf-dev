@@ -4,6 +4,7 @@ import { PopHead, Popover, PopRow, PopSep } from './Popover'
 import { StageMenu } from './StageMenu'
 import { useProject } from '../store/project'
 import { FOLDER, TITLEBAR, relativeTime } from '../copy'
+import { titlebarNoteOf } from '../../../shared/outline'
 import { showsToggle, useLayout } from './useLayout'
 import { useShallow } from 'zustand/react/shallow'
 import { AppUpdateDialog, useUpdateSubscription, useUpdates } from './Updates'
@@ -51,6 +52,9 @@ export function TitleBar({ canShowNewsDialog, onReport }: { canShowNewsDialog: b
     root: s.root, settings: s.settings, open: s.open, setPaperClosed: s.setPaperClosed, paperClosed: s.paperClosed,
     paneView: s.paneView, setPaneView: s.setPaneView, openSheet: s.openSheet
   })))
+  // 제목줄 안내 한 줄의 근거 — 등록된 장 수(모르면 null)와 학교 차례 상태(장이 0개일 때만 읽는다).
+  const sectionCount = useProject((s) => s.sections?.length ?? null)
+  const outline = useProject((s) => s.outline)
   const layout = useLayout()
   const [menu, setMenu] = useState<'paper' | null>(null)
 
@@ -100,8 +104,9 @@ export function TitleBar({ canShowNewsDialog, onReport }: { canShowNewsDialog: b
       <StageMenu />
       <span className="sp" />
 
-      {/* 첫 대화는 한 칸 — 옆 칸이 왜 비어 있는지 한 줄로 말한다(시안 ③). */}
-      {layout.kind === 'solo' && <span className="tbtn quiet">{TITLEBAR.paperLater}</span>}
+      {/* 첫 대화는 한 칸 — 옆 칸이 왜 비어 있는지 한 줄로 말한다(시안 ③).
+          학교 고정 차례가 없는 전공은 장이 0개로 남으므로 그때는 사실대로 말한다(CONTRACT-A4 §2). */}
+      {layout.kind === 'solo' && <span className="tbtn quiet">{TITLEBAR[titlebarNoteOf(sectionCount, outline)]}</span>}
 
 
       {news?.mode === 'button' && <button type="button" className={`tbtn news-button${appAvailable ? ' news-defer-narrow' : ''}`} onClick={() => void openNews()}><span className="news-dot" aria-hidden="true" /><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 11v3h4l9 4V7l-9 4H3zM7 14l2 5h3l-2-5M19 10v5" /></svg>{NEWS.button}</button>}
