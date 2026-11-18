@@ -150,7 +150,11 @@ export interface RecentEntry { root: string; opened_at: string }
 export interface RuntimeStatus { supported: boolean; target: string | null; installed: boolean; sizeBytes: number | null }
 /** `runtime:install` 의 응답 — 성공하면 새 선택으로 재시작한 사이드카 정보를 같이 준다. */
 export interface RuntimeInstallReply { installed: boolean; sidecar: SidecarInfo }
+export interface ReleaseNote { kind: 'app' | 'skill'; version: string; date: string; major: boolean; action: string | null; lines: string[] }
+export interface NewsState { app: string; skill: string | null; notes: ReleaseNote[]; unread: ReleaseNote[]; mode: 'none' | 'button' | 'dialog' }
+
 export interface Settings {
+  release_notes_seen?: { app: string; skill: string | null }
   recent: RecentEntry[]
   credit_shown_at: string | null
   /**

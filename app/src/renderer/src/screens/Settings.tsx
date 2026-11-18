@@ -14,6 +14,10 @@ import { useShallow } from 'zustand/react/shallow'
 import { APP_NAME } from '../../../shared/name'
 import { UpdateSettings } from '../components/Updates'
 import { settingsSectionForFocus, type SettingsSection } from '../copy-menus'
+import { ReleaseNotesList } from '../components/ReleaseNotesList'
+import { NEWS } from '../copy-news'
+import type { NewsState } from '../../../shared/types'
+type NewsSection = SettingsSection | 'news'
 import { requestArchive } from './Chat'
 import { useLanes } from '../store/lanes'
 import { LANE_ARCHIVE, LANES_SETTINGS, providerName, stampKo } from '../copy-lanes'
@@ -23,19 +27,23 @@ import { LanesSettings } from './LanesSettings'
 /** 폴더가 다르거나 아직 안 왔을 때 — 참조가 고정돼야 셀렉터가 매번 새 배열을 만들지 않는다. */
 const NO_ARCHIVES: ArchivedChatSummary[] = []
 
-const SETTINGS_SECTIONS: { id: SettingsSection; label: string }[] = [
+const SETTINGS_SECTIONS: { id: NewsSection; label: string }[] = [
   { id: 'helper', label: '도우미 연결' },
   { id: 'lanes', label: LANES_SETTINGS.title },
   { id: 'folder', label: '폴더' },
   { id: 'trouble', label: '문제 해결' },
   { id: 'tools', label: '고급 도구' },
   { id: 'python', label: 'Python 실행기' },
+  { id: 'news', label: NEWS.history },
   { id: 'info', label: '앱 정보' }
 ]
 
 export function SettingsScreen() {
   const { root, settings, loadSettings, sidecar, refreshSidecar, logs, clearLogs, openHelper, open, loading, settingsFocus, clearSettingsFocus } = useProject(useShallow((s) => ({ root: s.root, settings: s.settings, loadSettings: s.loadSettings, sidecar: s.sidecar, refreshSidecar: s.refreshSidecar, logs: s.logs, clearLogs: s.clearLogs, openHelper: s.openHelper, open: s.open, loading: s.loading, settingsFocus: s.settingsFocus, clearSettingsFocus: s.clearSettingsFocus })))
-  const [section, setSection] = useState<SettingsSection>(() => settingsSectionForFocus(settingsFocus))
+  const [section, setSection] = useState<NewsSection>(() => settingsFocus === 'news:history' ? 'news' : settingsSectionForFocus(settingsFocus))
+  const [news, setNews] = useState<NewsState | null>(null)
+  const [newsFailed, setNewsFailed] = useState(false)
+  useEffect(() => { if (section === 'news') void window.knuaf.news.state().then(setNews).catch(() => setNewsFailed(true)) }, [section])
   const setMode = useChat((s) => s.setMode)
   const [override, setOverride] = useState('')
   const [restarting, setRestarting] = useState(false)
@@ -56,7 +64,7 @@ export function SettingsScreen() {
   /** Failure deep links: open the matching 펼침, then clear so it behaves like a normal disclosure. */
   useLayoutEffect(() => {
     if (!settingsFocus) return
-    const target = settingsSectionForFocus(settingsFocus)
+    const target: NewsSection = settingsFocus === 'news:history' ? 'news' : settingsSectionForFocus(settingsFocus)
     if (section !== target) { setSection(target); return }
     const el = body.current?.querySelector<HTMLDetailsElement>(`details[data-preset="${CSS.escape(settingsFocus)}"]`)
     if (el) { el.open = true; el.scrollIntoView({ block: 'start' }) }
@@ -216,6 +224,12 @@ export function SettingsScreen() {
             <div className="log">{logs.length === 0 ? <span className="muted">없음</span> : logs.map((l, i) => <div key={i} className={l.stream}>{l.line}</div>)}</div>
           </div>
         </Disclosure>
+      </section>
+
+      <section className="card" hidden={section !== 'news'}>
+        <div className="card-head"><h2>{NEWS.history}</h2></div>
+        {news && <ReleaseNotesList state={news} />}
+        {newsFailed && <p role="alert">{NEWS.failed}</p>}
       </section>
 
       <section className="card" hidden={section !== 'info'}>

@@ -157,7 +157,7 @@ export function App() {
     <div style={{ height: '100%' }} onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop} data-dragging={dragging || undefined}>
       {!settings ? null : (
         <Shell
-          titleBar={<TitleBar onReport={() => requestReport()} />}
+          titleBar={<TitleBar canShowNewsDialog={!splashVisible} onReport={() => requestReport()} />}
           sheets={!splashVisible && <>
             <SettingsModal open={sheet === 'settings'} onClose={closeSheet} />
             {sheet === 'checkup' && !paperOnScreen && <Sheet open side screen="checkup" title={CHECKUP.sheetTitle} onClose={closeSheet}><Checkup /></Sheet>}

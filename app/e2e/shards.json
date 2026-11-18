@@ -34,7 +34,9 @@
       "win-reqa-layout",
       "guard-codex-marketplace",
       "guard-codex-connection",
-      "kordoc-mcp-lifecycle"
+      "kordoc-mcp-lifecycle",
+      "news-storage-failure",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -77,7 +79,9 @@
       "edits-store",
       "sameword",
       "guard-codex-thread-lock",
-      "kordoc-mcp-policy"
+      "kordoc-mcp-policy",
+      "support-sidebar",
+      "finance-hole-card"
     ],
     [
       "artifacts-states",
@@ -122,6 +126,7 @@
       "viewer-edit",
       "guard-codex-tool-lock",
       "kordoc-mcp-real",
+      "news-release-notes",
       "formula-notice-confirm"
     ],
     [
@@ -157,7 +162,9 @@
       "recheck-screen",
       "guard-claude-skill-host",
       "guard-key",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "app-update-recheck",
+      "empty-toc"
     ],
     [
       "agent",
@@ -279,6 +286,7 @@
       "notice-bubble",
       "notice-real-screen",
       "formula-notice-confirm",
+      "finance-hole-card",
       "progress-list",
       "token-usage",
       "edits-store",
@@ -289,7 +297,10 @@
       "guard-codex-tool-lock",
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "support-sidebar",
+      "app-update-recheck",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -382,7 +393,10 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "news-release-notes",
+      "news-storage-failure",
+      "empty-toc"
     ]
   ]
 }
