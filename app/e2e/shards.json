@@ -35,6 +35,7 @@
       "guard-codex-marketplace",
       "guard-codex-connection",
       "kordoc-mcp-lifecycle",
+      "news-storage-failure",
       "outline-note"
     ],
     [
@@ -79,6 +80,7 @@
       "sameword",
       "guard-codex-thread-lock",
       "kordoc-mcp-policy",
+      "support-sidebar",
       "finance-hole-card"
     ],
     [
@@ -124,6 +126,7 @@
       "viewer-edit",
       "guard-codex-tool-lock",
       "kordoc-mcp-real",
+      "news-release-notes",
       "formula-notice-confirm"
     ],
     [
@@ -160,6 +163,7 @@
       "guard-claude-skill-host",
       "guard-key",
       "kordoc-mcp-registry",
+      "app-update-recheck",
       "empty-toc"
     ],
     [
@@ -294,6 +298,8 @@
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
       "kordoc-mcp-registry",
+      "support-sidebar",
+      "app-update-recheck",
       "outline-note"
     ],
     [
@@ -388,6 +394,8 @@
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
       "kordoc-runtime",
+      "news-release-notes",
+      "news-storage-failure",
       "empty-toc"
     ]
   ]
