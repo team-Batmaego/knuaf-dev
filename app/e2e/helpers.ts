@@ -11,7 +11,7 @@ export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', '
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
 /** Check the real account row without relying on the model chip's label. */
-export async function expectConnected(page: Page, provider: 'codex' | 'claude' = 'codex', timeout = 30000): Promise<void> {
+export async function expectConnected(page: Page, provider: 'codex' | 'claude' | 'free' = 'codex', timeout = 30000): Promise<void> {
   const chip = page.getByTitle('이 논문의 도우미')
   const wasOpen = await chip.getAttribute('aria-expanded') === 'true'
   if (!wasOpen) await chip.click()

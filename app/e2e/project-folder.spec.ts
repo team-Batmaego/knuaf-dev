@@ -277,7 +277,7 @@ for (const route of ['menu', 'picker'] as const) {
       await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
       await page.keyboard.press('Escape')
       await page.locator('.splash').waitFor({ state: 'detached' })
-      await expectConnected(page)
+      await expectConnected(page, 'free')
       expect((await page.evaluate(() => window.knuaf.getSettings())).provider_choice).toBeNull()
       await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('무료로 첫 요청')
       await page.getByRole('button', { name: '보내기', exact: true }).click()

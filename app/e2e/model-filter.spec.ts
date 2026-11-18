@@ -37,7 +37,7 @@ async function api(page: Page, request: ApiRequest) {
   }, request)
 }
 
-async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, failList = false) {
+async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, failList = 0) {
   const dir = scratch(), root = synthProject({ withContent: false })
   const turns = join(dir, 'turns.jsonl'), applied = join(dir, 'applied.jsonl'), thread = join(dir, 'thread.json')
   writeFileSync(turns, '')
@@ -50,7 +50,7 @@ async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice
   const userData = userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' }, chat_models: { codex: stored } })
   const app = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin'), {
     FAKE_CODEX_MODELS: JSON.stringify(models), FAKE_CODEX_DEFAULT_MODEL: defaultModel,
-    FAKE_CODEX_MODELS_FAIL_TIMES: failList ? '1' : '0', FAKE_CODEX_THREAD_STATE: thread,
+    FAKE_CODEX_MODELS_FAIL_TIMES: String(failList), FAKE_CODEX_THREAD_STATE: thread,
     FAKE_CODEX_TURN_LOG: turns, FAKE_CODEX_APPLIED_LOG: applied, FAKE_CODEX_REPLY: replyFile(dir, 'MF1 응답')
   }) })
   await openProject(app.page, root)
@@ -107,7 +107,7 @@ for (const scenario of [
 }
 
 test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조회·허용 모델 선택 뒤 복구한다', async () => {
-  const { electronApp, page, root, turns } = await scene(true, 'GPT-6-Astra', rejected, true)
+  const { electronApp, page, root, turns } = await scene(true, 'GPT-6-Astra', rejected, 2)
   try {
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
@@ -141,7 +141,7 @@ test('명시적 계정 기본 선택 뒤에도 외부 공급자 기본값은 차
 })
 
 test('정상 OpenAI 저장 선택은 목록 실패로 지우지 않고 그대로 전송한다', async () => {
-  const { electronApp, page, root, turns } = await scene(false, 'GPT-6-Astra', allowed, true)
+  const { electronApp, page, root, turns } = await scene(false, 'GPT-6-Astra', allowed, 1)
   try {
     const result = await api(page, { action: 'models', root })
     expect(result.result?.error).toBeTruthy()
