@@ -15,6 +15,7 @@ export interface NoticesApi {
   read: (root: string) => Promise<RpcResult<NoticesRead>>
   dismiss: (root: string, key: string) => Promise<RpcResult<string[]>>
   choose: (root: string, identity: string, value: NoticeChoiceValue) => Promise<RpcResult<Envelope>>
+  confirm: (root: string, identity: string) => Promise<RpcResult<Envelope>>
 }
 
 export interface NoticeStackProps {
@@ -42,7 +43,8 @@ function defaultApi(): NoticesApi {
   return {
     read: (root) => window.knuaf.notices.read(root),
     dismiss: (root, key) => window.knuaf.notices.dismiss(root, key),
-    choose: (root, identity, value) => window.knuaf.notices.choose(root, identity, value)
+    choose: (root, identity, value) => window.knuaf.notices.choose(root, identity, value),
+    confirm: (root, identity) => window.knuaf.notices.confirm(root, identity)
   }
 }
 
@@ -179,6 +181,16 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
     setReload((count) => count + 1)
   }
 
+  const confirm = async (key: string): Promise<void> => {
+    const at = root
+    if (!at) throw new Error(NOTICE.confirmFailed)
+    const reply = await apiRef.current.confirm(at, key.slice(key.indexOf(':') + 1))
+    if (reply.error || !reply.result?.ok || reply.result.status !== 'acknowledged') {
+      throw new Error(reply.result?.block_reason || NOTICE.confirmFailed)
+    }
+    if (rootRef.current === at) setReload((count) => count + 1)
+  }
+
   if (!root || state.root !== root) return null
   const reopened = (key: string): boolean => forceOpenKeys.includes(key) && !consumed.includes(key)
   const shown = state.notices
@@ -198,6 +210,7 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
             notice={notice}
             onDismiss={dismiss}
             onChoose={(value) => choose(notice.key, value)}
+            onConfirm={() => confirm(notice.key)}
             onFootnote={() => { onFootnote?.(); onWriteTalk?.(NOTICE.footnoteAction) }}
             forceOpen={reopened(notice.key)}
           />
