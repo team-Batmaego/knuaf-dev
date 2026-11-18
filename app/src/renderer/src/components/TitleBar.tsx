@@ -26,7 +26,7 @@ import './news.css'
  *
  * 가운데 진행 표시(T1)는 `StageMenu` 다 — 도우미 답의 진행 목록 덩어리를 고른다.
  */
-export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
+export function TitleBar({ canShowNewsDialog, onReport }: { canShowNewsDialog: boolean; onReport?: () => void }) {
   useUpdateSubscription()
   const skillUpdate = useUpdates(s => s.skill)
   const appUpdate = useUpdates(s => s.app)
@@ -113,7 +113,8 @@ export function TitleBar({ onReport }: { onReport?: () => void } = {}) {
         {hasUpdate && <span aria-hidden="true" style={{ position: 'absolute', right: 3, top: 3, width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)' }} />}
       </button>
       {appAvailable && <button className="tbtn news-app-update" onClick={() => showUpdate(true)}>{blocked ? UPDATE.appBlockedTitle : UPDATE.title}</button>}
-      {news?.mode === 'dialog' && <NewsDialog state={news} onSeen={() => setNews({ ...news, mode: 'none', unread: [] })} />}
+      {/* showModal puts the dialog above the splash, but the splash still captures its input. */}
+      {canShowNewsDialog && news?.mode === 'dialog' && <NewsDialog state={news} onSeen={() => setNews({ ...news, mode: 'none', unread: [] })} />}
       <AppUpdateDialog />
     </header>
   )
