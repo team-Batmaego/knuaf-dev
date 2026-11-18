@@ -53,7 +53,7 @@ test('다른 회사로 바꾸기 전과 후에 맥락 손실을 알린다', asyn
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toBeVisible({ timeout: 30000 })
     await chip.click()
-    await page.getByRole('button', { name: 'AI 회사·로그인', exact: true }).click()
+    await page.getByRole('button', { name: /^AI 회사·로그인/ }).click()
     await expect(page.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.')).toBeVisible()
     await page.getByRole('button', { name: 'Claude로 바꾸기' }).click()
     const warning = page.getByRole('status').filter({ hasText: 'Claude는 다른 AI와 나눈 대화를 볼 수 없어요.' })

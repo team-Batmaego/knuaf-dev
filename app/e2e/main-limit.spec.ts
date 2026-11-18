@@ -362,6 +362,19 @@ test('handoff: 누르기 전 숨은 모델·사용량 호출 0', async () => {
   expect(spawns(rig)).toBe(1)
 })
 
+test('계정 조회는 아직 없는 앱 전용 폴더에서도 연결과 모델을 읽는다', async () => {
+  const rig = claudeRig({ W1_MODELS: JSON.stringify(MODELS) })
+  const probe = laneAccountProbe({
+    appDir: join(rig.dir, 'new-user-data', 'relay'), env: () => rig.env,
+    openExternal: async () => {}, binary: () => rig.binary
+  })
+  const account = await probe('claude')
+  expect(account?.connected).toBe(true)
+  expect(account?.account.models).toEqual(expect.arrayContaining([
+    expect.objectContaining({ model: 'opus', name: 'Opus' })
+  ]))
+})
+
 test('handoff: 동시 두 제안의 첫 계정 조회는 1회', async () => {
   // 동시에 두 제안이 열려도 실제 읽기는 하나이고, 두 제안은 **같은 값**으로 판정된다.
   // 실패는 저장하지 않는다 — 기다리던 모두에게 같은 실패가 가고 다음 제안이 다시 1회 읽는다.

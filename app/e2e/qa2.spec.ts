@@ -180,7 +180,7 @@ test('칩 팝오버의 계정 행과 추론 단계가 화면 안에 있다 (QA2A
       await chip.click()
       const pop = page.locator('.chat-composer .popover')
       await expect(pop).toBeVisible()
-      await pop.getByRole('button', { name: 'AI 회사·로그인', exact: true }).click()
+      await pop.getByRole('button', { name: /^AI 회사·로그인/ }).click()
       const accountRow = pop.locator('[data-provider="claude"]')
       await accountRow.scrollIntoViewIfNeeded()
       await expect(accountRow).toBeVisible()

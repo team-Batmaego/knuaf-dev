@@ -42,7 +42,7 @@ const waitCodexThread = async (page: Page): Promise<void> => {
 async function switchToCodex(page: Page): Promise<void> {
   await page.getByTitle('이 논문의 도우미').click()
   const menu = page.locator('.composer-model-host .lane-menu')
-  await menu.getByRole('button', { name: 'AI 회사·로그인', exact: true }).click()
+  await menu.getByRole('button', { name: /^AI 회사·로그인/ }).click()
   await expect(menu.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.', { exact: true })).toBeVisible()
   await expect(menu.locator('[data-provider="codex"]')).toContainText('연결됐어요')
   await menu.getByRole('button', { name: 'ChatGPT로 바꾸기', exact: true }).click()

@@ -16,7 +16,7 @@ export async function expectConnected(page: Page, provider: 'codex' | 'claude' =
   const wasOpen = await chip.getAttribute('aria-expanded') === 'true'
   if (!wasOpen) await chip.click()
   const popup = page.locator('.composer-model-host .popover')
-  const account = popup.getByRole('button', { name: 'AI 회사·로그인', exact: true })
+  const account = popup.getByRole('button', { name: /^AI 회사·로그인/ })
   if (await account.isVisible()) await account.click()
   await expect(popup.locator(`[data-provider="${provider}"]`)).toContainText('연결됐어요', { timeout })
   if (!wasOpen) await page.keyboard.press('Escape')

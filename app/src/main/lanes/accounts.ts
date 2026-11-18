@@ -9,6 +9,7 @@
  * 비용: Claude 는 초기화 왕복 한 번(턴 없음), Codex 는 app-server 한 번. 계정 값은 자주
  * 바뀌지 않으므로 짧게 캐시하고 동시 호출은 하나로 접는다. **모델 호출은 하지 않는다.**
  */
+import { mkdirSync } from 'node:fs'
 import type { Provider } from '../../shared/chat'
 import type { ExecutionAccount } from '../chat/jobs/types'
 import { relayIsolation } from '../chat/jobs/isolation'
@@ -59,6 +60,7 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
     const binary = deps.binary(company)
     if (!binary) return null
     if (company === 'free') return freeExecutionAccount()
+    mkdirSync(deps.appDir, { recursive: true })
     const options: AgentOptions = {
       binary, root: deps.appDir, skill: '', env: deps.env(), openExternal: deps.openExternal
     }

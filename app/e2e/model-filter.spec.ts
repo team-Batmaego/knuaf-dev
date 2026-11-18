@@ -111,7 +111,7 @@ test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조
   try {
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
-    await expect(popup.getByText(MODEL_PICKER.listFailed, { exact: true })).toBeVisible()
+    await expect(popup.getByRole('alert')).toContainText('모델 목록 임시 오류')
     await expect(page.getByTitle('이 논문의 도우미')).toContainText(MODEL_PICKER.reselectionTitle)
     await expect(page.getByTitle('이 논문의 도우미')).not.toContainText(rejected.model)
     expect((await send(page, root, 'failed-list')).error?.message).toBe(MODEL_PICKER.reselectionRequired)
@@ -134,7 +134,7 @@ test('명시적 계정 기본 선택 뒤에도 외부 공급자 기본값은 차
     expect((await api(page, { action: 'setModel', root, choice: null })).error).toBeUndefined()
     expect((await send(page, root, 'cross-default')).error?.message).toBe(MODEL_PICKER.crossProviderDefault)
     expect(records(turns)).toEqual([])
-    await api(page, { action: 'setModel', root, choice: allowed })
+    expect((await api(page, { action: 'setModel', root, choice: allowed })).error).toBeUndefined()
     expect((await send(page, root, 'safe-model')).error).toBeUndefined()
     await expect.poll(() => records(turns)).toEqual([allowed])
   } finally { await electronApp.close() }
