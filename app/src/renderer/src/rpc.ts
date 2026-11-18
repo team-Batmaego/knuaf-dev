@@ -97,6 +97,11 @@ export const rpc = {
   status: (root: string) => call<Status>('project.status', { root }),
   load: (root: string) => call<ProjectLoad>('project.load', { root }),
   major: (root: string) => call<MajorBinding>('project.major', { root }),
+  /**
+   * 학교 차례 상태(CONTRACT-A4 §2) — 순수 읽기다. 모양은 `shared/outline.ts` 의
+   * `outlineStateOf` 가 검사한다(모르는 상태·손상된 응답은 null → 화면은 지금 문구 그대로).
+   */
+  outline: (root: string) => call<unknown>('project.outline', { root }),
   checks: (root: string, scope: 'all' | 'submission' = 'all') => call<Status['checks']>('project.checks', { root, scope }),
   sections: (root: string) => call<SectionRow[]>('project.sections', { root }),
   readSection: (root: string, id: string) => call<{ id: string; title: string; path: string; draft: string }>('section.read', { root, id }),

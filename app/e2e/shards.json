@@ -34,7 +34,8 @@
       "win-reqa-layout",
       "guard-codex-marketplace",
       "guard-codex-connection",
-      "kordoc-mcp-lifecycle"
+      "kordoc-mcp-lifecycle",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -158,7 +159,8 @@
       "recheck-screen",
       "guard-claude-skill-host",
       "guard-key",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "empty-toc"
     ],
     [
       "agent",
@@ -291,7 +293,8 @@
       "guard-codex-tool-lock",
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -384,7 +387,8 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "empty-toc"
     ]
   ]
 }
