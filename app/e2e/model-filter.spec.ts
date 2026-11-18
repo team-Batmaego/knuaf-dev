@@ -51,6 +51,7 @@ async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice
   const app = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin'), {
     FAKE_CODEX_MODELS: JSON.stringify(models), FAKE_CODEX_DEFAULT_MODEL: defaultModel,
     FAKE_CODEX_MODELS_FAIL_TIMES: String(failList), FAKE_CODEX_THREAD_STATE: thread,
+    ...(failList === 2 ? { FAKE_CODEX_REQUEST_LOG: join(dir, 'requests.jsonl') } : {}),
     FAKE_CODEX_TURN_LOG: turns, FAKE_CODEX_APPLIED_LOG: applied, FAKE_CODEX_REPLY: replyFile(dir, 'MF1 응답')
   }) })
   await openProject(app.page, root)

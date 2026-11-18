@@ -37,6 +37,8 @@
  *   FAKE_CODEX_EPHEMERAL_THREAD_ID_FILE  `FAKE_CODEX_EPHEMERAL_THREAD_ID_MODE` 를 **한 번만**
  *                           적용한다(읽고 지운다) — 버려진 프로세스 뒤의 재탐침이 정상 응답을 받는다
  *   FAKE_CODEX_MODELS_FAIL_TIMES  모델 목록 조회를 처음 N회 오류로 거절한다(복구 UI 시험).
+ *   FAKE_CODEX_MODELS_FAIL_FILE  목록 실패 횟수를 프로세스 간 공유할 파일. 지정하지 않으면
+ *                           THREAD_STATE 옆 `.models-fail`, 그것도 없으면 프로세스 안에서 센다.
  *
  * 1층 잠금(§4.1-C)·턴 원장(⑨) 시험용 노브 — **설정하지 않으면 기존 동작 그대로**다.
  *   FAKE_CODEX_CONFIG_READ          `config/read` 응답(JSON). `{config, layers}` 또는 `{fail}`/`{malformed}`
@@ -157,6 +159,20 @@ const takeEphemeralThreadIdMode = () => {
   return EPHEMERAL_THREAD_ID_MODE
 }
 let modelListFailures = Math.max(0, Number(process.env.FAKE_CODEX_MODELS_FAIL_TIMES ?? 0) || 0)
+const MODELS_FAIL_FILE = process.env.FAKE_CODEX_MODELS_FAIL_FILE
+  ?? (modelListFailures > 0 && process.env.FAKE_CODEX_THREAD_STATE
+    ? join(dirname(process.env.FAKE_CODEX_THREAD_STATE), '.models-fail') : '')
+if (MODELS_FAIL_FILE && !existsSync(MODELS_FAIL_FILE) && modelListFailures > 0) {
+  try { writeFileSync(MODELS_FAIL_FILE, String(modelListFailures), { flag: 'wx' }) } catch { /* 이미 만들었거나 파일을 쓸 수 없다 */ }
+}
+const readModelFailCount = () => {
+  if (!MODELS_FAIL_FILE) return modelListFailures
+  try { return Math.max(0, Number(readFileSync(MODELS_FAIL_FILE, 'utf8')) || 0) } catch { return 0 }
+}
+const writeModelFailCount = (n) => {
+  if (!MODELS_FAIL_FILE) { modelListFailures = n; return }
+  writeFileSync(MODELS_FAIL_FILE, String(n))
+}
 const TURN_FAILURE = process.env.FAKE_CODEX_TURN_FAILURE ?? ''
 const LOGIN_COMPLETE = process.env.FAKE_CODEX_LOGIN_COMPLETE ?? ''
 const TURN_RELEASE = process.env.FAKE_CODEX_TURN_RELEASE ?? ''
@@ -487,8 +503,8 @@ function handle(message) {
       return out({ id, result })
     }
     case 'model/list':
-      if (modelListFailures > 0) {
-        modelListFailures -= 1
+      if (readModelFailCount() > 0) {
+        writeModelFailCount(readModelFailCount() - 1)
         return out({ id, error: { code: -32603, message: '모델 목록 임시 오류' } })
       }
       // 쪽 나눔은 흉내 내지 않는다(앱은 nextCursor 가 없으면 멈춘다).
