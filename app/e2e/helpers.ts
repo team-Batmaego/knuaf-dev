@@ -16,9 +16,11 @@ export async function expectConnected(page: Page, provider: 'codex' | 'claude' |
   const wasOpen = await chip.getAttribute('aria-expanded') === 'true'
   if (!wasOpen) await chip.click()
   const popup = page.locator('.composer-model-host .popover')
-  const account = popup.getByRole('button', { name: /^AI 회사·로그인/ })
+  const account = popup.locator('[data-submenu="true"]').getByText('AI 회사·로그인', { exact: true })
+  const row = popup.locator(`[data-provider="${provider}"]`)
+  await expect(account.or(row).first()).toBeVisible({ timeout })
   if (await account.isVisible()) await account.click()
-  await expect(popup.locator(`[data-provider="${provider}"]`)).toContainText('연결됐어요', { timeout })
+  await expect(row).toContainText('연결됐어요', { timeout })
   if (!wasOpen) await page.keyboard.press('Escape')
 }
 

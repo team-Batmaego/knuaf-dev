@@ -201,6 +201,7 @@ test('빈 목록에서 계정을 바꿔도 안 고름 줄을 표시하지 않는
     await popup.getByRole('button', { name: '주 모델', exact: true }).click()
     await popup.getByRole('button', { name: /^AI 회사·로그인/ }).click()
     await popup.getByRole('button', { name: 'Claude로 바꾸기' }).click()
+    await expect(chip).toHaveAttribute('aria-expanded', 'false')
     await expectConnected(page, 'claude')
     await chip.click()
     await popup.locator('[data-submenu="true"]').first().click()
