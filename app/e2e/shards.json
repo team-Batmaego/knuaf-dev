@@ -78,7 +78,8 @@
       "edits-store",
       "sameword",
       "guard-codex-thread-lock",
-      "kordoc-mcp-policy"
+      "kordoc-mcp-policy",
+      "finance-hole-card"
     ],
     [
       "artifacts-states",
@@ -122,7 +123,8 @@
       "recheck",
       "viewer-edit",
       "guard-codex-tool-lock",
-      "kordoc-mcp-real"
+      "kordoc-mcp-real",
+      "formula-notice-confirm"
     ],
     [
       "app-update-install-mode",
@@ -279,6 +281,8 @@
       "guard-scope",
       "notice-bubble",
       "notice-real-screen",
+      "formula-notice-confirm",
+      "finance-hole-card",
       "progress-list",
       "token-usage",
       "edits-store",
