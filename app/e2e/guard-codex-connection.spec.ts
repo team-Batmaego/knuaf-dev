@@ -7,9 +7,9 @@
  * `turn/start` 가 나가며, 턴 id 는 응답을 받은 즉시 원장에 남는다.
  */
 import { expect, test, afterAll } from '@playwright/test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { CodexConnection } from '../src/main/chat/codex'
 import { ChatService } from '../src/main/chat/service'
 import { findExecutable } from '../src/main/agent'
@@ -441,3 +441,105 @@ test('§10-23 ⓖ 이어 하기는 같은 잠금 config 를 다시 싣고, 원�
     't-fake': { fingerprint: FOREIGN_FINGERPRINT, turns: ['u-1', 'u-2'] }
   })
 })
+
+for (const [trust, boundary] of [
+  ['verified', 'plain'], ['absent', 'plain'], ['collision', 'plain'], ['failed-probe', 'plain'],
+  ['verified', 'unicode'], ['verified', 'case']
+] as const) {
+  test(`v071 MCP 승인: ${trust}/${boundary} 신원과 요청 모양을 프로세스 경계에서 대조한다`, async () => {
+    const s = scene(`approval-${trust}`)
+    let siblingFile = join(s.base, 'outside.hwpx')
+    if (boundary !== 'plain') {
+      const rootName = boundary === 'unicode' ? '가' : 'CaseRoot'
+      const siblingName = boundary === 'unicode' ? '가'.normalize('NFD') : 'caseroot'
+      s.root = join(s.base, rootName)
+      mkdirSync(s.root)
+      const sibling = join(s.base, siblingName)
+      if (boundary === 'unicode' && process.platform === 'win32') {
+        expect(existsSync(sibling), 'Windows must execute the distinct NFC/NFD sibling regression').toBe(false)
+      }
+      if (existsSync(sibling)) {
+        // APFS may alias these names. Do not claim two distinct directories here.
+        expect(statSync(sibling).ino).toBe(statSync(s.root).ino)
+        test.skip(true, `${boundary}: host filesystem aliases sibling names; distinct-directory regression runs on Windows/Linux`)
+      }
+      mkdirSync(sibling)
+      siblingFile = join(sibling, 'document.hwpx')
+      s.skill = join(s.root, '.agents', 'skills', 'knuaf-dev')
+      mkdirSync(s.skill, { recursive: true })
+      writeFileSync(join(s.skill, 'SKILL.md'), '# test skill\n')
+    }
+    writeFileSync(siblingFile, 'outside fixture')
+    const linkOut = join(s.root, 'outside-link.hwpx')
+    symlinkSync(siblingFile, linkOut)
+    const spec: KordocMcpSpec = {
+      command: '/app/node', args: ['/app/kordoc/mcp.js'],
+      env: { KORDOC_ROOT: s.root, KORDOC_OFFLINE: '1' }, version: '4.17.1'
+    }
+    const own = { command: spec.command, args: spec.args, env_vars: Object.keys(spec.env),
+      enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+    if (trust !== 'absent') {
+      s.env.FAKE_CODEX_CONFIG_READ = JSON.stringify({
+        config: { mcp_servers: { kordoc: { ...own, enabled: true, environment_id: 'local' } }, plugins: {} },
+        layers: [{ name: { type: trust === 'collision' ? 'user' : 'sessionFlags' }, config: { mcp_servers: { kordoc: own } } }]
+      })
+      s.env.FAKE_CODEX_MCP_STATUS = JSON.stringify([{ name: 'kordoc', runtimeStatus: 'disabled' }])
+      s.env.FAKE_CODEX_MCP_PROCESS_STATUS = JSON.stringify([{
+        name: 'kordoc', runtimeStatus: null, serverInfo: { name: 'kordoc', version: spec.version },
+        tools: Object.fromEntries(advertisedReadTools(spec.version)!.map((name) => [name, { name }])), toolsError: null
+      }])
+      if (trust !== 'failed-probe') s.env.FAKE_CODEX_MCP_PROBE_ROOT = s.root
+    }
+    const file = join(s.root, 'document.hwpx')
+    writeFileSync(file, 'fixture')
+    const meta = { codex_approval_kind: 'mcp_tool_call', tool_name: 'parse_document', tool_params: { file_path: file, ocr: false } }
+    const approval = { serverName: 'kordoc', mode: 'form', message: 'PRIVATE_APPROVAL_TEXT',
+      requestedSchema: { type: 'object', properties: {} }, _meta: meta }
+    const variants = [
+      {},
+      { serverName: 'student-mcp' }, { mode: 'url', url: 'https://example.invalid', elicitationId: 'e' },
+      { mode: 'openai/form' }, { mode: 'openaiForm' }, { mode: 'unknown' },
+      { _meta: null }, { _meta: { ...meta, codex_approval_kind: 'browser_auth' } },
+      { _meta: { ...meta, tool_name: 'create_document' } },
+      { _meta: { ...meta, tool_params: { file_path: join(s.base, 'outside.hwpx') } } },
+      { _meta: { ...meta, tool_params: null } },
+      { _meta: { ...meta, codex_requires_user_input: true } },
+      { _meta: { ...meta, codex_sensitive_action: true } },
+      { requestedSchema: null }, { requestedSchema: { type: 'object', properties: { answer: { type: 'string' } } } },
+      { requestedSchema: { type: 'object', properties: {}, required: ['answer'] } },
+      { threadId: 'other-thread' }, { turnId: 'other-turn' }, { turnId: null },
+      ...[siblingFile, relative(s.root, siblingFile), linkOut]
+        .map((file_path) => ({ _meta: { ...meta, tool_params: { file_path } } }))
+    ]
+    s.env.FAKE_CODEX_SERVER_REQUESTS = JSON.stringify([
+      ...variants.map((over) => ({ method: 'mcpServer/elicitation/request', params: { ...approval, ...over } })),
+      { method: 'item/permissions/requestApproval', params: { reason: 'PRIVATE_PERMISSION_TEXT' } },
+      { method: 'future/approval', params: { secret: 'PRIVATE_UNKNOWN_TEXT' } }
+    ])
+    const replies = join(s.base, 'replies.jsonl')
+    s.env.FAKE_CODEX_SERVER_REPLY_LOG = replies
+    const log = join(s.base, 'app.log')
+    const previous = process.env.KNUAF_APP_LOG
+    process.env.KNUAF_APP_LOG = log
+    let permissionCards = 0
+    const conn = connection(s)
+    try {
+      if (trust !== 'absent') await conn.setMcpSpec(spec)
+      await conn.run('읽어줘', undefined, { ...s.events, permission: () => { permissionCards++ } })
+    } finally {
+      await conn.stop()
+      if (previous === undefined) delete process.env.KNUAF_APP_LOG
+      else process.env.KNUAF_APP_LOG = previous
+    }
+    const responses = readFileSync(replies, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    expect(responses.slice(0, variants.length).map((reply) => reply.result)).toEqual(
+      variants.map((_, i) => ({ action: trust === 'verified' && i === 0 ? 'accept' : 'decline', content: null, _meta: null }))
+    )
+    expect(responses[variants.length].result).toEqual({ permissions: { network: null, fileSystem: null }, scope: 'turn' })
+    expect(responses[variants.length + 1].error.code).toBe(-32601)
+    expect(permissionCards).toBe(0)
+    expect(readFileSync(log, 'utf8')).toContain('codex-request unsupported method="future/approval"')
+    expect(readFileSync(log, 'utf8')).not.toMatch(/PRIVATE_/)
+    expect(s.requests().filter((r) => r.method === 'turn/start')).toHaveLength(1)
+  })
+}
