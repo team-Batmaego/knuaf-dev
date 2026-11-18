@@ -1,6 +1,6 @@
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename } from 'node:path'
-import { codeOf, diag } from './diagLog'
+import { codeOf, diag, logCodeOf } from './diagLog'
 
 /**
  * 학생 논문 폴더에 파일을 남기는 **공용 쓰기** (WIN-ONEDRIVE).
@@ -97,16 +97,15 @@ export function writeFileAtomic(file: string, data: string, opts: SafeWriteOptio
     const wait = delays[attempt++]
     // 진단: 이 대기는 **main 스레드를 동기로 막는다**(Atomics.wait). 종료 경로에서 돌면 마감이 늦어진다.
     // `log` 가 아니라 진단 파일로 보낸다 — 시험의 stdout 문구 계약(`safe-write.spec.ts`)을 건드리지 않는다.
-    diag(`safeWrite:retry ${baseName(file)} code=${codeOf(e)} wait=${wait}ms attempt=${attempt}/${delays.length}`)
+    diag(`safeWrite:retry code=${logCodeOf(e)}`)
     sleepSync(wait)
     return true
   }
   const fail = (e: unknown, note: string): WriteResult => {
     const error = asError(e)
-    // 진단에는 **파일 이름과 코드/이름만** 남긴다(검토 RT3 중요). 절대 경로와 `error.message` 는
-    // 논문 폴더·사용자 이름·본문 조각을 실어 왔고, 진단 파일은 CI 산출물로 올라간다.
+    // 파일 이름·자유문은 상시 파일 로그에 남기지 않는다. 기존 사용자 문구는 그대로 둔다.
     const name = baseName(file)
-    diag(`safeWrite:fail ${name} code=${codeOf(error)} note=${note}`)
+    diag(`safeWrite:fail code=${logCodeOf(error)}`)
     log(`[knuaf] 파일을 저장하지 못했어요: ${name} (${codeOf(error)}) — ${note}`)
     return { ok: false, error }
   }

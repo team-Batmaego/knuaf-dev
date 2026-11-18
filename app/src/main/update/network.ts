@@ -1,6 +1,6 @@
 import { assetUrl, MAX_BYTES, object, verifySkill, type VerifiedSkill } from './manifest'
 import type { UpdateConfig } from './keys'
-import { codeOf, diag } from '../diagLog'
+import { diag, logCodeOf } from '../diagLog'
 /**
  * `redirect: 'manual'` 의 뜻은 **전송 계층이** 3xx 를 따라가지 않고 응답으로 돌려준다는 것이다
  * (`netTransport.ts`). 3xx 를 응답으로 주지 않는 전송 계층(Electron `net.fetch`)은 쓸 수 없다 —
@@ -13,15 +13,10 @@ const CDN: Record<string, true> = { 'release-assets.githubusercontent.com': true
 
 /** Redirects are inspected before the next request, not just after fetching an arbitrary host. */
 export async function boundedFetch(url: string, signal: AbortSignal, fetch: Transport, limit: number, config: UpdateConfig, channel = false): Promise<Response> {
-  const stage = channel ? 'channel' : 'asset'
-  // 실패 로그의 재료 — 값이 아니라 모양만 남긴다(호스트·상태 코드). 쿼리 문자열은 싣지 않는다.
-  let host = '', status: number | null = null
   try {
     if (channel) { if (url !== config.channel) throw new Error('채널 주소가 달라요.') } else assetUrl(url)
-    host = new URL(url).hostname
     for (let redirects = 0; redirects <= 5; redirects++) {
       const response = await fetch(url, { signal, redirect: 'manual' })
-      status = response.status
       if (REDIRECTS.includes(response.status)) {
         await response.body?.cancel()
         const location = response.headers.get('location')
@@ -29,8 +24,6 @@ export async function boundedFetch(url: string, signal: AbortSignal, fetch: Tran
         const next = new URL(location, url)
         if (next.protocol !== 'https:' || next.username || next.password || next.port || next.hash || !Object.hasOwn(CDN, next.hostname)) throw new Error('허용되지 않은 업데이트 이동 주소예요.')
         url = next.href
-        host = next.hostname
-        status = null
         continue
       }
       if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('업데이트를 내려받지 못했어요.') }
@@ -49,9 +42,9 @@ export async function boundedFetch(url: string, signal: AbortSignal, fetch: Tran
     throw new Error('업데이트 이동 횟수가 너무 많아요.')
   } catch (error) {
     // 앱·규칙집 업데이트 실패는 진단 로그에 한 줄 남긴다 — 맥 실측에서 원인 단서가 0줄이었다.
-    // 남기는 것은 **모양**뿐이다: 단계·호스트·상태 코드·오류 이름. 주소·쿼리 문자열은 싣지 않는다.
-    // `KNUAF_APP_LOG` 가 없으면 `diag` 는 완전 무동작이다(동작 불변).
-    diag(`update:failed stage=${stage} host=${host || '(없음)'} status=${status ?? '-'} error=${codeOf(error)}`)
+    // 주소·호스트·상태 등 외부 값 없이 안전 오류 이름만 기록한다.
+    // 출시판 기본 로그에도 같은 안전 오류 어휘만 남긴다.
+    diag(`update:failed error=${logCodeOf(error)}`)
     throw error
   }
 }

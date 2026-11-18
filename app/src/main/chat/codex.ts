@@ -19,7 +19,7 @@ import { codexMcpArgs, codexMcpEnv, mcpPolicy, MCP_TOOL_PREFIX, MCP_DOC_READ_INS
 import { McpSafetyError, verifyCodexKordoc, verifyKordocAbsent } from './kordocMcpVerify'
 import { appThreadLockPlan, appThreadLockVerify, type AppThreadPlan } from './codexToolLock'
 import { CodexThreadGuard, type LoadReply, type LoadTransport } from './codexThreadLock'
-import { codeOf, diag } from '../diagLog'
+import { diag, logCodeOf } from '../diagLog'
 import { FREE_RELAY_URL, FREE_MODELS, FreeRelayError, freeStatus, freeExecutionAccount, freeRelayError } from '../free/provider'
 import { FREE_DS_MODEL } from '../../shared/lanes'
 
@@ -201,7 +201,7 @@ export class CodexConnection implements AgentConnection {
       root: this.options.root, form: 'app-thread', injected, rpc, codexHome: this.codexHome()
     })
     if (!plan.ok) {
-      diag(`codex-lock stage=plan reason=${plan.reason}`)
+      diag('codex-lock stage=plan')
       throw new Error(plan.studentCopy)
     }
     // Restart without -c injection before any inventory/probe can start a contaminated MCP.
@@ -245,7 +245,7 @@ export class CodexConnection implements AgentConnection {
           const plan = await this.ensurePlan(rpc)
           return this.loadReply(await rpc.request('thread/start', { ...args, config: plan.config }))
         } catch (e) {
-          diag(`codex-lock stage=thread-start code=${codeOf(e)}`)
+          diag(`codex-lock stage=thread-start code=${logCodeOf(e)}`)
           return { ok: false, kind: 'error', message: text(e) }
         }
       },
@@ -255,7 +255,7 @@ export class CodexConnection implements AgentConnection {
           const plan = await this.ensurePlan(rpc)
           return this.loadReply(await rpc.request('thread/resume', { ...args, threadId, config: plan.config }))
         } catch (e) {
-          diag(`codex-lock stage=thread-resume code=${codeOf(e)}`)
+          diag(`codex-lock stage=thread-resume code=${logCodeOf(e)}`)
           const message = text(e)
           const kind = message.includes('already has an active writer')
             ? 'active-writer'
@@ -293,15 +293,11 @@ export class CodexConnection implements AgentConnection {
             }
           }
           if (!out.ok) {
-            // Exact product names only: kordocMcp.MCP_SERVER_NAME and bundled Codex's node_repl
-            // (scripts/fetch-codex.mjs). Even short user names can contain secrets or personal data.
-            let userMcp = 0
-            const names = out.remaining.map((name) => name === MCP_SERVER_NAME || name === 'node_repl' ? name : `user-mcp-${++userMcp}`)
-            diag(`codex-lock stage=verify reason=${out.reason} remaining=${out.remaining.length} names=${JSON.stringify(names)}`)
+            diag('codex-lock stage=verify failed=true')
           }
           return out.ok ? { ok: true } : { ok: false, detail: out.reason }
         } catch (e) {
-          diag(`codex-lock stage=verify code=${codeOf(e)}`)
+          diag(`codex-lock stage=verify code=${logCodeOf(e)}`)
           return { ok: false, detail: 'exception' }
         }
       },

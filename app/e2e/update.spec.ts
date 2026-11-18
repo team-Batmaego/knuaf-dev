@@ -578,10 +578,9 @@ test('channel 302 surfaces as a response, the allowlist rejects it, and the poin
     expect(hitsA.length).toBeGreaterThanOrEqual(1)
     expect(hitsB).toHaveLength(0)
 
-    // 4. main 로그 한 줄 — 맥 실측에서 실패 원인이 로그에 0줄이었다(ORDER 추가 3). 남기는 것은
-    //    단계·호스트·상태 코드·오류 이름뿐이고 쿼리 문자열·주소 전체는 싣지 않는다.
+    // 지속 로그는 실패 이벤트·안전 오류 이름만 기록한다. 호스트·상태 값은 저장하지 않는다.
     const appLogText = (): string => existsSync(appLog) ? readFileSync(appLog, 'utf-8') : ''
-    await expect.poll(appLogText).toMatch(/update:failed stage=channel host=127\.0\.0\.1 status=302 error=Error/)
+    await expect.poll(appLogText).toContain('update:failed error=Error')
     // 두 갈래(규칙집·앱)가 같은 채널을 각각 읽으므로 줄이 둘 이상일 수 있다 - 전부 같은 모양이어야 한다.
     const failureLines = appLogText().split('\n').filter(line => line.includes('update:failed'))
     expect(failureLines.length).toBeGreaterThanOrEqual(2)

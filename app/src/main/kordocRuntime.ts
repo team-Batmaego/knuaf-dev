@@ -19,7 +19,7 @@ import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdir
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { KordocRuntime } from './chat/kordocMcp'
-import { diag } from './diagLog'
+import { diag as writeDiagnostic } from './diagLog'
 import {
   SHIM_NAME,
   insideDir,
@@ -41,8 +41,13 @@ import {
   type SpecState,
   type VerifyLedger
 } from './kordocRuntimeCore'
+
 import { downloadToFile } from './runtimeDownload'
 import { extract, runtimeRoot, targetTriple } from './runtime'
+/** 진단 실패가 설치·안내 파일 정리와 재시도를 막지 않게 경계를 닫는다. */
+function diag(event: string): void {
+  try { writeDiagnostic(event) } catch { /* 진단은 앱 동작을 바꾸지 않는다 */ }
+}
 
 const APP_ROOT = resolve(__dirname, '..', '..')
 const RELEASE_BASE = 'https://github.com/team-Batmaego/knuaf-dev/releases/download'
@@ -433,8 +438,8 @@ export function installKordocRuntime(onEvent?: (event: Progress) => void): Promi
   const promise = installKordoc(installDeps(state, abort.signal, onEvent)).then((dir) => {
     try {
       if (!writeKordocHostFile(dir, state.spec, state.target)) removeKordocHostFile()
-    } catch (error) {
-      diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+    } catch {
+      diag('kordoc 안내 파일 쓰기 실패')
       removeKordocHostFile()
     }
     return dir
@@ -465,7 +470,7 @@ function kickInstall(): void {
       const code = (error as { code?: string }).code ?? 'unknown'
       retry.failed(Date.now())
       if (code === 'runtime_locked') return
-      diag(`kordoc 설치 실패: ${code}`)
+      diag('kordoc 설치 실패')
       scheduleRetry()
     }
   )
@@ -493,7 +498,7 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
     void (async () => {
       const state = kordocSpecState()
       if (state.kind !== 'ok') {
-        if (state.kind === 'invalid') diag(`kordoc 명세 오류: ${state.reason}`)
+        if (state.kind === 'invalid') diag('kordoc 명세 오류')
         removeKordocHostFile()
         return
       }
@@ -512,8 +517,8 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
       if (dir) {
         try {
           if (!writeKordocHostFile(dir, state.spec, state.target)) refreshHostFileForUsableRuntime()
-        } catch (error) {
-          diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+        } catch {
+          diag('kordoc 안내 파일 쓰기 실패')
           refreshHostFileForUsableRuntime()
         }
       } else removeKordocHostFile()
@@ -531,8 +536,8 @@ export function startKordocWork(delayMs = START_DELAY_MS): void {
       })
       // ② 설치 — 온라인일 때만(§4.7).
       if (!dir && typeof net?.isOnline === 'function' && net.isOnline()) kickInstall()
-    })().catch((error: unknown) => {
-      diag(`kordoc 시작 작업 실패: ${String(error)}`)
+    })().catch(() => {
+      diag('kordoc 시작 작업 실패')
       if (!refreshHostFileForUsableRuntime()) removeKordocHostFile()
     })
   }, delayMs)
@@ -560,8 +565,8 @@ export function withManagedKordoc(
           if (state.kind === 'ok') {
             try {
               if (!writeKordocHostFile(dirname(managed.nodeArgs[1]), state.spec, state.target)) refreshHostFileForUsableRuntime()
-            } catch (error) {
-              diag(`kordoc 안내 파일 쓰기 실패: ${String(error)}`)
+            } catch {
+              diag('kordoc 안내 파일 쓰기 실패')
               refreshHostFileForUsableRuntime()
             }
           }
@@ -573,6 +578,6 @@ export function withManagedKordoc(
       }
     },
     startInstall: kickInstall,
-    reportInvalid: (reason) => diag(`kordoc 명세 오류: ${reason}`)
+    reportInvalid: () => diag('kordoc 명세 오류')
   }, legacy)
 }

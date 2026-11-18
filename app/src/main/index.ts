@@ -14,12 +14,21 @@ import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
+import { installMainLog } from './mainLog'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
 // 표시이름이 바뀌며 생긴 옛 userData 폴더에서 설정을 이어 받는다(userdata.ts).
 // 테스트(KNUAF_USER_DATA 지정)에서는 돌리지 않는다.
 else migrateUserDataDir(app.getPath('userData'), LEGACY_USERDATA_NAMES.map((n) => join(app.getPath('appData'), n)))
+
+/**
+ * 파일 로그 배선. 설치판에는 콘솔이 없어 `console.error`·`diag()` 가 전부 증발했다
+ * (inv-logs/RESULT.md) - 이제 `app.getPath('logs')/main.log` 에 남는다. `KNUAF_APP_LOG` 는
+ * 시험·임시 진단용 덮어쓰기로 남는다. 아래 `diagEnabled()` 가드보다 **먼저** 불러야
+ * 기동 단계(`stage=boot`)와 heartbeat 가 파일에 남는다.
+ */
+installMainLog(app)
 
 let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
@@ -31,32 +40,21 @@ let quitting = false
  * doctor 종료 + 6초 sidecar 마감). 넘기면 `app.exit()` 로 확실히 끝낸다.
  */
 const SHUTDOWN_DEADLINE_MS = 10_000
-/**
- * 진단(KNUAF_APP_LOG 지정 시에만): 지금 어느 단계에 있는지 한 줄씩 파일에 남긴다.
- * `last` 는 마지막으로 남긴 단계 이름 그대로이고, heartbeat 가 이 값을 다시 적는다 —
- * 종료가 90초를 넘겨도 "어디서 멈췄는지"가 파일에 보이게 하는 장치다(동작 불변).
- */
-const diagStart = Date.now()
-let lastStage = 'boot'
-let quitPasses = 0
-const trace = (stage: string, detail: string | (() => string) = ''): void => {
-  // 진단이 꺼져 있으면 **아무 일도 하지 않는다**(검토 RT3 권고). `lastStage` 는 heartbeat 만
-  // 읽는데 그 타이머도 아래 가드 안에서만 등록되므로, 꺼진 상태에서는 쓸 소비자가 없다.
-  // `detail` 을 함수로 넘기면 그 계산(예: 자식 pid 수집)도 꺼진 상태에서 아예 돌지 않는다.
-  if (!diagEnabled()) return
-  lastStage = stage
-  const text = typeof detail === 'function' ? detail() : detail
-  diag(`stage=${stage}${text ? ` ${text}` : ''} elapsed=${Date.now() - diagStart}ms uptime=${process.uptime().toFixed(2)}s`)
+/** 고정 단계만 기록한다. 상세 값·핸들·리스너 이름은 지속 로그에 저장하지 않는다. */
+const trace = (stage: 'boot' | 'will-quit' | 'process-exit' | 'before-quit' | 'flush-start' | 'flush-end'
+  | 'task-start' | 'task-done' | 'task-reject' | 'shutdown-start' | 'shutdown-outcome'
+  | 'branch:quit' | 'branch:extra-listener' | 'branch:reclaim' | 'branch:reclaim-done' | 'branch:exit'): void => {
+  if (diagEnabled()) diag(`stage=${stage}`)
 }
 if (diagEnabled()) {
   // 이벤트 루프가 살아 있는 한 5초마다 현재 단계를 남긴다. unref — 이 타이머가 종료를 붙잡지 않는다.
   const beat = setInterval(() => {
-    diag(`heartbeat stage=${lastStage} elapsed=${Date.now() - diagStart}ms handles=${openHandles() || '(없음)'}`)
+    diag('heartbeat')
   }, 5_000)
   beat.unref?.()
-  trace('boot', `pid=${process.pid} electron=${process.versions.electron} node=${process.versions.node}`)
-  app.on('will-quit', () => trace('will-quit', `listeners=${app.listenerCount('will-quit')}`))
-  process.on('exit', (code) => trace('process-exit', `code=${code}`))
+  trace('boot')
+  app.on('will-quit', () => trace('will-quit'))
+  process.on('exit', () => trace('process-exit'))
 }
 const isMac = process.platform === 'darwin'
 // e2e 숨김 실행(`KNUAF_E2E_HIDDEN=1`, `e2e/helpers.ts` 가 기본으로 켠다): 창은 만들고 렌더는
@@ -179,8 +177,7 @@ else {
   })
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
   app.on('before-quit', (e) => {
-    quitPasses += 1
-    trace(`before-quit#${quitPasses}`, `quitting=${quitting} listeners=${app.listenerCount('before-quit')} defaultPrevented=${e.defaultPrevented}`)
+    trace('before-quit')
     // Wait for owned sidecar processes as well as agent connections before exiting.
     if (!quitting) {
       // 아직 안 쓴 학생 입력을 먼저 남긴다 — 동기다. **한 번만** 부른다: 예전에는 이 줄이 가드 밖에
@@ -196,9 +193,9 @@ else {
       // 지연은 flush 자신의 줄(`drafts:flush:*`)로 따로 보이게 한다.
       // 한계도 적는다: 그래서 "앱이 10초 안에 닫힌다"고 이 코드만으로는 말할 수 없다 — 상한은
       // flush 비용(초안 수 × 50ms + 동기 쓰기) + 10초 + 회수 1.5초의 합이다.
-      trace(`before-quit#${quitPasses}:flush-start`)
+      trace('flush-start')
       chat?.flushDrafts({ delaysMs: QUIT_FLUSH_DELAYS_MS })
-      trace(`before-quit#${quitPasses}:flush-end`)
+      trace('flush-end')
       quitting = true
       chat?.beginShutdown()
       if (win && !win.isDestroyed()) win.webContents.send('app:quitting')
@@ -229,14 +226,13 @@ else {
       const task = (name: string, start: () => Promise<unknown>): ShutdownTask => ({
         name,
         start: () => {
-          trace(`task:${name}:start`)
+          trace('task-start')
           const p = start()
-          // 거절 이유는 **코드/이름만** 남긴다 — `String(e)` 는 경로·본문·토큰을 실어 온다(검토 RT3 중요).
-          void p.then(() => trace(`task:${name}:done`), (e: unknown) => trace(`task:${name}:reject`, `code=${codeOf(e)}`))
+          void p.then(() => trace('task-done'), () => trace('task-reject'))
           return p
         }
       })
-      trace(`before-quit#${quitPasses}:shutdown-start`, () => `stalled=${stalled} pids=${knownPids().join(',') || '없음'}`)
+      trace('shutdown-start')
       void shutdownWithin([
         task('sidecar.stop', () => stalled ? Promise.withResolvers<void>().promise : sidecar.stopForExit()),
         /**
@@ -249,7 +245,7 @@ else {
           if (result.outcome === 'pending') throw new Error(`연결 정리 미완료 pids=${result.pids.join(',') || '없음'}`)
         })
       ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
-        trace(`before-quit#${quitPasses}:shutdown-outcome`, `done=[${outcome.done.join(', ')}] pending=[${outcome.pending.join(', ')}] failed=[${outcome.failed.map((f) => f.name).join(', ')}] elapsedMs=${outcome.elapsedMs}`)
+        trace('shutdown-outcome')
         for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, codeOf(failure.reason))
         /**
          * **정착한 실패도 회수 대상이다**(검토 RT2-03). 예전에는 `pending` 이 비었는지만 보고
@@ -258,7 +254,7 @@ else {
          */
         const forced = needsReclaim(outcome)
         if (!forced) {
-          trace(`branch:quit`, `elapsedMs=${outcome.elapsedMs}`)
+          trace('branch:quit')
           // 정상 종료도 한 줄 남긴다 — 이 줄이 없으면 before-quit 배선/마감이 아예 돌지 않은 것이다.
           console.error(`[shutdown] 정리 완료 ${outcome.elapsedMs}ms (${outcome.done.join(', ') || '없음'})`)
           if (outcome.elapsedMs > SHUTDOWN_DEADLINE_MS) {
@@ -274,15 +270,15 @@ else {
          * 종전처럼 `app.quit()` 으로 넘긴다. 그 청취자가 풀지 않으면 그때는 그쪽 계약이다.
          */
         if (app.listenerCount('before-quit') !== 1) {
-          trace(`branch:extra-listener`, () => `n=${app.listenerCount('before-quit')} listeners=${app.listeners('before-quit').map((f) => f.name || '(anonymous)').join('|')}`)
+          trace('branch:extra-listener')
           app.quit()
           return
         }
         const pids = knownPids()
         // 아는 자식을 한 번 더 트리째 끝내고, 살아 있는지 **관측**한다. OS 회수를 가정하지 않는다.
-        trace(`branch:reclaim`, `pids=${pids.join(',') || '없음'}`)
+        trace('branch:reclaim')
         const reclaim = await reclaimChildren(pids)
-        trace(`branch:reclaim-done`, () => `alive=${reclaim.alive.join(',') || '없음'} unknown=${reclaim.unknown.join(',') || '없음'} handles=${openHandles() || '(없음)'}`)
+        trace('branch:reclaim-done')
         console.error(`[shutdown] 남은 핸들: ${openHandles() || '(없음)'}`)
         console.error(`[shutdown] 자식 회수 시도 pid=${reclaim.pids.join(',') || '없음'} 살아있음=${reclaim.alive.join(',') || '없음'} 확인못함=${reclaim.unknown.join(',') || '없음'} (앱이 아는 pid 만 — 손자는 관측 밖)`)
         trace('branch:exit')

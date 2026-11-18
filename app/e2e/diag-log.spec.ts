@@ -63,13 +63,13 @@ test('diag() 는 파일에 scrub 을 거친 것만 쓴다 — 가짜 토큰·경
   const before = process.env.KNUAF_APP_LOG
   process.env.KNUAF_APP_LOG = file
   try {
-    diag(`safeWrite:fail chat.json code=EPERM note=${HEADER_MARK}`)
+    diag(`safeWrite:fail code=EPERM note=${HEADER_MARK}`)
     diag(`close:start path=/Users/${PATH_MARK}/논문 token=${TOKEN_MARK}`)
     const text = readFileSync(file, 'utf8')
     for (const secret of [TOKEN_MARK, 'MARKERHEADER000000000000000000000000', PATH_MARK]) {
       expect(text, `진단 파일에 비밀값이 닿았다: ${secret}`).not.toContain(secret)
     }
-    expect(text, '진단이 아예 기록되지 않았다').toContain('safeWrite:fail chat.json code=EPERM')
+    expect(text, '진단이 아예 기록되지 않았다').toContain('safeWrite:fail code=EPERM')
   } finally {
     if (before === undefined) delete process.env.KNUAF_APP_LOG
     else process.env.KNUAF_APP_LOG = before
