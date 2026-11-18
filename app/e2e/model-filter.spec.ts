@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { launch, openProject, synthProject } from './helpers'
@@ -37,9 +37,11 @@ async function api(page: Page, request: ApiRequest) {
   }, request)
 }
 
-async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, failList = 0) {
+async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, outage = false, requestLog?: string) {
   const dir = scratch(), root = synthProject({ withContent: false })
   const turns = join(dir, 'turns.jsonl'), applied = join(dir, 'applied.jsonl'), thread = join(dir, 'thread.json')
+  const failureFile = join(dir, 'models-unavailable')
+  if (outage) writeFileSync(failureFile, '')
   writeFileSync(turns, '')
   if (resumed) {
     seedChat(root, [{ id: 'old', role: 'assistant', text: '이전 답변', at: new Date().toISOString() }])
@@ -50,8 +52,9 @@ async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice
   const userData = userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' }, chat_models: { codex: stored } })
   const app = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin'), {
     FAKE_CODEX_MODELS: JSON.stringify(models), FAKE_CODEX_DEFAULT_MODEL: defaultModel,
-    FAKE_CODEX_MODELS_FAIL_TIMES: String(failList), FAKE_CODEX_THREAD_STATE: thread,
-    ...(failList === 2 ? { FAKE_CODEX_REQUEST_LOG: join(dir, 'requests.jsonl') } : {}),
+    FAKE_CODEX_THREAD_STATE: thread,
+    ...(outage ? { FAKE_CODEX_MODELS_FAIL_WHILE_FILE: failureFile } : {}),
+    ...(requestLog ? { FAKE_CODEX_REQUEST_LOG: requestLog } : {}),
     FAKE_CODEX_TURN_LOG: turns, FAKE_CODEX_APPLIED_LOG: applied, FAKE_CODEX_REPLY: replyFile(dir, 'MF1 응답')
   }) })
   await openProject(app.page, root)
@@ -61,7 +64,7 @@ async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice
     await expect(app.page.getByTitle('이 논문의 도우미')).not.toContainText(MODEL_PICKER.reselectionTitle)
     await expect(app.page.getByTitle('이 논문의 도우미')).toContainText(defaultModel)
   }
-  return { ...app, root, turns, applied, userData }
+  return { ...app, root, turns, applied, userData, failureFile }
 }
 
 async function send(page: Page, root: string, id: string) {
@@ -107,8 +110,8 @@ for (const scenario of [
   })
 }
 
-test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조회·허용 모델 선택 뒤 복구한다', async () => {
-  const { electronApp, page, root, turns } = await scene(true, 'GPT-6-Astra', rejected, 2)
+test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조회·허용 모델 선택 뒤 복구한다', async ({}, info) => {
+  const { electronApp, page, root, turns, failureFile } = await scene(true, 'GPT-6-Astra', rejected, true, info.outputPath('requests.jsonl'))
   try {
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
@@ -120,6 +123,7 @@ test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조
     mkdirSync(captures, { recursive: true })
     await page.screenshot({ path: join(captures, 'mf1-list-failed.png') })
     await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
+    unlinkSync(failureFile)
     await popup.getByRole('button', { name: MODEL_PICKER.reload, exact: true }).click()
     await popup.locator('[data-submenu="true"]').first().click()
     await popup.getByRole('button', { name: allowed.model, exact: true }).click()
@@ -142,11 +146,12 @@ test('명시적 계정 기본 선택 뒤에도 외부 공급자 기본값은 차
 })
 
 test('정상 OpenAI 저장 선택은 목록 실패로 지우지 않고 그대로 전송한다', async () => {
-  const { electronApp, page, root, turns } = await scene(false, 'GPT-6-Astra', allowed, 1)
+  const { electronApp, page, root, turns, failureFile } = await scene(false, 'GPT-6-Astra', allowed, true)
   try {
     const result = await api(page, { action: 'models', root })
     expect(result.result?.error).toBeTruthy()
     expect(result.result?.selected).toEqual(allowed)
+    unlinkSync(failureFile)
     expect((await send(page, root, 'normal-choice')).error).toBeUndefined()
     await expect.poll(() => records(turns)).toEqual([allowed])
   } finally { await electronApp.close() }
