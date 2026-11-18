@@ -107,6 +107,7 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
     expect(splash.early, '시작 화면이 붙어 있는 동안 새 소식 창이 열려 있었다 — 패치 전 앱과 같은 겹침').toBe(0)
 
     const news = await page.evaluate(() => window.knuaf.news.state())
+    console.log(`[A1-INSTALLED] news mode=${news.mode} unread=${news.unread.length} github_sha=${process.env.GITHUB_SHA ?? 'local'} event=${process.env.GITHUB_EVENT_NAME ?? 'local'}`)
     // 판정서 ④ 판독용 표지: 이 실행이 창 케이스(아래 if)를 실제로 탔는지 대체 분기를 탔는지 보고서·trace에 남긴다.
     // 단언은 바꾸지 않는다 — 분기 선택은 동봉 판 글에 달렸고, 대체 분기도 기존대로 통과한다.
     test.info().annotations.push({ type: 'news-mode', description: `mode=${news.mode} unread=${news.unread.length}` })
@@ -115,6 +116,7 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
       expect(news.unread.length, '창을 띄운 새 소식이 비어 있다').toBeGreaterThan(0)
       // 시작 화면이 분리된 뒤 **학생 조작 없이** 자동으로 떠야 한다(기본 5초 상한은 그대로 둔다).
       await expect(newsDialog, '시작 화면이 사라진 뒤 새 소식 창이 저절로 뜨지 않았다').toBeVisible()
+      console.log('[A1-INSTALLED] dialog visible passed')
       // 클릭과 닫힘을 단계로 갈라 둔다: 클릭 단계가 통과하고 닫힘 단계가 실패하면, 버튼 핸들러에는
       // 닿았는데 `news:seen` 저장이 실패한 것이다(창은 `failed` 문구를 띄운 채 열린 채로 남는다).
       await test.step('확인했어요 한 번 클릭', async () => {
@@ -123,6 +125,7 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
       await test.step('열린 새 소식 창 0개', async () => {
         try {
           await expect(newsDialog).toHaveCount(0)
+          console.log('[A1-INSTALLED] clicked once, open dialogs 0 passed')
         } catch (error) {
           // ④ 판독용 — 여기서 다시 실패하면 두 원인을 가른다: 버튼 핸들러에 안 닿았다(`news:seen` 전이라
           // 상태가 여전히 `dialog`, 단추도 다시 눌린 상태) / 저장이 실패했다(창이 `failed` 문구를 띄운 채 남는다).
@@ -142,6 +145,7 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
       })
     } else {
       await expect(newsDialog).toHaveCount(0)
+      console.log('[A1-INSTALLED] no-dialog branch: open dialogs 0 passed')
     }
 
     // 동봉 실행기 선택을 보므로 개발용 .venv seed와 준비 완료 대기를 제외한다.
@@ -152,12 +156,14 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
     expect(sc.kind, '동봉 python 이 아니라 다른 실행기를 골랐다').toBe('bundled')
     expect(sc.python).toBe(b.python)
     expect(sc.scriptsDir).toBe(b.scripts)
+    console.log(`[A1-INSTALLED] bundled runner passed kind=${sc.kind}`)
 
     // 창 제목이 열린 폴더 이름을 단다 — 설치본에서도 main 이 같은 경로를 탄다.
     // (`page.title()` 이 아니라 창 제목을 본다: 문서 제목은 `index.html` 의 정적 값이라
     //  main 이 세우는 창 제목과 다른 출처다.)
     const title = await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getTitle())
     expect(title).toBe(`${basename(root)} — ${APP_NAME}`)
+    console.log('[A1-INSTALLED] window title passed')
   } finally {
     await electronApp.close()
   }
