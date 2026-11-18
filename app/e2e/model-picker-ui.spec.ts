@@ -13,11 +13,11 @@ const option = (model: string, name: string, hidden = false) => ({
 const lowModels = [option('gpt-terra', 'Terra'), option('gpt-luna', 'Luna'), option('gpt-hidden-sol', 'Sol', true)]
 const highModels = [option('gpt-sol', 'Sol'), option('gpt-astra', 'Astra'), option('gpt-terra', 'Terra'), option('gpt-luna', 'Luna')]
 
-async function scene(models = highModels, colorScheme: 'light' | 'dark' = 'light', extra: Record<string, string> = {}, settings: Record<string, unknown> = {}) {
+async function scene(models = highModels, colorScheme: 'light' | 'dark' = 'light', extra: Record<string, string> = {}, settings: Record<string, unknown> = {}, claudeConnected = false) {
   const dir = scratch()
   const bin = join(dir, 'bin')
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODELS: JSON.stringify(models), FAKE_CODEX_REPLY: replyFile(dir, '작업을 마쳤어요.'), ...extra })
-  writeFakeClaude(bin)
+  writeFakeClaude(bin, claudeConnected)
   const userData = userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' }, ...settings })
   const app = await launch({ env, userData, colorScheme })
   return { ...app, dir, userData }
@@ -189,7 +189,7 @@ test('여러 세대 모델을 주 모델 목록에서 각각 고를 수 있다',
 
 
 test('빈 목록에서 계정을 바꿔도 안 고름 줄을 표시하지 않는다 (U1)', async () => {
-  const { electronApp, page } = await scene([])
+  const { electronApp, page } = await scene([], 'light', {}, {}, true)
   try {
     const chip = page.getByTitle('이 논문의 도우미')
     await expectConnected(page)
