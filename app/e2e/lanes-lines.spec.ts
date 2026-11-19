@@ -266,6 +266,9 @@ test('기록 줄 — 경고 표시와 "멈춘 대화 보기" 손잡이가 계약
 
 test('이름·조사·자르기 — 표 밖 이름도 읽을 수 있게', () => {
   expect(modelName('claude-sonnet-4')).toBe('Sonnet')
+  expect(modelName('claude-opus-5-5')).toBe('Opus')
+  expect(modelLabel({ company: 'claude', model: 'claude-fable-5-2-preview' })).toBe('Claude Fable')
+  expect(objectOf('Fable')).toBe('을')
   expect(modelName('gpt-6.1-sol')).toBe('Sol')
   expect(modelName('gpt-6.1-astra')).toBe('Astra')
   expect(modelName(null)).toBe('')

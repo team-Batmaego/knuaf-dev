@@ -49,8 +49,8 @@ function claudeRig(extra: Record<string, string> = {}) {
   const disallowed = (): string[] => {
     const args = rows().find((x) => Array.isArray(x.args))?.args
     const list = Array.isArray(args) ? args : []
-    const at = list.indexOf('--disallowedTools')
-    return at >= 0 && typeof list[at + 1] === 'string' ? String(list[at + 1]).split(',').filter(Boolean) : []
+    const flag = list.find((arg) => typeof arg === 'string' && arg.startsWith('--disallowedTools='))
+    return typeof flag === 'string' ? flag.slice('--disallowedTools='.length).split(',').filter(Boolean) : []
   }
   return { root, conn, env, rows, inits, hooks, disallowed }
 }
