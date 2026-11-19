@@ -40,13 +40,12 @@ function fixture(v = '0.6.0'): Fixture {
 }
 
 /** 켜 둔 앱 하나 — 실제 `AppUpdates` 에 fetch 대역과 emit 수집기를 건다. */
-function harness(options: { recheckMs?: number; fixture?: Fixture } = {}) {
+function harness(options: { recheckMs?: number; fixture?: Fixture; stallAsset?: boolean } = {}) {
   const root = temporary(), f = options.fixture ?? fixture('0.6.0')
   const requests: string[] = [], emitted: AppUpdateStatus['phase'][] = []
   let channel: unknown = f.channel
   let channelFailure: Error | null = null
-  let stallAsset = false
-  let releaseAsset: (() => void) | null = null
+  const assetEntered = Promise.withResolvers<void>()
   const updates = new AppUpdates({
     userData: root, current: '0.5.1', platform: 'win32', arch: 'x64', config: config(),
     handoff: { run: async transfer => { await transfer() } },
@@ -58,10 +57,11 @@ function harness(options: { recheckMs?: number; fixture?: Fixture } = {}) {
       }
       // 내려받기 대역 — 멈추면 본문이 끝나지 않아 phase 가 `downloading` 에 머문다.
       // 취소(`cancel()`)가 오면 그 자리에서 거절해 설치 약속이 매달리지 않게 한다.
-      if (stallAsset) {
+      if (options.stallAsset) {
+        init.signal.throwIfAborted()
         const gate = Promise.withResolvers<void>()
-        releaseAsset = gate.resolve
-        init.signal.addEventListener('abort', () => gate.reject(new Error('aborted')))
+        init.signal.addEventListener('abort', () => gate.reject(new Error('aborted')), { once: true })
+        assetEntered.resolve()
         await gate.promise
       }
       return new Response(f.bytes)
@@ -74,7 +74,7 @@ function harness(options: { recheckMs?: number; fixture?: Fixture } = {}) {
     root, updates, requests, emitted, fixture: f,
     serve(next: unknown): void { channel = next },
     fail(next: Error | null): void { channelFailure = next },
-    stall(on: boolean): void { stallAsset = on; if (!on) releaseAsset?.() },
+    assetEntered: assetEntered.promise,
     channelCalls: (): number => requests.filter(url => url === CHANNEL_URL).length
   }
 }
@@ -98,17 +98,23 @@ test('(1) 켜 둔 채 새 판이 나오면 간격 안에 available 이 되고 �
 })
 
 test('(2) 받는 중에는 주기 확인이 상태를 덮지 않고 채널도 부르지 않는다', async () => {
-  const h = harness()
+  const h = harness({ stallAsset: true })
   expect((await h.updates.check()).phase).toBe('available')
-  h.stall(true)
   const installing = h.updates.install()
-  installing.catch(() => { /* 취소로 끝난다 */ })
-  await expect.poll(() => h.updates.status().phase, { timeout: 5_000 }).toBe('downloading')
-  const requests = h.channelCalls(), before = h.updates.status()
-  expect(await h.updates.recheck()).toMatchObject({ phase: 'downloading' })
-  expect(h.channelCalls()).toBe(requests) // 확인 자체를 하지 않는다
-  expect(h.updates.status()).toEqual(before)
-  h.updates.cancel()
+  try {
+    await Promise.race([
+      h.assetEntered,
+      installing.then(() => { throw new Error('Install completed before the asset request stalled') })
+    ])
+    const requests = h.channelCalls(), before = h.updates.status()
+    expect(before.phase).toBe('downloading')
+    expect(await h.updates.recheck()).toMatchObject({ phase: 'downloading' })
+    expect(h.channelCalls()).toBe(requests) // 확인 자체를 하지 않는다
+    expect(h.updates.status()).toEqual(before)
+  } finally {
+    h.updates.cancel()
+    await installing.catch(() => { /* 회수만 한다 — 위 실패를 덮지 않는다. */ })
+  }
   await expect(installing).rejects.toThrow()
 })
 
