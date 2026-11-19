@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { downloadToFile } from '../runtimeDownload'
-import { compatible, verifySkill, version, type VerifiedSkill } from './manifest'
+import { compatible, compare, verifySkill, version, type VerifiedSkill } from './manifest'
 import { type UpdateConfig } from './keys'
 import { boundedFetch, downloadLimit, readChannel, type Transport } from './network'
 import { SkillStore } from './store'
@@ -53,10 +53,17 @@ export class SkillUpdates {
         this.candidate = null
         return this.set({ phase: 'idle', available: null })
       }
+      // An app upgrade can ship ahead of the channel; observing that is not permission to install it.
+      const highest = this.store.state().highest
+      if (compatible(p.manifest, this.store.appVersion) && compare(p.manifest.version, this.store.bundledVersion) < 0 && (!highest || compare(p.manifest.version, highest.version) >= 0)) {
+        if (highest?.version === p.manifest.version && highest.manifest !== p.digest) throw new Error('이전 판이거나 같은 판의 내용이 달라서 받지 않아요.')
+        this.candidate = null
+        return this.set({ phase: 'idle', available: null })
+      }
       this.candidate = p
       if (!compatible(p.manifest, this.store.appVersion)) return this.set({ phase: 'needs-app', available: p.manifest.version, message: '이 규칙집은 앱 새 판이 필요해요.' })
       const kind = this.store.disposition(p)
-      if (kind === 'kept' && p.manifest.version === this.store.bundledVersion && !this.store.state().highest) {
+      if (kind === 'kept' && p.manifest.version === this.store.bundledVersion && (!highest || compare(highest.version, this.store.bundledVersion) < 0)) {
         this.candidate = null
         return this.set({ phase: 'idle', available: null })
       }
