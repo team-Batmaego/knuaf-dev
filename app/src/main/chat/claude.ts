@@ -1785,7 +1785,7 @@ export class ClaudeConnection implements AgentConnection {
    * 로 접혀서, CLI 가 잠깐 멈추기만 해도 학생에게 로그인을 다시 시키는 문구가 떴다
    * (IMPL-R1-04). `probe:'failed'` 가 그 구분이고, 폴더별 화면도 같은 필드를 쓴다.
    */
-  async status(): Promise<ConnectionStatus> {
+  async status(signal?: AbortSignal): Promise<ConnectionStatus> {
     // auth status는 만료된 자격정보에도 loggedIn:true일 수 있다. 새 로그인 프로세스가
     // 성공 종료하기 전에는 그 옛 응답으로 재인증 성공을 선언하지 않는다.
     if (this.loginProcess) return { installed: true, connected: false, version: null, probe: 'ok', detail: CLAUDE_AUTH_COPY.required }
@@ -1793,8 +1793,13 @@ export class ClaudeConnection implements AgentConnection {
     // 윈도우에서 npm 이 깐 claude 는 `.cmd` 다 — Node 가 셸 없이 띄우지 못해 cmd.exe 로 감싼다
     // (맥·리눅스와 `.exe` 는 그대로 — winSpawn 이 빈 옵션을 돌려준다).
     const probe = winSpawn(this.options.binary, ['auth', 'status'])
-    try { output = (await promisify(execFile)(probe.command, probe.args, { env: this.options.env, timeout: this.options.statusTimeoutMs ?? 12_000, ...probe.options })).stdout }
-    catch (e) { output = (e as { stdout?: string }).stdout ?? '' }
+    try {
+      if (signal?.aborted) throw new Error('aborted')
+      const pending = promisify(execFile)(probe.command, probe.args, { env: this.options.env, timeout: this.options.statusTimeoutMs ?? 12_000, ...probe.options })
+      const abort = () => killTree(pending.child)
+      signal?.addEventListener('abort', abort, { once: true })
+      try { output = (await pending).stdout } finally { signal?.removeEventListener('abort', abort) }
+    } catch (e) { output = (e as { stdout?: string }).stdout ?? '' }
     let r: Record<string, unknown> | null = null
     try { const parsed = JSON.parse(output); if (parsed && typeof parsed === 'object') r = parsed as Record<string, unknown> } catch { /* 실행 실패·시간 초과·깨진 JSON → 확인 실패 */ }
     if (!r) return { installed: true, connected: false, version: null, probe: 'failed', detail: 'Claude 연결 상태를 확인하지 못했어요. 잠시 후 "다시 확인"을 눌러 주세요.' }
@@ -2248,7 +2253,7 @@ export class ClaudeRelayConnection implements JobConnection {
   async availability(): Promise<ExecutionAccount> {
     const controller = new AbortController()
     this.controller = controller
-    const status = await this.status()
+    const status = await new ClaudeConnection(this.options).status(controller.signal)
     if (controller.signal.aborted) throw new Error('담당이 중단됐어요.')
     if (!status.connected) { this.controller = undefined; return { ...claudeExecutionAccount(this.options, null), connected: false, usage: 'auth' } }
     const q = this.active = query({ prompt: (async function* () {})(), options: this.queryOptions(controller) })

@@ -391,8 +391,9 @@ for (const company of ['codex', 'claude'] as const) {
   test(`종료 중 ${company} 계정 조회 자식을 회수하고 새 조회를 막는다`, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'kd-probe-stop-'))
     const pidFile = join(dir, 'pid')
+    const countFile = join(dir, 'starts')
     const script = join(dir, 'hold.cjs')
-    writeFileSync(script, `const fs = require('node:fs'); if (process.argv[2] === 'auth') { console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'})); } else { fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000); }`)
+    writeFileSync(script, `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(countFile)}, 'x'); fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)
     const bin = join(dir, company)
     writeCliShim(dir, company, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"`, `"${process.execPath}" "${script}" %*`)
     const probe = laneAccountProbe({ appDir: join(dir, 'relay'), env: () => process.env, openExternal: async () => {}, binary: () => process.platform === 'win32' ? `${bin}.cmd` : bin })
@@ -404,9 +405,16 @@ for (const company of ['codex', 'claude'] as const) {
       const started = Date.now()
       await probe.close()
       expect(Date.now() - started).toBeLessThan(10000)
-      await expect.poll(() => { try { process.kill(pid, 0); return true } catch { return false } }).toBe(false)
+      await expect.poll(() => {
+        try { process.kill(pid, 0); return false } catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH') return true
+          throw error
+        }
+      }).toBe(true)
       expect(await pending).toBeNull()
+      const starts = readFileSync(countFile, 'utf8')
       expect(await probe(company, { fresh: true })).toBeNull()
+      expect(readFileSync(countFile, 'utf8')).toBe(starts)
     } finally {
       await probe.close()
       if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }
