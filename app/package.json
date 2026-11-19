@@ -28,7 +28,7 @@
     "prepare:resources": "pnpm stage:skill && pnpm fetch:python && pnpm fetch:codex && pnpm build:wheelhouse && pnpm build:icons && pnpm build:guide"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.275",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.328",
     "docx-preview": "0.4.1",
     "markdown-it": "14.3.2",
     "pdfjs-dist": "6.3.289",

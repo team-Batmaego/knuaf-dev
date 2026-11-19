@@ -44,7 +44,7 @@ function rig(extra: Record<string, string> = {}) {
   const turns = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
     .map((line) => JSON.parse(line) as { args?: string[] })
     .filter((row): row is { args: string[] } => Array.isArray(row.args) && !row.args.includes('auth'))
-    .map(({ args }) => ({ model: args.includes('--model') ? args[args.indexOf('--model') + 1] : undefined }))
+    .map(({ args }) => ({ model: args.find((a) => a.startsWith('--model='))?.slice('--model='.length) }))
   return {
     conn, env, events, turns, binary, root,
     choose: (v: ModelChoice | null, chosen = true) => { choice = v; everChosen = chosen },

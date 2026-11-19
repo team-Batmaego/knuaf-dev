@@ -13,6 +13,7 @@ import {
   planFromRow,
   proposeLaneRequest,
   resolveLanes,
+  resolveCodexAlias,
   selectLaneRow,
   subscriptionCheck,
   type AccountSnapshot,
@@ -44,6 +45,18 @@ const CODEX_MODELS = [
   model('gpt-6.1-astra', 'Astra', [...EFFORTS, 'ultra']),
   model('gpt-6-luna', 'Luna', EFFORTS)
 ]
+
+test('Codex 레인 별칭은 GPT 6.2 id를 찾고 같은 별칭의 옛 판보다 우선한다', () => {
+  const catalog = [
+    ...CODEX_MODELS,
+    model('gpt-6.2-sol', 'GPT-6.2 Sol'),
+    model('gpt-6.2-astra', 'GPT-6.2 Astra')
+  ]
+  expect(resolveCodexAlias(catalog, 'sol')).toBe('gpt-6.2-sol')
+  expect(resolveCodexAlias(catalog, 'astra')).toBe('gpt-6.2-astra')
+  expect(resolveCodexAlias(catalog, 'terra')).toBe('gpt-6.1-terra')
+  expect(resolveCodexAlias(catalog, 'luna')).toBe('gpt-6-luna')
+})
 
 function claude(over: { apiKeySource?: string | null; subscriptionType?: string | null; models?: readonly ModelCatalogEntry[] | null } = {}): AccountSnapshot {
   return {

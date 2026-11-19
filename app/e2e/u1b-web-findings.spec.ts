@@ -47,8 +47,8 @@ function scene(extra: Record<string, string> = {}) {
       .filter((row): row is { args: string[] } => Array.isArray(row.args) && !row.args.includes('auth'))
       .map(({ args }) => ({
         args,
-        model: args.includes('--model') ? args[args.indexOf('--model') + 1] : undefined,
-        effort: args.includes('--effort') ? args[args.indexOf('--effort') + 1] : undefined,
+        model: args.find((a) => a.startsWith('--model='))?.slice('--model='.length),
+        effort: args.find((a) => a.startsWith('--effort='))?.slice('--effort='.length),
         resume: args.find((a) => a.startsWith('--resume='))?.slice('--resume='.length)
       }))
   const stored = new Map<string, ModelChoice | null>()
