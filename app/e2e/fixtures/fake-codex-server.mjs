@@ -536,6 +536,11 @@ function handle(message) {
         for (const request of SERVER_REQUESTS) {
           const requestId = ++serverSeq
           pendingServerRequests.add(requestId)
+          // `before` 는 그 요청 **직전** 알림이다 — 0.164.0 이 승인 요청 앞에 보내는
+          // `item/started`(mcpToolCall)를 재현한다. threadId·turnId 는 서버가 붙인다.
+          for (const event of request.before ?? []) {
+            out({ ...event, params: { threadId: turnThread, turnId, ...event.params } })
+          }
           out({ id: requestId, method: request.method, params: { threadId: turnThread, turnId, ...request.params } })
         }
         return
