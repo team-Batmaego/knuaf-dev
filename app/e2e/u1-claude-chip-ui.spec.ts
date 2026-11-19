@@ -11,7 +11,7 @@ import { launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, writeCliShim } from './fixtures/fake-codex'
 
 const MODELS = [
-  { value: 'opus', resolvedModel: 'claude-opus-5', displayName: 'Opus', description: '가장 깊은 작업', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: '가장 깊은 작업', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
   { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: '일상 작업', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] }
 ]
 
@@ -53,7 +53,7 @@ test('U1 화면: Claude 칩에서 모델과 생각 깊이를 고를 수 있다',
     await expect(dialog.getByText('Claude', { exact: true })).toBeVisible()
 
     // 모델마다 지원하는 추론 단계가 다르다.
-    await dialog.getByRole('button', { name: 'Opus', exact: true }).click()
+    await dialog.getByRole('button', { name: 'Opus 5.5', exact: true }).click()
     const depth = dialog.getByRole('group', { name: '추론 단계' })
     await expect(depth.getByRole('button')).toHaveText(['low', 'medium', 'high', 'xhigh', 'max'])
     await dialog.getByRole('button', { name: 'Sonnet', exact: true }).click()

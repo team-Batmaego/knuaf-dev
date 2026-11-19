@@ -27,7 +27,7 @@ export function providerName(company: Provider): string {
 const MODEL_DISPLAY: Record<string, string> = {
   sol: 'Sol', terra: 'Terra', astra: 'Astra', luna: 'Luna',
   deepseek: 'DeepSeek', glm: 'GLM',
-  opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku'
+  opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable'
 }
 
 export function modelName(model: string | null | undefined): string {
@@ -107,7 +107,7 @@ const DIGIT: Record<string, boolean> = {
   '9': false
 }
 
-/** 제품에 나오는 영문 이름의 한국어 읽기 받침 — 솔·소넷·챗만 있고 나머지는 없다. */
+/** 제품에 나오는 영문 이름의 한국어 읽기 받침 — 솔·소넷·페이블·챗만 있고 나머지는 없다. */
 const LATIN: Record<string, boolean> = {
   chatgpt: false,
   claude: false,
@@ -120,6 +120,7 @@ const LATIN: Record<string, boolean> = {
   luna: false,
   opus: false,
   haiku: false,
+  fable: true,
   data: false,
   chat: true
 }

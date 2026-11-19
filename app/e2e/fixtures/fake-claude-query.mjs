@@ -3,12 +3,14 @@ import { createInterface } from 'node:readline'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 const args = process.argv.slice(2)
+// SDK 0.3.328 sends these options as a single --flag=value token.
+const option = (flag) => args.find((a) => a.startsWith(`${flag}=`))?.slice(flag.length + 1)
 // 실제 CLI 는 재개하면 그 세션 id 로 답하고, 새 대화면 새 id 를 만든다 — 앱은 그 id 를 저장해
 // 다음 턴을 잇는다. 시험은 `W1_SESSION_SEQ`(카운터 파일)로 새 대화마다 다른 id 를 받는다.
-const resumeArg = args.find((a) => a.startsWith('--resume='))
+const resumeArg = option('--resume')
 const seqFile = process.env.W1_SESSION_SEQ
 let sessionId = 'fake-session'
-if (resumeArg) sessionId = resumeArg.slice('--resume='.length)
+if (resumeArg) sessionId = resumeArg
 else if (seqFile) {
   const n = (existsSync(seqFile) ? Number(readFileSync(seqFile, 'utf8')) || 0 : 0) + 1
   writeFileSync(seqFile, String(n))
@@ -33,13 +35,13 @@ const turnIn = (name) => {
   return raw.split(',').map((s) => Number(s.trim())).includes(turnNo)
 }
 // 이 턴에 앱이 실제로 넘긴 모델 — 초기화가 무엇을 답할지 시험이 정한다(`W1_INIT_MODEL_BY_MODEL`).
-const modelArg = args.includes('--model') ? args[args.indexOf('--model') + 1] : undefined
+const modelArg = option('--model')
 /**
  * `--disallowedTools` = 엔진이 모델에게 **도구를 주지 않는** 자리다. 실제 CLI 는 그 이름을
  * 도구 목록에서 빼고, 모델이 그래도 부르면 "No such tool available" 로 끝낸다(훅도
  * can_use_tool 도 보지 않는다 — 검토 U5b 실측). 가짜 CLI 도 그 계약을 그대로 흉내 낸다.
  */
-const disallowedArg = args.includes('--disallowedTools') ? args[args.indexOf('--disallowedTools') + 1] : ''
+const disallowedArg = option('--disallowedTools') ?? ''
 const DISALLOWED = new Set(disallowedArg.split(',').map((s) => s.trim()).filter(Boolean))
 if (args[0] === 'auth' && args[1] === 'status') {
   console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }))
