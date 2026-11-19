@@ -1,16 +1,16 @@
 {
   "schema": 1,
   "app": {
-    "latest": "0.7.0",
-    "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.7.0",
+    "latest": "0.7.1",
+    "page": "https://github.com/team-Batmaego/knuaf-dev/releases/tag/v0.7.1",
     "win32-x64": {
-      "manifest": "eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYtYXBwIiwidmVyc2lvbiI6IjAuNy4wIiwicGxhdGZvcm0iOiJ3aW4zMi14NjQiLCJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vdGVhbS1CYXRtYWVnby9rbnVhZi1kZXYvcmVsZWFzZXMvZG93bmxvYWQvdjAuNy4wL2tudWFmLWRldi0wLjcuMC14NjQuZXhlIiwic2l6ZSI6MzU1NjY4MzY4LCJzaGEyNTYiOiI4ODM3OTdkYTZiYjY2OGQ5ZmNkN2JiNzczZWNkOThiYjVlM2JmZWE2NWU2ZTM2YWQ4MDcxYmU5ZTAwYjY4OTc0In0=",
-      "sig": "OWCUgojRCVNE7JqSTLg1bxgbSzbrwEv703706SvZWMZKPGy3aZp9rEQpjenMD8U3YEk4LH1kPD7a/zjG+MD8DA==",
-      "version": "0.7.0",
+      "manifest": "eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYtYXBwIiwidmVyc2lvbiI6IjAuNy4xIiwicGxhdGZvcm0iOiJ3aW4zMi14NjQiLCJ1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vdGVhbS1CYXRtYWVnby9rbnVhZi1kZXYvcmVsZWFzZXMvZG93bmxvYWQvdjAuNy4xL2tudWFmLWRldi0wLjcuMS14NjQuZXhlIiwic2l6ZSI6MzU1Njc3NjI0LCJzaGEyNTYiOiJjNzgyYzU0MGFiOTFjY2QyNjIyMTM1YWU5NDA0YzNiODY4N2YzNGJkNTY1NGFlZDVjOTg5NGUzODg5Y2MwZDhjIn0=",
+      "sig": "K3OAB/PtFRJhm4QaSp3lMm7mGTgxMarpDV0R6peJHQXJv0DKN72HzRK2nMZillYomP7TZXn3zvI4l3O/7bDWBA==",
+      "version": "0.7.1",
       "platform": "win32-x64",
-      "url": "https://github.com/team-Batmaego/knuaf-dev/releases/download/v0.7.0/knuaf-dev-0.7.0-x64.exe",
-      "size": 355668368,
-      "sha256": "883797da6bb668d9fcd7bb773ecd98bb5e3bfea65e6e36ad8071be9e00b68974"
+      "url": "https://github.com/team-Batmaego/knuaf-dev/releases/download/v0.7.1/knuaf-dev-0.7.1-x64.exe",
+      "size": 355677624,
+      "sha256": "c782c540ab91ccd2622135ae9404c3b8687f34bd5654aed5c9894e3889cc0d8c"
     }
   },
   "skill": {
