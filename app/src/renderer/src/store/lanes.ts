@@ -9,7 +9,11 @@ import type {
   LaneCard,
   LanesReply,
   LanesSnapshot,
-  ReviewModelGroup
+  ReviewModelGroup,
+  LaneModelsResult,
+  PlacementDecision,
+  PlacementEntries,
+  PlacementOrigin
 } from '../../../shared/lanes-ipc'
 import type { Provider } from '../../../shared/chat'
 import { LANES_TEST_ARCHIVE_EVENT, LANES_TEST_EVENT, LANES_TEST_SEAM_EVENT } from '../copy-lanes'
@@ -31,6 +35,8 @@ type LanesApi = {
   cardStatus(root: string, cardId: string): Promise<LanesReply<CardDecision>>
   settingsCard(root: string, kind: 'enable' | 'revert'): Promise<LanesReply<LaneCard>>
   disable(root: string): Promise<LanesReply<void>>
+  setPlacement(root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>>
+  laneModels(root: string, fresh?: boolean): Promise<LanesReply<LaneModelsResult>>
   reviewModels(root: string): Promise<LanesReply<ReviewModelGroup[]>>
   pickReview(root: string, company: Provider, model: string): Promise<LanesReply<LaneCard>>
   consents(): Promise<LanesReply<ConsentRow[]>>
@@ -280,6 +286,9 @@ export function laneActions() {
     /** 설정 켜기·되돌리기 — 카드는 응답으로만 오므로(계약 §3 [F5]) 값을 그대로 돌려준다(검토 C01). */
     settingsCard: (root: string, kind: 'enable' | 'revert') =>
       useLanes.getState().callValue(({ lanes }) => lanes.settingsCard(root, kind)),
+    setPlacement: (root: string, version: number, entries: PlacementEntries, origin: PlacementOrigin) =>
+      useLanes.getState().callValue(({ lanes }) => lanes.setPlacement(root, version, entries, origin)),
+    laneModels: (root: string, fresh?: boolean) => useLanes.getState().callValue(({ lanes }) => lanes.laneModels(root, fresh)),
     disable: (root: string) => ask(({ lanes }) => lanes.disable(root)),
     dismiss: (root: string, lineId: string) => ask(({ lanes }) => lanes.dismiss(root, lineId)),
     handoffContinue: (root: string, proposalId: string) => ask(({ lanes }) => lanes.handoffContinue(root, proposalId)),

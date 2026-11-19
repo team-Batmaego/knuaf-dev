@@ -44,27 +44,21 @@ test('U1 화면: Claude 칩에서 모델과 생각 깊이를 고를 수 있다',
     await openProject(page, s.root)
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toBeVisible({ timeout: 30_000 })
-    await expect(chip).toContainText('Claude')
+    await expect(chip).toBeEnabled()
 
     await chip.click()
     const dialog = page.getByRole('dialog', { name: '이 논문의 도우미' })
     await expect(dialog).toBeVisible()
-    // 회사 이름이 문구에 박혀 있지 않다 — Claude 목록도 같은 부품으로 그린다.
-    await expect(dialog.getByText('Claude 모델')).toBeVisible()
+    await dialog.locator('[data-submenu="true"]').first().click()
+    await expect(dialog.getByText('Claude', { exact: true })).toBeVisible()
 
-    // 모델을 고르면 그 모델의 깊이 단계가 나온다.
-    await dialog.getByRole('button', { name: /Opus/ }).click()
-    const depth = dialog.getByLabel('생각 깊이')
-    await expect(depth).toBeEnabled({ timeout: 20_000 })
-    await expect(depth.locator('option')).toHaveText(['기본값', '낮게', '보통', '높게', '아주 높게', '최대로'])
-
-    // 다른 모델을 고르면 깊이 목록도 그 모델 것으로 바뀐다.
-    await dialog.getByRole('button', { name: /Sonnet/ }).click()
-    await expect(depth.locator('option')).toHaveText(['기본값', '낮게', '보통', '높게'])
-
-    // 칩은 고른 모델과 깊이를 그대로 보여 준다.
+    // 모델마다 지원하는 추론 단계가 다르다.
+    await dialog.getByRole('button', { name: 'Opus', exact: true }).click()
+    const depth = dialog.getByRole('group', { name: '추론 단계' })
+    await expect(depth.getByRole('button')).toHaveText(['low', 'medium', 'high', 'xhigh', 'max'])
+    await dialog.getByRole('button', { name: 'Sonnet', exact: true }).click()
+    await expect(depth.getByRole('button')).toHaveText(['low', 'medium', 'high'])
     await expect(chip).toContainText('Sonnet')
-    await expect(chip).toContainText('생각 깊이 기본')
   } finally {
     await electronApp.close()
   }
@@ -89,8 +83,8 @@ test('U1 화면: ultra·무거운 모델을 골라도 한도 안내 줄은 뜨�
     await chip.click()
     const dialog = page.getByRole('dialog', { name: '이 논문의 도우미' })
     await expect(dialog).toBeVisible()
-    // 이름표도 한국어로 뜬다(F22: 예전에는 영어 "ultra" 가 그대로 나왔다).
-    await expect(dialog.getByLabel('생각 깊이').locator('option', { hasText: '울트라(자동 분담)' })).toHaveCount(1)
+    await dialog.locator('[data-submenu="true"]').first().click()
+    await expect(dialog.getByRole('group', { name: '추론 단계' }).getByRole('button', { name: 'ultra', exact: true })).toBeVisible()
     // 한도 안내 줄은 뺐다(형님 11-13) — 울트라를 골라도 '한도' 문장이 뜨지 않는다.
     await expect(dialog.getByText(/한도/)).toHaveCount(0)
   } finally {

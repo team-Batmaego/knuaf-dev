@@ -252,6 +252,7 @@ test('모델 칩에서 두 AI의 연결 상태를 확인한다', async () => {
   await page.getByTitle('이 논문의 도우미').click()
   const pop = page.locator('.chat-zone .popover')
   await expect(pop).toBeVisible()
+  await pop.getByRole('button', { name: 'AI 회사·로그인' }).click()
   // 첫 실행 1단계와 같은 부품(ConnectRow) — 공급자마다 한 줄.
   await expect(pop.locator('[data-provider]')).toHaveCount(2)
   await expect(pop.locator('[data-provider="codex"]')).toContainText('ChatGPT')

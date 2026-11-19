@@ -8,7 +8,7 @@ import { expect, test, type ElectronApplication } from '@playwright/test'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { launch, openProject, synthProject } from './helpers'
+import { expectConnected, launch, openProject, synthProject } from './helpers'
 import { captureAppLog } from './diag'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeCliShim } from './fixtures/fake-codex'
 
@@ -121,8 +121,7 @@ test('턴이 매달린 채로 앱을 닫아도 종료가 마감 안에 돌아오
   let pids: number[] = []
   try {
     await openProject(page, root)
-    const chip = page.getByTitle('이 논문의 도우미')
-    await expect(chip).toContainText('연결됨')
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('매달릴 요청')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     // 턴이 시작됐다 — 이 상태에서 종료하면 예전에는 run 이 영원히 안 끝나 앱이 안 꺼졌다.

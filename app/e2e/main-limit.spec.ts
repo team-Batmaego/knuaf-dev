@@ -7,7 +7,7 @@
 //  3. `entry` 는 **실패 당시** 실제로 보낸 회사·모델·깊이다(턴 지역 값).
 //  4. 제안이 열리면 그 턴의 오류 줄 대신 제안 줄이 남는다.
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { ChatService, type HandoffSeam } from '../src/main/chat/service'
@@ -23,7 +23,7 @@ import { findExecutable, skillSource } from '../src/main/agent'
 import { chatConnectionKey } from '../src/main/chat/jobs/key'
 import { laneAccountProbe } from '../src/main/lanes/accounts'
 import { planFromRow } from '../src/shared/lanes'
-import { fakeCodexEnv } from './fixtures/fake-codex'
+import { fakeCodexEnv, writeCliShim } from './fixtures/fake-codex'
 import type { ChatSnapshot } from '../src/shared/chat'
 
 const appRoot = resolve(__dirname, '..')
@@ -361,6 +361,66 @@ test('handoff: 누르기 전 숨은 모델·사용량 호출 0', async () => {
   // 엔진 프로세스를 띄운 기록은 그 본대화 턴 하나뿐이다.
   expect(spawns(rig)).toBe(1)
 })
+
+test('계정 조회는 아직 없는 앱 전용 폴더에서도 연결과 모델을 읽는다', async () => {
+  const rig = claudeRig({ W1_MODELS: JSON.stringify(MODELS) })
+  const probe = laneAccountProbe({
+    appDir: join(rig.dir, 'new-user-data', 'relay'), env: () => rig.env,
+    openExternal: async () => {}, binary: () => rig.binary
+  })
+  const account = await probe('claude')
+  expect(account?.connected).toBe(true)
+  expect(account?.account.models).toEqual(expect.arrayContaining([
+    expect.objectContaining({ model: 'opus', name: 'Opus' })
+  ]))
+
+  const bin = join(rig.dir, 'codex-bin')
+  const env = fakeCodexEnv(bin)
+  const codex = laneAccountProbe({
+    appDir: join(rig.dir, 'new-codex-data', 'relay'), env: () => ({ ...process.env, ...env }),
+    openExternal: async () => {}, binary: () => join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex')
+  })
+  const codexAccount = await codex('codex')
+  expect(codexAccount?.connected).toBe(true)
+  expect(codexAccount?.account.models).toEqual(expect.arrayContaining([
+    expect.objectContaining({ model: 'gpt-sol', name: 'Sol' })
+  ]))
+})
+
+for (const company of ['codex', 'claude'] as const) {
+  test(`종료 중 ${company} 계정 조회 자식을 회수하고 새 조회를 막는다`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kd-probe-stop-'))
+    const pidFile = join(dir, 'pid')
+    const countFile = join(dir, 'starts')
+    const script = join(dir, 'hold.cjs')
+    writeFileSync(script, `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(countFile)}, 'x'); fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)
+    const bin = join(dir, company)
+    writeCliShim(dir, company, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"`, `"${process.execPath}" "${script}" %*`)
+    const probe = laneAccountProbe({ appDir: join(dir, 'relay'), env: () => process.env, openExternal: async () => {}, binary: () => process.platform === 'win32' ? `${bin}.cmd` : bin })
+    const pending = probe(company)
+    let pid = 0
+    try {
+      await expect.poll(() => existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : 0, { timeout: 15000 }).toBeGreaterThan(0)
+      pid = Number(readFileSync(pidFile, 'utf8'))
+      const started = Date.now()
+      await probe.close()
+      expect(Date.now() - started).toBeLessThan(10000)
+      await expect.poll(() => {
+        try { process.kill(pid, 0); return false } catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH') return true
+          throw error
+        }
+      }).toBe(true)
+      expect(await pending).toBeNull()
+      const starts = readFileSync(countFile, 'utf8')
+      expect(await probe(company, { fresh: true })).toBeNull()
+      expect(readFileSync(countFile, 'utf8')).toBe(starts)
+    } finally {
+      await probe.close()
+      if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }
+    }
+  })
+}
 
 test('handoff: 동시 두 제안의 첫 계정 조회는 1회', async () => {
   // 동시에 두 제안이 열려도 실제 읽기는 하나이고, 두 제안은 **같은 값**으로 판정된다.
