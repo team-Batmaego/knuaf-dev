@@ -133,7 +133,7 @@ test('U1b-2: 앞 대화에서 모델을 골랐어도 새 대화는 계정 기본
   choice = null
   await conn.run('B 대화 첫 턴', undefined, events)
   const b1 = s.turns().at(-1)!
-  expect(b1.model).toBeUndefined()
+  expect(b1.args.some((arg) => arg === '--model' || arg.startsWith('--model='))).toBe(false)
   const bSession = seen.at(-1)!
   // 새 대화는 앞 대화와 다른 세션이다(같은 연결이 두 대화를 맡는다).
   expect(bSession).not.toBe(aSession)
@@ -186,7 +186,7 @@ test('U1b-4: 깊이를 "기본값"으로 되돌리면 환경 변수 깊이를 �
     const turn = s.turns().at(-1)!
     expect(turn.model).toBe('sonnet')
     // 화면이 "기본값"이라고 했으면 요청에도 깊이가 없어야 한다.
-    expect(turn.effort).toBeUndefined()
+    expect(turn.args.some((arg) => arg === '--effort' || arg.startsWith('--effort='))).toBe(false)
   } finally { await svc.close() }
 })
 
@@ -226,7 +226,7 @@ test('U1b-5: 초기화 대조·기본값 저장은 실제로 보낸 값으로 �
     message: () => {}, permission: () => {}, note: () => {}, session: () => {}, skill: () => {}
   })
   const turn2 = s2.turns().at(-1)!
-  expect(turn2.model).toBeUndefined()
+  expect(turn2.args.some((arg) => arg === '--model' || arg.startsWith('--model='))).toBe(false)
   await expect(conn2.prepare(turn2.resume!)).resolves.toBeUndefined()
 })
 
@@ -257,6 +257,6 @@ test('U1b-권고1: 모델을 바꾸면 지원하지 않는 기존 깊이는 해�
     expect((await idle(svc, s.root)).state).toBe('idle')
     const turn = s.turns().at(-1)!
     expect(turn.model).toBe('sonnet')
-    expect(turn.effort).toBeUndefined()
+    expect(turn.args.some((arg) => arg === '--effort' || arg.startsWith('--effort='))).toBe(false)
   } finally { await svc.close() }
 })

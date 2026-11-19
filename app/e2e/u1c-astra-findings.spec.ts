@@ -44,7 +44,7 @@ function rig(extra: Record<string, string> = {}) {
   const turns = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
     .map((line) => JSON.parse(line) as { args?: string[] })
     .filter((row): row is { args: string[] } => Array.isArray(row.args) && !row.args.includes('auth'))
-    .map(({ args }) => ({ model: args.find((a) => a.startsWith('--model='))?.slice('--model='.length) }))
+    .map(({ args }) => ({ args, model: args.find((a) => a.startsWith('--model='))?.slice('--model='.length) }))
   return {
     conn, env, events, turns, binary, root,
     choose: (v: ModelChoice | null, chosen = true) => { choice = v; everChosen = chosen },
@@ -96,7 +96,7 @@ test('U1c-R2: 새 대화에서 확인한 최신 기본값으로 갱신해 전송
   r.choose(null, true)
 
   await r.conn.run('첫 기본값', undefined, r.events)
-  expect(r.turns().at(-1)!.model).toBeUndefined()
+  expect(r.turns().at(-1)!.args.some((arg) => arg === '--model' || arg.startsWith('--model='))).toBe(false)
 
   // 계정/프로젝트 기본값이 바뀐 상황 — 새 대화의 init 이 다른 모델을 알려 준다.
   r.env.W1_INIT_MODEL = 'claude-opus-5'
@@ -128,7 +128,7 @@ test('U1c-R2경계: 기본값이 갱신돼도 고른 모델의 전송값은 그�
   r.env.W1_INIT_MODEL = 'claude-sonnet-5'
   r.choose(null, true)
   await r.conn.run('기본값 확인용 새 대화', undefined, r.events)
-  expect(r.turns().at(-1)!.model).toBeUndefined()
+  expect(r.turns().at(-1)!.args.some((arg) => arg === '--model' || arg.startsWith('--model='))).toBe(false)
 
   // 학생이 다시 Opus 를 고르고 대화 A 를 잇는다 — 갱신된 기본값이 끼어들지 않는다.
   r.choose({ model: 'opus', effort: null })
