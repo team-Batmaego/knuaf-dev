@@ -310,8 +310,8 @@ test('jobs:stop-one stops exactly one job through the handler table', async () =
   await w.svc.close()
 })
 
-// ⑥ 동의를 거두면 그 회사 **계정**의 대기·진행 주문이 그 자리에서 멈춘다(계약 §5·§8-8).
-test('revoking consent through IPC stops exactly that account\'s live jobs', async () => {
+// ⑥ r12j: 구 동의 IPC는 작업을 멈추지 않는다. 중단은 명시적 jobs:stop-one만 한다.
+test('legacy consent IPC preserves live jobs until explicit stop-one', async () => {
   const w = wiring()
   w.svc.approvePlan(w.root, planFromRow('both-high'))
   w.svc.setConsent('codex', 'codex-account', true)
@@ -322,9 +322,13 @@ test('revoking consent through IPC stops exactly that account\'s live jobs', asy
   resultOf(await w.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-other', false) as LanesReply<unknown>)
   expect(JSON.parse(readFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), 'utf8')).status).toBe('running')
 
-  resultOf(await w.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-account', false) as LanesReply<unknown>)
-  await until(() => JSON.parse(readFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), 'utf8')).status === 'stopped')
-  // 멈춘 주문의 결과는 넘기지 않는다.
+  const unchanged = resultOf(await w.ipc.call(LANES_INVOKE.setConsent, 'codex', 'codex-account', false) as LanesReply<{ state: string }>)
+  expect(unchanged.state).toBe('none')
+  expect(JSON.parse(readFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), 'utf8')).status).toBe('running')
+  expect(JSON.parse(readFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-b.json'), 'utf8')).status).toBe('queued')
+  expect(resultOf(await w.ipc.call(LANES_INVOKE.consents) as LanesReply<unknown[]>)).toEqual([])
+  resultOf(await w.ipc.call(JOBS_INVOKE.stopOne, w.root, 'job-a') as LanesReply<void>)
+  expect(JSON.parse(readFileSync(join(w.root, '.knuaf-gui', 'jobs', 'job-a.json'), 'utf8')).status).toBe('stopped')
   expect(w.svc.snapshot(w.root, 'claude').messages.some(message => message.text.startsWith('자료 담당('))).toBe(false)
   // 본대화는 그대로다.
   expect(w.svc.snapshot(w.root, 'claude').state).not.toBe('stopped')

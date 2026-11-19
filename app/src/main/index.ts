@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { Sidecar } from './sidecar'
 import { registerIpc } from './ipc'
 import { QUIT_FLUSH_DELAYS_MS, type ChatService } from './chat/service'
+import type { AccountProbe } from './lanes/accounts'
 import { sweepRelayPlugins } from './chat/claude'
 import { APP_ROOT } from './python'
 import { cleanupRuntime } from './runtime'
@@ -24,6 +25,7 @@ else migrateUserDataDir(app.getPath('userData'), LEGACY_USERDATA_NAMES.map((n) =
 let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
 let chat: ChatService | null = null
+let probe: AccountProbe | null = null
 let quitting = false
 /**
  * 종료 정리를 기다리는 상한. Playwright 의 시험 상한(90초)과 워커 정리(같은 값) 안에 넉넉히
@@ -165,6 +167,7 @@ else {
     }
     const services = registerIpc(sidecar, () => win, () => installMenu(sendMenu))
     chat = services.chat
+    probe = services.probe
     // 그림 요청 하나가 들어오면 read → 폴더 안 판정 → 응답. 실패는 404로 닫고, 렌더러가
     // "그림을 찾지 못했어요 · <경로>"로 바꾼다(main.tsx 문서 리스너).
     protocol.handle(IMAGE_SCHEME, (request) => services.images.handle(request))
@@ -239,6 +242,7 @@ else {
       trace(`before-quit#${quitPasses}:shutdown-start`, () => `stalled=${stalled} pids=${knownPids().join(',') || '없음'}`)
       void shutdownWithin([
         task('sidecar.stop', () => stalled ? Promise.withResolvers<void>().promise : sidecar.stopForExit()),
+        task('probe.close', () => probe?.close() ?? Promise.resolve()),
         /**
          * 연결 정리가 마감을 넘겼으면 **실패로 승격한다**(검토 RT3 차단). 예전에는 `close()` 가
          * 성공 모양(`void`)을 돌려줘 이 정리가 `done` 으로 집계됐고, 그래서 `needsReclaim=false` —

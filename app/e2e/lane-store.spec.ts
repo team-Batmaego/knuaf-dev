@@ -15,7 +15,7 @@ function card(root: string, cardId: string, baseVersion: number): LaneCard {
   }
 }
 
-test('store: legacy consent true is read as agreed with no date', () => {
+test('store: legacy consent remains readable but compatibility setter never writes', () => {
   const d = dir()
   writeFileSync(join(d, 'store.json'), JSON.stringify({
     version: 1, approvals: {}, consent: { 'codex\u0000a': true }, deliveries: {}
@@ -26,9 +26,10 @@ test('store: legacy consent true is read as agreed with no date', () => {
   expect(store.consented('codex', 'a')).toBe(true)
   store.setConsent('codex', 'a', false)
   const written = JSON.parse(readFileSync(join(d, 'store.json'), 'utf8'))
-  expect(written.consent['codex\u0000a'].state).toBe('withdrawn')
-  expect(typeof written.consent['codex\u0000a'].at).toBe('string')
-  expect(store.consented('codex', 'a')).toBe(false)
+  expect(written.consent['codex\u0000a']).toBe(true)
+  expect(store.consent('codex', 'new-account')).toBeNull()
+  store.setConsent('codex', 'new-account', true)
+  expect(store.consent('codex', 'new-account')).toBeNull()
 })
 
 test('store: a card is consumed once and stale baseVersion is refused', () => {

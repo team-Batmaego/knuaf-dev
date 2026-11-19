@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, openProject, synthProject } from './helpers'
+import { expectConnected, launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, questionMessage, questionProject, QUESTION_2, replyFile, scratch, seedChat, userDataWith } from './fixtures/fake-codex'
 
 const BOX = 'textarea[aria-label="답변을 입력하세요"]'
@@ -46,7 +46,7 @@ for (const outcome of ['prepare-failure', 'accepted', 'accepted-edited'] as cons
           return result
         })
       }, a)
-      await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨')
+      await expectConnected(page)
       await page.locator(BOX).fill('INT1 보존해야 하는 첫 메시지')
       await page.getByRole('button', { name: '보내기', exact: true }).click()
       await page.getByRole('button', { name: /내 폴더 고르기/ }).click()
@@ -96,14 +96,15 @@ for (const theme of ['light', 'dark'] as const) {
       await card.locator('.freebox textarea').fill(draft)
       await chip.click()
       const popup = page.locator('.composer-model-host .popover')
-      await popup.getByRole('button', { name: /^Sol / }).click()
-      await popup.getByLabel('생각 깊이').selectOption('high')
+      await popup.locator('[data-submenu="true"]').first().click()
+      await popup.getByRole('button', { name: 'Sol', exact: true }).click()
+      await popup.getByRole('button', { name: 'high', exact: true }).click()
       await page.keyboard.press('1')
       await expect(page.locator('.chat-msg.user')).toHaveCount(0)
       await page.keyboard.press('Escape')
       await expect(card.locator('.qcard-q')).toHaveText(question)
       await expect(card.locator('.freebox textarea')).toHaveValue(draft)
-      await expect(chip).toContainText('Sol · 생각 깊이 높게')
+      await expect(chip).toContainText('Sol · high')
       const capture = process.env.KNUAF_INT1_CAPTURE_DIR ?? testInfo.outputPath('captures')
       mkdirSync(capture, { recursive: true })
       await page.screenshot({ path: join(capture, `question-chip-1024-${theme}.png`) })

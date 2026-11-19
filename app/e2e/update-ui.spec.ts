@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { launch, navTo, openProject, synthProject } from './helpers'
+import { expectConnected, launch, navTo, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, userDataWith } from './fixtures/fake-codex'
 
 const sha = (data: Buffer) => createHash('sha256').update(data).digest('hex')
@@ -68,7 +68,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
         ? new Response(Buffer.from(data.archive, 'base64')) : new Response('blocked', { status: 403 }))
     }, { url, archive: archive.toString('base64') })
     await openProject(page, root)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('업데이트 전 대화')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('시험 응답입니다')).toBeVisible({ timeout: 30000 })

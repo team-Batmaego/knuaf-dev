@@ -285,12 +285,12 @@ test('redeliver retries a failed delivery exactly once and never an uncertain on
   await uncertain.svc.close()
 })
 
-// ⑤ 동의를 거두면 그 회사·그 계정의 대기·진행 주문이 멈춘다. 다른 회사 주문은 그대로다.
-test('revoking consent stops that company account jobs and leaves the other company queued', async () => {
+// ⑤ r12j: 구 동의 setter는 실행 중/대기 주문을 바꾸지 않는다.
+test('legacy consent changes never stop active or queued approved jobs', async () => {
   const { promise: held, resolve: hold } = Promise.withResolvers<void>()
   const w = control({
-    row: 'claude-high-codex-low',
-    orders: (root) => [order(root, 'a-codex', 'writing', 'claude-high-codex-low'), order(root, 'b-claude', 'research', 'claude-high-codex-low')],
+    row: 'claude-low-codex-high',
+    orders: (root) => [order(root, 'a-codex', 'writing', 'claude-low-codex-high'), order(root, 'b-claude', 'review', 'claude-low-codex-high')],
     jobBehavior: async (request, events) => {
       events.session(`session-${request.jobId}`)
       if (request.jobId === 'a-codex') await held
@@ -298,28 +298,27 @@ test('revoking consent stops that company account jobs and leaves the other comp
     },
     jobStop: () => hold()
   })
-  w.svc.approvePlan(w.root, planFromRow('claude-high-codex-low'))
+  w.svc.approvePlan(w.root, planFromRow('claude-low-codex-high'))
   w.svc.setConsent('codex', 'codex-account', true)
   w.svc.setConsent('claude', 'claude-account', true)
   await w.svc.send(w.root, 'codex', '두 개 부탁', 'req-1')
   await until(() => w.jobRuns.includes('a-codex'))
   expect(statusOf(w.root, 'b-claude')).toBe('queued')
 
-  // 다른 계정 id 로 거둔 동의는 이 주문에 닿지 않는다(카드가 고정한 계정 경계).
-  w.svc.setConsent('codex', 'codex-other', false)
-  await sleep(50)
-  expect(statusOf(w.root, 'a-codex')).toBe('running')
-
-  w.svc.setConsent('codex', 'codex-account', false)
-  await until(() => statusOf(w.root, 'a-codex') === 'stopped')
-  expect(w.counters.jobStops).toEqual(['a-codex'])
-  expect(w.counters.jobStops).not.toContain('b-claude')
-  // 본대화는 살아 있다 — 동의 철회는 주문만 멈춘다.
-  expect(w.counters.mainStops).toBe(0)
-  // 다른 회사 주문은 대기 그대로였다가 자기 차례에 돈다.
-  await until(() => statusOf(w.root, 'b-claude') === 'completed')
-  await until(() => w.deliveries().length === 1)
-  expect(w.deliveries()[0].text).toContain('Claude')
-  expect(deliveryRecord(w.userData, 'a-codex')).toBeUndefined()
+  try {
+    // account identity does not make the removed consent API authoritative again.
+    w.svc.setConsent('codex', 'codex-other', false)
+    w.svc.setConsent('codex', 'codex-account', false)
+    expect(statusOf(w.root, 'a-codex')).toBe('running')
+    expect(statusOf(w.root, 'b-claude')).toBe('queued')
+    expect(w.store().consents()).toEqual([])
+    hold()
+    await until(() => statusOf(w.root, 'a-codex') === 'completed' && statusOf(w.root, 'b-claude') === 'completed')
+    await until(() => deliveryRecord(w.userData, 'a-codex')?.state === 'done' && deliveryRecord(w.userData, 'b-claude')?.state === 'done')
+    expect(w.jobRuns).toEqual(['a-codex', 'b-claude'])
+    expect(w.counters.mainStops).toBe(0)
+    expect(deliveryRecord(w.userData, 'a-codex')?.state).toBe('done')
+    expect(deliveryRecord(w.userData, 'b-claude')?.state).toBe('done')
+  } finally { hold() }
   await w.svc.close()
 })
