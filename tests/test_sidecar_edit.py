@@ -14,7 +14,7 @@ import sys
 import pytest
 
 import gg_core as core
-from conftest import END, REPO, START, write_section
+from conftest import END, REPO, START, apply_basic_draft, basic_change, bind_test_major, write_section
 from test_sidecar import Sidecar
 
 SIDECAR_DIR = REPO / "app" / "sidecar"
@@ -26,6 +26,18 @@ from knuaf_sidecar.rpc import RpcError  # noqa: E402
 
 BODY = "농장A의 재배 면적은 600평이다."
 TYPED = "농장A의 재배 면적은 600평이에요."
+
+
+@pytest.fixture
+def project(empty_folder):
+    """Legacy manuscript: caller-owned sections exist before major binding."""
+    core.init(empty_folder)
+    change = basic_change()
+    section = next(op["value"] for op in change["ops"] if op["collection"] == "sections")
+    section.update(id="sec-01", path="sections/01.md")
+    apply_basic_draft(empty_folder, change, 0)
+    bind_test_major(empty_folder)
+    return empty_folder
 
 
 @pytest.fixture
@@ -470,7 +482,7 @@ def test_committed_cleanup_pending_is_success_with_a_warning(project, monkeypatc
 
     monkeypatch.setattr(core, "apply", applied_then_failed)
     result = _call_edit(project)
-    assert result["revision"] == 2
+    assert result["revision"] == 3
     assert "cleanup_warning" in result
     assert TYPED in (project / "sections" / "01.md").read_text(encoding="utf-8")
     # 확정(_cleanup_pending)은 보존 폴더를 지우지 않는다 — 실패 원인을 남겨 둔다(§4-2 7).
@@ -489,7 +501,7 @@ def test_indeterminate_but_mine_keeps_the_new_text(project, monkeypatch):
 
     monkeypatch.setattr(core, "apply", applied_then_failed)
     result = _call_edit(project)
-    assert result["revision"] == 2
+    assert result["revision"] == 3
     assert "cleanup_warning" in result
     assert TYPED in (project / "sections" / "01.md").read_text(encoding="utf-8")
 
@@ -630,7 +642,7 @@ def test_a_folder_that_cannot_place_without_overwriting_refuses_the_save(project
     assert caught.value.code == "edit_failed"
     assert path.read_bytes() == original
     assert not [n for n in path.parent.iterdir() if n.name.startswith(".gg-edit-")]
-    assert core.load(project)["revision"] == 1
+    assert core.load(project)["revision"] == 2
 
 
 def test_check_keys_keeps_every_target_shape():
