@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
-import { bundle, bundledProject, launchInstalled, seededUserData } from './launch-installed'
+import { bundle, bundledProject, launchInstalled, readSplashRecord, seededUserData } from './launch-installed'
 import { openProject, paperReady } from '../e2e/helpers'
 import { APP_NAME } from '../src/shared/name'
 
@@ -81,11 +81,72 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
   const b = bundle()
   // 폴더도 **동봉 python + 동봉 gg.py** 로 만든다 — 저장소의 .venv-dev 를 쓰지 않는다.
   const root = bundledProject()
-  const { electronApp, page } = await launchInstalled({ userData: seededUserData() })
+  // 관측은 **띄우는 순간부터** 돈다 — 시작 화면이 붙어 있는 동안의 새 소식 창과 분리 시각을 본다.
+  const { electronApp, page } = await launchInstalled({ userData: seededUserData(), recordSplash: true })
   try {
     // 이 시험이 개발 트리 우회로 도는 게 아님을 먼저 못 박는다.
     expect(await electronApp.evaluate(() => process.env.KNUAF_PYTHON ?? null)).toBeNull()
     expect(await electronApp.evaluate(() => process.env.KNUAF_SCRIPTS_DIR ?? null)).toBeNull()
+
+    // 이 userData 는 '앱을 쓰던 학생, 새 소식 확인 기록 없음'이다 — 큰 판 글이 동봉돼 있으면
+    // 새 소식 창이 한 번 뜨는 게 의도다(A1). 뜨면 동봉 판 글로 떴는지 보고 '확인했어요'로 닫는다.
+    // 뜨지 않는 판(작은 판만 있는 경우)도 그대로 통과한다.
+    //
+    // 순서를 지키는 시험이다(PR #160 재판정 ③): 시작 화면이 **붙어 있는 동안** 열린 새 소식 창이
+    // 0개여야 하고, 그 화면이 **분리된 뒤** 학생 조작 없이 창이 저절로 떠야 한다. 앱은 시작 화면이
+    // 떠 있는 동안 창을 마운트하지 않으므로(`App.tsx` 의 `canShowNewsDialog={!splashVisible}`)
+    // 분리를 유한 시간(30초) 기다린다 — 멈추면 여기서 실패한다. 이 기다림만으로는 패치 전 앱도
+    // (늦게 클릭해서) 통과할 수 있으므로, 관측은 클릭 **전에** 한다. 관측은 창이 뜬 순간부터
+    // 이미 돌고 있다(`launchInstalled({ recordSplash: true })`): `.titlebar` 대기가 10초를 넘는 느린
+    // 러너에서는 시작 화면이 그 사이에 끝나므로, 여기서 걸면 "붙어 있는 동안" 구간을 통째로 못 본다.
+    const splash = await readSplashRecord(page)
+    // 분리를 못 봤으면 관측 자체가 성립하지 않는다 — 조용히 건너뛰지 않고 이 단계에서 실패한다.
+    // 관측이 늦은 경우(붙어 있는 표본 0)를 먼저 말한다: 그때 `detached` 가 거짓인 것은 앱 결함이 아니다.
+    expect(splash.attached, '시작 화면이 붙어 있는 표본을 한 번도 못 봤다 — 관측이 시작 화면보다 늦었다').toBeGreaterThan(0)
+    expect(splash.detached, `관측 시작 후 ${splash.waited}ms 동안 시작 화면(.splash)이 DOM 에서 분리되지 않았다`).toBe(true)
+    expect(splash.early, '시작 화면이 붙어 있는 동안 새 소식 창이 열려 있었다 — 패치 전 앱과 같은 겹침').toBe(0)
+
+    const news = await page.evaluate(() => window.knuaf.news.state())
+    console.log(`[A1-INSTALLED] news mode=${news.mode} unread=${news.unread.length} github_sha=${process.env.GITHUB_SHA ?? 'local'} event=${process.env.GITHUB_EVENT_NAME ?? 'local'}`)
+    // 판정서 ④ 판독용 표지: 이 실행이 창 케이스(아래 if)를 실제로 탔는지 대체 분기를 탔는지 보고서·trace에 남긴다.
+    // 단언은 바꾸지 않는다 — 분기 선택은 동봉 판 글에 달렸고, 대체 분기도 기존대로 통과한다.
+    test.info().annotations.push({ type: 'news-mode', description: `mode=${news.mode} unread=${news.unread.length}` })
+    const newsDialog = page.locator('dialog.news-dialog[open]')
+    if (news.mode === 'dialog') {
+      expect(news.unread.length, '창을 띄운 새 소식이 비어 있다').toBeGreaterThan(0)
+      // 시작 화면이 분리된 뒤 **학생 조작 없이** 자동으로 떠야 한다(기본 5초 상한은 그대로 둔다).
+      await expect(newsDialog, '시작 화면이 사라진 뒤 새 소식 창이 저절로 뜨지 않았다').toBeVisible()
+      console.log('[A1-INSTALLED] dialog visible passed')
+      // 클릭과 닫힘을 단계로 갈라 둔다: 클릭 단계가 통과하고 닫힘 단계가 실패하면, 버튼 핸들러에는
+      // 닿았는데 `news:seen` 저장이 실패한 것이다(창은 `failed` 문구를 띄운 채 열린 채로 남는다).
+      await test.step('확인했어요 한 번 클릭', async () => {
+        await newsDialog.getByRole('button', { name: '확인했어요' }).click()
+      })
+      await test.step('열린 새 소식 창 0개', async () => {
+        try {
+          await expect(newsDialog).toHaveCount(0)
+          console.log('[A1-INSTALLED] clicked once, open dialogs 0 passed')
+        } catch (error) {
+          // ④ 판독용 — 여기서 다시 실패하면 두 원인을 가른다: 버튼 핸들러에 안 닿았다(`news:seen` 전이라
+          // 상태가 여전히 `dialog`, 단추도 다시 눌린 상태) / 저장이 실패했다(창이 `failed` 문구를 띄운 채 남는다).
+          // 단언은 그대로 실패한다 — 관측만 덧붙인다.
+          const after = await page.evaluate(async () => {
+            const state = await window.knuaf.news.state().catch(() => null)
+            return {
+              mode: state?.mode ?? '조회 실패',
+              unread: state?.unread.length ?? -1,
+              alert: [...document.querySelectorAll('dialog.news-dialog [role="alert"]')].map((el) => el.textContent ?? ''),
+              disabled: [...document.querySelectorAll<HTMLButtonElement>('dialog.news-dialog .sheet-foot button')].map((el) => el.disabled)
+            }
+          }).catch(() => null)
+          console.error(`[닫힘 실패 진단] ${JSON.stringify(after)}`)
+          throw error
+        }
+      })
+    } else {
+      await expect(newsDialog).toHaveCount(0)
+      console.log('[A1-INSTALLED] no-dialog branch: open dialogs 0 passed')
+    }
 
     // 동봉 실행기 선택을 보므로 개발용 .venv seed와 준비 완료 대기를 제외한다.
     await openProject(page, root, (p) => paperReady(p, '600평'), { preparation: 'pending' })
@@ -95,12 +156,14 @@ test('동봉 python·스킬로 폴더를 열면 사이드카가 붙고 종이가
     expect(sc.kind, '동봉 python 이 아니라 다른 실행기를 골랐다').toBe('bundled')
     expect(sc.python).toBe(b.python)
     expect(sc.scriptsDir).toBe(b.scripts)
+    console.log(`[A1-INSTALLED] bundled runner passed kind=${sc.kind}`)
 
     // 창 제목이 열린 폴더 이름을 단다 — 설치본에서도 main 이 같은 경로를 탄다.
     // (`page.title()` 이 아니라 창 제목을 본다: 문서 제목은 `index.html` 의 정적 값이라
     //  main 이 세우는 창 제목과 다른 출처다.)
     const title = await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getTitle())
     expect(title).toBe(`${basename(root)} — ${APP_NAME}`)
+    console.log('[A1-INSTALLED] window title passed')
   } finally {
     await electronApp.close()
   }

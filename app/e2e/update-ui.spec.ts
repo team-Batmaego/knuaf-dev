@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { launch, navTo, openProject, synthProject } from './helpers'
+import { expectConnected, launch, navTo, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, userDataWith } from './fixtures/fake-codex'
 
 const sha = (data: Buffer) => createHash('sha256').update(data).digest('hex')
@@ -69,7 +69,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
         ? new Response(Buffer.from(data.archive, 'base64')) : new Response('blocked', { status: 403 }))
     }, { url, archive: archive.toString('base64') })
     await openProject(page, root)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('업데이트 전 대화')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('시험 응답입니다')).toBeVisible({ timeout: 30000 })
@@ -119,7 +119,7 @@ test('signed local channel: install, rollback, incompatible app and offline', as
     await section.getByRole('button', { name: '내려받기 페이지 열기' }).click()
     await expect.poll(() => electronApp.evaluate(() => (globalThis as typeof globalThis & { openedUpdate?: string }).openedUpdate)).toBe('https://github.com/team-Batmaego/knuaf-dev/releases/tag/v99.0.0')
     await page.locator('dialog[data-screen="settings"] > .sheet-head button[aria-label="닫기"]').click()
-    await page.locator('.titlebar').getByRole('button', { name: '업데이트', exact: true }).click()
+    await page.locator('.sidebar-update-card').getByRole('button', { name: '업데이트', exact: true }).click()
     await expect(page.getByRole('dialog', { name: '새 앱 99.0.0이 나왔어요' })).toBeVisible()
     await page.getByRole('button', { name: '나중에' }).click()
   } finally {
@@ -189,7 +189,7 @@ test('app update progress remains reachable after closing the named dialog', asy
     }, phase)
     // A later fail-closed event must still remove the button; do not mask real states.
     await emit('available')
-    const titleButton = page.locator('.titlebar').getByRole('button', { name: '업데이트', exact: true })
+    const titleButton = page.locator('.sidebar-update-card').getByRole('button', { name: '업데이트', exact: true })
     await expect(titleButton).toBeVisible()
     await electronApp.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0].webContents.send('app-update:status', {

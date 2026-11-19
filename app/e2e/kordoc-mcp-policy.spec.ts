@@ -128,7 +128,7 @@ test('E1: MCP가 아닌 도구는 null(기존 흐름), 다른 서버 MCP는 거�
   expect(mcpPolicy(f.root, 'mcp__other__parse_document', { file_path: f.insideFile })).toEqual(deny(DENY_FOREIGN_MCP))
 })
 
-test('E1: insideRootReal — realpath 기준 판정과 NFC 정규화', () => {
+test('E1: insideRootReal — 파일시스템이 반환한 realpath 경계를 그대로 따른다', () => {
   expect(insideRootReal(f.root, f.root)).toBe(true)
   expect(insideRootReal(f.root, `${f.root}/`)).toBe(true)
   expect(insideRootReal(f.root, f.insideFile)).toBe(true)
@@ -149,6 +149,23 @@ test('E1: insideRootReal — realpath 기준 판정과 NFC 정규화', () => {
   mkdirSync(sibling)
   writeFileSync(join(sibling, 'a.hwpx'), 'x')
   expect(insideRootReal(f.root, join(sibling, 'a.hwpx'))).toBe(false)
+})
+
+test('R271-01: 서로 다른 Unicode·대소문자 realpath는 Claude 읽기 정책에서도 밖이다', () => {
+  for (const [rootName, siblingName] of [['가', '가'.normalize('NFD')], ['가'.normalize('NFD'), '가'], ['Paper', 'paper']]) {
+    const root = join(f.base, rootName)
+    const sibling = join(f.base, siblingName, 'document.hwpx')
+    // Filesystem seam: also exercises filesystems where both spellings are distinct
+    // even when the host APFS folds them. No normalization is permitted after realpath.
+    const fs = { realpathSync: (path: string): string => path }
+    for (const path of [sibling, join('..', siblingName, 'document.hwpx')]) {
+      expect(insideRootReal(root, path, fs)).toBe(false)
+      expect(mcpPolicy(root, 'mcp__kordoc__parse_document', { file_path: path }, fs)).toEqual(deny(DENY_OUTSIDE_ROOT))
+    }
+    for (const path of [join(root, '자료.hwpx'), '자료.hwpx']) {
+      expect(mcpPolicy(root, 'mcp__kordoc__parse_document', { file_path: path }, fs)).toEqual(allow)
+    }
+  }
 })
 
 /** 판 비교 — 표에 없는 판을 열지 않는 근거. */

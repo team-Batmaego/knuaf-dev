@@ -10,6 +10,7 @@ import { insideByFileId } from './file-identity'
 import { registerProgressIpc } from './progress'
 // link (v0.6.4 ⑤): 대화 속 http(s) 주소 열기 — 채널 하나(`link:open`), main이 주소를 다시 본다.
 import { registerLinkIpc } from './links'
+import { registerReleaseNotes } from './releaseNotes'
 // paper-images (v0.6.4 사진 갈래): 종이 칸 그림 — 스킴(`knuaf-img:`) 처리기 하나. electron 값 import 없음.
 import { createPaperImages } from './paper-images'
 import type { PaperImages } from './paper-images'
@@ -25,8 +26,9 @@ import { ClaudeRelayConnection } from './chat/claude'
 import { CodexRelayConnection } from './chat/codex'
 import { subscriptionEnv, type AgentOptions } from './chat/contracts'
 import { ConversationHandoff } from './chat/jobs/conversation'
-import { laneAccountProbe } from './lanes/accounts'
+import { laneAccountProbe, type AccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
+import { consumePendingDesign, selectDesign } from './lanes/cards'
 import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
 import { loadGuardKey } from './guard/key'
@@ -102,7 +104,7 @@ function findNestedProject(root: string): string | null {
  * Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit.
  * `images`는 스킴 처리기다 — `index.ts`만 `protocol`을 알므로 등록도 거기서 한다(ipc는 electron을 값으로 더 잡지 않는다).
  */
-export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages } {
+export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages; probe: AccountProbe } {
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
@@ -126,6 +128,7 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   const store = new SkillStore(app.getPath('userData'), skillSource(APP_ROOT, app.isPackaged, process.resourcesPath), app.getVersion(), config.keys)
   try { store.cleanup() } catch (error) { console.error('[knuaf] 규칙집 보관 정리 실패', error) }
   configureSkillSource(() => store.resolveSkillSource())
+  registerReleaseNotes(() => store.resolveSkillSource(), APP_ROOT, ipcMain, () => app.getVersion(), app.isPackaged)
   const updates = new SkillUpdates(store, {
     config, fetch: netRequestTransport,
     restartSidecar: () => sidecar.restart(),
@@ -172,7 +175,9 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     if (method === 'artifact.preview') return { error: { code: 'invalid_method', message: '미리보기는 preview:read 경로만 사용할 수 있어요.' } }
     // 선택은 `notices:choose` 만 — generic RPC 는 `params.root` 를 그대로 넘기므로(아래 `root`)
     // 화면이 고른 폴더와 다른 폴더에 학생 선택을 적을 수 있다. 그 문을 닫는다.
+    // 확인(`notices.confirm`)도 정본 쓰기라 같은 좁은 문 하나뿐이다.
     if (method === 'notices.choose') return { error: { code: 'invalid_method', message: '알림 선택은 notices:choose 경로만 사용할 수 있어요.' } }
+    if (method === 'notices.confirm') return { error: { code: 'invalid_method', message: '알림 확인은 notices:confirm 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -569,7 +574,24 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('window:info', () => windowInfo())
 
   ipcMain.handle('settings:get', () => loadSettings())
-  ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
+  ipcMain.handle('settings:set', async (_e, patch) => {
+    const provider = patch?.provider_choice?.provider
+    const root = currentRoot
+    const visit = currentVisit
+    const assertCurrent = (): void => {
+      if (currentRoot !== root || currentVisit !== visit) throw new Error('논문 폴더가 바뀌어 주 모델을 바꾸지 않았어요.')
+    }
+    if (root && provider && provider !== loadSettings().provider_choice?.provider) {
+      await consumePendingDesign(chat.lanesStore(), root, provider, async pending => {
+        assertCurrent()
+        if (!pending.model) throw new Error('예약 모델이 없어요.')
+        await chat.setModel(root, provider, { model: pending.model, effort: pending.effort }, assertCurrent)
+        assertCurrent()
+      })
+      assertCurrent()
+    }
+    const s = saveSettings(patch); onRecentsChanged(); return s
+  })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
@@ -805,6 +827,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('app-update:install', () => updateResult(async () => { await appUpdates.install(); return appUpdates.status() }))
   ipcMain.handle('app-update:open-page', () => updateResult(async () => { await appUpdates.openPage(); return true }))
   ipcMain.handle('app-update:cancel', () => ({ result: appUpdates.cancel() }))
+  // 켜 둔 채 쓰는 학생에게 새 판을 알린다(A1-3) — 켤 때 확인은 아래 한 번, 이후는 30분마다 조용히.
+  appUpdates.startRecheck()
   void appUpdates.check()
   const chatFail = (e: unknown): { error: { code: string; message: string } } => ({ error: { code: e instanceof FreeRelayError ? e.kind : e instanceof UpdateSuspendedError ? e.code : 'chat', message: e instanceof Error ? e.message : String(e) } })
   ipcMain.handle('chat:snapshot', (_e, root: string, provider: Provider) => { try { activeMainCompany = providerOf(provider); return { result: chat.snapshot(root, provider) } } catch (e) { return chatFail(e) } })
@@ -835,7 +859,24 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('chat:models', async (_e, root: string | null, provider: Provider) => { try { return { result: await chat.models(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:set-model', async (_e, root: string | null, provider: Provider, choice: ModelChoice | null) => {
     // 저장·순서는 ChatService 가 맡는다(목록 검증과 저장 사이에 새 선택이 끼어드는 경합).
-    try { return { result: await chat.setModel(root, provider, choice) } } catch (e) { return chatFail(e) }
+    try {
+      if (root && choice) {
+        const folder = canonical(root)
+        if (!currentRoot || canonical(currentRoot) !== folder) throw new Error('지금 열린 논문 폴더가 아니에요.')
+        await selectDesign({
+          store: chat.lanesStore(), account: company => chat.laneAccount(company),
+          freshAccount: company => chat.laneAccount(company, { fresh: true }),
+          mainCompany: loadSettings().provider_choice?.provider ?? activeMainCompany,
+          applyDesign: async (_root, entry) => {
+            await chat.setModel(folder, entry.company, { model: entry.model!, effort: entry.effort })
+            return true
+          }
+        }, folder, { company: providerOf(provider), model: choice.model, effort: choice.effort, how: 'main' })
+        lanesHub.touch(folder)
+        return { result: choice }
+      }
+      return { result: await chat.setModel(root, provider, choice) }
+    } catch (e) { return chatFail(e) }
   })
 
   // 폴더 없이 쓰는 연결 — 첫 실행 화면(온보딩)이 폴더를 고르기 전에 쓴다. root 인자가 없다.
@@ -1035,7 +1076,34 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     }
   })
 
+  /** 확인은 열린 폴더와 알림을 다시 검사하고, 전달받은 답이 있으면 출처를 보존한다. */
+  ipcMain.handle('notices:confirm', async (_e, root: unknown, identity: unknown, quote: unknown) => {
+    if (typeof root !== 'string' || root !== currentRoot) {
+      return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌었어요.' } }
+    }
+    if (typeof identity !== 'string' || !identity.trim()) {
+      return { error: { code: 'invalid_params', message: '알림 식별자가 올바르지 않습니다.' } }
+    }
+    if (quote !== undefined && (typeof quote !== 'string' || !quote.trim())) {
+      return { error: { code: 'invalid_params', message: '전달한 답이 올바르지 않습니다.' } }
+    }
+    // 알림 파일은 규칙집이 쓴다 — 그 파일이 말하는 알림만 확인할 수 있다.
+    let known = false
+    try {
+      known = readNotices(root).notices.some((notice) => notice.key.slice(notice.key.indexOf(':') + 1) === identity)
+    } catch (error) {
+      return { error: { code: 'notices_read', message: error instanceof Error ? error.message : String(error) } }
+    }
+    if (!known) return { error: { code: 'notice_unknown', message: '그 알림을 이 폴더에서 찾지 못했어요.' } }
+    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    try {
+      return { result: await sidecar.call('notices.confirm', { root, identity, ...(typeof quote === 'string' ? { relayed_quote: quote.trim() } : {}) }) }
+    } catch (error) {
+      return { error: ipcError(error) }
+    }
+  })
+
   sidecar.on('log', (entry) => win()?.webContents.send('sidecar:log', entry))
   sidecar.on('exit', (entry) => win()?.webContents.send('sidecar:exit', entry))
-  return { chat, images }
+  return { chat, images, probe: probeAccount }
 }

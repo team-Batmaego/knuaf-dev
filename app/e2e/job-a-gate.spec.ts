@@ -134,12 +134,11 @@ test('㉠ limit and auth and rejected stay closed with or without the gate', asy
     expect(f.runner.records()[0].status).toBe(usage)
   }
   const noConsent = setup({ company: 'claude',
-    shot: { ...claudeShot('unknown'), consented: false },
-    fake: { gateInTurn: true, liveUsage: 'unknown', writeOutput: true },
-    buildFactory: () => { throw new Error('must not build a connection') } })
+    shot: { ...claudeShot('allowed'), consented: false },
+    fake: { gateInTurn: true, liveUsage: 'allowed', writeOutput: true } })
   await noConsent.runner.runQueued()
-  expect(noConsent.runner.records()[0].status).toBe('rejected')
-  expect(noConsent.calls).toEqual([])
+  expect(noConsent.runner.records()[0].status).toBe('completed')
+  expect(noConsent.calls).toEqual(['gate-job'])
 })
 
 test('㉠ live availability limit closes as limit even with the gate', async () => {

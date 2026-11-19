@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { join } from 'node:path'
-import { launch } from './helpers'
+import { expectConnected, launch } from './helpers'
 import { fakeCodexEnv, replyFile, scratch } from './fixtures/fake-codex'
 
 const suggestions = [
@@ -16,7 +16,7 @@ for (const [label, prompt] of suggestions) {
     const { electronApp, page } = await launch({ env, permissionPrompt: true })
     try {
       await electronApp.evaluate(({ app }, docs) => app.setPath('documents', docs), dir)
-      await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+      await expectConnected(page)
       const box = page.getByRole('textbox', { name: '답변을 입력하세요' })
       await page.getByRole('button', { name: label, exact: true }).click()
       await expect(box).toHaveValue(prompt)

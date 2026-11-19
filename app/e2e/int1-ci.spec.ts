@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch } from './helpers'
+import { expectConnected, launch } from './helpers'
 import { fakeCodexEnv, replyFile, scratch } from './fixtures/fake-codex'
 
 for (const barrier of ['acceptance', 'draft-cleanup'] as const) {
@@ -33,7 +33,7 @@ for (const barrier of ['acceptance', 'draft-cleanup'] as const) {
           })
         }
       }, barrier)
-      await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨')
+      await expectConnected(page)
       await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('기존 논문 이어 쓰기')
       await page.getByRole('button', { name: '보내기', exact: true }).click()
       await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()

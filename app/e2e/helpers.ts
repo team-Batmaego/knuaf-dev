@@ -10,6 +10,20 @@ export const repo = resolve(app, '..')
 export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
+/** Check the real account row without relying on the model chip's label. */
+export async function expectConnected(page: Page, provider: 'codex' | 'claude' | 'free' = 'codex', timeout = 30000): Promise<void> {
+  const chip = page.getByTitle('이 논문의 도우미')
+  const wasOpen = await chip.getAttribute('aria-expanded') === 'true'
+  if (!wasOpen) await chip.click()
+  const popup = page.locator('.composer-model-host .popover')
+  const account = popup.locator('[data-submenu="true"]').getByText('AI 회사·로그인', { exact: true })
+  const row = popup.locator(`[data-provider="${provider}"]`)
+  await expect(account.or(row).first()).toBeVisible({ timeout })
+  if (await account.isVisible()) await account.click()
+  await expect(row).toContainText('연결됐어요', { timeout })
+  if (!wasOpen) await page.keyboard.press('Escape')
+}
+
 let dependencySeed: string | undefined
 
 /** Install once per worker, then copy real directories; every project still passes the app's doctor. */
@@ -150,8 +164,17 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
    * 않으므로 리스너가 아예 없다** — 음성 시험은 `env: { KNUAF_E2E_TEST_HOOKS: '0' }` 로 끈다.
    */
   if (env.KNUAF_E2E_TEST_HOOKS === undefined) env.KNUAF_E2E_TEST_HOOKS = '1'
+  /**
+   * 가짜 HOME(임시 userData)으로 띄운 Electron 이 safeStorage 를 부르면 맥이 "키체인을 찾을 수
+   * 없음" 창을 띄워 시험을 세운다 — 가짜 키체인 저장소를 써서 실제 키체인을 건드리지 않게 한다.
+   * 맥 전용 플래그라 다른 OS 에는 넘기지 않는다.
+   */
   const electronApp = await electron.launch({
-    args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+    args: [
+      join(app, 'out', 'main', 'index.js'),
+      `--user-data-dir=${userData}`,
+      ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])
+    ],
     env,
     colorScheme: opts.colorScheme
   })

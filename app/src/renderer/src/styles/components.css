@@ -328,7 +328,7 @@ label.opt-row input[type="radio"] { margin-top: 2px; }
 .log { border-radius: var(--r-md); }
 .progress-log .stderr, .log .stderr { color: #f0b6ac; }
 .result { border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4); margin-top: var(--sp-4); border: var(--hairline) solid transparent; }
-.result-ok { background: var(--ok-soft); } .result-blocked { background: var(--blocked-soft); } .result-fail { background: var(--bad-soft); }
+.result-ok { background: var(--ok-soft); } .result-blocked, .result-held { background: var(--blocked-soft); } .result-fail { background: var(--bad-soft); }
 /* 최근 논문은 한 줄씩 세로 목록(시안 B) — 이름 + 최근 시점, 제거는 줄 끝 작게(N-R02). */
 .projects { display: flex; flex-direction: column; gap: 2px; }
 .project { text-align: left; display: flex; align-items: center; gap: var(--sp-3); padding: 11px 12px; border-radius: 10px; background: none; border: 0; cursor: pointer; }
@@ -573,6 +573,17 @@ dialog.sheet .sheet-foot { display: flex; justify-content: flex-end; gap: var(--
 .model-picker-note p { margin: 0 0 4px; }
 .model-picker-note small { display: block; margin-bottom: 6px; }
 .model-picker-note[role="alert"] { color: var(--bad); }
+/* D2 역할 메뉴: 기존 팝오버와 같은 줄·선·선택 상태를 쓴다. */
+.lane-menu .lane-label { width: 68px; flex: none; color: var(--muted); font-size: 13px; }
+.lane-menu .lane-meta { margin-left: auto; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.lane-menu .lane-efforts { display: flex; flex-wrap: wrap; gap: 2px; padding: 2px 6px 6px; }
+.lane-menu .lane-effort { border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 5px 9px; border-radius: 7px; }
+.lane-menu .lane-effort:hover { background: var(--hover); color: var(--ink); }
+.lane-menu .lane-effort[aria-pressed="true"] { background: var(--sel-bg); color: var(--ink); font-weight: 600; }
+.lane-menu .lane-switch { margin-left: auto; width: 34px; height: 20px; border-radius: 999px; background: var(--line-strong); position: relative; flex: none; }
+.lane-menu .lane-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
+.lane-menu .lane-switch.on { background: var(--send-bg); }
+.lane-menu .lane-switch.on::after { left: 16px; }
 /* 아직 고를 수 없는 줄 — 흐리게, 눌리지 않게. */
 .pop-row.off { opacity: .6; cursor: default; }
 .pop-row.off:hover { background: none; }
@@ -865,6 +876,7 @@ button.lk:hover { border-bottom-color: var(--ink); }
 .notice-choice button { flex: 1 1 auto; min-width: 0; padding: 7px 12px; font-size: 13px; font-weight: 500;
   background: var(--panel); border-color: var(--line-strong); border-radius: var(--r-md); }
 .notice-choice button:hover { background: var(--btn-bg); border-color: var(--btn-border); color: var(--btn-ink); }
+.notice-confirm button { padding: 7px 12px; font-size: 13px; font-weight: 500; background: var(--panel); border-color: var(--line-strong); border-radius: var(--r-md); }
 .notice-failed { margin: 0; font-size: 12.5px; color: var(--bad); }
 .notice-foot { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); }
 .notice-foot button { flex: none; font-size: 12.5px; padding: 4px 10px; }
