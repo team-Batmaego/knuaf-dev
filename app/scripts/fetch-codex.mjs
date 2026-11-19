@@ -41,9 +41,9 @@ import { createGunzip } from 'node:zlib'
  * 파일 도구가 하나도 안 돈다. 상류 수정은 openai/codex#51822(0.163.0 부터). 같은 기기에서 0.162.1 은
  * 실패, 0.164.0 은 통과를 번갈아 확인했다.
  */
-export const DEFAULT_VERSION = '0.164.0'
-/** `@openai/codex@<version>-win32-x64` tgz 의 SHA-256 (2026-10-27 실측, npm 레지스트리 sha1 과도 일치). */
-export const DEFAULT_SHA256 = '4fbd23473a2fc223396cdd8490d3f658d368438134c12a3f1dac9d1e2041a65b'
+export const DEFAULT_VERSION = '0.170.0'
+/** `@openai/codex@<version>-win32-x64` tgz 의 SHA-256 (npm 레지스트리 SHA-512 무결성 값과도 대조). */
+export const DEFAULT_SHA256 = '49eedd5e5e1c828b0cfcdde97f19d83528d8fda4eafef3b02cc770da218b6da3'
 export const TARGET = 'x86_64-pc-windows-msvc'
 export const MARKER = '.complete'
 
