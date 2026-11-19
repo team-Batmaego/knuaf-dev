@@ -7,7 +7,7 @@
 //  3. `entry` 는 **실패 당시** 실제로 보낸 회사·모델·깊이다(턴 지역 값).
 //  4. 제안이 열리면 그 턴의 오류 줄 대신 제안 줄이 남는다.
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { ChatService, type HandoffSeam } from '../src/main/chat/service'
@@ -23,7 +23,7 @@ import { findExecutable, skillSource } from '../src/main/agent'
 import { chatConnectionKey } from '../src/main/chat/jobs/key'
 import { laneAccountProbe } from '../src/main/lanes/accounts'
 import { planFromRow } from '../src/shared/lanes'
-import { fakeCodexEnv } from './fixtures/fake-codex'
+import { fakeCodexEnv, writeCliShim } from './fixtures/fake-codex'
 import type { ChatSnapshot } from '../src/shared/chat'
 
 const appRoot = resolve(__dirname, '..')
@@ -386,6 +386,33 @@ test('계정 조회는 아직 없는 앱 전용 폴더에서도 연결과 모델
     expect.objectContaining({ model: 'gpt-sol', name: 'Sol' })
   ]))
 })
+
+for (const company of ['codex', 'claude'] as const) {
+  test(`종료 중 ${company} 계정 조회 자식을 회수하고 새 조회를 막는다`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kd-probe-stop-'))
+    const pidFile = join(dir, 'pid')
+    const script = join(dir, 'hold.cjs')
+    writeFileSync(script, `const fs = require('node:fs'); if (process.argv[2] === 'auth') { console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'})); } else { fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000); }`)
+    const bin = join(dir, company)
+    writeCliShim(dir, company, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"`, `"${process.execPath}" "${script}" %*`)
+    const probe = laneAccountProbe({ appDir: join(dir, 'relay'), env: () => process.env, openExternal: async () => {}, binary: () => process.platform === 'win32' ? `${bin}.cmd` : bin })
+    const pending = probe(company)
+    let pid = 0
+    try {
+      await expect.poll(() => existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : 0, { timeout: 15000 }).toBeGreaterThan(0)
+      pid = Number(readFileSync(pidFile, 'utf8'))
+      const started = Date.now()
+      await probe.close()
+      expect(Date.now() - started).toBeLessThan(10000)
+      await expect.poll(() => { try { process.kill(pid, 0); return true } catch { return false } }).toBe(false)
+      expect(await pending).toBeNull()
+      expect(await probe(company, { fresh: true })).toBeNull()
+    } finally {
+      await probe.close()
+      if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }
+    }
+  })
+}
 
 test('handoff: 동시 두 제안의 첫 계정 조회는 1회', async () => {
   // 동시에 두 제안이 열려도 실제 읽기는 하나이고, 두 제안은 **같은 값**으로 판정된다.

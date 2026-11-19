@@ -2246,10 +2246,12 @@ export class ClaudeRelayConnection implements JobConnection {
    * 지어내면 한도를 넘은 계정에 주문을 열어 주게 된다.
    */
   async availability(): Promise<ExecutionAccount> {
-    const status = await this.status()
-    if (!status.connected) return { ...claudeExecutionAccount(this.options, null), connected: false, usage: 'auth' }
     const controller = new AbortController()
-    const q = query({ prompt: (async function* () {})(), options: this.queryOptions(controller) })
+    this.controller = controller
+    const status = await this.status()
+    if (controller.signal.aborted) throw new Error('담당이 중단됐어요.')
+    if (!status.connected) { this.controller = undefined; return { ...claudeExecutionAccount(this.options, null), connected: false, usage: 'auth' } }
+    const q = this.active = query({ prompt: (async function* () {})(), options: this.queryOptions(controller) })
     try {
       // 초기화 응답 한 번으로 명령·모델·계정을 함께 받는다. `supportedModels()` 는 별도 왕복이다.
       const init = await q.initializationResult()
@@ -2267,10 +2269,11 @@ export class ClaudeRelayConnection implements JobConnection {
       const keyed = Boolean(account?.apiKeySource) && account?.apiKeySource !== 'none'
       const provider = account?.apiProvider
       return { ...known, connected: !keyed && (!provider || provider === 'firstParty'), usage: keyed ? 'auth' : 'unknown' }
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted) throw error
       // 초기화를 못 받았다 = 지금 쓸 수 있는지 모른다. 모름을 `allowed` 로 바꾸지 않는다.
       return { ...claudeExecutionAccount(this.options, null), usage: 'unknown' }
-    } finally { q.close() }
+    } finally { q.close(); if (this.active === q) this.active = undefined; if (this.controller === controller) this.controller = undefined }
   }
 
   /** 주문 한 건. 순서와 관문은 `runJob` 주석 참조. */

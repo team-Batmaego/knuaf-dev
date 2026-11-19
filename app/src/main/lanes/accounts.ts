@@ -34,7 +34,7 @@ export interface AccountProbeDeps {
  * `fresh` 는 캐시를 건너뛰고 **지금** 관측한다 — 카드 적용·동의 켜기처럼 권한을 바꾸는 자리는
  * 15초 전 값을 쓰면 안 된다(C1-06). 실패는 `null`(모름)이고, 부르는 쪽이 닫는다.
  */
-type Probe = ((company: Provider, options?: { fresh?: boolean }) => Promise<ExecutionAccount | null>) & {
+export type AccountProbe = ((company: Provider, options?: { fresh?: boolean }) => Promise<ExecutionAccount | null>) & {
   /**
    * **인계 제안 판정 전용 상한** — 실행당 회사당 1회, 로그인 세대가 바뀌면 다시 1회.
    * 누르기 **전**에 부르므로 이 값이 제안 단추의 근거다. 15초 캐시를 읽지도 쓰지도 않는다
@@ -44,17 +44,22 @@ type Probe = ((company: Provider, options?: { fresh?: boolean }) => Promise<Exec
    * 다시 1회 읽는다(실패를 굳히면 연결이 돌아와도 단추가 영영 없다).
    */
   once(company: Provider, epoch: number): Promise<ExecutionAccount | null>
+  close(): Promise<void>
 }
 
 /**
  * 회사별 계정 조회. 실행 파일이 없으면 `null`(그 회사는 쓸 수 없음). 실패도 `null` 이다 —
  * 모르는 값을 `allowed` 로 지어내지 않는다.
  */
-export function laneAccountProbe(deps: AccountProbeDeps): Probe {
+export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
   const cache = new Map<Provider, { at: number; value: ExecutionAccount | null }>()
   const inflight = new Map<Provider, Promise<ExecutionAccount | null>>()
+  const active = new Set<CodexRelayConnection | ClaudeRelayConnection>()
+  let closing = false
+  let closePromise: Promise<void> | undefined
 
   const probe = async (company: Provider): Promise<ExecutionAccount | null> => {
+    if (closing) return null
     // [C1-01] 자기 방어 — 이 함수만 따로 불려도 허용 회사 밖의 이름이 실행 파일 탐색에 닿지 않는다.
     if (!isProvider(company)) return null
     const binary = deps.binary(company)
@@ -77,8 +82,9 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
     const connection = company === 'claude'
       ? new ClaudeRelayConnection(options, request, deps.appDir)
       : new CodexRelayConnection(options, request)
-    try { return await connection.availability() } finally {
-      try { await connection.stop() } catch { /* 이미 닫힌 연결 */ }
+    active.add(connection)
+    try { const result = await connection.availability(); return closing ? null : result } finally {
+      try { if (!closing) await connection.stop() } finally { active.delete(connection) }
     }
   }
 
@@ -86,6 +92,7 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
   const memo = new Map<Provider, { value?: ExecutionAccount | null; generation: number; inflight?: Promise<ExecutionAccount | null> }>()
 
   const read = (company: Provider, options?: { fresh?: boolean }): Promise<ExecutionAccount | null> => {
+    if (closing) return Promise.resolve(null)
     if (!isProvider(company)) return Promise.resolve(null)
     if (!options?.fresh) {
       const hit = cache.get(company)
@@ -105,6 +112,7 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
   }
 
   const once = (company: Provider, epoch: number): Promise<ExecutionAccount | null> => {
+    if (closing) return Promise.resolve(null)
     if (!isProvider(company)) return Promise.resolve(null)
     let entry = memo.get(company)
     if (!entry) { entry = { generation: epoch }; memo.set(company, entry) }
@@ -129,5 +137,5 @@ export function laneAccountProbe(deps: AccountProbeDeps): Probe {
   }
 
   const fn = (company: Provider, options?: { fresh?: boolean }) => read(company, options)
-  return Object.assign(fn, { once })
+  return Object.assign(fn, { once, close: () => { closing = true; return closePromise ??= Promise.all([...active].map(connection => connection.stop())).then(() => undefined) } })
 }

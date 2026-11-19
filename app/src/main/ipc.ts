@@ -26,7 +26,7 @@ import { ClaudeRelayConnection } from './chat/claude'
 import { CodexRelayConnection } from './chat/codex'
 import { subscriptionEnv, type AgentOptions } from './chat/contracts'
 import { ConversationHandoff } from './chat/jobs/conversation'
-import { laneAccountProbe } from './lanes/accounts'
+import { laneAccountProbe, type AccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
 import { consumePendingDesign, selectDesign } from './lanes/cards'
 import { LanesHub, connectChanges } from './lanes/hub'
@@ -104,7 +104,7 @@ function findNestedProject(root: string): string | null {
  * Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit.
  * `images`는 스킴 처리기다 — `index.ts`만 `protocol`을 알므로 등록도 거기서 한다(ipc는 electron을 값으로 더 잡지 않는다).
  */
-export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages } {
+export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages; probe: AccountProbe } {
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
@@ -1105,5 +1105,5 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   sidecar.on('log', (entry) => win()?.webContents.send('sidecar:log', entry))
   sidecar.on('exit', (entry) => win()?.webContents.send('sidecar:exit', entry))
-  return { chat, images }
+  return { chat, images, probe: probeAccount }
 }
