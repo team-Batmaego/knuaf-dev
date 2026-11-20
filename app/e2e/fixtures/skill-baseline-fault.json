@@ -1,5 +1,5 @@
 {
- "_made": "a340264 (src unchanged), tests r6 (W normalization fixed), 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r7 (E-STRUCT EISDIR/ELOOP), 2026-11-21",
  "R-B1": {
   "result": {
    "threw": "sidecar restart failed"

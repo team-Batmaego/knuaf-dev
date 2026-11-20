@@ -731,6 +731,10 @@ const structural = async (c: Case): Promise<void> => {
 test('GOLD E-STRUCT file in place of the folder', () => gold('ESTRUCT-file', { spec: D0, prep: d => { realFs.rmSync(join(d.storeDir, '1.0.14'), { recursive: true, force: true }); realFs.writeFileSync(join(d.storeDir, '1.0.14'), 'x') } }, structural))
 test('GOLD E-STRUCT folder in place of a file', () => gold('ESTRUCT-dir', { spec: D0, prep: d => { realFs.rmSync(join(d.storeDir, '1.0.14', 'SKILL.md'), { force: true }); realFs.mkdirSync(join(d.storeDir, '1.0.14', 'SKILL.md')) } }, structural))
 test('GOLD E-STRUCT symlink folder', () => gold('ESTRUCT-link', { spec: D0, prep: d => { realFs.renameSync(join(d.storeDir, '1.0.14'), join(d.root, 'elsewhere-14')); symlinkSync(join(d.root, 'elsewhere-14'), join(d.storeDir, '1.0.14')) } }, structural))
+// 구조 errno를 실제로 내는 경우(변이 M19가 살아남은 구멍): proof 자리에 폴더 → readFileSync EISDIR, 고리 심볼릭 링크 → ELOOP.
+// 기준판에서 둘 다 '확정 무효'(모름 아님)다.
+test('GOLD E-STRUCT proof replaced by a folder (EISDIR)', () => gold('ESTRUCT-proof-dir', { spec: D0, prep: d => { const proof = join(d.storeDir, 'proofs', '1.0.14.json'); realFs.rmSync(proof, { force: true }); realFs.mkdirSync(proof) } }, structural))
+test('GOLD E-STRUCT proof is a symlink loop (ELOOP)', () => gold('ESTRUCT-proof-loop', { spec: D0, prep: d => { const proof = join(d.storeDir, 'proofs', '1.0.14.json'); realFs.rmSync(proof, { force: true }); symlinkSync(proof, proof) } }, structural))
 
 // 판정서 v2.3 입력 1·2와 동시성 EQ도 골든에 담는다.
 test('GOLD status with both reads succeeding', () => gold('V1-status-two-reads', { spec: { active: '1.0.14', highest: '1.0.15' } }, async c => {

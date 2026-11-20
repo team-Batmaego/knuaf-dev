@@ -1,5 +1,5 @@
 {
- "_made": "a340264 (src unchanged), tests r6 (W normalization fixed), 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r7 (E-STRUCT EISDIR/ELOOP), 2026-11-21",
  "E1": {
   "steps": [
    [
@@ -2119,6 +2119,175 @@
     "highest.json",
     "proofs/",
     "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 2,
+  "events": [
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "ESTRUCT-proof-dir": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "select .14",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json/",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 2,
+  "events": [
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "ESTRUCT-proof-loop": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "select .14",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
     "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
