@@ -1,5 +1,5 @@
 {
- "_made": "a340264 (src unchanged), tests r5, 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r6 (W normalization fixed), 2026-11-21",
  "E1": {
   "steps": [
    [
@@ -794,9 +794,9 @@
    ]
   ],
   "disk": {
-   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.13\",\"manifest\":\"8edbf3e7b0654cce47b115c7244089dbcaae23c5b6659a86a74d9c08c534a91f\"}}",
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.13\",\"manifest\":\"W(1.0.13)\"}}",
    "stateTmp": "<ENOENT>",
-   "highest": "{\"version\":\"1.0.13\",\"manifest\":\"8edbf3e7b0654cce47b115c7244089dbcaae23c5b6659a86a74d9c08c534a91f\"}",
+   "highest": "{\"version\":\"1.0.13\",\"manifest\":\"W(1.0.13)\"}",
    "highestTmp": "<ENOENT>",
    "tree": [
     "1.0.14/",

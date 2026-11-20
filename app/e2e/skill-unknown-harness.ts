@@ -555,7 +555,9 @@ export function normalize(text: string, root: string): string {
     const v = f.manifest.version
     out = out.split(f.verified().digest).join(`D(${v})`).split(f.manifest.sha256).join(`Z(${v})`)
   }
-  for (const v of new Set(registry.map(f => f.manifest.version))) out = out.split(wrapDigest(v)).join(`W(${v})`)
+  // 기록만 있는 highest(`wrapDigest`)는 묶음 등록과 무관하게 고정 판 범위로 바꾼다 — 등록 목록은 Playwright가
+  // 시험 실패 뒤 워커를 다시 띄우면 비므로, 등록에 기대면 같은 디스크가 실행마다 다르게 정규화된다(판정 뒤 2단계 실행에서 실측).
+  for (const v of WRAP_VERSIONS) out = out.split(wrapDigest(v)).join(`W(${v})`)
   return out
     .replace(/\.(stage|download)-[A-Za-z0-9]{6}/g, '.$1-T')
     .replace(/\.damaged-([0-9.]+)-\d+/g, '.damaged-$1-T')
@@ -575,6 +577,8 @@ function proofPrint(path: string, root: string): string {
   } catch { sig = 'unparsable' }
   return `${JSON.stringify(normalize(masked, root))} ${sig}`
 }
+
+const WRAP_VERSIONS = Array.from({ length: 41 }, (_, i) => `1.0.${i}`)
 
 const readOr = (path: string): string => { try { return real.readFileSync(path, 'utf8') } catch (e) { return `<${(e as { code?: string }).code ?? 'error'}>` } }
 
