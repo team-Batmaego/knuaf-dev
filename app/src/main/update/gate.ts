@@ -13,7 +13,10 @@ import { createPublicKey } from 'node:crypto'
 declare const __KNUAF_GATE__: unknown
 export interface Gate { channel: string; key: string }
 const CHANNEL = /^http:\/\/127\.0\.0\.1:([1-9]\d{3,4})\/channel\.json$/
-function ed25519(key: string): boolean { try { return createPublicKey(key).asymmetricKeyType === 'ed25519' } catch { return false } }
+/** 다시 내보낸 SPKI 공개키 PEM 과 글자까지 같아야 한다 — `createPublicKey` 는 개인키도 받아 공개키를 파생하므로 형식만 보면 안 된다. */
+function ed25519(key: string): boolean {
+  try { const parsed = createPublicKey(key); return parsed.asymmetricKeyType === 'ed25519' && parsed.export({ type: 'spki', format: 'pem' }) === key } catch { return false }
+}
 /** `null`·없음은 평소 빌드. 그 밖의 값은 모양이 정확히 맞아야 한다 — 반쯤 맞는 값은 닫는다. */
 export function gateOf(raw: unknown): Gate | null {
   if (raw === null || raw === undefined) return null

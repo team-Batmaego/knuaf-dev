@@ -1,14 +1,14 @@
 // 관문 전용 빌드 경계 — 출시 산출물 검사가 운영 모양은 통과시키고 관문 모양은 막는지,
 // 관문 값이 같은 PC 주소로만 만들어지는지, 출시 워크플로에 관문 이름이 없는지를 잠근다.
 import assert from 'node:assert/strict'
-import { createPublicKey, verify } from 'node:crypto'
+import { createPrivateKey, createPublicKey, verify } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { GATE_MARK, gateDefine, gateValue } from '../gate-define.mjs'
 import { buildGateChannel, gateChannelUrl, gateKeyPair } from '../gate-channel.mjs'
-import { checkBundle, checkEnvironment, checkWorkflows, productionConfig, readAsar, readOut, RELEASE_WORKFLOWS } from '../check-release-update-config.mjs'
+import { checkBundle, checkEnvironment, checkGateBundle, checkNoKeyMaterial, checkWorkflows, productionConfig, readAsar, readOut, RELEASE_WORKFLOWS } from '../check-release-update-config.mjs'
 
 const production = productionConfig()
 const pem = body => `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----\n`
@@ -33,6 +33,12 @@ test('production-shaped bundle passes; every gate trace fails', () => {
   assert.throws(() => checkBundle(files(productionMain.replace(production.keys[0], pair.publicKey.split('\n')[1])), production), /exactly the two production update keys/)
   assert.throws(() => checkBundle(files(productionMain.replace(pem(production.keys[0]), '')), production), /found 1/)
   assert.throws(() => checkBundle([{ name: 'renderer/x.js', text: 'x' }], production), /No main bundle/)
+  // 관문 쪽 확인은 관문 값이 실제로 있을 때만 통과한다 — 번들 없음·운영 번들·값 일부만은 각각 다른 이유로 실패.
+  assert.deepEqual(checkGateBundle(files(gateMain), production), { files: 3, main: 1 })
+  assert.throws(() => checkGateBundle([{ name: 'renderer/x.js', text: 'x' }], production), /No main bundle/)
+  assert.throws(() => checkGateBundle(files(productionMain), production), /no loopback update channel/)
+  assert.throws(() => checkGateBundle(files(productionMain + '"http://127.0.0.1:38473/channel.json"'), production), /exactly one non-production update key \(found 0\)/)
+  assert.throws(() => checkGateBundle(files(gateMain, [{ name: 'renderer/x.js', text: 'http://127.0.0.1:38473/channel.json' }]), production), /outside the main bundle: renderer\/x\.js/)
 })
 
 test('gate value exists only for an exact loopback channel and an Ed25519 key', () => {
@@ -46,6 +52,12 @@ test('gate value exists only for an exact loopback channel and an Ed25519 key', 
   assert.throws(() => gateValue({ KNUAF_GATE_PUBLIC_KEY: pair.publicKey }), /KNUAF_GATE_CHANNEL/)
   assert.throws(() => gateValue({ KNUAF_GATE_CHANNEL: gateEnv.KNUAF_GATE_CHANNEL }), /KNUAF_GATE_PUBLIC_KEY/)
   assert.throws(() => gateValue({ ...gateEnv, KNUAF_GATE_PUBLIC_KEY: 'not a key' }), /KNUAF_GATE_PUBLIC_KEY/)
+  // 공개키 자리에 개인키가 잘못 들어오면 거절한다(createPublicKey 는 개인키에서도 공개키를 파생한다).
+  assert.throws(() => gateValue({ ...gateEnv, KNUAF_GATE_PUBLIC_KEY: pair.privateKey }), /KNUAF_GATE_PUBLIC_KEY/)
+  assert.throws(() => gateValue({ ...gateEnv, KNUAF_GATE_PUBLIC_KEY: pair.publicKey + pair.privateKey }), /KNUAF_GATE_PUBLIC_KEY/)
+  assert.throws(() => gateValue({ ...gateEnv, KNUAF_GATE_PUBLIC_KEY: pair.privateKey.replace(/PRIVATE/g, 'PUBLIC') }), /KNUAF_GATE_PUBLIC_KEY/)
+  // 앞뒤 공백·개행이 달라도 싣는 값은 다시 내보낸 공개키 하나다.
+  assert.equal(gateValue({ ...gateEnv, KNUAF_GATE_PUBLIC_KEY: `\n${pair.publicKey.trim()}  ` }).key, pair.publicKey)
 })
 
 test('gate channel document is signed by the run key and points at the same PC only', () => {
@@ -84,8 +96,23 @@ test('release environments and workflows carry no gate names; gate-build stays s
   assert.equal(/\$\{\{\s*inputs\./.test(gate), false)
   assert.equal(/gh\s+release|--publish\s+(?!never)|contents:\s*write/.test(gate), false)
   assert.ok((gate.match(/--publish never/g) ?? []).length >= 2)
-  assert.match(gate, /retention-days: 3\n/); assert.equal(/retention-days: (?!3\n)/.test(gate), false)
+  assert.match(gate, /retention-days: 1\n/); assert.equal(/retention-days: (?!1\n)/.test(gate), false)
+  // 개인키 검사는 서명 뒤·키 삭제 앞·올리기 앞에 있다.
+  const at = name => gate.indexOf(`- name: ${name}\n`)
+  assert.ok(at('채널 문서 서명 (임시 키)') > 0 && at('채널 문서 서명 (임시 키)') < at('아티팩트에 개인키가 없는지 확인') && at('아티팩트에 개인키가 없는지 확인') < at('임시 개인키 지우기') && at('임시 개인키 지우기') < at('아티팩트'))
+  assert.match(gate, /--no-key-material "\$RUNNER_TEMP\/gate-key\.pem" --scan gate --scan out --scan dist\/win-unpacked\/resources/)
   assert.match(gate, /artifactName=knuaf-dev-GATE-/)
+})
+
+test('private key material in anything to be uploaded is caught in every encoding', () => {
+  const der = createPrivateKey(pair.privateKey).export({ type: 'pkcs8', format: 'der' }), seed = der.subarray(der.length - 32)
+  const clean = [{ name: 'channel.json', bytes: Buffer.from(JSON.stringify({ key: pair.publicKey })) }, { name: 'a.exe', bytes: Buffer.alloc(64, 7) }]
+  assert.equal(checkNoKeyMaterial(pair.privateKey, clean), 2)
+  for (const leak of [Buffer.from(pair.privateKey), der, seed, Buffer.from(seed.toString('base64')), Buffer.from(seed.toString('hex')), Buffer.concat([Buffer.alloc(9, 1), seed, Buffer.alloc(9, 2)])]) {
+    assert.throws(() => checkNoKeyMaterial(pair.privateKey, [...clean, { name: 'leak.bin', bytes: leak }]), /Private key material found in leak\.bin/)
+  }
+  assert.throws(() => checkNoKeyMaterial(pair.privateKey, []), /Nothing to scan/)
+  assert.throws(() => checkNoKeyMaterial(pair.publicKey, clean))
 })
 
 test('readOut and readAsar hand the same out/ files to the check', () => {
@@ -106,6 +133,10 @@ test('readOut and readAsar hand the same out/ files to the check', () => {
   header.files.out.files.renderer = { files: { 'a.js': { size: parts[2].length, offset: String(parts[0].length + parts[1].length) } } }
   writeFileSync(asar, pack(header, parts))
   assert.throws(() => checkBundle(readAsar(asar), production), /marker found in renderer\/a\.js/)
+  for (const bad of [{ size: -1, offset: '0' }, { size: 3, offset: '-4' }, { size: 3, offset: '1e2' }, { size: 3, offset: '99999999' }]) {
+    header.files.out.files.renderer.files['a.js'] = bad
+    writeFileSync(asar, pack(header, parts)); assert.throws(() => readAsar(asar), /Cannot read renderer\/a\.js/, JSON.stringify(bad))
+  }
   header.files.out.files.renderer.files['a.js'] = { size: 3, unpacked: true }
   writeFileSync(asar, pack(header, parts)); assert.throws(() => readAsar(asar), /Cannot read renderer\/a\.js/)
   writeFileSync(asar, pack({ files: {} }, [])); assert.throws(() => readAsar(asar), /no out\/ directory/)

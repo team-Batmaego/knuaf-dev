@@ -19,10 +19,15 @@ export function gateValue(env = process.env) {
   if (!channel && !key) return null
   const port = typeof channel === 'string' ? GATE_CHANNEL.exec(channel)?.[1] : undefined
   if (!port || Number(port) > 65535) throw new Error('KNUAF_GATE_CHANNEL must be http://127.0.0.1:<port>/channel.json')
-  let type
-  try { type = createPublicKey(String(key)).asymmetricKeyType } catch { /* 아래에서 던진다 */ }
-  if (type !== 'ed25519') throw new Error('KNUAF_GATE_PUBLIC_KEY must be an Ed25519 public key (PEM)')
-  return { mark: GATE_MARK, channel, key }
+  // `createPublicKey` 는 개인키 PEM 도 받아 공개키를 파생한다 — 입력 문자열을 그대로 번들에 넣으면
+  // 잘못 들어온 개인키가 설치본에 실린다. SPKI 공개키 블록 하나만 받고, 다시 내보낸 값만 싣는다.
+  const text = typeof key === 'string' ? key.trim() : ''
+  let parsed
+  if (/^-----BEGIN PUBLIC KEY-----[A-Za-z0-9+/=\s]+-----END PUBLIC KEY-----$/.test(text)) {
+    try { parsed = createPublicKey(text) } catch { /* 아래에서 던진다 */ }
+  }
+  if (parsed?.asymmetricKeyType !== 'ed25519') throw new Error('KNUAF_GATE_PUBLIC_KEY must be a single Ed25519 SPKI public key (PEM)')
+  return { mark: GATE_MARK, channel, key: parsed.export({ type: 'spki', format: 'pem' }) }
 }
 
 /** define 에 넣을 JS 식 문자열. */
