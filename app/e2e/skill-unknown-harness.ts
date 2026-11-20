@@ -38,11 +38,23 @@ import { SkillUpdates } from '../src/main/update/service'
 /** 진짜 `node:fs` 모듈 객체 — 여기의 속성을 바꾸면 앱 코드가 부르는 함수가 바뀐다. */
 const fs = createRequire(__filename)('node:fs') as typeof import('node:fs')
 
+/**
+ * `rmSync` 안에서 일어나는 하위 호출 깊이. 윈도 Node의 `rmSync`(recursive)는 폴더를 지울 때 안에서 `fs.unlinkSync`·`lstatSync`·
+ * `readdirSync`를 **공개 fs 객체를 통해** 부르므로 이 대역이 그것까지 기록·주입에 걸었다(맥은 안 걸린다). 하위 호출은 기록도
+ * 주입도 하지 않고, 앱이 부른 `rmSync` 한 줄(`rm:<경로>`)만 남긴다 — 앱이 `rmSync` 밖에서 직접 부른 호출은 그대로 기록된다.
+ */
+let inRm = 0
+const originalRm = fs.rmSync
+const rmDeep = (path: Parameters<typeof originalRm>[0], opts?: Parameters<typeof originalRm>[1]): void => {
+  inRm++
+  try { originalRm(path, opts) } finally { inRm-- }
+}
+
 /** 대역이 설치되기 **전** 원본들. 이 파일의 모든 파일 접근은 이것만 쓴다. */
 const real = {
   readFileSync: fs.readFileSync, readdirSync: fs.readdirSync, lstatSync: fs.lstatSync,
   statSync: fs.statSync, writeFileSync: fs.writeFileSync, renameSync: fs.renameSync,
-  unlinkSync: fs.unlinkSync, rmSync: fs.rmSync, mkdtempSync: fs.mkdtempSync,
+  unlinkSync: fs.unlinkSync, rmSync: rmDeep as typeof fs.rmSync, mkdtempSync: fs.mkdtempSync,
   mkdirSync: fs.mkdirSync, existsSync: fs.existsSync, copyFileSync: fs.copyFileSync
 }
 
@@ -202,6 +214,8 @@ let rules: Rule[] = []
 let ops: string[] = []
 
 const nameOf = (path: string): string => path.slice(path.lastIndexOf(sep) + 1)
+/** 기록에 남기는 경로 — 구분자만 `/`로(윈도 `\`). 맥·리눅스는 그대로다. 규칙 대조(`match`)는 원래 경로를 쓴다. */
+const recorded = (path: string): string => sep === '/' ? path : path.split(sep).join('/')
 
 /** 규칙 대조만 — 기록하지 않는다. 발동하면 `applied`를 올린다. */
 const match = (op: Op, path: string, info: { data?: unknown; src?: string } = {}): Rule | null => {
@@ -236,7 +250,11 @@ const applyOnce = (rule: Rule): void => { applied.set(rule, (applied.get(rule) ?
 const raise = (rule: Rule | null): void => { if (rule?.code) { applyOnce(rule); throw errno(rule.code) } }
 
 /** 호출 하나 = 기록 하나. */
-const hit = (op: Op, path: string, info: { data?: unknown; src?: string } = {}): Rule | null => { ops.push(`${op}:${path}`); return match(op, path, info) }
+const hit = (op: Op, path: string, info: { data?: unknown; src?: string } = {}): Rule | null => {
+  if (inRm > 0) return null // `rmSync` 안의 하위 호출 — 기록·주입 없음(위 inRm 설명)
+  ops.push(`${op}:${recorded(path)}`)
+  return match(op, path, info)
+}
 
 const patched = {
   readFileSync: (path: string, opts?: unknown): unknown => {
@@ -271,7 +289,7 @@ const patched = {
     real.writeFileSync(path as never, data as never, opts as never)
   },
   renameSync: (from: string, to: string): void => {
-    ops.push(`rename:${String(from)} -> ${String(to)}`)
+    ops.push(`rename:${recorded(String(from))} -> ${recorded(String(to))}`)
     const rule = match('rename', String(to)) ?? match('rename', String(from))
     raise(rule)
     real.renameSync(from, to)
@@ -284,7 +302,7 @@ const patched = {
   rmSync: (path: string, opts?: unknown): void => {
     const rule = hit('rm', String(path))
     raise(rule)
-    real.rmSync(path as never, opts as never)
+    rmDeep(path as never, opts as never)
   },
   mkdtempSync: (prefix: string, opts?: unknown): string => {
     const rule = hit('mkdtemp', String(prefix))
@@ -325,7 +343,7 @@ export const inject = {
   writes(): string[] { return ops.filter(line => /^(write|rename|unlink|rm|mkdtemp|mkdir):/.test(line)) },
   /** (연산, 파일 이름) 호출 수. */
   count(op: Op, name: string): number {
-    const tail = `:${sep}${name}`
+    const tail = `:/${name}`
     return ops.filter(line => line.startsWith(`${op}:`) && (line.endsWith(tail) || line.endsWith(`:${name}`))).length
   },
   /** 규칙이 실제로 오류를 던지거나 값을 바꾼 횟수 — "주입이 안 닿았다"를 조용히 넘기지 않게. */
@@ -565,7 +583,8 @@ export function sweep(roots: string[]): void {
 
 /** 실행마다 바뀌는 값(임시 뿌리·서명 digest·zip 해시·임시 폴더 이름)을 고정 이름으로 바꾼다. */
 export function normalize(text: string, root: string): string {
-  let out = text.split(root).join('<root>')
+  // 기록은 경로 구분자를 `/`로 남기므로(윈도 `\`→`/`) 뿌리도 두 모양을 모두 바꾼다. 맥·리눅스는 두 모양이 같다.
+  let out = text.split(root).join('<root>').split(root.split(sep).join('/')).join('<root>')
   for (const f of registry) {
     const v = f.manifest.version
     out = out.split(f.verified().digest).join(`D(${v})`).split(f.manifest.sha256).join(`Z(${v})`)
@@ -573,9 +592,27 @@ export function normalize(text: string, root: string): string {
   // 기록만 있는 highest(`wrapDigest`)는 묶음 등록과 무관하게 고정 판 범위로 바꾼다 — 등록 목록은 Playwright가
   // 시험 실패 뒤 워커를 다시 띄우면 비므로, 등록에 기대면 같은 디스크가 실행마다 다르게 정규화된다(판정 뒤 2단계 실행에서 실측).
   for (const v of WRAP_VERSIONS) out = out.split(wrapDigest(v)).join(`W(${v})`)
-  return out
+  return pathTails(out
     .replace(/\.(stage|download)-[A-Za-z0-9]{6}/g, '.$1-T')
-    .replace(/\.damaged-([0-9.]+)-\d+/g, '.damaged-$1-T')
+    .replace(/\.damaged-([0-9.]+)-\d+/g, '.damaged-$1-T'))
+}
+
+/**
+ * 윈도: `<root>` 로 시작하는 **경로 낱말** 안의 `\`만 `/`로 바꾼다(`<root>\bundled` → `<root>/bundled`). 앱이 돌려준 경로·던진 오류 문구에
+ * 든 경로가 기록(`/`)과 같은 모양이 되게 한다. 낱말은 공백·따옴표·쉼표·세미콜론·괄호에서 끝나므로 문장 전체 치환이 아니다.
+ * 맥·리눅스는 `\`가 경로 구분자가 아니므로 그대로 둔다.
+ */
+function pathTails(text: string): string {
+  if (sep === '/') return text
+  return text.replace(/<root>[^\s"'`,;()<>|*?]*/g, word => word.split('\\').join('/'))
+}
+
+/** 값 안의 문자열(키 포함)만 정규화한다 — `JSON.stringify` 뒤 문자열 전체를 바꾸면 JSON 탈출(`\\`)과 엉킨다. */
+function normalizeDeep(value: unknown, root: string): unknown {
+  if (typeof value === 'string') return normalize(value, root)
+  if (Array.isArray(value)) return value.map(item => normalizeDeep(item, root))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [normalize(k, root), normalizeDeep(v, root)]))
+  return value
 }
 
 /**
@@ -626,5 +663,5 @@ export function shownStatus(status: unknown): unknown {
 
 /** 한 조작의 결과 — 반환값(정규화) 또는 던진 문구. */
 export async function outcome(d: Disk, work: () => unknown): Promise<unknown> {
-  try { const got = await work(); return { ok: JSON.parse(normalize(JSON.stringify(shownStatus(got) ?? null), d.root)) } } catch (e) { return { threw: normalize(e instanceof Error ? e.message : String(e), d.root) } }
+  try { const got = await work(); return { ok: normalizeDeep(JSON.parse(JSON.stringify(shownStatus(got) ?? null)), d.root) } } catch (e) { return { threw: normalize(e instanceof Error ? e.message : String(e), d.root) } }
 }
