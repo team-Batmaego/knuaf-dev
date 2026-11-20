@@ -611,7 +611,8 @@ test('R-B3f cleanup never writes the backup through an existing state.json.bad l
   // 링크 대상은 그대로, 백업은 링크가 아닌 새 파일로 원본 `{`를 담는다(또는 정리가 멈춰 본문이 그대로).
   expect(realFs.readFileSync(victim, 'utf8')).toBe('keep me')
   const bad = join(d.storeDir, 'state.json.bad')
-  const backedUp = !realFs.lstatSync(bad).isSymbolicLink() && realFs.readFileSync(bad, 'utf8') === '{'
+  // 판정서 tests r10 권고: 안전 중단이면 `.bad`가 아예 없을 수 있다 — 없으면 '백업 안 함'으로 보고 중단 경로를 본다.
+  const backedUp = realFs.existsSync(bad) && !realFs.lstatSync(bad).isSymbolicLink() && realFs.readFileSync(bad, 'utf8') === '{'
   const stopped = 'threw' in res && realFs.readFileSync(join(d.storeDir, 'state.json'), 'utf8') === '{'
   expect(backedUp || stopped).toBe(true)
 })
