@@ -12,14 +12,22 @@
 /** 기동 표식 상한 — 단계당 3줄(같은 이벤트가 반복돼도 앞의 몇 번이면 원인을 안다), 창당 40줄. */
 export const STARTUP_DIAG_LIMITS = { perStage: 3, total: 40 } as const
 
-/** 기동 구간의 시간 상한 — 첫 load 완료·첫 표시가 끝내 안 와도 로그가 무한정 열려 있지 않게. */
-export const STARTUP_WINDOW_MS = 20_000
+/**
+ * 기동 구간의 시간 상한 — 구간은 **창 닫힘 또는 이 상한**에서만 끝난다(검토 roh290b 새 결함).
+ *
+ * 첫 `ready-to-show`·`did-finish-load` 는 구간을 닫지 않는다: 그 둘은 문서 로드가 끝났다는
+ * 신호일 뿐 React 의 `.titlebar` 가 떴다는 신호가 아니다(TitleBar.tsx, helpers.ts 의
+ * `waitForSelector('.titlebar')` 는 그 뒤에 온다). 그때 닫으면 **제목줄을 기다리는 동안**의
+ * render-process-gone·unresponsive·콘솔 오류를 놓친다.
+ *
+ * 60초인 이유: 제목줄 대기(helpers.ts)와 그 뒤 splash 단계까지 덮어야 한다. 20초는 창 생성에서
+ * 첫 표시까지만 덮어 제목줄 대기 구간이 로그 밖으로 나갔다. 비용은 시간이 아니라 줄 수가 막는다
+ * (`STARTUP_DIAG_LIMITS` 단계당 3줄·창당 40줄).
+ */
+export const STARTUP_WINDOW_MS = 60_000
 
 /** `settings:get` 진단은 첫 3회만 — 설정 화면은 이 핸들러를 여러 번 부른다. */
 export const SETTINGS_GET_DIAG_CALLS = 3
-
-/** 실패 경로의 첨부를 기다리는 상한 — 넘기면 원래 오류를 그대로 던진다(검토 I-02). */
-export const ATTACH_WAIT_MS = 3_000
 
 export interface StartupDiag {
   /** 그 단계의 줄을 하나 더 써도 되는가. 이미 닫혔거나 상한이면 `false`(파일 쓰기 없음). */
@@ -77,26 +85,4 @@ export function createCallGate(limit: number): () => boolean {
     used += 1
     return true
   }
-}
-
-export type SettleOutcome = 'fulfilled' | 'rejected' | 'timeout'
-
-/**
- * `work` 가 끝나기를 `ms` 까지만 기다린다. **절대 던지지 않는다** — 실패 경로에서 원래 오류를
- * 가리지 않으려는 장치다(검토 I-02: 첨부가 늦으면 기동 오류 대신 시험 전체 시간 초과로 보고됐다).
- * 시간이 지나도 `work` 는 그대로 진행되며, 그 늦은 거절은 여기서 받아 삼킨다(미처리 거절 없음).
- */
-export function settleWithin(work: Promise<unknown>, ms: number): Promise<SettleOutcome> {
-  return new Promise<SettleOutcome>((resolve) => {
-    let done = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const finish = (outcome: SettleOutcome): void => {
-      if (done) return
-      done = true
-      if (timer) clearTimeout(timer)
-      resolve(outcome)
-    }
-    timer = setTimeout(() => finish('timeout'), ms)
-    work.then(() => finish('fulfilled'), () => finish('rejected'))
-  })
 }

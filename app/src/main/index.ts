@@ -146,10 +146,13 @@ function createWindow(): void {
   if (diagEnabled()) {
     const contents = win.webContents
     /**
-     * 기동 표식은 **이 창이 기동을 마칠 때까지만** 남긴다(검토 I-01). 끝나는 자리는 첫 load 완료·
-     * 첫 표시 중 먼저 오는 쪽이고, 시간 상한(20초)을 함께 둔다 — 끝내 안 와도 로그가 무한정 열려
-     * 있지 않게. 끝나면 구독을 전부 떼고, 그 뒤에 울린 이벤트는 계수기에서 조용히 사라진다.
-     * `console-message`·`unresponsive` 같은 반복 이벤트는 단계당 3줄·창당 40줄로 막는다.
+     * 기동 표식은 **창이 닫히거나 시간 상한(60초)에 닿을 때까지** 남긴다(검토 I-01·roh290b).
+     * 첫 load 완료·첫 표시는 **구간을 닫지 않는다** — 그 둘은 문서 로드가 끝났다는 신호일 뿐이고,
+     * React 의 `.titlebar` 는 그 뒤에 뜬다(`TitleBar.tsx`, `e2e/helpers.ts` 의 `waitForSelector`).
+     * 그때 닫으면 정작 봐야 할 제목줄 대기 구간의 renderer-gone·unresponsive·콘솔 오류를 놓친다.
+     * 끝나면 구독을 전부 떼고, 그 뒤에 울린 이벤트는 계수기에서 조용히 사라진다.
+     * `console-message`·`unresponsive` 같은 반복 이벤트는 단계당 3줄·창당 40줄로 막는다 —
+     * 구간이 길어진 비용도 이 줄 상한이 막는다.
      */
     const budget = createStartupDiag()
     // 해제 클로저가 `win`(모듈 지역 `let`)을 다시 읽으면 TS 는 `null` 가능성을 되살린다 — 이 창을
@@ -175,10 +178,12 @@ function createWindow(): void {
     mark('startup:window-created')
     // 등록과 해제는 **같은 참조**로 짝을 맞춘다. Electron 의 `off` 는 이벤트 이름마다 시그니처가
     // 달라 이름을 문자열로 받는 도우미를 쓸 수 없다 — 한 줄씩 적는 편이 타입에 정직하다.
-    const onReadyToShow = (): void => { mark('startup:ready-to-show'); stopStartup('ready-to-show') }
+    // 첫 표시·첫 load 완료는 **값만 남기고 구간은 닫지 않는다**(검토 roh290b 새 결함) — 제목줄은
+    // 그 뒤에 뜬다. 구간을 닫는 자리는 `closed`(창 닫힘)와 `deadline`(시간 상한) 둘뿐이다.
+    const onReadyToShow = (): void => mark('startup:ready-to-show')
     const onLoadStart = (): void => mark('startup:load-start')
     const onDomReady = (): void => mark('startup:dom-ready')
-    const onLoadFinished = (): void => { mark('startup:load-finished'); stopStartup('did-finish-load') }
+    const onLoadFinished = (): void => mark('startup:load-finished')
     // did-stop-loading 은 구간을 닫지 않는다 — 첫 load 가 실패해도 울려서, 정작 봐야 할
     // `startup:load-failed` 를 덮고 로그를 닫아 버린다. 값만 남긴다.
     const onLoadStopped = (): void => mark('startup:load-stopped')

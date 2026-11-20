@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { DEFAULT_WINDOW } from '../src/shared/window'
-import { ATTACH_WAIT_MS, settleWithin } from '../src/main/diagLimits'
 
 export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
@@ -217,16 +216,13 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
     markStartup('launch:done')
     return { electronApp, page, appLog }
   } catch (error) {
+    // 원래 기동 오류를 **가리지 않는다**(검토 I-02). 예전에는 실패 경로에서 `app-log.txt` 사본을
+    // 첨부하느라 최대 3초를 기다렸는데, 시험 마감(90초) 직전 실패면 그 대기 중에 마감이 먼저 와
+    // 원래 오류(예: 제목줄이 왜 안 떴는지)가 사라졌다. 그래서 여기서는 아무것도 기다리지 않고
+    // 곧바로 재던진다. `app-log.txt` 는 CI 가 이미 아티팩트로 모으므로(ci.yml `app-log.txt`)
+    // 사본을 Playwright 첨부로 한 번 더 남길 이유가 없다 — 공용 로그 전체 사본 첨부(권고 R-01)도
+    // 함께 없어진다.
     markStartup('launch:failed')
-    if (env.KNUAF_APP_LOG && existsSync(appLog)) {
-      // 첨부를 **짧은 상한** 안에서만 기다린다(검토 I-02). 첨부가 늦으면 지금까지는 원래 기동
-      // 오류가 안 던져지고 시험 전체 시간 초과로 보고됐다 - 그때는 제목줄이 왜 안 보였는지가
-      // 사라진다. 상한을 넘기면 첨부를 포기하고 원래 오류를 그대로 던진다(원본은 CI 가 이미 모은다).
-      await settleWithin(
-        test.info().attach('startup-log', { path: appLog, contentType: 'text/plain' }).catch(() => { /* Keep the original launch failure. */ }),
-        ATTACH_WAIT_MS
-      )
-    }
     throw error
   }
 }
