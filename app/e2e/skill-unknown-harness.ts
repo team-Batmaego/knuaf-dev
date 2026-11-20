@@ -43,7 +43,7 @@ const real = {
   readFileSync: fs.readFileSync, readdirSync: fs.readdirSync, lstatSync: fs.lstatSync,
   statSync: fs.statSync, writeFileSync: fs.writeFileSync, renameSync: fs.renameSync,
   unlinkSync: fs.unlinkSync, rmSync: fs.rmSync, mkdtempSync: fs.mkdtempSync,
-  mkdirSync: fs.mkdirSync, existsSync: fs.existsSync
+  mkdirSync: fs.mkdirSync, existsSync: fs.existsSync, copyFileSync: fs.copyFileSync
 }
 
 const SRC_MAIN = join(__dirname, '..', 'src', 'main')
@@ -180,6 +180,8 @@ export type Rule = {
   /** 가장 안쪽 `SkillUpdates.*` 메서드 이름이 맞아야 발동. */
   svc?: RegExp
   name?: string
+  /** 파일 이름이 이 접두로 시작해야 발동 — 구현이 임시 이름을 자유롭게 고르는 자리(백업 등)를 겨냥할 때. */
+  namePrefix?: string
   skip?: number
   times?: number
   code?: string
@@ -204,6 +206,7 @@ const match = (op: Op, path: string): Rule | null => {
   for (const rule of rules) {
     if (rule.op !== op) continue
     if (rule.name !== undefined && rule.name !== name) continue
+    if (rule.namePrefix !== undefined && !name.startsWith(rule.namePrefix)) continue
     if (rule.at) {
       frames ??= framesOf()
       if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) continue
@@ -281,6 +284,12 @@ const patched = {
     const rule = hit('mkdtemp', String(prefix))
     raise(rule)
     return real.mkdtempSync(prefix as never, opts as never)
+  },
+  /** 복사는 대상 파일 쓰기로 본다(백업을 copyFileSync로 만드는 구현도 같은 규칙으로 겨냥 — 판정서 tests r11 I-01). */
+  copyFileSync: (src: string, dest: string, mode?: number): void => {
+    const rule = hit('write', String(dest))
+    raise(rule)
+    real.copyFileSync(src as never, dest as never, mode as never)
   },
   /** 실제 `existsSync`는 접근 오류(EPERM 등)를 삼키고 false를 낸다 — 같은 경로의 `lstat` 규칙이 errno면 false. */
   existsSync: (path: string): boolean => {

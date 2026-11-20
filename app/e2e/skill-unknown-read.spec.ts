@@ -619,18 +619,22 @@ test('R-B3f cleanup never writes the backup through an existing state.json.bad l
 
 test('R-B3g a failed backup replacement keeps the previous state.json.bad', async () => {
   // roh293c N-02: 새 백업을 쓰기 전에 직전 `.bad`를 지워, 새 쓰기가 실패하면(디스크 가득) 이전 복구본이 사라졌다.
-  // 기준판은 `.bad`를 다루지 않으므로 이 시험은 기준판에서 통과한다 — 이번 판에 새로 넣은 백업 동작을 지킨다.
+  // 이번 판에 새로 넣은 백업 동작을 지키는 시험이다.
   const d = disk()
   const bad = join(d.storeDir, 'state.json.bad')
   realFs.writeFileSync(bad, 'previous backup')
   realFs.writeFileSync(join(d.storeDir, 'state.json'), '{')
   const store = d.store()
-  const fault: Rule = { op: 'write', store: /^cleanup$/, code: 'ENOSPC', times: ALWAYS }
+  // 판정서 tests r11 I-01: ENOSPC는 **새 백업 쓰기**에만 — 이름이 `state.json.bad`로 시작하는 파일 쓰기(이름은 구현 자유).
+  // 기준판에는 백업 쓰기가 없어 이 주입이 닿지 않는다(그래서 기준판에서는 '주입 규칙이 닿지 않았다'로 실패한다).
+  const fault: Rule = { op: 'write', namePrefix: 'state.json.bad', code: 'ENOSPC', times: ALWAYS }
   inject.set([fault])
+  inject.mark()
   const res = await settle(() => store.cleanup())
+  // 판정서 tests r11 I-02: 관측(쓰기 기록 포함)을 규칙·기록을 지우기 전에 남긴다.
+  await faultRecord('R-B3g', d, null, res)
   fired(fault)
   inject.clear()
-  await faultRecord('R-B3g', d, null, res)
   expect('threw' in res).toBe(true)
   expect(realFs.readFileSync(bad, 'utf8')).toBe('previous backup')
   expect(realFs.readFileSync(join(d.storeDir, 'state.json'), 'utf8')).toBe('{')

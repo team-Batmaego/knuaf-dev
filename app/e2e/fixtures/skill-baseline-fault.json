@@ -1,5 +1,5 @@
 {
- "_made": "a340264 (src unchanged), tests r11 (roh293c N-02), 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r12 (R-B3g narrowed), 2026-11-21",
  "R-B1": {
   "result": {
    "threw": "sidecar restart failed"
@@ -374,10 +374,10 @@
  },
  "R-B3g": {
   "result": {
-   "threw": "ENOSPC: injected"
+   "ok": null
   },
   "disk": {
-   "state": "{",
+   "state": "{\"active\":null,\"kept\":{},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
    "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
    "highestTmp": "<ENOENT>",
@@ -399,7 +399,12 @@
     "state.json",
     "state.json.bad"
    ],
-   "writes": []
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
   },
   "phases": null,
   "restarts": null,
