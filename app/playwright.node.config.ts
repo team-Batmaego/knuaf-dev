@@ -47,7 +47,8 @@ export default defineConfig({
     'job-a-gate.spec.ts',
     'lanes.spec.ts',
     'jobs.spec.ts',
-    'job-control.spec.ts'
+    'job-control.spec.ts',
+    'skill-unknown-read.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

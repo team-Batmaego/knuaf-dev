@@ -1,0 +1,513 @@
+/**
+ * v0.7.3 `못 읽은 규칙집 상태` 반례 시험의 공용 대역.
+ *
+ * ## 주입은 왜 `node:fs` 한 겹인가
+ * 소스에 주입 지점(훅·꼬리표)이 아직 없다(설계 §6: 꼬리표는 2단계 산물). 그래서 이 대역은
+ * **소스를 고치지 않고** `node:fs`의 속성만 바꾼다. `store.ts`·`service.ts`·`safeWrite.ts`는
+ * `import { x } from 'node:fs'` → TS/CJS 변환에서 `node_fs_1.x(...)` 즉 **호출 시점 속성 조회**가
+ * 되므로, `require('node:fs')`의 속성을 바꾸면 두 나무(기준판·고친 판)에 같은 주입이 들어간다.
+ *
+ * ## 자리(site)는 소스 좌표로 겨냥한다
+ * 꼬리표 대신 **호출 스택의 (파일, 줄)** 로 겨냥한다. 줄 번호는 손으로 적지 않고 소스의
+ * 고유 스니펫에서 계산한다(`site()`). 그래서 2단계가 줄을 밀어도 같은 자리를 계속 겨냥하고,
+ * 그 스니펫이 사라지면 "주입 지점이 사라졌다"로 **크게** 실패한다(조용한 통과 없음).
+ *
+ * ## 대역 밖으로 새지 않게
+ * 이 파일 자신의 파일 접근은 **원본 함수**(`real.*`)만 쓴다. 패치된 함수를 쓰면 주입이 시험
+ * 도우미의 디스크 준비·대조까지 오염된다. `harness: the fs patch is live and targeted by site`
+ * 시험이 패치가 실제로 먹는지 먼저 증명한다.
+ */
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, relative, sep } from 'node:path'
+import { deflateRawSync } from 'node:zlib'
+import { ASSET_PREFIX, CHANNEL_URL, verifySkill, type SkillManifest } from '../src/main/update/manifest'
+import { updateConfig } from '../src/main/update/keys'
+import { SkillStore } from '../src/main/update/store'
+import { SkillSwitch } from '../src/main/update/switch'
+import { SkillUpdates } from '../src/main/update/service'
+
+/** 진짜 `node:fs` 모듈 객체 — 여기의 속성을 바꾸면 앱 코드가 부르는 함수가 바뀐다. */
+const fs = createRequire(__filename)('node:fs') as typeof import('node:fs')
+
+/** 대역이 설치되기 **전** 원본들. 이 파일의 모든 파일 접근은 이것만 쓴다. */
+const real = {
+  readFileSync: fs.readFileSync, readdirSync: fs.readdirSync, lstatSync: fs.lstatSync,
+  statSync: fs.statSync, writeFileSync: fs.writeFileSync, renameSync: fs.renameSync,
+  unlinkSync: fs.unlinkSync, rmSync: fs.rmSync, mkdtempSync: fs.mkdtempSync,
+  mkdirSync: fs.mkdirSync, existsSync: fs.existsSync
+}
+
+const SRC_MAIN = join(__dirname, '..', 'src', 'main')
+
+/* ────────────────────────── 서명 열쇠·묶음 ────────────────────────── */
+
+const pair = generateKeyPairSync('ed25519')
+export const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+export const keys = [publicKey]
+export const config = (): ReturnType<typeof updateConfig> => updateConfig(false, { KNUAF_UPDATE_PUBLIC_KEY: publicKey })
+
+const sha256Of = (b: Buffer): string => createHash('sha256').update(b).digest('hex')
+
+type Entry = { name: string; data: Buffer; method?: number }
+
+function zipEntries(entries: Entry[]): Buffer {
+  const locals: Buffer[] = [], central: Buffer[] = []
+  let offset = 0
+  for (const e of entries) {
+    const name = Buffer.from(e.name), data = e.method === 8 ? deflateRawSync(e.data) : e.data
+    const local = Buffer.alloc(30), record = Buffer.alloc(46)
+    local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6); local.writeUInt16LE(e.method ?? 0, 8)
+    local.writeUInt32LE(data.length, 18); local.writeUInt32LE(e.data.length, 22); local.writeUInt16LE(name.length, 26)
+    record.writeUInt32LE(0x02014b50); record.writeUInt16LE(0x314, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(0x800, 8); record.writeUInt16LE(e.method ?? 0, 10)
+    record.writeUInt32LE(data.length, 20); record.writeUInt32LE(e.data.length, 24); record.writeUInt16LE(name.length, 28)
+    record.writeUInt32LE((0x81a4 << 16) >>> 0, 38); record.writeUInt32LE(offset, 42)
+    locals.push(local, name, data); central.push(record, name); offset += local.length + name.length + data.length
+  }
+  const directory = Buffer.concat(central), end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16)
+  return Buffer.concat([...locals, directory, end])
+}
+
+function envelope(m: object) {
+  const bytes = Buffer.from(JSON.stringify(m))
+  return { manifest: bytes.toString('base64'), sig: sign(null, bytes, pair.privateKey).toString('base64') }
+}
+
+/**
+ * 판 묶음 하나. `extra`로 `install-manifest.json` 같은 덧붙임 파일을 넣는다.
+ * `changes.files`로 서명된 파일 목록만 따로 덮을 수 있다(동봉 manifest 실험용).
+ */
+export function fixture(v: string, changes: Partial<SkillManifest> = {}, extra: Entry[] = []) {
+  const entries: Entry[] = [
+    { name: 'SKILL.md', data: Buffer.from(`# skill ${v}`), method: 8 },
+    { name: 'skill.json', data: Buffer.from(JSON.stringify({ version: v, api: 1, source: { repo: 'starceas/knuaf-doc', tag: 'v0.2.0', commit: 'a'.repeat(40) }, overlay: 'b'.repeat(64) })) },
+    { name: 'scripts/example.py', data: Buffer.from(`print('${v}')\n`) },
+    ...extra
+  ]
+  const zip = zipEntries(entries)
+  const manifest: SkillManifest = {
+    schema: 1, name: 'knuaf-dev', version: v, api: 1, minApp: '0.5.1',
+    url: `${ASSET_PREFIX}skill-v${v}/knuaf-dev-skill-${v}.zip`, size: zip.length, sha256: sha256Of(zip),
+    files: Object.fromEntries(entries.map(e => [e.name, sha256Of(e.data)])), ...changes
+  }
+  const signed = envelope(manifest)
+  return { entries, zip, manifest, signed, verified: () => verifySkill(signed, keys) }
+}
+export type Fixture = ReturnType<typeof fixture>
+
+/* ────────────────────────── 자리(site) ────────────────────────── */
+
+export type Site = { file: string; line: number }
+
+const siteCache = new Map<string, number>()
+
+/**
+ * 소스의 **고유 스니펫**에서 줄 번호를 계산한다. 손으로 적은 줄 번호는 2단계에서 밀린다.
+ * `nth`는 같은 스니펫이 여러 번 나올 때의 순번(0부터)이다. `exact`면 줄 앞뒤 공백을 뺀
+ * 전체가 스니펫과 같아야 한다 — `const s = this.state()` 처럼 더 긴 줄의 앞부분인 경우를 가른다.
+ */
+export function site(file: string, snippet: string, nth = 0, exact = false): Site {
+  const key = `${file}::${snippet}::${nth}::${exact}`
+  const cached = siteCache.get(key)
+  if (cached !== undefined) return { file, line: cached }
+  const lines = real.readFileSync(join(SRC_MAIN, file), 'utf8').split('\n')
+  const hits = lines.map((line, index) => ((exact ? line.trim() === snippet : line.includes(snippet)) ? index + 1 : 0)).filter(line => line > 0)
+  const line = hits[nth]
+  if (line === undefined) throw new Error(`주입 지점이 사라졌다: ${file} 에 ${JSON.stringify(snippet)}[${nth}] 가 ${hits.length}개뿐이다`)
+  siteCache.set(key, line)
+  return { file, line }
+}
+
+/** 지금 스택의 (파일, 줄, 함수 이름) — 자리 대조에 쓴다. 안쪽 프레임이 앞이다. */
+export type Frame = Site & { fn: string }
+export function framesOf(): Frame[] {
+  const out: Frame[] = []
+  for (const raw of (new Error().stack ?? '').split('\n').slice(2)) {
+    const line = raw.trim()
+    const named = /^at (?:async )?(?:new )?(.+?) \((.+):(\d+):(\d+)\)$/.exec(line)
+    if (named) { out.push({ fn: named[1], file: named[2], line: Number(named[3]) }); continue }
+    const bare = /^at (?:async )?(.+):(\d+):(\d+)$/.exec(line)
+    if (bare) out.push({ fn: '', file: bare[1], line: Number(bare[2]) })
+  }
+  return out
+}
+
+/**
+ * 함수 이름으로 겨냥한다 — 2단계가 줄·스니펫을 바꿔도 같은 자리를 겨냥하게.
+ * `store`: 스택에서 **가장 바깥** `SkillStore.*` 메서드(서비스가 직접 부른 store 진입점).
+ * `svc`: 스택에서 **가장 안쪽** `SkillUpdates.*` 메서드.
+ */
+const methodOf = (fn: string, cls: string): string | null => fn.startsWith(`${cls}.`) ? fn.slice(cls.length + 1) : null
+export function outerStore(frames: Frame[]): string | null {
+  let found: string | null = null
+  for (const f of frames) { const m = methodOf(f.fn, 'SkillStore'); if (m) found = m }
+  return found
+}
+export function innerService(frames: Frame[]): string | null {
+  for (const f of frames) { const m = methodOf(f.fn, 'SkillUpdates'); if (m) return m }
+  return null
+}
+
+/* ────────────────────────── 주입기 ────────────────────────── */
+
+export type Op = 'read' | 'readdir' | 'lstat' | 'stat' | 'write' | 'rename' | 'unlink' | 'rm' | 'mkdtemp' | 'mkdir'
+
+/**
+ * 규칙 하나. `at`(자리)으로 겨냥하고, `name`(파일 이름 꼬리)으로 좁히고, `skip`/`times`로
+ * "여기서부터 계속"·"이 호출만"을 가른다. `code`면 errno를 던지고, `text`/`bytes`면 값을 바꾼다.
+ */
+export type Rule = {
+  op: Op
+  at?: Site
+  /** 가장 바깥 `SkillStore.*` 메서드 이름이 맞아야 발동. */
+  store?: RegExp
+  /** 가장 안쪽 `SkillUpdates.*` 메서드 이름이 맞아야 발동. */
+  svc?: RegExp
+  name?: string
+  skip?: number
+  times?: number
+  code?: string
+  text?: (s: string) => string
+  bytes?: (b: Buffer) => Buffer
+}
+
+const errno = (code: string): Error => Object.assign(new Error(`${code}: injected`), { code })
+
+const tally = new Map<Rule, number>()
+let rules: Rule[] = []
+let ops: string[] = []
+
+const nameOf = (path: string): string => path.slice(path.lastIndexOf(sep) + 1)
+
+const hit = (op: Op, path: string): Rule | null => {
+  ops.push(`${op}:${path}`)
+  if (!rules.length) return null
+  let frames: Frame[] | null = null
+  const name = nameOf(path)
+  for (const rule of rules) {
+    if (rule.op !== op) continue
+    if (rule.name !== undefined && rule.name !== name) continue
+    if (rule.at) {
+      frames ??= framesOf()
+      if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) continue
+    }
+    if (rule.store || rule.svc) {
+      frames ??= framesOf()
+      if (rule.store && !rule.store.test(outerStore(frames) ?? '')) continue
+      if (rule.svc && !rule.svc.test(innerService(frames) ?? '')) continue
+    }
+    const n = (tally.get(rule) ?? 0) + 1
+    tally.set(rule, n)
+    const skip = rule.skip ?? 0, times = rule.times ?? 1
+    if (n > skip && n <= skip + times) return rule
+  }
+  return null
+}
+
+const patched = {
+  readFileSync: (path: string, opts?: unknown): unknown => {
+    const rule = hit('read', String(path))
+    if (rule?.code) throw errno(rule.code)
+    const got = real.readFileSync(path as never, opts as never) as unknown
+    if (!rule) return got
+    if (typeof got === 'string') return rule.text ? rule.text(got) : got
+    return rule.bytes ? rule.bytes(got as Buffer) : got
+  },
+  readdirSync: (path: string, opts?: unknown): unknown => {
+    const rule = hit('readdir', String(path))
+    if (rule?.code) throw errno(rule.code)
+    return real.readdirSync(path as never, opts as never)
+  },
+  lstatSync: (path: string, opts?: unknown): unknown => {
+    const rule = hit('lstat', String(path))
+    if (rule?.code) throw errno(rule.code)
+    return real.lstatSync(path as never, opts as never)
+  },
+  statSync: (path: string, opts?: unknown): unknown => {
+    const rule = hit('stat', String(path))
+    if (rule?.code) throw errno(rule.code)
+    return real.statSync(path as never, opts as never)
+  },
+  writeFileSync: (path: string, data: unknown, opts?: unknown): void => {
+    const rule = hit('write', String(path))
+    if (rule?.code) throw errno(rule.code)
+    real.writeFileSync(path as never, data as never, opts as never)
+  },
+  renameSync: (from: string, to: string): void => {
+    const rule = hit('rename', String(to)) ?? hit('rename', String(from))
+    if (rule?.code) throw errno(rule.code)
+    real.renameSync(from, to)
+  },
+  unlinkSync: (path: string): void => {
+    const rule = hit('unlink', String(path))
+    if (rule?.code) throw errno(rule.code)
+    real.unlinkSync(path)
+  },
+  rmSync: (path: string, opts?: unknown): void => {
+    const rule = hit('rm', String(path))
+    if (rule?.code) throw errno(rule.code)
+    real.rmSync(path as never, opts as never)
+  },
+  mkdtempSync: (prefix: string, opts?: unknown): string => {
+    const rule = hit('mkdtemp', String(prefix))
+    if (rule?.code) throw errno(rule.code)
+    return real.mkdtempSync(prefix as never, opts as never)
+  },
+  /** 실제 `existsSync`는 접근 오류(EPERM 등)를 삼키고 false를 낸다 — 같은 경로의 `lstat` 규칙이 errno면 false. */
+  existsSync: (path: string): boolean => {
+    const rule = hit('lstat', String(path))
+    if (rule?.code) return false
+    return real.existsSync(path as never)
+  },
+  mkdirSync: (path: string, opts?: unknown): unknown => {
+    const rule = hit('mkdir', String(path))
+    if (rule?.code) throw errno(rule.code)
+    return real.mkdirSync(path as never, opts as never)
+  }
+}
+
+Object.assign(fs, patched)
+
+export const inject = {
+  /** 규칙을 갈아 끼운다 — 시험마다 `clear()` 뒤 새로 넣는다. */
+  set(list: Rule[]): void { rules = list.slice(); tally.clear() },
+  /** 규칙과 기록을 모두 비운다(대역 해제). */
+  clear(): void { rules = []; tally.clear(); ops = [] },
+  /** 호출 기록만 비운다 — 시험의 조작 구간만 세고 싶을 때. */
+  mark(): void { ops = [] },
+  /** 모든 파일 접근 기록(`op:절대경로`). */
+  ops(): string[] { return ops.slice() },
+  /** 쓰기·이름바꾸기·삭제만 — 설계 §5.0 '쓰기·rename·삭제 호출 순서'. */
+  writes(): string[] { return ops.filter(line => /^(write|rename|unlink|rm|mkdtemp|mkdir):/.test(line)) },
+  /** (연산, 파일 이름) 호출 수. */
+  count(op: Op, name: string): number {
+    const tail = `:${sep}${name}`
+    return ops.filter(line => line.startsWith(`${op}:`) && (line.endsWith(tail) || line.endsWith(`:${name}`))).length
+  },
+  /** 규칙이 실제로 발동한 횟수 — "주입이 안 닿았다"를 조용히 넘기지 않게. */
+  fired(rule: Rule): number { return tally.get(rule) ?? 0 },
+  /** 경로가 들어간 호출 기록. */
+  paths(op: Op): string[] { return ops.filter(line => line.startsWith(`${op}:`)).map(line => line.slice(op.length + 1)) }
+}
+
+/* ────────────────────────── 디스크 ────────────────────────── */
+
+/** 기준판 `state()`가 요구하는 모양(64자 해시)을 맞추는 자리 — '기록만 있는' highest. */
+export const wrapDigest = (v: string): string => sha256Of(Buffer.from(`digest-${v}`))
+
+export type DiskState = { active: string | null; kept: Record<string, string>; highest: { version: string; manifest: string } | null }
+
+export type Disk = {
+  root: string
+  bundled: string
+  storeDir: string
+  versions: Map<string, Fixture>
+  log: string
+  state(): DiskState
+  stateText(): string
+  writeState(next: Partial<DiskState>): void
+  /** 파일 하나를 망가뜨린다(해시 불일치) — 확정 무효 입력. */
+  corrupt(version: string): void
+  store(): SkillStore
+}
+
+export type DiskSpec = {
+  bundledVersion?: string
+  versions?: string[]
+  active?: string | null
+  highest?: string | null
+  kept?: string[]
+  /** `false`면 state.json을 만들지 않는다(처음 설치). */
+  state?: boolean
+  /** 동봉 `install-manifest.json`을 만들 때 쓰는 판(서명 파일 목록이 곧 동봉 목록). */
+  bundleManifestFrom?: Fixture
+  /** 동봉 `install-manifest.json` 본문을 직접 준다. */
+  bundleManifestFiles?: Record<string, string>
+  /** 기본 `fixture()` 대신 쓸 묶음 — 동봉 manifest 비교(R-MB)처럼 파일 목록을 직접 맞출 때. */
+  fixtures?: Fixture[]
+}
+
+export function temporary(): string { return real.mkdtempSync(join(tmpdir(), 'knuaf-unknown-')) }
+
+export function makeDisk(spec: DiskSpec = {}): Disk {
+  const root = temporary(), bundled = join(root, 'bundled'), storeDir = join(root, 'skill-store'), log = join(root, 'app.log')
+  const bundledVersion = spec.bundledVersion ?? '1.0.13'
+  const versions = (spec.versions ?? ['1.0.14', '1.0.15']).map(v => fixture(v))
+  real.mkdirSync(join(bundled, 'scripts'), { recursive: true })
+  real.writeFileSync(join(bundled, 'SKILL.md'), `# bundle ${bundledVersion}`)
+  real.writeFileSync(join(bundled, 'scripts', 'example.py'), `print('${bundledVersion}')\n`)
+  real.writeFileSync(join(bundled, 'skill.json'), JSON.stringify({ version: bundledVersion, api: 1 }))
+  const manifestFiles = spec.bundleManifestFiles ?? spec.bundleManifestFrom?.manifest.files
+  if (manifestFiles) {
+    real.writeFileSync(join(bundled, 'install-manifest.json'), JSON.stringify({ schema: 'knuaf-doc/install-manifest@1', files: manifestFiles }))
+  }
+  real.mkdirSync(join(storeDir, 'proofs'), { recursive: true })
+  const map = new Map<string, Fixture>()
+  for (const f of versions) {
+    map.set(f.manifest.version, f)
+    const dir = join(storeDir, f.manifest.version)
+    for (const e of f.entries) {
+      real.mkdirSync(dirname(join(dir, e.name)), { recursive: true })
+      real.writeFileSync(join(dir, e.name), e.data)
+    }
+    real.writeFileSync(join(storeDir, 'proofs', `${f.manifest.version}.json`), JSON.stringify(f.signed))
+  }
+  const keptVersions = spec.kept ?? [...map.keys()]
+  const kept = Object.fromEntries(keptVersions.filter(v => map.has(v)).map(v => [v, map.get(v)!.verified().digest]))
+  const active = spec.active === undefined ? keptVersions.at(-1) ?? null : spec.active
+  const highestVersion = spec.highest === undefined ? keptVersions.at(-1) ?? null : spec.highest
+  const value: DiskState = {
+    active,
+    kept,
+    highest: highestVersion === null ? null : { version: highestVersion, manifest: map.get(highestVersion)?.verified().digest ?? wrapDigest(highestVersion) }
+  }
+  const stateFile = join(storeDir, 'state.json')
+  if (spec.state !== false) {
+    real.writeFileSync(stateFile, JSON.stringify(value))
+    if (value.highest) real.writeFileSync(join(storeDir, 'highest.json'), JSON.stringify(value.highest))
+  }
+  return {
+    root, bundled, storeDir, versions: map, log,
+    state: () => JSON.parse(real.readFileSync(stateFile, 'utf8')) as DiskState,
+    stateText: () => real.readFileSync(stateFile, 'utf8'),
+    writeState(next: Partial<DiskState>) {
+      const current = JSON.parse(real.readFileSync(stateFile, 'utf8')) as DiskState
+      const merged = { ...current, ...next }
+      if ('highest' in next) {
+        if (next.highest) real.writeFileSync(join(storeDir, 'highest.json'), JSON.stringify(next.highest))
+        else real.rmSync(join(storeDir, 'highest.json'), { force: true })
+      }
+      real.writeFileSync(stateFile, JSON.stringify(merged))
+    },
+    corrupt(version: string) {
+      const dir = join(storeDir, version)
+      real.writeFileSync(join(dir, 'SKILL.md'), `# damaged ${version}`)
+    },
+    store: () => new SkillStore(root, bundled, '0.5.1', keys)
+  }
+}
+
+/* ────────────────────────── 갈래 대역 ────────────────────────── */
+
+/**
+ * 시간 대기 없이 순서를 고정하는 문. `arrived`는 상대가 문에 닿으면 풀리고,
+ * 상대는 시험이 `release()`할 때까지 `reached`에서 멈춘다.
+ */
+export type Gate = { arrived: Promise<void>; arrive: () => void; reached: Promise<void>; release: () => void }
+export function gate(): Gate {
+  const a = Promise.withResolvers<void>(), r = Promise.withResolvers<void>()
+  return { arrived: a.promise, arrive: a.resolve, reached: r.promise, release: r.resolve }
+}
+
+/** 잠금 시도 수와 진입 순서를 세는 스위치 — 설계 §5.0 '잠금 시도 수', 판정서 R-C4 순서 기록. */
+export class CountingSwitch extends SkillSwitch {
+  attempts = 0
+  private entered = Promise.withResolvers<void>()
+  /** 첫 `switch()` 진입에서 풀린다(H-LOCK 순서 관찰). */
+  readonly switched = this.entered.promise
+  constructor(private readonly events?: string[]) { super() }
+  override async switch<T>(work: () => Promise<T>, timeout?: number): Promise<T> {
+    ++this.attempts
+    this.events?.push('lock.switch')
+    this.entered.resolve()
+    return super.switch(work, timeout)
+  }
+}
+
+export type UpdaterOptions = {
+  disk: Disk
+  lock?: CountingSwitch
+  /** 채널 응답을 붙잡는 자리(H-FETCH). */
+  channelGate?: Gate
+  /** zip 응답을 붙잡는 자리(H-FETCH). */
+  fetchGate?: Gate
+  /** 채널이 내미는 후보. 없으면 disk 의 최신 판. */
+  candidate?: Fixture
+  /** 채널 본문을 직접 준다(후보 없음·형식 오류 실험). */
+  channel?: () => unknown
+  restart?: () => Promise<unknown>
+  /** 잠금 진입·publish 진입 순서 — 판정서 R-C4가 본다. */
+  events?: string[]
+}
+
+export type Updater = {
+  updates: SkillUpdates
+  switch: CountingSwitch
+  phases: string[]
+  requests: string[]
+  events: string[]
+  store: SkillStore
+}
+
+export function makeUpdater(opts: UpdaterOptions): Updater {
+  const events = opts.events ?? []
+  const f = opts.candidate ?? fixture('1.0.15')
+  const lock = opts.lock ?? new CountingSwitch(events)
+  const phases: string[] = [], requests: string[] = []
+  const store = opts.disk.store()
+  const publish = store.publish.bind(store)
+  ;(store as unknown as { publish: unknown }).publish = (p: unknown, zip: Buffer): void => {
+    events.push('publish')
+    return (publish as (p: unknown, z: Buffer) => void)(p, zip)
+  }
+  const channelBody = opts.channel ?? (() => ({ schema: 1, skill: { ...f.signed, version: f.manifest.version, api: f.manifest.api, minApp: f.manifest.minApp, url: f.manifest.url } }))
+  const updates = new SkillUpdates(store, {
+    config: config(),
+    lock,
+    emit: status => { phases.push(status.phase) },
+    restartSidecar: opts.restart ?? (async () => {}),
+    fetch: async (url: string) => {
+      requests.push(url)
+      if (url === CHANNEL_URL) {
+        if (opts.channelGate) { opts.channelGate.arrive(); await opts.channelGate.reached }
+        return new Response(JSON.stringify(channelBody()))
+      }
+      if (opts.fetchGate) { opts.fetchGate.arrive(); await opts.fetchGate.reached }
+      return new Response(f.zip)
+    }
+  })
+  return { updates, switch: lock, phases, requests, events, store }
+}
+
+/* ────────────────────────── 대조 도구 ────────────────────────── */
+
+/** 진단 줄 — 시각 머리만 떼고 본문을 남긴다(설계 §4 형식 `<시각> skill:<단계> <결과>`). */
+export function diagLines(file: string): string[] {
+  try {
+    return real.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => line.replace(/^\d+ /, ''))
+  } catch { return [] }
+}
+
+/** `skill` 진단 줄만. */
+export function skillDiag(file: string): string[] {
+  return diagLines(file).filter(line => line.startsWith('skill:'))
+}
+
+/**
+ * `skill-store` 트리 지문 — 경로·해시. 시각이 든 이름은 정규화한다(설계 §5.0 '대조 필드').
+ */
+export function treePrint(dir: string): string[] {
+  const out: string[] = []
+  const walk = (current: string): void => {
+    let entries: string[]
+    try { entries = real.readdirSync(current) } catch { return }
+    for (const name of entries.sort()) {
+      const path = join(current, name)
+      const shown = relative(dir, path).split(sep).join('/')
+        .replace(/^\.damaged-([^/]+)-\d+$/, '.damaged-$1-T')
+        .replace(/^\.(stage|download)-[A-Za-z0-9]+$/, '.$1-T')
+      let st
+      try { st = real.statSync(path) } catch { continue }
+      if (st.isDirectory()) { out.push(`${shown}/`); walk(path) } else out.push(`${shown} ${sha256Of(real.readFileSync(path))}`)
+    }
+  }
+  walk(dir)
+  return out
+}
+
+/** 시험 사이 임시 폴더 정리. */
+export function sweep(roots: string[]): void {
+  for (const root of roots.splice(0)) { try { real.rmSync(root, { recursive: true, force: true }) } catch { /* 이미 없다 */ } }
+}
