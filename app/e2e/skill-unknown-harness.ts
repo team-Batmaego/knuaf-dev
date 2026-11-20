@@ -436,10 +436,11 @@ export class CountingSwitch extends SkillSwitch {
   private entered = Promise.withResolvers<void>()
   /** 첫 `switch()` 진입에서 풀린다(H-LOCK 순서 관찰). */
   readonly switched = this.entered.promise
-  constructor(private readonly events?: string[]) { super() }
+  /** 진입 순서 기록 — 따로 넘기지 않으면 자기 배열을 쓰고, `makeUpdater`가 그 배열을 `events`로 이어 받는다. */
+  constructor(readonly log: string[] = []) { super() }
   override async switch<T>(work: () => Promise<T>, timeout?: number): Promise<T> {
     ++this.attempts
-    this.events?.push('lock.switch')
+    this.log.push('lock.switch')
     this.entered.resolve()
     return super.switch(work, timeout)
   }
@@ -473,7 +474,8 @@ export type Updater = {
 }
 
 export function makeUpdater(opts: UpdaterOptions): Updater {
-  const events = opts.events ?? []
+  // 맞춤 잠금만 넘겨도 그 잠금의 진입 기록과 publish 기록이 한 배열에 모인다(판정서 tests r4 C-01).
+  const events = opts.events ?? opts.lock?.log ?? []
   const f = opts.candidate ?? fixture('1.0.15')
   const lock = opts.lock ?? new CountingSwitch(events)
   const phases: string[] = [], requests: string[] = []

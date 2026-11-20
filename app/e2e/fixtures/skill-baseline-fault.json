@@ -1,5 +1,5 @@
 {
- "_made": "a340264 (src unchanged), tests r4, 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r5, 2026-11-21",
  "R-B1": {
   "result": {
    "threw": "sidecar restart failed"
@@ -385,7 +385,9 @@
   ],
   "restarts": 1,
   "attempts": 1,
-  "events": []
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-D5": {
   "result": {
@@ -596,7 +598,8 @@
   "restarts": 1,
   "attempts": 1,
   "events": [
-   "publish"
+   "publish",
+   "lock.switch"
   ]
  },
  "R-N3": {
@@ -649,7 +652,9 @@
   ],
   "restarts": 1,
   "attempts": 1,
-  "events": []
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-N4": {
   "result": {
