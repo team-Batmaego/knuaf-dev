@@ -1,4 +1,4 @@
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { diagSkill } from '../diagLog'
 import { readRecoverable, writeFileAtomic, type ReadFs } from '../safeWrite'
@@ -82,7 +82,7 @@ export interface StateDetail {
   from: 'file' | 'tmp' | 'none'
 }
 export type Validity = { ok: true } | { ok: false; sure: true } | { ok: false; sure: false; errno: ErrnoClass }
-export interface Resolved { source: string; version: string; /** 진단 줄의 결과 이름(값·경로 없음). */ reason: string }
+export interface Resolved { source: string; version: string; /** 진단 줄의 결과 이름(값·경로 없음). */ reason: string; /** 무효로 본 판(resolver가 실제로 검사한 판). 진단의 보관 목록 대조용이며 밖으로 내보내지 않는다. */ checked?: string }
 
 function highest(v: unknown): Highest {
   const h = object(v); exact(h, ['version', 'manifest']); version(h.version); hash(h.manifest)
@@ -221,7 +221,7 @@ export class SkillStore {
       if (v && compare(v, this.bundledVersion) >= 0) {
         const c = this.check(v, s.kept[v])
         if (c.ok) return { source: join(this.root, v), version: v, reason: 'store' }
-        return bundle(`forced-invalid-${c.sure ? 'sure' : `io-${c.errno}`}`)
+        return { ...bundle(`forced-invalid-${c.sure ? 'sure' : `io-${c.errno}`}`), checked: v }
       }
       if (!d.selection.known) return bundle(unread())
       return bundle(v ? 'chosen-newer' : `chosen-no-active-${d.from}`)
@@ -233,7 +233,7 @@ export class SkillStore {
     const s = this.strict(site), v = s.active
     if (v && compare(v, this.bundledVersion) >= 0 && this.validStrict(v, s.kept[v], site)) return join(this.root, v)
     // 기록상 선택이 있는데 못 쓰는 판이라 동봉으로 내려갔다(진단 줄의 chosen/forced 구분용).
-    if (out) out.forced = v !== null
+    if (out) out.forced = v !== null && compare(v, this.bundledVersion) >= 0
     return this.bundled
   }
   private matchesBundle(p: VerifiedSkill): boolean {
@@ -312,11 +312,21 @@ export class SkillStore {
     const s = this.strict('rollback-target'), current = this.effStrict('rollback-target') === this.bundled ? this.bundledVersion : s.active!
     return Object.keys(s.kept).filter(v => compare(v, current) < 0 && compare(v, this.bundledVersion) >= 0 && this.validStrict(v, s.kept[v], 'rollback-target')).sort(compare).at(-1) ?? null
   }
+  /**
+   * 깨진 본문의 원본을 `state.json.bad`로 남긴다. 기존 `.bad`가 파일이든 링크든 그 이름만 지우고(링크는 대상을 안 건드린다)
+   * 배타 생성(`wx`, 0o600)으로 새로 쓴다. 못 만들면 던진다 — 호출부는 본문 정리를 하지 않는다.
+   */
+  private backupCorrupt(): void {
+    const body = join(this.root, 'state.json'), bad = `${body}.bad`
+    const original = readFileSync(body)
+    try { lstatSync(bad); unlinkSync(bad) } catch (e) { if (codeOfError(e) !== 'ENOENT') throw e }
+    writeFileSync(bad, original, { flag: 'wx', mode: 0o600 })
+  }
   /** Startup only, before any user request can hold an old source. */
   cleanup(): void {
     const d = this.strictDetail('cleanup', true), s = d.value, versions = Object.keys(s.kept).sort(compare).reverse()
     // 깨진 본문은 기준판처럼 비운 상태로 덮되, 덮기 전에 원본을 남긴다(되짓기는 다음 판). 남기지 못하면 덮지 않는다.
-    if (!d.selection.known) copyFileSync(join(this.root, 'state.json'), join(this.root, 'state.json.bad'))
+    if (!d.selection.known) this.backupCorrupt()
     const retain = new Set([...new Set([s.active, s.highest?.version, ...versions].filter((v): v is string => !!v))].slice(0, 2))
     for (const v of versions) if (!retain.has(v)) {
       rmSync(join(this.root, v), { recursive: true, force: true })

@@ -38,7 +38,8 @@ export class SkillUpdates {
       const current = !d.selection.known ? r.version : bundled ? this.store.bundledVersion : s.active!
       // 목록 검증은 한 번만 하고, 그 결과로 kept와 진단의 '같은 호출 안 보관 목록이 그 판을 어떻게 봤나'를 함께 낸다(설계 §4 C).
       const checks = Object.keys(s.kept).map(v => [v, this.store.check(v, s.kept[v])] as const)
-      const seen = s.active ? checks.find(([v]) => v === s.active)?.[1] : undefined
+      // resolver가 실제로 무효로 본 판을 목록 검증이 어떻게 봤는지(첫 읽기의 active와 다를 수 있다).
+      const seen = r.checked ? checks.find(([v]) => v === r.checked)?.[1] : undefined
       this.lastReason = r.reason.startsWith('bundle-forced-invalid-') && seen ? `${r.reason}-kept-${seen.ok ? 'valid' : seen.sure ? 'invalid' : 'io'}` : r.reason
       return { ...this.statusValue, current, bundled, highest: s.highest?.version ?? null, kept: checks.filter(([, c]) => c.ok).map(([v]) => v) }
     } catch {
