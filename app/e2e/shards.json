@@ -202,7 +202,8 @@
       "update-poll",
       "kordoc-mcp-codex",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "skill-unknown-read"
     ]
   ],
   "macos": [
@@ -402,7 +403,8 @@
       "kordoc-runtime",
       "news-release-notes",
       "news-storage-failure",
-      "empty-toc"
+      "empty-toc",
+      "skill-unknown-read"
     ]
   ]
 }
