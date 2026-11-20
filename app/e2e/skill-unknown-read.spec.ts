@@ -227,6 +227,7 @@ test('R-B1 activate: previous-read failure refuses instead of restoring null', a
   const p = u.updates.select('1.0.15')
   await p.catch(() => {})
   fired(fault)
+  await faultRecord('R-B1', d, { phases: u.phases, restarts: r.count(), thrown: await p.then(() => undefined, e => e) })
   // 기준판: previous를 동봉(null)으로 접어 select(.15) 쓰기 → 재시작 실패 → select(null) 쓰기 → active null.
   expect(d.state().active).toBe('1.0.14')
   expect(stateWrites()).toBe(0)
@@ -246,6 +247,7 @@ test('R-B1b activate: previous-validity failure refuses', async () => {
   const p = u.updates.select('1.0.15')
   await p.catch(() => {})
   fired(fault)
+  await faultRecord('R-B1b', d, { phases: u.phases, restarts: r.count(), thrown: await p.then(() => undefined, e => e) })
   // 기준판: .14 검증 I/O 실패를 확정 무효로 접어 previous=null → 결국 active null.
   expect(d.state().active).toBe('1.0.14')
   expect(stateWrites()).toBe(0)
@@ -277,6 +279,7 @@ test('R-B2 select: persistent state failure writes nothing and ends in error', a
   const p = u.updates.select('1.0.15')
   await p.catch(() => {})
   fired(fault)
+  await faultRecord('R-B2', d, { phases: u.phases, restarts: r.count(), thrown: await p.then(() => undefined, e => e) })
   expect(stateWrites()).toBe(0)
   expect(r.count()).toBe(0)
   // 기준판: 빈 상태라 '사용할 수 없어요' → 되돌림도 같은 이유로 던져 phase가 switching에 멈춘다.
@@ -296,6 +299,7 @@ test('R-B2b restore: unknown at restore time keeps the requested value and still
   const p = u.updates.select('1.0.15')
   await p.catch(() => {})
   fired(fault)
+  await faultRecord('R-B2b', d, { phases: u.phases, restarts: r.count(), thrown: await p.then(() => undefined, e => e) })
   // 기준판: 되돌림 select(.14)가 빈 상태로 '사용할 수 없어요'를 던져 원래 오류를 대신하고 두 번째 재시작이 없다.
   await expect(p).rejects.toThrow('sidecar restart failed')
   expect(r.count()).toBe(2)
@@ -313,7 +317,8 @@ test('R-N1 select(null): unreadable state keeps kept', async () => {
   inject.mark()
   await u.updates.select(null).catch(() => {})
   fired(fault)
-  expect(inject.writes().filter(line => !line.startsWith('mkdir:'))).toEqual([])
+  await faultRecord('R-N1', d, { phases: u.phases })
+  expect(inject.writes()).toEqual([])
   inject.clear()
   expect(readFileSync(join(d.storeDir, 'highest.json'), 'utf8')).toBe(highestBefore)
   // 기준판: 빈 상태 위에 active=null을 써 kept·highest를 잃는다.
@@ -321,13 +326,14 @@ test('R-N1 select(null): unreadable state keeps kept', async () => {
   expect(d.state().active).toBe('1.0.15')
 })
 
-test('R-N5 status: current is never null when the first read fails', () => {
+test('R-N5 status: current is never null when the first read fails', async () => {
   const d = disk()
   const u = makeUpdater({ disk: d })
   const fault: Rule = { op: 'read', name: 'state.json', svc: /^status$/, store: READ_STATE, code: EPERM, times: 1 }
   inject.set([fault])
   const status = u.updates.status()
   fired(fault)
+  await faultRecord('R-N5', d, { status })
   // 기준판: 첫 읽기를 빈 상태로 접고 resolver는 .15를 골라 current = s.active! = null.
   expect(status.current).toBe('1.0.15')
   expect(status.bundled).toBe(false)
@@ -353,6 +359,7 @@ test('R-B5a activate: unreadable newer tmp refuses', async () => {
   const p = u.updates.select('1.0.15')
   await p.catch(() => {})
   fired(fault)
+  await faultRecord('R-B5a', d, { phases: u.phases, restarts: r.count(), thrown: await p.then(() => undefined, e => e) })
   expect(stateWrites()).toBe(0)
   inject.clear()
   // 기준판: 본문 null을 previous로 믿고 쓰기를 진행해 `.tmp`(유일한 .14 기록)를 덮는다.
@@ -360,7 +367,7 @@ test('R-B5a activate: unreadable newer tmp refuses', async () => {
   await expect(p).rejects.toThrow(UNKNOWN)
 })
 
-test('R-B5c cleanup never overwrites an unreadable tmp', () => {
+test('R-B5c cleanup never overwrites an unreadable tmp', async () => {
   const d = tmpDisk()
   const tmpBefore = readFileSync(join(d.storeDir, 'state.json.tmp'), 'utf8')
   const store = d.store()
@@ -371,6 +378,7 @@ test('R-B5c cleanup never overwrites an unreadable tmp', () => {
   let thrown: unknown = null
   try { store.cleanup() } catch (e) { thrown = e }
   fired(fault)
+  await faultRecord('R-B5c', d, { thrown: thrown ?? undefined })
   expect(stateWrites()).toBe(0)
   // 삭제·이름바꾸기·쓰기 0, 트리·기록 원형 그대로.
   expect(inject.writes()).toEqual([])
@@ -394,6 +402,7 @@ test('R-N3 rollback: I/O-failed candidate is unknown, not absent', async () => {
   let thrown: unknown = null
   try { await u.updates.rollback() } catch (e) { thrown = e }
   fired(fault)
+  await faultRecord('R-N3', d, { phases: u.phases, restarts: r.count(), attempts: lock.attempts, thrown: thrown ?? undefined })
   // 기준판: .14를 '없음'으로 접어 목적지 null → 동봉으로 바꾸고 재시작 1.
   expect(d.state().active).toBe('1.0.15')
   expect(lock.attempts).toBe(0)
@@ -411,6 +420,7 @@ test('R-B9 rollback: target-read failure refuses before the lock', async () => {
   let thrown: unknown = null
   try { await u.updates.rollback() } catch (e) { thrown = e }
   fired(fault)
+  await faultRecord('R-B9', d, { phases: u.phases, restarts: r.count(), attempts: lock.attempts, thrown: thrown ?? undefined })
   // 기준판: 빈 상태 → 목적지 null → 동봉, 잠금 1, 재시작 1.
   expect(d.state().active).toBe('1.0.15')
   expect(lock.attempts).toBe(0)
@@ -444,6 +454,7 @@ test('R-N4 existence checks treat EPERM as unknown: unreadable highest backup bl
   expect(u.updates.status()).toMatchObject({ current: '1.0.14', highest: null })
   const status = await u.updates.check()
   fired(read, exists)
+  await faultRecord('R-N4', d, { phases: u.phases, status })
   // 기준판: highest.json을 '없음'으로 접어 .15를 새 판(available)으로 낸다 — 물높이 .16 아래로 내려간다.
   expect(status.phase).toBe('error')
   expect(status.message).toMatch(UNKNOWN)
@@ -459,6 +470,7 @@ test('R-MB iii disposition: unreadable bundle manifest is unknown, not a mismatc
   inject.set([fault])
   const status = await u.updates.check()
   fired(fault)
+  await faultRecord('R-MB-iii', d, { phases: u.phases, status })
   // 기준판: '이전 판이거나 같은 판의 내용이 달라서' — 못 읽음을 불일치로 접는다.
   expect(status.phase).toBe('error')
   expect(status.message).toMatch(UNKNOWN)
@@ -481,6 +493,7 @@ test('R-N2 install: lock-decision failure never quarantines the active without t
   let thrown: unknown = null
   try { await p } catch (e) { thrown = e }
   fired(fault)
+  await faultRecord('R-N2', d, { phases: u.phases, attempts: lock.attempts, thrown: thrown ?? undefined })
   // 기준판: 빈 상태로 접어 '활성 아님' → 잠금 없이 publish → 활성 폴더를 격리(.damaged-).
   expect(inject.writes().filter(line => line.includes('.damaged-'))).toEqual([])
   expect(lock.attempts).toBe(0)
@@ -497,6 +510,7 @@ test('R-N6 check: unknown highest is error, not latest', async () => {
   inject.set([fault])
   const status = await u.updates.check()
   fired(fault)
+  await faultRecord('R-N6', d, { phases: u.phases, status })
   // 기준판: highest를 '없음'으로 접어 조기 idle.
   expect(status.phase).toBe('error')
   expect(status.message).toMatch(UNKNOWN)
@@ -513,6 +527,7 @@ test('R-B10 publish: state read after rename failing keeps selection and kept', 
   let thrown: unknown = null
   try { await u.updates.install() } catch (e) { thrown = e }
   fired(fault)
+  await faultRecord('R-B10', d, { phases: u.phases, thrown: thrown ?? undefined })
   inject.clear()
   // 기준판: 빈 상태 위에 kept={.15}·active=null을 써서 선택과 .14 기록을 잃는다.
   expect(d.state().active).toBe('1.0.14')
@@ -533,15 +548,15 @@ test('R-D5 diag: an unknown read leaves one skill line with stage and kind only'
   inject.set([fault])
   await u.updates.select('1.0.15').catch(() => {})
   fired(fault)
+  await faultRecord('R-D5', d, { phases: u.phases })
   inject.clear()
   const lines = skillDiag(log)
   // 기준판: skill 진단 줄이 없다.
-  // 정확히 한 줄(판정서 tests I-04), 단계는 설계 R-B1의 `select`.
-  expect(lines.filter(line => /^skill:\S+ unknown-/.test(line))).toEqual(['skill:select unknown-io-eperm'])
-  for (const line of lines) {
-    expect(line).toMatch(/^skill:[a-z.-]+ [a-z-]+$/)
-    expect(line).not.toMatch(/\d|\/|\\/)
-  }
+  // 판정서 tests I-04: 전체 skill 줄을 본다. 설계 §4는 set()마다 `status.<phase>` 줄을 허용하므로
+  // 그 줄만 빼고, 나머지 skill 줄 전체가 정확히 이 한 줄이어야 한다. 모든 줄은 §4 문법(단계·결과, 숫자·경로 없음).
+  const GRAMMAR = /^skill:(status\.[a-z]+|use\.[a-z-]+|rollback-target|select|rollback|install|restore|publish|cleanup|rebuild|confirm|disposition|check) [a-z-]+$/
+  for (const line of lines) expect(line).toMatch(GRAMMAR)
+  expect(lines.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:select unknown-io-eperm'])
 })
 
 /* ═════════════════════════ GOLD — 기준판 골든 대조(설계 §5.0·§5.1, 판정서 tests C-01) ═════════════════════════
@@ -567,6 +582,23 @@ function golden(name: string, record: unknown): void {
   const all = JSON.parse(realFs.readFileSync(GOLDEN_FILE, 'utf8') as string) as Record<string, unknown>
   expect(all[name], `골든 없음: ${name}`).toBeDefined()
   expect(json).toEqual(all[name])
+}
+
+/**
+ * 기준판 실패 경로 골든(설계 §5.0 `skill-baseline-fault.json`, 판정서 tests r2 C-01) — R 시험이 **지금 코드가 이렇게
+ * 틀린다**는 관측을 단언 전에 남긴다. 채집 모드에서만 쓰고, 대조는 하지 않는다(2단계에서 R 동작이 바뀌는 것이 목적).
+ * 2단계 PR에서 이 파일의 diff는 0이어야 한다.
+ */
+const FAULT_FILE = join(__dirname, 'fixtures', 'skill-baseline-fault.json')
+async function faultRecord(name: string, d: Disk, extra: { phases?: string[]; restarts?: number; attempts?: number; thrown?: unknown; status?: unknown } = {}): Promise<void> {
+  if (!GOLDEN_WRITE) return
+  const thrown = extra.thrown === undefined ? undefined : normalize(extra.thrown instanceof Error ? extra.thrown.message : String(extra.thrown), d.root)
+  const record = JSON.parse(JSON.stringify({ disk: observeDisk(d), phases: extra.phases, restarts: extra.restarts, attempts: extra.attempts, thrown, status: extra.status === undefined ? undefined : JSON.parse(normalize(JSON.stringify(extra.status), d.root)) })) as unknown
+  let all: Record<string, unknown> = {}
+  try { all = JSON.parse(realFs.readFileSync(FAULT_FILE, 'utf8') as string) as Record<string, unknown> } catch { /* 처음 */ }
+  all._made = process.env.KNUAF_GOLDEN_MADE ?? 'unknown'
+  all[name] = record
+  realFs.writeFileSync(FAULT_FILE, JSON.stringify(Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b))), null, 1) + '\n')
 }
 
 type Case = {

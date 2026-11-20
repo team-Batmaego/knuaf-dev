@@ -216,13 +216,15 @@ const match = (op: Op, path: string): Rule | null => {
     const n = (tally.get(rule) ?? 0) + 1
     tally.set(rule, n)
     const skip = rule.skip ?? 0, times = rule.times ?? 1
-    if (n > skip && n <= skip + times) {
-      if (rule.code || rule.text || rule.bytes) applied.set(rule, (applied.get(rule) ?? 0) + 1)
-      return rule
-    }
+    if (n > skip && n <= skip + times) return rule
   }
   return null
 }
+
+/** 실제로 오류를 던지거나 값을 바꾼 순간에만 부른다. */
+const applyOnce = (rule: Rule): void => { applied.set(rule, (applied.get(rule) ?? 0) + 1) }
+/** errno 규칙이면 적용으로 세고 던진다. */
+const raise = (rule: Rule | null): void => { if (rule?.code) { applyOnce(rule); throw errno(rule.code) } }
 
 /** 호출 하나 = 기록 하나. */
 const hit = (op: Op, path: string): Rule | null => { ops.push(`${op}:${path}`); return match(op, path) }
@@ -230,62 +232,65 @@ const hit = (op: Op, path: string): Rule | null => { ops.push(`${op}:${path}`); 
 const patched = {
   readFileSync: (path: string, opts?: unknown): unknown => {
     const rule = hit('read', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     const got = real.readFileSync(path as never, opts as never) as unknown
     if (!rule) return got
-    if (typeof got === 'string') return rule.text ? rule.text(got) : got
-    return rule.bytes ? rule.bytes(got as Buffer) : got
+    if (typeof got === 'string') { if (!rule.text) return got; const out = rule.text(got); if (out !== got) applyOnce(rule); return out }
+    if (!rule.bytes) return got
+    const out = rule.bytes(got as Buffer)
+    if (!Buffer.isBuffer(out) || !out.equals(got as Buffer)) applyOnce(rule)
+    return out
   },
   readdirSync: (path: string, opts?: unknown): unknown => {
     const rule = hit('readdir', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     return real.readdirSync(path as never, opts as never)
   },
   lstatSync: (path: string, opts?: unknown): unknown => {
     const rule = hit('lstat', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     return real.lstatSync(path as never, opts as never)
   },
   statSync: (path: string, opts?: unknown): unknown => {
     const rule = hit('stat', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     return real.statSync(path as never, opts as never)
   },
   writeFileSync: (path: string, data: unknown, opts?: unknown): void => {
     const rule = hit('write', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     real.writeFileSync(path as never, data as never, opts as never)
   },
   renameSync: (from: string, to: string): void => {
     ops.push(`rename:${String(from)} -> ${String(to)}`)
     const rule = match('rename', String(to)) ?? match('rename', String(from))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     real.renameSync(from, to)
   },
   unlinkSync: (path: string): void => {
     const rule = hit('unlink', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     real.unlinkSync(path)
   },
   rmSync: (path: string, opts?: unknown): void => {
     const rule = hit('rm', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     real.rmSync(path as never, opts as never)
   },
   mkdtempSync: (prefix: string, opts?: unknown): string => {
     const rule = hit('mkdtemp', String(prefix))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     return real.mkdtempSync(prefix as never, opts as never)
   },
   /** 실제 `existsSync`는 접근 오류(EPERM 등)를 삼키고 false를 낸다 — 같은 경로의 `lstat` 규칙이 errno면 false. */
   existsSync: (path: string): boolean => {
     const rule = hit('lstat', String(path))
-    if (rule?.code) return false
+    if (rule?.code) { applyOnce(rule); return false }
     return real.existsSync(path as never)
   },
   mkdirSync: (path: string, opts?: unknown): unknown => {
     const rule = hit('mkdir', String(path))
-    if (rule?.code) throw errno(rule.code)
+    raise(rule)
     return real.mkdirSync(path as never, opts as never)
   }
 }
@@ -539,7 +544,7 @@ export function sweep(roots: string[]): void {
 /* ────────────────────────── 골든 관측(설계 §5.0 '대조 필드') ────────────────────────── */
 
 /** 실행마다 바뀌는 값(임시 뿌리·서명 digest·zip 해시·임시 폴더 이름)을 고정 이름으로 바꾼다. */
-export function normalize(text: string, root: string, opaqueHashes = true): string {
+export function normalize(text: string, root: string): string {
   let out = text.split(root).join('<root>')
   for (const f of registry) {
     const v = f.manifest.version
@@ -549,7 +554,16 @@ export function normalize(text: string, root: string, opaqueHashes = true): stri
   return out
     .replace(/\.(stage|download)-[A-Za-z0-9]{6}/g, '.$1-T')
     .replace(/\.damaged-([0-9.]+)-\d+/g, '.damaged-$1-T')
-    .replace(/\b[0-9a-f]{64}\b/g, hex => opaqueHashes ? 'H' : hex)
+}
+
+/** 서명 파일 지문 — 실행마다 바뀌는 서명은 검증 결과로, manifest는 정규화한 원문으로 남긴다. */
+function proofPrint(path: string, root: string): string {
+  try {
+    const env = JSON.parse(real.readFileSync(path, 'utf8') as string) as { manifest: string; sig: string }
+    let sig = 'sig-bad'
+    try { verifySkill(env, keys); sig = 'sig-ok' } catch { /* 확정 무효 */ }
+    return `manifest=${normalize(Buffer.from(env.manifest, 'base64').toString('utf8'), root)} ${sig}`
+  } catch (e) { return `<unparsable ${(e as { code?: string }).code ?? 'json'}>` }
 }
 
 const readOr = (path: string): string => { try { return real.readFileSync(path, 'utf8') } catch (e) { return `<${(e as { code?: string }).code ?? 'error'}>` } }
@@ -557,7 +571,13 @@ const readOr = (path: string): string => { try { return real.readFileSync(path, 
 /** 상태 전부 — 기록 파일 4개 원문(정규화), 트리(서명·기록 파일 해시는 뺌), 쓰기·rename·삭제 순서. */
 export function observeDisk(d: Disk): Record<string, unknown> {
   const n = (t: string): string => normalize(t, d.root)
-  const tree = treePrint(d.storeDir).map(line => /^(proofs\/[^ ]+\.json|state\.json(\.tmp)?|highest\.json(\.tmp)?|state\.json\.bad) /.test(line) ? line.replace(/ [0-9a-f]{64}$/, '') : line).map(line => normalize(line, d.root, false))
+  const tree = treePrint(d.storeDir).map(line => {
+    const proof = /^(proofs\/[^ ]+\.json) [0-9a-f]{64}$/.exec(line)
+    if (proof) return `${proof[1]} ${proofPrint(join(d.storeDir, proof[1]), d.root)}`
+    // 기록 파일은 원문을 따로 남기므로 트리에는 이름만(digest가 실행마다 바뀐다).
+    if (/^(state\.json(\.tmp|\.bad)?|highest\.json(\.tmp)?) /.test(line)) return line.replace(/ [0-9a-f]{64}$/, '')
+    return normalize(line, d.root)
+  })
   return {
     state: n(readOr(join(d.storeDir, 'state.json'))),
     stateTmp: n(readOr(join(d.storeDir, 'state.json.tmp'))),

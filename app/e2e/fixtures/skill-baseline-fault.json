@@ -1,0 +1,628 @@
+{
+ "_made": "a340264 (src unchanged), tests r3, 2026-11-21",
+ "R-B1": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "error"
+  ],
+  "restarts": 2,
+  "thrown": "sidecar restart failed"
+ },
+ "R-B10": {
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs",
+    "mkdir:<root>/skill-store",
+    "mkdtemp:<root>/skill-store/.download-",
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rename:<root>/skill-store/.stage-T -> <root>/skill-store/1.0.15",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.download-T"
+   ]
+  },
+  "phases": [
+   "checking",
+   "available",
+   "downloading",
+   "downloading",
+   "switching",
+   "ready"
+  ]
+ },
+ "R-B1b": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "error"
+  ],
+  "restarts": 2,
+  "thrown": "sidecar restart failed"
+ },
+ "R-B2": {
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "phases": [
+   "switching"
+  ],
+  "restarts": 0,
+  "thrown": "이 보관판은 사용할 수 없어요."
+ },
+ "R-B2b": {
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching"
+  ],
+  "restarts": 1,
+  "thrown": "이 보관판은 사용할 수 없어요."
+ },
+ "R-B5a": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "error"
+  ],
+  "restarts": 2,
+  "thrown": "sidecar restart failed"
+ },
+ "R-B5c": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  }
+ },
+ "R-B9": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "restarts": 1,
+  "attempts": 1
+ },
+ "R-D5": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "error"
+  ]
+ },
+ "R-MB-iii": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{},\"highest\":null}",
+   "stateTmp": "<ENOENT>",
+   "highest": "<ENOENT>",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "proofs/",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs"
+   ]
+  },
+  "phases": [
+   "checking",
+   "error"
+  ],
+  "status": {
+   "phase": "error",
+   "current": "1.0.13",
+   "bundled": true,
+   "highest": null,
+   "available": null,
+   "kept": [],
+   "message": "이전 판이거나 같은 판의 내용이 달라서 받지 않아요."
+  }
+ },
+ "R-N1": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "ready"
+  ]
+ },
+ "R-N2": {
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    ".damaged-1.0.15-T/",
+    ".damaged-1.0.15-T/SKILL.md eb9c5f2b9eda2580636194864488498f17ed25532e9043ed42e638a929041884",
+    ".damaged-1.0.15-T/scripts/",
+    ".damaged-1.0.15-T/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    ".damaged-1.0.15-T/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store",
+    "mkdtemp:<root>/skill-store/.download-",
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rename:<root>/skill-store/1.0.15 -> <root>/skill-store/.damaged-1.0.15-T",
+    "rename:<root>/skill-store/.stage-T -> <root>/skill-store/1.0.15",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.download-T"
+   ]
+  },
+  "phases": [
+   "checking",
+   "repair",
+   "downloading",
+   "downloading",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1
+ },
+ "R-N3": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "restarts": 1,
+  "attempts": 1
+ },
+ "R-N4": {
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\"},\"highest\":null}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.16\",\"manifest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/highest.json",
+    "mkdir:<root>/skill-store/proofs"
+   ]
+  },
+  "phases": [
+   "checking",
+   "available"
+  ],
+  "status": {
+   "phase": "available",
+   "current": "1.0.14",
+   "bundled": false,
+   "highest": null,
+   "available": "1.0.15",
+   "kept": [
+    "1.0.14"
+   ]
+  }
+ },
+ "R-N5": {
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs"
+   ]
+  },
+  "status": {
+   "phase": "idle",
+   "current": null,
+   "bundled": false,
+   "highest": "1.0.15",
+   "available": null,
+   "kept": []
+  }
+ },
+ "R-N6": {
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{},\"highest\":null}",
+   "stateTmp": "<ENOENT>",
+   "highest": "<ENOENT>",
+   "highestTmp": "{\"version\":\"1.0.16\",\"manifest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}",
+   "tree": [
+    "highest.json.tmp",
+    "proofs/",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/highest.json.tmp",
+    "mkdir:<root>/skill-store/proofs"
+   ]
+  },
+  "phases": [
+   "checking",
+   "idle"
+  ],
+  "status": {
+   "phase": "idle",
+   "current": "1.0.15",
+   "bundled": true,
+   "highest": null,
+   "available": null,
+   "kept": []
+  }
+ }
+}
