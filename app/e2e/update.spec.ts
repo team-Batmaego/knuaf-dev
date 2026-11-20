@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
-import { ASSET_PREFIX, CHANNEL_URL, compare, MAX_BYTES, sha256, verifySkill, type SkillManifest } from '../src/main/update/manifest'
+import { ASSET_PREFIX, assetUrl, CHANNEL_URL, compare, MAX_BYTES, sha256, verifySkill, type SkillManifest } from '../src/main/update/manifest'
+import { GATE, gateOf } from '../src/main/update/gate'
 import { extractSkill } from '../src/main/update/archive'
 import { UPDATE_KEYS, updateConfig } from '../src/main/update/keys'
 import { boundedFetch, type Transport } from '../src/main/update/network'
@@ -373,6 +374,42 @@ test('newer bundle wins and cleanup runs only on explicit startup, retaining act
   expect(newer.resolveSkillSource()).toBe(bundled)
   expect(() => newer.select('1.0.3')).toThrow(/사용할 수 없/)
   expect(compare('1.10.0', '1.9.99')).toBe(1)
+})
+
+test('gate build constant: absent keeps production; present pins the same-PC channel and ignores runtime env', async () => {
+  const gatePair = generateKeyPairSync('ed25519'), gateKey = gatePair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const env = { KNUAF_UPDATE_PUBLIC_KEY: publicKey, KNUAF_UPDATE_CHANNEL_URL: 'http://127.0.0.1:3210/channel.json', KNUAF_GATE_CHANNEL: 'http://127.0.0.1:4000/channel.json', KNUAF_GATE_PUBLIC_KEY: gateKey }
+  // 상수 없음(평소·출시 빌드, 이 시험 실행): 런타임 환경에 관문 이름이 있어도 운영 채널·운영 키 2개다.
+  expect(GATE).toBeNull(); expect(gateOf(null)).toBeNull(); expect(gateOf(undefined)).toBeNull()
+  expect(updateConfig(true, env)).toEqual({ channel: CHANNEL_URL, keys: Object.values(UPDATE_KEYS), development: false })
+  expect(updateConfig(true, env, null)).toEqual({ channel: CHANNEL_URL, keys: Object.values(UPDATE_KEYS), development: false })
+  expect(() => assetUrl('http://127.0.0.1:38473/knuaf-dev-GATE-0.7.4-x64.exe')).toThrow(/내려받기 주소/)
+  // 상수 있음(관문 전용 빌드): 박힌 채널·키만 쓴다 — 개발용 환경값도, 운영 키도 아니다.
+  const gate = gateOf({ mark: 'x', channel: 'http://127.0.0.1:38473/channel.json', key: gateKey })!
+  for (const packaged of [true, false]) expect(updateConfig(packaged, env, gate)).toEqual({ channel: gate.channel, keys: [gateKey], development: !packaged })
+  expect(() => assetUrl('http://127.0.0.1:38473/knuaf-dev-GATE-0.7.4-x64.exe', gate)).not.toThrow()
+  for (const url of ['http://127.0.0.1:38474/a.exe', 'http://localhost:38473/a.exe', 'https://127.0.0.1:38473/a.exe', 'http://127.0.0.1:38473@evil.example/a.exe', 'http://u@127.0.0.1:38473/a.exe',
+    'http://127.0.0.1:38473/a.exe?x=1', 'http://127.0.0.1:38473/a.exe#x', 'http://127.0.0.1:38473.evil.example/a.exe', `${ASSET_PREFIX}v0.7.4/knuaf-dev-0.7.4-x64.exe`, 7]) {
+    expect(() => assetUrl(url, gate), String(url)).toThrow(/내려받기 주소/)
+  }
+  // 같은 PC 주소 꼴이 아니거나 키가 틀리면 관문 값 자체가 성립하지 않는다(반쯤 맞는 값은 닫는다).
+  for (const channel of ['https://127.0.0.1:38473/channel.json', 'http://localhost:38473/channel.json', 'http://127.0.0.1/channel.json', 'http://127.0.0.1:38473/x.json', 'http://127.0.0.1:38473/channel.json?x',
+    'http://127.0.0.1.evil.example:38473/channel.json', 'http://192.168.0.2:38473/channel.json', 'http://127.0.0.1:99999/channel.json', CHANNEL_URL]) {
+    expect(() => gateOf({ channel, key: gateKey }), channel).toThrow(/관문 빌드 설정/)
+  }
+  // 관문 빌드는 같은 PC 밖으로 나가지 않는다: 자산의 이동(3xx)은 운영 CDN 으로든 같은 출처로든 따라가지 않는다.
+  const asset = 'http://127.0.0.1:38473/knuaf-dev-GATE-0.7.4-x64.exe', gateConfig = updateConfig(true, {}, gate)
+  for (const location of ['https://release-assets.githubusercontent.com/x/setup.exe', 'http://127.0.0.1:38473/other.exe', '/other.exe']) {
+    const hits: string[] = []
+    await expect(boundedFetch(asset, AbortSignal.timeout(5_000), async url => { hits.push(url); return new Response(null, { status: 302, headers: { location } }) }, 10, gateConfig, false, gate), location).rejects.toThrow(/이동 주소/)
+    expect(hits).toEqual([asset])
+  }
+  expect(await (await boundedFetch(asset, AbortSignal.timeout(5_000), async () => new Response('abc'), 10, gateConfig, false, gate)).text()).toBe('abc')
+  await expect(boundedFetch(`${ASSET_PREFIX}v0.7.4/knuaf-dev-0.7.4-x64.exe`, AbortSignal.timeout(5_000), async () => new Response('abc'), 10, gateConfig, false, gate)).rejects.toThrow(/내려받기 주소/)
+  // 공개키 자리의 개인키·다시 내보낸 값과 다른 PEM 은 관문 값이 아니다.
+  expect(() => gateOf({ channel: gate.channel, key: gatePair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() })).toThrow(/관문 빌드 설정/)
+  expect(() => gateOf({ channel: gate.channel, key: gateKey.trim() })).toThrow(/관문 빌드 설정/)
+  for (const raw of [{ channel: 'http://127.0.0.1:38473/channel.json', key: 'no' }, { channel: 'http://127.0.0.1:38473/channel.json' }, 'http://127.0.0.1:38473/channel.json', 0, false, '']) expect(() => gateOf(raw)).toThrow(/관문 빌드 설정/)
 })
 
 test('packaged ignores all developer overrides and uses the two pinned production keys', async () => {

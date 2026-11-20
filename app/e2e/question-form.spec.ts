@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { parseQuestionForm } from '../src/shared/question-form'
 import { zoneOf } from '../src/shared/zone'
+import { formFold, stripLines } from '../src/shared/chat-fold'
 import { launch, openProject } from './helpers'
 import { fakeCodexEnv, questionMessage, questionProject, scratch, seedChat } from './fixtures/fake-codex'
 
@@ -35,6 +36,35 @@ test('윈도우 기본 계획의 같은 줄 설명과 예시를 분리한다', (
   expect(form.fields[2].description).toBe('자기자본과 대출 예정액을 나눠 적어주세요')
   expect(form.fields[2].example).toContain('예: 자기자본 5천만 원')
   expect(parseQuestionForm(text.replace('2. **', '2) **'))).toBeNull()
+})
+
+test('F3 하나 고르는 목록은 여러 칸 입력 폼으로 바꾸지 않는다', () => {
+  const text = '[Q3] 아래 중 하나를 골라 주세요\n1) 사과\n2) 배'
+  expect(parseQuestionForm(text)).toBeNull()
+  expect(parseQuestionForm('1) 사과\n2) 배')).toBeNull()
+  const connection = { installed: true, connected: true, version: '', detail: '' }
+  const message = { id: 'a', role: 'assistant' as const, text, at: '' }
+  const snapshot = { root: '/p', provider: 'codex' as const, state: 'idle' as const, messages: [message] }
+  expect(zoneOf(snapshot, connection, null).kind).toBe('composer')
+  expect(zoneOf({ ...snapshot, messages: [{ ...message, text: text.replace('[Q3]', '[Q2-1]') }] }, connection, null).kind).toBe('question')
+})
+
+test('F5 폼과 본문 접기는 같은 마침표 목록만 읽는다', () => {
+  const dotted = '[Q2] 기본 계획\n1. 전공\n2. 자금'
+  expect(parseQuestionForm(dotted)?.fields.map(field => field.label)).toEqual(['전공', '자금'])
+  const fold = formFold(dotted)!
+  expect(fold).toEqual({ spans: [{ start: 0, end: 2 }], count: 2 })
+  expect(stripLines(dotted, fold.spans)).toBe('')
+  for (const text of [
+    dotted.replace('2. 자금', '2) 자금'),
+    dotted.replace(/\./g, ')'),
+    '[Q2] 기본 계획\n1. 전공\n2. 지역\n3) 자금',
+  ]) {
+    expect(parseQuestionForm(text)).toBeNull()
+    const rejected = formFold(text)
+    expect(rejected).toBeNull()
+    expect(stripLines(text, rejected?.spans ?? [])).toBe(text)
+  }
 })
 
 test('윈도우 화면 인용을 참고한 금액 질문 변형과 칸 설명 분리', () => {

@@ -9,7 +9,7 @@ def test_init_status_next_check_flow(project):
     st = run_gg(project, "status")
     assert st.returncode == 0, st.stderr
     data = parse_json(st.stdout)
-    assert data["revision"] == 1
+    assert data["revision"] == 2
     assert {"checks", "tasks", "completion", "skill_ready"} <= set(data)
     nx = run_gg(project, "next")
     assert nx.returncode == 0 and isinstance(parse_json(nx.stdout), list)
@@ -22,8 +22,8 @@ def test_export_draft_creates_versioned_folder(project):
     ex = run_gg(project, "export", "--kind", "draft", "--major", "specialty_crops")
     assert ex.returncode == 0, ex.stdout + ex.stderr
     path = parse_json(ex.stdout)["path"]
-    assert "/build/1/draft/" in path.replace("\\", "/")
-    assert (project / "build" / "1" / "draft" / "manifest.json").exists()
+    assert "/build/2/draft/" in path.replace("\\", "/")
+    assert (project / "build" / "2" / "draft" / "manifest.json").exists()
 
 
 def test_doctor_reports_lock_and_orphans(project):

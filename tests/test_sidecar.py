@@ -122,7 +122,7 @@ def test_utf8_requests_ignore_inherited_stdio_encoding(monkeypatch, project):
     try:
         loaded = sidecar.ok("project.load", root=str(project))["result"]
         assert loaded["project"] == core.load(project)
-        section = sidecar.ok("section.read", root=str(project), id="sec-01")["result"]
+        section = sidecar.ok("section.read", root=str(project), id="farm_status")["result"]
         assert "농장A의 재배 면적은 600평이다." in section["draft"]
     finally:
         sidecar.close()
@@ -130,7 +130,7 @@ def test_utf8_requests_ignore_inherited_stdio_encoding(monkeypatch, project):
 
 def test_status_has_four_lanes_and_banner(sidecar, project):
     st = sidecar.call("project.status", root=str(project))["result"]
-    assert st["revision"] == 1
+    assert st["revision"] == 2
     assert set(st["lanes"]) == {"machine", "content_review", "output_review", "professor"}
     assert st["lanes"]["content_review"]["independent_review_missing"] is True
     assert st["lanes"]["professor"]["recorded"] is False
@@ -139,8 +139,8 @@ def test_status_has_four_lanes_and_banner(sidecar, project):
 
 def test_sections_and_read(sidecar, project):
     secs = sidecar.call("project.sections", root=str(project))["result"]
-    assert secs[0]["id"] == "sec-01" and secs[0]["draft_hash_ok"] is True
-    body = sidecar.call("section.read", root=str(project), id="sec-01")["result"]
+    assert secs[0]["id"] == "farm_status" and secs[0]["draft_hash_ok"] is True
+    body = sidecar.call("section.read", root=str(project), id="farm_status")["result"]
     assert "600평" in body["draft"]
     missing = sidecar.call("section.read", root=str(project), id="nope")
     assert missing["error"]["code"] == "not_found"
@@ -242,7 +242,7 @@ def test_materials_list_facts_and_roles(sidecar, project):
         ],
     }
     import gg_core as core
-    core.apply(project, change, 1)
+    core.apply(project, change, core.load(project)["revision"])
     res = sidecar.call("materials.list", root=str(project))["result"]
     assert res["current_manuscript"]["provided"] is True
     assert res["current_manuscript"]["path"] == "sources/원고.docx"
