@@ -1,0 +1,2343 @@
+{
+ "_made": "a340264 (src) + ef2ecb3+REVISE tests, 2026-11-21",
+ "E1": {
+  "steps": [
+   [
+    "select .15",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E11": {
+  "steps": [
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "repair",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "install",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    ".damaged-1.0.15-T/",
+    ".damaged-1.0.15-T/SKILL.md eb9c5f2b9eda2580636194864488498f17ed25532e9043ed42e638a929041884",
+    ".damaged-1.0.15-T/scripts/",
+    ".damaged-1.0.15-T/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    ".damaged-1.0.15-T/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store",
+    "mkdtemp:<root>/skill-store/.download-",
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rename:<root>/skill-store/1.0.15 -> <root>/skill-store/.damaged-1.0.15-T",
+    "rename:<root>/skill-store/.stage-T -> <root>/skill-store/1.0.15",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.download-T"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "repair",
+   "downloading",
+   "downloading",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "publish",
+   "lock.switch"
+  ]
+ },
+ "E12": {
+  "steps": [
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "repair",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "install",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    ".damaged-1.0.15-T/",
+    ".damaged-1.0.15-T/SKILL.md eb9c5f2b9eda2580636194864488498f17ed25532e9043ed42e638a929041884",
+    ".damaged-1.0.15-T/scripts/",
+    ".damaged-1.0.15-T/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    ".damaged-1.0.15-T/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store",
+    "mkdtemp:<root>/skill-store/.download-",
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rename:<root>/skill-store/1.0.15 -> <root>/skill-store/.damaged-1.0.15-T",
+    "rename:<root>/skill-store/.stage-T -> <root>/skill-store/1.0.15",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.download-T"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "repair",
+   "downloading",
+   "downloading",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch",
+   "release",
+   "publish"
+  ]
+ },
+ "E13": {
+  "steps": [
+   [
+    "publish",
+    {
+     "threw": "사용 중인 정상 보관판은 바꾸지 않아요."
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rm:<root>/skill-store/.stage-T"
+   ]
+  },
+  "restarts": 0,
+  "phases": [],
+  "attempts": 0,
+  "events": [
+   "publish"
+  ]
+ },
+ "E14": {
+  "steps": [
+   [
+    "cleanup",
+    {
+     "ok": null
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.16\",\"kept\":{\"1.0.15\":\"D(1.0.15)\",\"1.0.16\":\"D(1.0.16)\"},\"highest\":{\"version\":\"1.0.16\",\"manifest\":\"D(1.0.16)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.16\",\"manifest\":\"D(1.0.16)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "1.0.16/",
+    "1.0.16/SKILL.md 5090cd05f0bfe07f616ffc101ccbf4c51968b9f4ec199f7e1383824012c8a978",
+    "1.0.16/scripts/",
+    "1.0.16/scripts/example.py 4c07cacf54c2a70beb04ae1fafc5b3ebec81c4cef53edf01ce3655654d9e5c01",
+    "1.0.16/skill.json 0737521234d66e8b8ff2ae61fa33e9bdee82af323a18aba1475b7ce685bcc40a",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.15.json",
+    "proofs/1.0.16.json",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store/proofs",
+    "rm:<root>/skill-store/1.0.14",
+    "rm:<root>/skill-store/proofs/1.0.14.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.damaged-1.0.14-T",
+    "rm:<root>/skill-store/.download-Tupted",
+    "rm:<root>/skill-store/.stage-Tupted"
+   ]
+  },
+  "restarts": 0,
+  "phases": [],
+  "attempts": 0,
+  "events": []
+ },
+ "E15a": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.16",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "source",
+    {
+     "ok": "<root>/bundled"
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.16",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "idle"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E15b": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "source",
+    {
+     "ok": "<root>/skill-store/1.0.15"
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.16",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "available"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E15c": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "source",
+    {
+     "ok": "<root>/bundled"
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.15",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": "1.0.16",
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md eb9c5f2b9eda2580636194864488498f17ed25532e9043ed42e638a929041884",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "available"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E15d": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": null,
+      "available": null,
+      "kept": []
+     }
+    }
+   ],
+   [
+    "source",
+    {
+     "ok": "<root>/bundled"
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": null,
+      "available": "1.0.15",
+      "kept": []
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "<ENOENT>",
+   "stateTmp": "<ENOENT>",
+   "highest": "<ENOENT>",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "proofs/"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "available"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E15e": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "source",
+    {
+     "ok": "<root>/skill-store/1.0.15"
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.16",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "{\"active\"",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json",
+    "state.json.tmp"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "available"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E15f": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.16",
+      "bundled": true,
+      "highest": null,
+      "available": null,
+      "kept": []
+     }
+    }
+   ],
+   [
+    "source",
+    {
+     "ok": "<root>/bundled"
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.16",
+      "bundled": true,
+      "highest": null,
+      "available": null,
+      "kept": []
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{},\"highest\":null}",
+   "stateTmp": "<ENOENT>",
+   "highest": "<ENOENT>",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "proofs/",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "idle"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E17": {
+  "steps": [
+   [
+    "check .14",
+    {
+     "ok": {
+      "phase": "error",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.13",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ],
+      "message": "이전 판이거나 같은 판의 내용이 달라서 받지 않아요."
+     }
+    }
+   ],
+   [
+    "install .14",
+    {
+     "threw": "먼저 업데이트를 확인해 주세요."
+    }
+   ],
+   [
+    "disposition .16",
+    {
+     "ok": "new"
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.13\",\"manifest\":\"H\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.13\",\"manifest\":\"H\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "error"
+  ],
+  "attempts": 0,
+  "events": []
+ },
+ "E18": {
+  "steps": [
+   [
+    "select 1.0.9",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ],
+   [
+    "select .15 (bad hash)",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md eb9c5f2b9eda2580636194864488498f17ed25532e9043ed42e638a929041884",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error",
+   "switching",
+   "error"
+  ],
+  "attempts": 2,
+  "events": [
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "E19": {
+  "steps": [
+   [
+    "select .15",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md 780d959dc9c9f5abf2e44ea1bc22cd9b3741d661775e91207140583cec34f14a",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E2": {
+  "steps": [
+   [
+    "select null",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E20a": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.14",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.14",
+      "available": "1.0.16",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.14",
+      "available": "1.0.16",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "cleanup",
+    {
+     "ok": null
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.14\",\"manifest\":\"D(1.0.14)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.14\",\"manifest\":\"D(1.0.14)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "available",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E20b": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": null,
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "error",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": null,
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ],
+      "message": "이전 판이거나 같은 판의 내용이 달라서 받지 않아요."
+     }
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": null,
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "cleanup",
+    {
+     "ok": null
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":null}",
+   "stateTmp": "<ENOENT>",
+   "highest": "<ENOENT>",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E20c": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15",
+       "1.0.16"
+      ]
+     }
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14",
+       "1.0.15",
+       "1.0.16"
+      ]
+     }
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14",
+       "1.0.15",
+       "1.0.16"
+      ]
+     }
+    }
+   ],
+   [
+    "cleanup",
+    {
+     "ok": null
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.15\":\"D(1.0.15)\",\"1.0.16\":\"D(1.0.16)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "1.0.16/",
+    "1.0.16/SKILL.md 5090cd05f0bfe07f616ffc101ccbf4c51968b9f4ec199f7e1383824012c8a978",
+    "1.0.16/scripts/",
+    "1.0.16/scripts/example.py 4c07cacf54c2a70beb04ae1fafc5b3ebec81c4cef53edf01ce3655654d9e5c01",
+    "1.0.16/skill.json 0737521234d66e8b8ff2ae61fa33e9bdee82af323a18aba1475b7ce685bcc40a",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.15.json",
+    "proofs/1.0.16.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "mkdir:<root>/skill-store/proofs",
+    "rm:<root>/skill-store/1.0.14",
+    "rm:<root>/skill-store/proofs/1.0.14.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "ready",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E20d": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": true,
+      "highest": "1.0.14",
+      "available": null,
+      "kept": [
+       "1.0.12",
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": true,
+      "highest": "1.0.14",
+      "available": null,
+      "kept": [
+       "1.0.12",
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.15",
+      "bundled": true,
+      "highest": "1.0.14",
+      "available": null,
+      "kept": [
+       "1.0.12",
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "cleanup",
+    {
+     "ok": null
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.12\":\"D(1.0.12)\",\"1.0.14\":\"D(1.0.14)\"},\"highest\":{\"version\":\"1.0.14\",\"manifest\":\"D(1.0.14)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.14\",\"manifest\":\"D(1.0.14)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.12/",
+    "1.0.12/SKILL.md 652fd1ebdc68ab8652f1b4d1b0b28161b00e8fb3336486af742921a46af9fbc8",
+    "1.0.12/scripts/",
+    "1.0.12/scripts/example.py eb1976370ed0a93a4552ad7f5707fcf3e792ade8dea7209318afde7dc375b8b1",
+    "1.0.12/skill.json b95b9b71aa056dd2c6adb4d4094a0ac68f21607a79a1c26fc8d21a0dae95071f",
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.12.json",
+    "proofs/1.0.14.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "mkdir:<root>/skill-store/proofs",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "idle",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E3": {
+  "steps": [
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E4": {
+  "steps": [
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.14",
+      "available": null,
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\"},\"highest\":{\"version\":\"1.0.14\",\"manifest\":\"D(1.0.14)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.14\",\"manifest\":\"D(1.0.14)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E5": {
+  "steps": [
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md eb9c5f2b9eda2580636194864488498f17ed25532e9043ed42e638a929041884",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E6": {
+  "steps": [
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md 780d959dc9c9f5abf2e44ea1bc22cd9b3741d661775e91207140583cec34f14a",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "E7": {
+  "steps": [
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.14",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "install",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store",
+    "mkdtemp:<root>/skill-store/.download-",
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rename:<root>/skill-store/.stage-T -> <root>/skill-store/1.0.15",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.download-T"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "checking",
+   "available",
+   "downloading",
+   "downloading",
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "publish",
+   "lock.switch"
+  ]
+ },
+ "E8": {
+  "steps": [
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "available",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.14",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14"
+      ]
+     }
+    }
+   ],
+   [
+    "install (restart fails)",
+    {
+     "threw": "sidecar restart failed"
+    }
+   ],
+   [
+    "install again (kept reuse)",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": "1.0.15",
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "requests",
+    {
+     "ok": 2
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "mkdir:<root>/skill-store",
+    "mkdtemp:<root>/skill-store/.download-",
+    "mkdtemp:<root>/skill-store/.stage-",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/SKILL.md",
+    "mkdir:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/.stage-T/skill.json",
+    "mkdir:<root>/skill-store/.stage-T/scripts",
+    "write:<root>/skill-store/.stage-T/scripts/example.py",
+    "write:<root>/skill-store/proofs/1.0.15.json.tmp",
+    "rename:<root>/skill-store/proofs/1.0.15.json.tmp -> <root>/skill-store/proofs/1.0.15.json",
+    "rename:<root>/skill-store/.stage-T -> <root>/skill-store/1.0.15",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.stage-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "rm:<root>/skill-store/.download-T",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 3,
+  "phases": [
+   "checking",
+   "available",
+   "downloading",
+   "downloading",
+   "switching",
+   "error",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 2,
+  "events": [
+   "publish",
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "E9": {
+  "steps": [
+   [
+    "select .15",
+    {
+     "threw": "sidecar restart failed"
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md 780d959dc9c9f5abf2e44ea1bc22cd9b3741d661775e91207140583cec34f14a",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "ESTRUCT-dir": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "select .14",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md/",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 2,
+  "events": [
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "ESTRUCT-file": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "select .14",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 2,
+  "events": [
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "ESTRUCT-link": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.15",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ],
+   [
+    "select .14",
+    {
+     "threw": "이 보관판은 사용할 수 없어요."
+    }
+   ],
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error",
+   "switching",
+   "ready"
+  ],
+  "attempts": 2,
+  "events": [
+   "lock.switch",
+   "lock.switch"
+  ]
+ },
+ "RC1": {
+  "steps": [
+   [
+    "rollback",
+    {
+     "ok": {
+      "phase": "ready",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 1,
+  "phases": [
+   "switching",
+   "ready"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "RC3": {
+  "steps": [
+   [
+    "select",
+    {
+     "threw": "sidecar restart failed"
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": [
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json",
+    "write:<root>/skill-store/state.json.tmp",
+    "rename:<root>/skill-store/state.json.tmp -> <root>/skill-store/state.json",
+    "write:<root>/skill-store/highest.json.tmp",
+    "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
+   ]
+  },
+  "restarts": 2,
+  "phases": [
+   "switching",
+   "error"
+  ],
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
+ },
+ "V1-status-two-reads": {
+  "steps": [
+   [
+    "status",
+    {
+     "ok": {
+      "phase": "idle",
+      "current": "1.0.14",
+      "bundled": false,
+      "highest": "1.0.15",
+      "available": null,
+      "kept": [
+       "1.0.14",
+       "1.0.15"
+      ]
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
+   "stateTmp": "<ENOENT>",
+   "highest": "{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "1.0.14/",
+    "1.0.14/SKILL.md a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae",
+    "1.0.14/scripts/",
+    "1.0.14/scripts/example.py 36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12",
+    "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
+    "1.0.15/",
+    "1.0.15/SKILL.md 96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890",
+    "1.0.15/scripts/",
+    "1.0.15/scripts/example.py 60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a",
+    "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
+    "highest.json",
+    "proofs/",
+    "proofs/1.0.14.json",
+    "proofs/1.0.15.json",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [],
+  "attempts": 0,
+  "events": []
+ },
+ "V2-manifest-reread": {
+  "steps": [
+   [
+    "check",
+    {
+     "ok": {
+      "phase": "error",
+      "current": "1.0.13",
+      "bundled": true,
+      "highest": null,
+      "available": null,
+      "kept": [],
+      "message": "이전 판이거나 같은 판의 내용이 달라서 받지 않아요."
+     }
+    }
+   ]
+  ],
+  "disk": {
+   "state": "{\"active\":null,\"kept\":{},\"highest\":null}",
+   "stateTmp": "<ENOENT>",
+   "highest": "<ENOENT>",
+   "highestTmp": "<ENOENT>",
+   "tree": [
+    "proofs/",
+    "state.json"
+   ],
+   "writes": []
+  },
+  "restarts": 0,
+  "phases": [
+   "checking",
+   "error"
+  ],
+  "attempts": 0,
+  "events": []
+ }
+}

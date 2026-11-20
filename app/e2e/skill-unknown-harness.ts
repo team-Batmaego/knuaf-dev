@@ -7,15 +7,22 @@
  * `import { x } from 'node:fs'` → TS/CJS 변환에서 `node_fs_1.x(...)` 즉 **호출 시점 속성 조회**가
  * 되므로, `require('node:fs')`의 속성을 바꾸면 두 나무(기준판·고친 판)에 같은 주입이 들어간다.
  *
- * ## 자리(site)는 소스 좌표로 겨냥한다
- * 꼬리표 대신 **호출 스택의 (파일, 줄)** 로 겨냥한다. 줄 번호는 손으로 적지 않고 소스의
- * 고유 스니펫에서 계산한다(`site()`). 그래서 2단계가 줄을 밀어도 같은 자리를 계속 겨냥하고,
- * 그 스니펫이 사라지면 "주입 지점이 사라졌다"로 **크게** 실패한다(조용한 통과 없음).
+ * ## 자리는 호출 스택의 함수 이름으로 겨냥한다(현행)
+ * 규칙의 `store`(가장 바깥 `SkillStore.*` 메서드)·`svc`(가장 안쪽 `SkillUpdates.*` 메서드)·`name`(파일 이름)으로
+ * 겨냥한다. 줄 번호를 쓰지 않으므로 2단계가 줄을 밀어도 같은 자리를 맞힌다. `site()`·`at`(소스 스니펫 → 줄)은
+ * 예비 도구로만 남겨 두었고 지금 시험은 쓰지 않는다.
+ *
+ * ## 발동 증명
+ * `inject.fired(rule)`은 **실제로 오류를 던지거나 값을 바꾼 횟수**다(조건만 맞고 `skip`에 걸린 호출은 세지 않는다).
+ *
+ * ## `existsSync` 대역의 한계
+ * Node의 `existsSync`는 내부에서 `access`(윈도는 추가 `stat`)를 부르고 오류면 false를 낸다. 이 대역은 그것을
+ * "같은 경로의 `lstat` 규칙이 errno면 false"로 **모형화**한 것이지 Node 내부 호출을 재현한 것이 아니다.
+ * 고친 판은 `lstat` 분류를 쓰므로 같은 규칙이 실제 EPERM을 던진다.
  *
  * ## 대역 밖으로 새지 않게
  * 이 파일 자신의 파일 접근은 **원본 함수**(`real.*`)만 쓴다. 패치된 함수를 쓰면 주입이 시험
- * 도우미의 디스크 준비·대조까지 오염된다. `harness: the fs patch is live and targeted by site`
- * 시험이 패치가 실제로 먹는지 먼저 증명한다.
+ * 도우미의 디스크 준비·대조까지 오염된다.
  */
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -40,6 +47,9 @@ const real = {
 }
 
 const SRC_MAIN = join(__dirname, '..', 'src', 'main')
+
+/** 원본 fs — 시험 파일이 골든 읽기·쓰기처럼 기록에 섞이면 안 되는 접근에 쓴다. */
+export const realFs = real
 
 /* ────────────────────────── 서명 열쇠·묶음 ────────────────────────── */
 
@@ -93,8 +103,12 @@ export function fixture(v: string, changes: Partial<SkillManifest> = {}, extra: 
     files: Object.fromEntries(entries.map(e => [e.name, sha256Of(e.data)])), ...changes
   }
   const signed = envelope(manifest)
-  return { entries, zip, manifest, signed, verified: () => verifySkill(signed, keys) }
+  const made = { entries, zip, manifest, signed, verified: () => verifySkill(signed, keys) }
+  registry.push(made)
+  return made
 }
+/** 이 프로세스에서 만든 묶음 — 골든 정규화가 실행마다 바뀌는 서명·digest를 판 이름으로 바꿀 때 쓴다. */
+const registry: { manifest: SkillManifest; zip: Buffer; verified: () => { digest: string } }[] = []
 export type Fixture = ReturnType<typeof fixture>
 
 /* ────────────────────────── 자리(site) ────────────────────────── */
@@ -176,13 +190,14 @@ export type Rule = {
 const errno = (code: string): Error => Object.assign(new Error(`${code}: injected`), { code })
 
 const tally = new Map<Rule, number>()
+const applied = new Map<Rule, number>()
 let rules: Rule[] = []
 let ops: string[] = []
 
 const nameOf = (path: string): string => path.slice(path.lastIndexOf(sep) + 1)
 
-const hit = (op: Op, path: string): Rule | null => {
-  ops.push(`${op}:${path}`)
+/** 규칙 대조만 — 기록하지 않는다. 발동하면 `applied`를 올린다. */
+const match = (op: Op, path: string): Rule | null => {
   if (!rules.length) return null
   let frames: Frame[] | null = null
   const name = nameOf(path)
@@ -201,10 +216,16 @@ const hit = (op: Op, path: string): Rule | null => {
     const n = (tally.get(rule) ?? 0) + 1
     tally.set(rule, n)
     const skip = rule.skip ?? 0, times = rule.times ?? 1
-    if (n > skip && n <= skip + times) return rule
+    if (n > skip && n <= skip + times) {
+      if (rule.code || rule.text || rule.bytes) applied.set(rule, (applied.get(rule) ?? 0) + 1)
+      return rule
+    }
   }
   return null
 }
+
+/** 호출 하나 = 기록 하나. */
+const hit = (op: Op, path: string): Rule | null => { ops.push(`${op}:${path}`); return match(op, path) }
 
 const patched = {
   readFileSync: (path: string, opts?: unknown): unknown => {
@@ -236,7 +257,8 @@ const patched = {
     real.writeFileSync(path as never, data as never, opts as never)
   },
   renameSync: (from: string, to: string): void => {
-    const rule = hit('rename', String(to)) ?? hit('rename', String(from))
+    ops.push(`rename:${String(from)} -> ${String(to)}`)
+    const rule = match('rename', String(to)) ?? match('rename', String(from))
     if (rule?.code) throw errno(rule.code)
     real.renameSync(from, to)
   },
@@ -272,9 +294,9 @@ Object.assign(fs, patched)
 
 export const inject = {
   /** 규칙을 갈아 끼운다 — 시험마다 `clear()` 뒤 새로 넣는다. */
-  set(list: Rule[]): void { rules = list.slice(); tally.clear() },
+  set(list: Rule[]): void { rules = list.slice(); tally.clear(); applied.clear() },
   /** 규칙과 기록을 모두 비운다(대역 해제). */
-  clear(): void { rules = []; tally.clear(); ops = [] },
+  clear(): void { rules = []; tally.clear(); applied.clear(); ops = [] },
   /** 호출 기록만 비운다 — 시험의 조작 구간만 세고 싶을 때. */
   mark(): void { ops = [] },
   /** 모든 파일 접근 기록(`op:절대경로`). */
@@ -286,8 +308,10 @@ export const inject = {
     const tail = `:${sep}${name}`
     return ops.filter(line => line.startsWith(`${op}:`) && (line.endsWith(tail) || line.endsWith(`:${name}`))).length
   },
-  /** 규칙이 실제로 발동한 횟수 — "주입이 안 닿았다"를 조용히 넘기지 않게. */
-  fired(rule: Rule): number { return tally.get(rule) ?? 0 },
+  /** 규칙이 실제로 오류를 던지거나 값을 바꾼 횟수 — "주입이 안 닿았다"를 조용히 넘기지 않게. */
+  fired(rule: Rule): number { return applied.get(rule) ?? 0 },
+  /** 규칙 조건이 맞은 호출 수(`skip` 포함). */
+  matched(rule: Rule): number { return tally.get(rule) ?? 0 },
   /** 경로가 들어간 호출 기록. */
   paths(op: Op): string[] { return ops.filter(line => line.startsWith(`${op}:`)).map(line => line.slice(op.length + 1)) }
 }
@@ -510,4 +534,48 @@ export function treePrint(dir: string): string[] {
 /** 시험 사이 임시 폴더 정리. */
 export function sweep(roots: string[]): void {
   for (const root of roots.splice(0)) { try { real.rmSync(root, { recursive: true, force: true }) } catch { /* 이미 없다 */ } }
+}
+
+/* ────────────────────────── 골든 관측(설계 §5.0 '대조 필드') ────────────────────────── */
+
+/** 실행마다 바뀌는 값(임시 뿌리·서명 digest·zip 해시·임시 폴더 이름)을 고정 이름으로 바꾼다. */
+export function normalize(text: string, root: string, opaqueHashes = true): string {
+  let out = text.split(root).join('<root>')
+  for (const f of registry) {
+    const v = f.manifest.version
+    out = out.split(f.verified().digest).join(`D(${v})`).split(f.manifest.sha256).join(`Z(${v})`)
+  }
+  for (const v of new Set(registry.map(f => f.manifest.version))) out = out.split(wrapDigest(v)).join(`W(${v})`)
+  return out
+    .replace(/\.(stage|download)-[A-Za-z0-9]{6}/g, '.$1-T')
+    .replace(/\.damaged-([0-9.]+)-\d+/g, '.damaged-$1-T')
+    .replace(/\b[0-9a-f]{64}\b/g, hex => opaqueHashes ? 'H' : hex)
+}
+
+const readOr = (path: string): string => { try { return real.readFileSync(path, 'utf8') } catch (e) { return `<${(e as { code?: string }).code ?? 'error'}>` } }
+
+/** 상태 전부 — 기록 파일 4개 원문(정규화), 트리(서명·기록 파일 해시는 뺌), 쓰기·rename·삭제 순서. */
+export function observeDisk(d: Disk): Record<string, unknown> {
+  const n = (t: string): string => normalize(t, d.root)
+  const tree = treePrint(d.storeDir).map(line => /^(proofs\/[^ ]+\.json|state\.json(\.tmp)?|highest\.json(\.tmp)?|state\.json\.bad) /.test(line) ? line.replace(/ [0-9a-f]{64}$/, '') : line).map(line => normalize(line, d.root, false))
+  return {
+    state: n(readOr(join(d.storeDir, 'state.json'))),
+    stateTmp: n(readOr(join(d.storeDir, 'state.json.tmp'))),
+    highest: n(readOr(join(d.storeDir, 'highest.json'))),
+    highestTmp: n(readOr(join(d.storeDir, 'highest.json.tmp'))),
+    tree,
+    writes: inject.writes().map(line => n(line))
+  }
+}
+
+/** 상태 표시에서 실행마다 바뀌는 칸(받은 바이트)은 뺀다. */
+export function shownStatus(status: unknown): unknown {
+  if (!status || typeof status !== 'object') return status
+  const { received: _r, total: _t, ...rest } = status as Record<string, unknown>
+  return rest
+}
+
+/** 한 조작의 결과 — 반환값(정규화) 또는 던진 문구. */
+export async function outcome(d: Disk, work: () => unknown): Promise<unknown> {
+  try { const got = await work(); return { ok: JSON.parse(normalize(JSON.stringify(shownStatus(got) ?? null), d.root)) } } catch (e) { return { threw: normalize(e instanceof Error ? e.message : String(e), d.root) } }
 }

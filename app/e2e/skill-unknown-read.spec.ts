@@ -13,9 +13,9 @@
  * 동시성 시험은 sleep·시간 대기 없이 문(gate)과 잠금 진입 신호로만 순서를 고정한다(설계 §5.0 H-LOCK·H-FETCH·H-RESTART).
  */
 import { expect, test } from '@playwright/test'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fixture, inject, makeDisk, makeUpdater, gate, CountingSwitch, skillDiag, sweep, type Disk, type DiskSpec, type Rule } from './skill-unknown-harness'
+import { fixture, inject, makeDisk, makeUpdater, gate, CountingSwitch, normalize, observeDisk, outcome, realFs, skillDiag, sweep, treePrint, type Disk, type DiskSpec, type Rule } from './skill-unknown-harness'
 
 const roots: string[] = []
 const disk = (spec: DiskSpec = {}): Disk => { const d = makeDisk(spec); roots.push(d.root); return d }
@@ -232,6 +232,8 @@ test('R-B1 activate: previous-read failure refuses instead of restoring null', a
   expect(stateWrites()).toBe(0)
   expect(r.count()).toBe(0)
   await expect(p).rejects.toThrow(UNKNOWN)
+  // 설계 S15: try 앞에서 던지므로 switching을 내보내지 않는다.
+  expect(u.phases).not.toContain('switching')
 })
 
 test('R-B1b activate: previous-validity failure refuses', async () => {
@@ -249,6 +251,8 @@ test('R-B1b activate: previous-validity failure refuses', async () => {
   expect(stateWrites()).toBe(0)
   expect(r.count()).toBe(0)
   await expect(p).rejects.toThrow(UNKNOWN)
+  // 설계 S15: try 앞에서 던지므로 switching을 내보내지 않는다.
+  expect(u.phases).not.toContain('switching')
 })
 
 test('R-B1-display activate: display-read failure still restores 1.0.14 (EQ)', async () => {
@@ -302,13 +306,16 @@ test('R-B2b restore: unknown at restore time keeps the requested value and still
 
 test('R-N1 select(null): unreadable state keeps kept', async () => {
   const d = disk()
+  const highestBefore = readFileSync(join(d.storeDir, 'highest.json'), 'utf8')
   const u = makeUpdater({ disk: d })
   const fault: Rule = { op: 'read', name: 'state.json', store: /^select$/, code: EPERM, times: ALWAYS }
   inject.set([fault])
   inject.mark()
   await u.updates.select(null).catch(() => {})
   fired(fault)
+  expect(inject.writes().filter(line => !line.startsWith('mkdir:'))).toEqual([])
   inject.clear()
+  expect(readFileSync(join(d.storeDir, 'highest.json'), 'utf8')).toBe(highestBefore)
   // 기준판: 빈 상태 위에 active=null을 써 kept·highest를 잃는다.
   expect(Object.keys(d.state().kept).sort()).toEqual(['1.0.14', '1.0.15'])
   expect(d.state().active).toBe('1.0.15')
@@ -357,6 +364,7 @@ test('R-B5c cleanup never overwrites an unreadable tmp', () => {
   const d = tmpDisk()
   const tmpBefore = readFileSync(join(d.storeDir, 'state.json.tmp'), 'utf8')
   const store = d.store()
+  const treeBefore = treePrint(d.storeDir), highestBefore = readFileSync(join(d.storeDir, 'highest.json'), 'utf8'), stateBefore = d.stateText()
   const fault: Rule = { op: 'read', name: 'state.json.tmp', code: EPERM, times: ALWAYS }
   inject.set([fault])
   inject.mark()
@@ -364,7 +372,12 @@ test('R-B5c cleanup never overwrites an unreadable tmp', () => {
   try { store.cleanup() } catch (e) { thrown = e }
   fired(fault)
   expect(stateWrites()).toBe(0)
+  // 삭제·이름바꾸기·쓰기 0, 트리·기록 원형 그대로.
+  expect(inject.writes()).toEqual([])
   inject.clear()
+  expect(treePrint(d.storeDir)).toEqual(treeBefore)
+  expect(d.stateText()).toBe(stateBefore)
+  expect(readFileSync(join(d.storeDir, 'highest.json'), 'utf8')).toBe(highestBefore)
   expect(readFileSync(join(d.storeDir, 'state.json.tmp'), 'utf8')).toBe(tmpBefore)
   expect(String(thrown)).toMatch(UNKNOWN)
 })
@@ -451,6 +464,64 @@ test('R-MB iii disposition: unreadable bundle manifest is unknown, not a mismatc
   expect(status.message).toMatch(UNKNOWN)
 })
 
+/* ═════════════════════════ R — 쓰기 결정 자리의 못 읽음(판정서 tests (f) 우선 보강) ═════════════════════════ */
+
+test('R-N2 install: lock-decision failure never quarantines the active without the lock', async () => {
+  // 활성 .15가 손상, 같은 digest로 수리 — 기준판은 :97의 state()로 잠금 갈래를 정한다.
+  const d = disk()
+  d.corrupt('1.0.15')
+  const lock = new CountingSwitch()
+  const u = makeUpdater({ disk: d, lock, candidate: d.versions.get('1.0.15')! })
+  expect((await u.updates.check()).phase).toBe('repair')
+  // 소비자를 잡지 않는다 — 기준판은 잠금 없이 격리한 뒤 activate의 잠금에서 기다리므로, 잡으면 시간 제한까지 멈춘다.
+  const fault: Rule = { op: 'read', name: 'state.json', svc: /^install$/, store: READ_STATE, code: EPERM, times: 1 }
+  inject.set([fault])
+  inject.mark()
+  const p = u.updates.install()
+  let thrown: unknown = null
+  try { await p } catch (e) { thrown = e }
+  fired(fault)
+  // 기준판: 빈 상태로 접어 '활성 아님' → 잠금 없이 publish → 활성 폴더를 격리(.damaged-).
+  expect(inject.writes().filter(line => line.includes('.damaged-'))).toEqual([])
+  expect(lock.attempts).toBe(0)
+  expect(readFileSync(join(d.storeDir, '1.0.15', 'SKILL.md'), 'utf8')).toBe('# damaged 1.0.15')
+  expect(String(thrown)).toMatch(UNKNOWN)
+})
+
+test('R-N6 check: unknown highest is error, not latest', async () => {
+  // 동봉 .15, 채널 .14. 기록 highest는 `.tmp`(.16)에만 있고 그 `.tmp`를 읽지 못한다.
+  const d = disk({ bundledVersion: '1.0.15', versions: [], kept: [], active: null, highest: null })
+  writeFileSync(join(d.storeDir, 'highest.json.tmp'), JSON.stringify({ version: '1.0.16', manifest: 'c'.repeat(64) }))
+  const u = makeUpdater({ disk: d, candidate: fixture('1.0.14') })
+  const fault: Rule = { op: 'read', name: 'highest.json.tmp', code: EPERM, times: ALWAYS }
+  inject.set([fault])
+  const status = await u.updates.check()
+  fired(fault)
+  // 기준판: highest를 '없음'으로 접어 조기 idle.
+  expect(status.phase).toBe('error')
+  expect(status.message).toMatch(UNKNOWN)
+})
+
+test('R-B10 publish: state read after rename failing keeps selection and kept', async () => {
+  const d = disk({ versions: ['1.0.14'], active: '1.0.14' })
+  const before = d.state()
+  const u = makeUpdater({ disk: d, candidate: fixture('1.0.15') })
+  await u.updates.check()
+  // publish 안의 state() 읽기: 1번째 = disposition, 2번째 = rename 뒤(:125).
+  const fault: Rule = { op: 'read', name: 'state.json', store: /^publish$/, skip: 1, code: EPERM, times: 1 }
+  inject.set([fault])
+  let thrown: unknown = null
+  try { await u.updates.install() } catch (e) { thrown = e }
+  fired(fault)
+  inject.clear()
+  // 기준판: 빈 상태 위에 kept={.15}·active=null을 써서 선택과 .14 기록을 잃는다.
+  expect(d.state().active).toBe('1.0.14')
+  expect(d.state().kept).toEqual(before.kept)
+  expect(d.state().highest).toEqual(before.highest)
+  expect(String(thrown)).toMatch(UNKNOWN)
+  expect(u.phases.at(-1)).toBe('error')
+})
+
 /* ═════════════════════════ 진단 줄(조건③) ═════════════════════════ */
 
 test('R-D5 diag: an unknown read leaves one skill line with stage and kind only', async () => {
@@ -465,9 +536,182 @@ test('R-D5 diag: an unknown read leaves one skill line with stage and kind only'
   inject.clear()
   const lines = skillDiag(log)
   // 기준판: skill 진단 줄이 없다.
-  expect(lines.some(line => /^skill:\S+ unknown-io-eperm$/.test(line))).toBe(true)
+  // 정확히 한 줄(판정서 tests I-04), 단계는 설계 R-B1의 `select`.
+  expect(lines.filter(line => /^skill:\S+ unknown-/.test(line))).toEqual(['skill:select unknown-io-eperm'])
   for (const line of lines) {
     expect(line).toMatch(/^skill:[a-z.-]+ [a-z-]+$/)
     expect(line).not.toMatch(/\d|\/|\\/)
   }
 })
+
+/* ═════════════════════════ GOLD — 기준판 골든 대조(설계 §5.0·§5.1, 판정서 tests C-01) ═════════════════════════
+ * 각 시나리오의 대조 필드 전부(반환/던진 문구, state·highest 원문과 .tmp, 트리 지문, 쓰기·rename·삭제 순서,
+ * 재시작 수, phase 순서, 잠금 시도 수, 잠금·publish 순서)를 `fixtures/skill-baseline-ok.json`과 비교한다.
+ * 골든은 **기준판 a340264에서** `KNUAF_GOLDEN_WRITE=1`로 한 번 채집해 동결했다(파일 머리 `_made`).
+ * 2단계 PR에서 이 파일의 diff는 0이어야 한다.
+ */
+const GOLDEN_FILE = join(__dirname, 'fixtures', 'skill-baseline-ok.json')
+const GOLDEN_WRITE = process.env.KNUAF_GOLDEN_WRITE === '1'
+
+function golden(name: string, record: unknown): void {
+  const json = JSON.parse(JSON.stringify(record)) as unknown
+  if (GOLDEN_WRITE) {
+    let all: Record<string, unknown> = {}
+    try { all = JSON.parse(realFs.readFileSync(GOLDEN_FILE, 'utf8') as string) as Record<string, unknown> } catch { /* 처음 */ }
+    all._made = process.env.KNUAF_GOLDEN_MADE ?? 'unknown'
+    all[name] = json
+    realFs.mkdirSync(join(__dirname, 'fixtures'), { recursive: true })
+    realFs.writeFileSync(GOLDEN_FILE, JSON.stringify(Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b))), null, 1) + '\n')
+    return
+  }
+  const all = JSON.parse(realFs.readFileSync(GOLDEN_FILE, 'utf8') as string) as Record<string, unknown>
+  expect(all[name], `골든 없음: ${name}`).toBeDefined()
+  expect(json).toEqual(all[name])
+}
+
+type Case = {
+  d: Disk
+  u: ReturnType<typeof makeUpdater>
+  r: ReturnType<typeof restarter>
+  lock: CountingSwitch
+  events: string[]
+  step: (label: string, work: () => unknown) => Promise<void>
+}
+type CaseSpec = {
+  spec?: DiskSpec
+  prep?: (d: Disk) => void
+  failFirstRestart?: boolean
+  restart?: (d: Disk, n: number) => Promise<void>
+  candidate?: (d: Disk) => ReturnType<typeof fixture>
+  fetchGate?: ReturnType<typeof gate>
+}
+
+async function gold(name: string, cs: CaseSpec, body: (c: Case) => Promise<void>): Promise<void> {
+  const d = disk(cs.spec ?? {})
+  cs.prep?.(d)
+  const events: string[] = []
+  const lock = new CountingSwitch(events)
+  const r = restarter(cs.failFirstRestart)
+  let n = 0
+  const restart = cs.restart ? async () => { ++n; await cs.restart!(d, n) } : r.restart
+  const u = makeUpdater({ disk: d, lock, events, restart, candidate: cs.candidate?.(d), fetchGate: cs.fetchGate })
+  const steps: [string, unknown][] = []
+  inject.mark()
+  await body({ d, u, r, lock, events, step: async (label, work) => { steps.push([label, await outcome(d, work)]) } })
+  golden(name, { steps, disk: observeDisk(d), restarts: cs.restart ? n : r.count(), phases: u.phases, attempts: lock.attempts, events })
+}
+
+const D0: DiskSpec = {}
+
+test('GOLD E1 select stored version', () => gold('E1', { spec: { active: '1.0.14' } }, async c => { await c.step('select .15', () => c.u.updates.select('1.0.15')) }))
+test('GOLD E2 select null', () => gold('E2', { spec: D0 }, async c => { await c.step('select null', () => c.u.updates.select(null)) }))
+test('GOLD E3 rollback to the lower kept', () => gold('E3', { spec: D0 }, async c => { await c.step('rollback', () => c.u.updates.rollback()) }))
+test('GOLD E4 rollback with no lower kept goes to bundle', () => gold('E4', { spec: { versions: ['1.0.14'], active: '1.0.14' } }, async c => { await c.step('rollback', () => c.u.updates.rollback()) }))
+test('GOLD E5 rollback with sure-invalid active', () => gold('E5', { spec: D0, prep: d => d.corrupt('1.0.15') }, async c => { await c.step('rollback', () => c.u.updates.rollback()) }))
+test('GOLD E6 rollback skips a sure-invalid lower candidate', () => gold('E6', { spec: D0, prep: d => d.corrupt('1.0.14') }, async c => { await c.step('rollback', () => c.u.updates.rollback()) }))
+test('GOLD E7 install new version', () => gold('E7', { spec: { versions: ['1.0.14'], active: '1.0.14' }, candidate: () => fixture('1.0.15') }, async c => {
+  await c.step('check', () => c.u.updates.check())
+  await c.step('install', () => c.u.updates.install())
+}))
+test('GOLD E8+E10 restart failure restores previous, then kept reuse', () => gold('E8', { spec: { versions: ['1.0.14'], active: '1.0.14' }, failFirstRestart: true, candidate: () => fixture('1.0.15') }, async c => {
+  await c.step('check', () => c.u.updates.check())
+  await c.step('install (restart fails)', () => c.u.updates.install())
+  await c.step('install again (kept reuse)', () => c.u.updates.install())
+  await c.step('requests', () => c.u.requests.length)
+}))
+test('GOLD E9 restart failure with sure-invalid active restores null', () => gold('E9', { spec: { active: '1.0.14' }, prep: d => d.corrupt('1.0.14'), failFirstRestart: true }, async c => { await c.step('select .15', () => c.u.updates.select('1.0.15')) }))
+test('GOLD E11 repair of a non-active kept', () => gold('E11', { spec: { active: '1.0.14' }, prep: d => d.corrupt('1.0.15'), candidate: d => d.versions.get('1.0.15')! }, async c => {
+  await c.step('check', () => c.u.updates.check())
+  await c.step('install', () => c.u.updates.install())
+}))
+test('GOLD E12 repair of the active waits for consumers', () => gold('E12', { spec: D0, prep: d => d.corrupt('1.0.15'), candidate: d => d.versions.get('1.0.15')! }, async c => {
+  await c.step('check', () => c.u.updates.check())
+  const consumer = c.lock.enter()
+  const p = c.u.updates.install()
+  await c.lock.switched
+  c.events.push('release')
+  consumer()
+  await c.step('install', () => p)
+}))
+test('GOLD E13 direct publish of the valid active throws after proof write', () => gold('E13', { spec: D0 }, async c => {
+  const f = c.d.versions.get('1.0.15')!
+  await c.step('publish', () => { c.u.store.publish(f.verified(), f.zip); return null })
+}))
+test('GOLD E14 cleanup retention and debris', () => gold('E14', { spec: { versions: ['1.0.14', '1.0.15', '1.0.16'], active: '1.0.16' }, prep: d => { for (const n of ['.stage-interrupted', '.download-interrupted', '.damaged-1.0.14-1000']) realFs.mkdirSync(join(d.storeDir, n)) } }, async c => {
+  await c.step('cleanup', () => { c.d.store().cleanup(); return null })
+}))
+
+// E15·E16: 디스크별 status·check·소비 소스.
+const surface = async (c: Case): Promise<void> => {
+  await c.step('status', () => c.u.updates.status())
+  await c.step('source', () => normalize(c.u.store.resolveSkillSource(), c.d.root))
+  await c.step('check', () => c.u.updates.check())
+}
+test('GOLD E15a bundle newer', () => gold('E15a', { spec: { bundledVersion: '1.0.16' }, candidate: () => fixture('1.0.15') }, surface))
+test('GOLD E15b same version as bundle passes', () => gold('E15b', { spec: { bundledVersion: '1.0.15' }, candidate: () => fixture('1.0.16') }, surface))
+test('GOLD E15c same version as bundle with bad hash', () => gold('E15c', { spec: { bundledVersion: '1.0.15' }, prep: d => d.corrupt('1.0.15'), candidate: () => fixture('1.0.16') }, surface))
+test('GOLD E15d first install', () => gold('E15d', { spec: { versions: [], kept: [], state: false }, candidate: () => fixture('1.0.15') }, surface))
+test('GOLD E15e half tmp', () => gold('E15e', { spec: D0, prep: d => realFs.writeFileSync(join(d.storeDir, 'state.json.tmp'), '{"active"'), candidate: () => fixture('1.0.16') }, surface))
+test('GOLD E15f channel behind bundle', () => gold('E15f', { spec: { versions: [], kept: [], active: null, highest: null, bundledVersion: '1.0.16' }, candidate: () => fixture('1.0.15') }, surface))
+
+test('GOLD E17 disposition keeps active in the floor', () => gold('E17', { spec: { active: '1.0.15', highest: '1.0.13' }, candidate: () => fixture('1.0.14') }, async c => {
+  await c.step('check .14', () => c.u.updates.check())
+  await c.step('install .14', () => c.u.updates.install())
+  await c.step('disposition .16', () => c.u.store.disposition(fixture('1.0.16').verified()))
+}))
+test('GOLD E18 unusable well-formed selection restores and restarts', () => gold('E18', { spec: { active: '1.0.14' }, prep: d => d.corrupt('1.0.15') }, async c => {
+  await c.step('select 1.0.9', () => c.u.updates.select('1.0.9'))
+  await c.step('select .15 (bad hash)', () => c.u.updates.select('1.0.15'))
+}))
+test('GOLD E19 restore of a previous that became invalid', () => gold('E19', { spec: { active: '1.0.14' }, restart: async (d, n) => { if (n === 1) { d.corrupt('1.0.14'); throw new Error('sidecar restart failed') } } }, async c => {
+  await c.step('select .15', () => c.u.updates.select('1.0.15'))
+}))
+
+// E20: 기준판 reader가 받아들이는 비정형 상태들.
+const reader = async (c: Case): Promise<void> => {
+  await c.step('status', () => c.u.updates.status())
+  await c.step('check', () => c.u.updates.check())
+  await c.step('rollback', () => c.u.updates.rollback())
+  await c.step('cleanup', () => { c.d.store().cleanup(); return null })
+}
+test('GOLD E20a active above highest', () => gold('E20a', { spec: { active: '1.0.15', highest: '1.0.14' }, candidate: () => fixture('1.0.16') }, reader))
+test('GOLD E20b highest null with active', () => gold('E20b', { spec: { active: '1.0.15', highest: null }, candidate: () => fixture('1.0.14') }, reader))
+test('GOLD E20c kept above highest', () => gold('E20c', { spec: { versions: ['1.0.14', '1.0.15', '1.0.16'], active: '1.0.14', highest: '1.0.15' }, candidate: () => fixture('1.0.15') }, reader))
+test('GOLD E20d bundle above highest above active', () => gold('E20d', { spec: { versions: ['1.0.12', '1.0.14'], active: '1.0.12', highest: '1.0.14', bundledVersion: '1.0.15' }, candidate: () => fixture('1.0.14') }, reader))
+
+// E-STRUCT: 구조 errno는 확정 무효(모름 아님).
+const structural = async (c: Case): Promise<void> => {
+  await c.step('status', () => c.u.updates.status())
+  await c.step('select .14', () => c.u.updates.select('1.0.14'))
+  await c.step('rollback', () => c.u.updates.rollback())
+}
+test('GOLD E-STRUCT file in place of the folder', () => gold('ESTRUCT-file', { spec: D0, prep: d => { realFs.rmSync(join(d.storeDir, '1.0.14'), { recursive: true, force: true }); realFs.writeFileSync(join(d.storeDir, '1.0.14'), 'x') } }, structural))
+test('GOLD E-STRUCT folder in place of a file', () => gold('ESTRUCT-dir', { spec: D0, prep: d => { realFs.rmSync(join(d.storeDir, '1.0.14', 'SKILL.md'), { force: true }); realFs.mkdirSync(join(d.storeDir, '1.0.14', 'SKILL.md')) } }, structural))
+test('GOLD E-STRUCT symlink folder', () => gold('ESTRUCT-link', { spec: D0, prep: d => { realFs.renameSync(join(d.storeDir, '1.0.14'), join(d.root, 'elsewhere-14')); symlinkSync(join(d.root, 'elsewhere-14'), join(d.storeDir, '1.0.14')) } }, structural))
+
+// 판정서 v2.3 입력 1·2와 동시성 EQ도 골든에 담는다.
+test('GOLD status with both reads succeeding', () => gold('V1-status-two-reads', { spec: { active: '1.0.14', highest: '1.0.15' } }, async c => {
+  inject.set([{ op: 'read', name: 'state.json', svc: /^status$/, store: RESOLVE, times: ALWAYS, text: t => t.replace('"active":"1.0.14"', '"active":"1.0.15"') }])
+  await c.step('status', () => c.u.updates.status())
+}))
+test('GOLD bundle manifest re-read differs', () => {
+  const { spec, candidate } = bundleCandidate()
+  return gold('V2-manifest-reread', { spec, candidate: () => candidate }, async c => {
+    inject.set([{ op: 'read', name: 'install-manifest.json', skip: 1, times: ALWAYS, text: t => t + ' ', bytes: b => Buffer.concat([b, Buffer.from(' ')]) }])
+    await c.step('check', () => c.u.updates.check())
+  })
+})
+test('GOLD R-C1 rollback target before the lock wait', () => gold('RC1', { spec: D0 }, async c => {
+  const release = c.lock.enter()
+  const p = c.u.updates.rollback()
+  c.d.writeState({ active: '1.0.14' })
+  release()
+  await c.step('rollback', () => p)
+}))
+test('GOLD R-C3 select previous after the wait', () => gold('RC3', { spec: { active: '1.0.14' }, failFirstRestart: true }, async c => {
+  const release = c.lock.enter()
+  const p = c.u.updates.select('1.0.15')
+  c.d.writeState({ active: '1.0.15' })
+  release()
+  await c.step('select', () => p)
+}))
