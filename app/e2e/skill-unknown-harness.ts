@@ -462,6 +462,8 @@ export type UpdaterOptions = {
 }
 
 export type Updater = {
+  /** 재시작 대역이 불린 횟수(던졌든 아니든). */
+  restarts: () => number
   updates: SkillUpdates
   switch: CountingSwitch
   phases: string[]
@@ -475,6 +477,7 @@ export function makeUpdater(opts: UpdaterOptions): Updater {
   const f = opts.candidate ?? fixture('1.0.15')
   const lock = opts.lock ?? new CountingSwitch(events)
   const phases: string[] = [], requests: string[] = []
+  let restartCount = 0
   const store = opts.disk.store()
   const publish = store.publish.bind(store)
   ;(store as unknown as { publish: unknown }).publish = (p: unknown, zip: Buffer): void => {
@@ -486,7 +489,7 @@ export function makeUpdater(opts: UpdaterOptions): Updater {
     config: config(),
     lock,
     emit: status => { phases.push(status.phase) },
-    restartSidecar: opts.restart ?? (async () => {}),
+    restartSidecar: async () => { ++restartCount; return (opts.restart ?? (async () => {}))() },
     fetch: async (url: string) => {
       requests.push(url)
       if (url === CHANNEL_URL) {
@@ -497,7 +500,7 @@ export function makeUpdater(opts: UpdaterOptions): Updater {
       return new Response(f.zip)
     }
   })
-  return { updates, switch: lock, phases, requests, events, store }
+  return { updates, switch: lock, phases, requests, events, store, restarts: () => restartCount }
 }
 
 /* ────────────────────────── 대조 도구 ────────────────────────── */
@@ -556,14 +559,19 @@ export function normalize(text: string, root: string): string {
     .replace(/\.damaged-([0-9.]+)-\d+/g, '.damaged-$1-T')
 }
 
-/** 서명 파일 지문 — 실행마다 바뀌는 서명은 검증 결과로, manifest는 정규화한 원문으로 남긴다. */
+/**
+ * 서명 파일 지문 — 파일 원문 그대로 남기되, 실행마다 바뀌는 칸(서명 값: 시험 키가 프로세스마다 새로 생긴다)만
+ * `S`로 바꾸고 검증 결과(`sig-ok`/`sig-bad`)를 붙인다. 키 순서·공백·줄바꿈 같은 직렬화 차이도 그대로 드러난다.
+ */
 function proofPrint(path: string, root: string): string {
+  const text = real.readFileSync(path, 'utf8') as string
+  let sig = 'sig-bad', masked = text
   try {
-    const env = JSON.parse(real.readFileSync(path, 'utf8') as string) as { manifest: string; sig: string }
-    let sig = 'sig-bad'
+    const env = JSON.parse(text) as { manifest: string; sig: string }
+    if (typeof env.sig === 'string' && env.sig) masked = text.split(env.sig).join('S')
     try { verifySkill(env, keys); sig = 'sig-ok' } catch { /* 확정 무효 */ }
-    return `manifest=${normalize(Buffer.from(env.manifest, 'base64').toString('utf8'), root)} ${sig}`
-  } catch (e) { return `<unparsable ${(e as { code?: string }).code ?? 'json'}>` }
+  } catch { sig = 'unparsable' }
+  return `${JSON.stringify(normalize(masked, root))} ${sig}`
 }
 
 const readOr = (path: string): string => { try { return real.readFileSync(path, 'utf8') } catch (e) { return `<${(e as { code?: string }).code ?? 'error'}>` } }

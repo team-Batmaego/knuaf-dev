@@ -1,6 +1,9 @@
 {
- "_made": "a340264 (src unchanged), tests r3, 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r4, 2026-11-21",
  "R-B1": {
+  "result": {
+   "threw": "sidecar restart failed"
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -19,8 +22,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -39,9 +42,24 @@
    "error"
   ],
   "restarts": 2,
-  "thrown": "sidecar restart failed"
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-B10": {
+  "result": {
+   "ok": {
+    "phase": "ready",
+    "current": "1.0.15",
+    "bundled": false,
+    "highest": "1.0.15",
+    "available": "1.0.15",
+    "kept": [
+     "1.0.15"
+    ]
+   }
+  },
   "disk": {
    "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -60,8 +78,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -97,9 +115,18 @@
    "downloading",
    "switching",
    "ready"
+  ],
+  "restarts": 1,
+  "attempts": 1,
+  "events": [
+   "publish",
+   "lock.switch"
   ]
  },
  "R-B1b": {
+  "result": {
+   "threw": "sidecar restart failed"
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -118,8 +145,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -138,9 +165,15 @@
    "error"
   ],
   "restarts": 2,
-  "thrown": "sidecar restart failed"
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-B2": {
+  "result": {
+   "threw": "이 보관판은 사용할 수 없어요."
+  },
   "disk": {
    "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -159,8 +192,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": []
@@ -169,9 +202,15 @@
    "switching"
   ],
   "restarts": 0,
-  "thrown": "이 보관판은 사용할 수 없어요."
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-B2b": {
+  "result": {
+   "threw": "이 보관판은 사용할 수 없어요."
+  },
   "disk": {
    "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -190,8 +229,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -206,9 +245,15 @@
    "switching"
   ],
   "restarts": 1,
-  "thrown": "이 보관판은 사용할 수 없어요."
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-B5a": {
+  "result": {
+   "threw": "sidecar restart failed"
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -227,8 +272,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -247,9 +292,15 @@
    "error"
   ],
   "restarts": 2,
-  "thrown": "sidecar restart failed"
+  "attempts": 1,
+  "events": [
+   "lock.switch"
+  ]
  },
  "R-B5c": {
+  "result": {
+   "ok": null
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -268,8 +319,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -278,9 +329,26 @@
     "write:<root>/skill-store/highest.json.tmp",
     "rename:<root>/skill-store/highest.json.tmp -> <root>/skill-store/highest.json"
    ]
-  }
+  },
+  "phases": null,
+  "restarts": null,
+  "attempts": null,
+  "events": null
  },
  "R-B9": {
+  "result": {
+   "ok": {
+    "phase": "ready",
+    "current": "1.0.13",
+    "bundled": true,
+    "highest": "1.0.15",
+    "available": null,
+    "kept": [
+     "1.0.14",
+     "1.0.15"
+    ]
+   }
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -299,8 +367,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -316,9 +384,13 @@
    "ready"
   ],
   "restarts": 1,
-  "attempts": 1
+  "attempts": 1,
+  "events": []
  },
  "R-D5": {
+  "result": {
+   "threw": "sidecar restart failed"
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -337,8 +409,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -356,9 +428,25 @@
   "phases": [
    "switching",
    "error"
+  ],
+  "restarts": 2,
+  "attempts": 1,
+  "events": [
+   "lock.switch"
   ]
  },
  "R-MB-iii": {
+  "result": {
+   "ok": {
+    "phase": "error",
+    "current": "1.0.13",
+    "bundled": true,
+    "highest": null,
+    "available": null,
+    "kept": [],
+    "message": "이전 판이거나 같은 판의 내용이 달라서 받지 않아요."
+   }
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{},\"highest\":null}",
    "stateTmp": "<ENOENT>",
@@ -376,17 +464,21 @@
    "checking",
    "error"
   ],
-  "status": {
-   "phase": "error",
-   "current": "1.0.13",
-   "bundled": true,
-   "highest": null,
-   "available": null,
-   "kept": [],
-   "message": "이전 판이거나 같은 판의 내용이 달라서 받지 않아요."
-  }
+  "restarts": 0,
+  "attempts": 0,
+  "events": []
  },
  "R-N1": {
+  "result": {
+   "ok": {
+    "phase": "ready",
+    "current": "1.0.13",
+    "bundled": true,
+    "highest": "1.0.15",
+    "available": null,
+    "kept": []
+   }
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -405,8 +497,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -419,9 +511,27 @@
   "phases": [
    "switching",
    "ready"
+  ],
+  "restarts": 1,
+  "attempts": 1,
+  "events": [
+   "lock.switch"
   ]
  },
  "R-N2": {
+  "result": {
+   "ok": {
+    "phase": "ready",
+    "current": "1.0.15",
+    "bundled": false,
+    "highest": "1.0.15",
+    "available": "1.0.15",
+    "kept": [
+     "1.0.14",
+     "1.0.15"
+    ]
+   }
+  },
   "disk": {
    "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -445,8 +555,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -483,9 +593,26 @@
    "switching",
    "ready"
   ],
-  "attempts": 1
+  "restarts": 1,
+  "attempts": 1,
+  "events": [
+   "publish"
+  ]
  },
  "R-N3": {
+  "result": {
+   "ok": {
+    "phase": "ready",
+    "current": "1.0.13",
+    "bundled": true,
+    "highest": "1.0.15",
+    "available": null,
+    "kept": [
+     "1.0.14",
+     "1.0.15"
+    ]
+   }
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -504,8 +631,8 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -521,9 +648,22 @@
    "ready"
   ],
   "restarts": 1,
-  "attempts": 1
+  "attempts": 1,
+  "events": []
  },
  "R-N4": {
+  "result": {
+   "ok": {
+    "phase": "available",
+    "current": "1.0.14",
+    "bundled": false,
+    "highest": null,
+    "available": "1.0.15",
+    "kept": [
+     "1.0.14"
+    ]
+   }
+  },
   "disk": {
    "state": "{\"active\":\"1.0.14\",\"kept\":{\"1.0.14\":\"D(1.0.14)\"},\"highest\":null}",
    "stateTmp": "<ENOENT>",
@@ -537,7 +677,7 @@
     "1.0.14/skill.json fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
@@ -549,18 +689,21 @@
    "checking",
    "available"
   ],
-  "status": {
-   "phase": "available",
-   "current": "1.0.14",
-   "bundled": false,
-   "highest": null,
-   "available": "1.0.15",
-   "kept": [
-    "1.0.14"
-   ]
-  }
+  "restarts": 0,
+  "attempts": 0,
+  "events": []
  },
  "R-N5": {
+  "result": {
+   "ok": {
+    "phase": "idle",
+    "current": null,
+    "bundled": false,
+    "highest": "1.0.15",
+    "available": null,
+    "kept": []
+   }
+  },
   "disk": {
    "state": "{\"active\":\"1.0.15\",\"kept\":{\"1.0.14\":\"D(1.0.14)\",\"1.0.15\":\"D(1.0.15)\"},\"highest\":{\"version\":\"1.0.15\",\"manifest\":\"D(1.0.15)\"}}",
    "stateTmp": "<ENOENT>",
@@ -579,24 +722,30 @@
     "1.0.15/skill.json f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288",
     "highest.json",
     "proofs/",
-    "proofs/1.0.14.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.14\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.14/knuaf-dev-skill-1.0.14.zip\",\"size\":565,\"sha256\":\"Z(1.0.14)\",\"files\":{\"SKILL.md\":\"a12c534032f62200c36e4987a9c6649187d837383c803ea606543831b64c1bae\",\"skill.json\":\"fd60159c01e19054d7101d1861f832b633c24a73795282ae642c1d8731030602\",\"scripts/example.py\":\"36cefc6170a8dfda734733151133bf416e8519506fa51a5bd4c81ad0e458ec12\"}} sig-ok",
-    "proofs/1.0.15.json manifest={\"schema\":1,\"name\":\"knuaf-dev\",\"version\":\"1.0.15\",\"api\":1,\"minApp\":\"0.5.1\",\"url\":\"https://github.com/team-Batmaego/knuaf-dev/releases/download/skill-v1.0.15/knuaf-dev-skill-1.0.15.zip\",\"size\":565,\"sha256\":\"Z(1.0.15)\",\"files\":{\"SKILL.md\":\"96ab3373ea13b770b720d19fa36d677a7b313be378652d23dcc3bb764b02b890\",\"skill.json\":\"f11e8f1905f3c75e22042020b2073bd0b8e35bc5b5cecbdb9aa4aac52169f288\",\"scripts/example.py\":\"60a1b437f35d448deecad0899e495e5090dabbedd1e922fe3075ac5faa66461a\"}} sig-ok",
+    "proofs/1.0.14.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE0IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE0L2tudWFmLWRldi1za2lsbC0xLjAuMTQuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiI3ZWRhZWQ5MDc3MGY2ZTJkNmNjNTA2NDYzZWRiODAyNzY2M2JjODFmNTRhOTgwNGE3YzIyZDk4NTgzODkzODczIiwiZmlsZXMiOnsiU0tJTEwubWQiOiJhMTJjNTM0MDMyZjYyMjAwYzM2ZTQ5ODdhOWM2NjQ5MTg3ZDgzNzM4M2M4MDNlYTYwNjU0MzgzMWI2NGMxYmFlIiwic2tpbGwuanNvbiI6ImZkNjAxNTljMDFlMTkwNTRkNzEwMWQxODYxZjgzMmI2MzNjMjRhNzM3OTUyODJhZTY0MmMxZDg3MzEwMzA2MDIiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiIzNmNlZmM2MTcwYThkZmRhNzM0NzMzMTUxMTMzYmY0MTZlODUxOTUwNmZhNTFhNWJkNGM4MWFkMGU0NThlYzEyIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
+    "proofs/1.0.15.json \"{\\\"manifest\\\":\\\"eyJzY2hlbWEiOjEsIm5hbWUiOiJrbnVhZi1kZXYiLCJ2ZXJzaW9uIjoiMS4wLjE1IiwiYXBpIjoxLCJtaW5BcHAiOiIwLjUuMSIsInVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS90ZWFtLUJhdG1hZWdvL2tudWFmLWRldi9yZWxlYXNlcy9kb3dubG9hZC9za2lsbC12MS4wLjE1L2tudWFmLWRldi1za2lsbC0xLjAuMTUuemlwIiwic2l6ZSI6NTY1LCJzaGEyNTYiOiJmYmNlOTg2YmZjNDczYjc0ZTkxMjdmYTc2NDQzZjdmOWFlNDRiYjYzMmI4OTJiMDZjNDEzYzg0MTk0MjBjOGJmIiwiZmlsZXMiOnsiU0tJTEwubWQiOiI5NmFiMzM3M2VhMTNiNzcwYjcyMGQxOWZhMzZkNjc3YTdiMzEzYmUzNzg2NTJkMjNkY2MzYmI3NjRiMDJiODkwIiwic2tpbGwuanNvbiI6ImYxMWU4ZjE5MDVmM2M3NWUyMjA0MjAyMGIyMDczYmQwYjhlMzViYzViNWNlY2JkYjlhYTRhYWM1MjE2OWYyODgiLCJzY3JpcHRzL2V4YW1wbGUucHkiOiI2MGExYjQzN2YzNWQ0NDhkZWVjYWQwODk5ZTQ5NWU1MDkwZGFiYmVkZDFlOTIyZmUzMDc1YWM1ZmFhNjY0NjFhIn19\\\",\\\"sig\\\":\\\"S\\\"}\" sig-ok",
     "state.json"
    ],
    "writes": [
     "mkdir:<root>/skill-store/proofs"
    ]
   },
-  "status": {
-   "phase": "idle",
-   "current": null,
-   "bundled": false,
-   "highest": "1.0.15",
-   "available": null,
-   "kept": []
-  }
+  "phases": [],
+  "restarts": 0,
+  "attempts": 0,
+  "events": []
  },
  "R-N6": {
+  "result": {
+   "ok": {
+    "phase": "idle",
+    "current": "1.0.15",
+    "bundled": true,
+    "highest": null,
+    "available": null,
+    "kept": []
+   }
+  },
   "disk": {
    "state": "{\"active\":null,\"kept\":{},\"highest\":null}",
    "stateTmp": "<ENOENT>",
@@ -616,13 +765,8 @@
    "checking",
    "idle"
   ],
-  "status": {
-   "phase": "idle",
-   "current": "1.0.15",
-   "bundled": true,
-   "highest": null,
-   "available": null,
-   "kept": []
-  }
+  "restarts": 0,
+  "attempts": 0,
+  "events": []
  }
 }
