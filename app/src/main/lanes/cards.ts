@@ -14,10 +14,10 @@ import type { Provider } from '../../shared/chat'
 import type {
   AccountSnapshot, LaneEntry, LanePlan, LaneRequest, LaneRequestEntry
 } from '../../shared/lanes'
-import { REVIEW_EFFORT, WORK_LANES, isCrossProviderModelId, judgePlan, proposeLaneRequest, type LaneProposal } from '../../shared/lanes'
+import { LANE_TABLE, REVIEW_EFFORT, WORK_LANES, checkLaneRequest, fitEffort, isCrossProviderModelId, judgePlan, proposeLaneRequest, resolveLanes, type LaneProposal } from '../../shared/lanes'
 import type {
   CardAction, CardDecision, CardInvalidReason, CardRow, CardState, CardVariant, FeeNotice, LaneCard,
-  ModelRef, ReviewModelGroup
+  ModelRef, ReviewModelGroup, PlacementEntries, PlacementOrigin, PlacementDecision, LaneModelsResult
 } from '../../shared/lanes-ipc'
 import type { JobRunner } from '../chat/jobs'
 import type { ExecutionAccount } from '../chat/jobs/types'
@@ -186,6 +186,127 @@ export async function reviewModels(deps: Pick<CardDeps, 'account'>): Promise<Rev
   return groups
 }
 
+/** 메뉴 목록도 승인과 같은 계정·모델 경계를 쓴다. */
+export async function laneModels(deps: Pick<CardDeps, 'account' | 'freshAccount'>, options?: { fresh?: boolean }): Promise<LaneModelsResult> {
+  const groups: LaneModelsResult['groups'] = []
+  const failed: Provider[] = []
+  for (const company of ['claude', 'codex', 'free'] as const) {
+    const account = await (options?.fresh && deps.freshAccount ? deps.freshAccount(company) : deps.account(company))
+    if (!account?.connected || !judgePlan(account.account).usable) continue
+    if (account.account.models === null) { failed.push(company); continue }
+    const models = account.account.models.filter(entry => !isCrossProviderModelId(entry.model))
+      .map(entry => ({ model: entry.model, name: entry.name, efforts: [...entry.efforts] }))
+    if (models.length) groups.push({ company, models })
+  }
+  return { groups, failed }
+}
+
+/** 카드·끄기와 같은 잠금 안에서 전량 검사 후 한 번 저장한다. */
+export async function setPlacement(
+  deps: CardDeps, root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin
+): Promise<PlacementDecision> {
+  const folder = canonical(root)
+  return withFolderLock(folder, async () => {
+    if (deps.store.versionOf(folder) !== baseVersion) return { outcome: 'invalid', reason: 'base-version' }
+    const lanes = ['research', 'writing', 'repeat', 'review'] as const
+    if (!entries || typeof entries !== 'object' || lanes.some(lane => !Object.hasOwn(entries, lane))
+      || Object.keys(entries).some(lane => !lanes.includes(lane as typeof lanes[number]))) {
+      throw new LaneFailure('internal', '네 역할의 배치를 모두 골라 주세요.')
+    }
+    if (!origin || (origin.kind !== 'mine' && origin.kind !== 'recommended')
+      || (origin.kind === 'recommended' && !Object.hasOwn(LANE_TABLE, origin.rowId))) {
+      throw new LaneFailure('not-found', '추천 배치를 찾지 못했어요.')
+    }
+    const accounts = await laneAccounts(deps)
+    const snapshots = accountSnapshots(accounts.executions)
+    let nextDesign: LaneEntry | null = null
+    if (origin.kind === 'recommended') {
+      const wanted = LANE_TABLE[origin.rowId].lanes.design
+      const checked = checkLaneRequest({ scope: 'continue', quote: '', lanes: { design: {
+        company: wanted.company, model: wanted.model ?? undefined, effort: wanted.effort
+      } } }, snapshots)
+      const accepted = checked.accepted[0]
+      if (!accepted?.company || !accepted.model) throw new LaneFailure('unavailable', '추천 주 모델을 쓸 수 없어요.')
+      const supported = snapshots.find(account => account.company === accepted.company)?.models
+        ?.find(model => model.model === accepted.model)?.efforts ?? []
+      const choice = deps.designChoice?.()
+      const currentEffort = choice ? choice.effort : deps.store.approvedPlan(folder)?.design?.effort ?? null
+      nextDesign = { company: accepted.company, model: accepted.model, effort: fitEffort(currentEffort, supported), how: 'main' }
+    }
+    const design = { company: deps.mainCompany, model: null, effort: null, ...deps.designChoice?.(), how: 'main' as const }
+    let requested = entries
+    if (origin.kind === 'recommended') {
+      const catalog = Object.fromEntries((['claude', 'codex', 'free'] as const).map(company => [company,
+        accounts.executions[company]?.connected ? accounts.executions[company]!.account.models : []]))
+      requested = resolveLanes(origin.rowId, { mainCompany: deps.mainCompany, catalog, design }).plan
+    }
+    const base: LanePlan = { design, research: null, writing: null, repeat: null, review: null }
+    const request: LaneRequest = { scope: 'continue', quote: '', lanes: {} }
+    for (const lane of lanes) {
+      const entry = requested[lane]
+      if (entry === null) continue
+      if (!entry || (entry.how !== 'main' && entry.how !== 'relay')) {
+        return { outcome: 'rejected', rejected: [{ lane, reason: 'malformed' }] }
+      }
+      request.lanes[lane] = entry.how === 'main' ? { main: true }
+        : { company: entry.company, model: entry.model ?? undefined, effort: entry.effort }
+    }
+    const proposal = proposeLaneRequest(request, snapshots, base, deps.mainCompany)
+    if (proposal.rejected.length) return { outcome: 'rejected', rejected: proposal.rejected.map(entry => ({ lane: entry.lane as Exclude<typeof entry.lane, 'design'>, reason: entry.reason })) }
+    const fresh = deps.freshAccount ?? deps.account
+    for (const company of ['claude', 'codex', 'free'] as const) {
+      if (nextDesign?.company !== company && !lanes.some(lane => proposal.next[lane]?.company === company && proposal.next[lane]?.how === 'relay')) continue
+      const before = accounts.executions[company]
+      const current = await fresh(company)
+      if (!before || !current?.connected || current.accountId !== before.accountId
+        || JSON.stringify(current.account) !== JSON.stringify(before.account)) return { outcome: 'invalid', reason: 'account-changed' }
+      if (!judgePlan(current.account).usable || current.usage !== 'allowed') throw new LaneFailure('unavailable', '지금은 작업을 나눠 맡길 수 없어요.')
+    }
+    if (deps.store.versionOf(folder) !== baseVersion) return { outcome: 'invalid', reason: 'base-version' }
+    if (nextDesign) await selectDesignLocked(deps, folder, nextDesign)
+    if (nextDesign?.company === deps.mainCompany) proposal.next.design = nextDesign
+    deps.store.approve(folder, proposal.next, origin)
+    deps.store.bumpVersion(folder)
+    return { outcome: 'applied', version: deps.store.versionOf(folder) }
+  })
+}
+
+/** 학생이 다른 회사 대화를 명시적으로 열 때만 예약을 소비한다. 실패하면 예약은 남는다. */
+export async function consumePendingDesign(
+  store: JobStore, root: string, company: Provider, apply: (entry: LaneEntry) => Promise<unknown>
+): Promise<void> {
+  const folder = canonical(root)
+  return withFolderLock(folder, async () => {
+    const pending = store.pendingDesign(folder)
+    if (pending?.company !== company) return
+    await apply(pending)
+    store.setPendingDesign(folder, null)
+  })
+}
+
+async function selectDesignLocked(deps: CardDeps, folder: string, entry: LaneEntry): Promise<void> {
+  if (entry.company !== deps.mainCompany) {
+    deps.store.setPendingDesign(folder, entry)
+    return
+  }
+  if (!deps.applyDesign) throw new LaneFailure('unavailable', '주 모델 설정이 연결되지 않았어요.')
+  await deps.applyDesign(folder, entry)
+  deps.store.setPendingDesign(folder, null)
+}
+
+export async function selectDesign(deps: CardDeps, root: string, entry: LaneEntry): Promise<void> {
+  const folder = canonical(root)
+  return withFolderLock(folder, async () => {
+    const account = await (deps.freshAccount ?? deps.account)(entry.company)
+    const check = checkLaneRequest({ scope: 'continue', quote: '', lanes: { design: {
+      company: entry.company, model: entry.model ?? undefined, effort: entry.effort
+    } } }, account?.connected ? [account.account] : [])
+    const accepted = check.accepted[0]
+    if (!accepted?.company || !accepted.model) throw new LaneFailure('unavailable', '이 모델을 고를 수 없어요.')
+    await selectDesignLocked(deps, folder, { company: accepted.company, model: accepted.model, effort: accepted.effort, how: 'main' })
+  })
+}
+
 /** §3-4 고르기 — 고르는 것만으로는 적용되지 않는다. §3-2 카드(검토 줄 하나)를 연다. */
 export async function pickReview(deps: CardDeps, root: string, company: Provider, model: string): Promise<LaneCard> {
   // [C1-01] 회사 값은 계정 조회(그리고 실행 파일 선택) **전에** 닫는다.
@@ -329,7 +450,6 @@ async function decideCardLocked(
         const applied = await deps.applyDesign!(folder, design!)
         if (!applied) return closeAsInvalid(deps, cardId, null)
       }
-      saveConsents(deps, stored)
       deps.store.approve(folder, plan)
       return settle(deps, cardId, { kind: 'applied', scope: 'continue' }, null, null)
     }
@@ -401,13 +521,6 @@ function closeAsInvalid(deps: CardDeps, cardId: string, reason: CardInvalidReaso
   return { outcome: 'invalid', reason, card: publicCard(settled), boundTurn: null }
 }
 
-/** 요금 동의는 카드에 낀 회사의 **카드를 띄운 계정 id** 에 남는다([이번만]도 동의는 남는다). */
-function saveConsents(deps: CardDeps, stored: StoredCard): void {
-  for (const fee of stored.fees) {
-    const accountId = stored.boundAccounts[fee.company]
-    if (accountId) deps.store.setConsent(fee.company, accountId, true)
-  }
-}
 
 /**
  * 바뀌는 줄. 거절된 줄은 `after` 가 이전 값 그대로이고 `requested` 가 학생이 요청한 값이다.
@@ -537,7 +650,7 @@ function accountSnapshots(executions: Partial<Record<Provider, ExecutionAccount>
   const snapshots: AccountSnapshot[] = []
   for (const company of ['claude', 'codex', 'free'] as const) {
     const account = executions[company]
-    if (account) snapshots.push(account.account)
+    if (account?.connected) snapshots.push(account.account)
   }
   return snapshots
 }

@@ -26,8 +26,9 @@ import { ClaudeRelayConnection } from './chat/claude'
 import { CodexRelayConnection } from './chat/codex'
 import { subscriptionEnv, type AgentOptions } from './chat/contracts'
 import { ConversationHandoff } from './chat/jobs/conversation'
-import { laneAccountProbe } from './lanes/accounts'
+import { laneAccountProbe, type AccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
+import { consumePendingDesign, selectDesign } from './lanes/cards'
 import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
 import { loadGuardKey } from './guard/key'
@@ -104,7 +105,7 @@ function findNestedProject(root: string): string | null {
  * Every renderer request goes through here; the renderer never sees Node. Returns the services so index.ts can close them on quit.
  * `images`는 스킴 처리기다 — `index.ts`만 `protocol`을 알므로 등록도 거기서 한다(ipc는 electron을 값으로 더 잡지 않는다).
  */
-export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages } {
+export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, onRecentsChanged: () => void = () => {}): { chat: ChatService; images: PaperImages; probe: AccountProbe } {
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
@@ -586,7 +587,24 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
       throw error
     }
   })
-  ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
+  ipcMain.handle('settings:set', async (_e, patch) => {
+    const provider = patch?.provider_choice?.provider
+    const root = currentRoot
+    const visit = currentVisit
+    const assertCurrent = (): void => {
+      if (currentRoot !== root || currentVisit !== visit) throw new Error('논문 폴더가 바뀌어 주 모델을 바꾸지 않았어요.')
+    }
+    if (root && provider && provider !== loadSettings().provider_choice?.provider) {
+      await consumePendingDesign(chat.lanesStore(), root, provider, async pending => {
+        assertCurrent()
+        if (!pending.model) throw new Error('예약 모델이 없어요.')
+        await chat.setModel(root, provider, { model: pending.model, effort: pending.effort }, assertCurrent)
+        assertCurrent()
+      })
+      assertCurrent()
+    }
+    const s = saveSettings(patch); onRecentsChanged(); return s
+  })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
@@ -854,7 +872,24 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
   ipcMain.handle('chat:models', async (_e, root: string | null, provider: Provider) => { try { return { result: await chat.models(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:set-model', async (_e, root: string | null, provider: Provider, choice: ModelChoice | null) => {
     // 저장·순서는 ChatService 가 맡는다(목록 검증과 저장 사이에 새 선택이 끼어드는 경합).
-    try { return { result: await chat.setModel(root, provider, choice) } } catch (e) { return chatFail(e) }
+    try {
+      if (root && choice) {
+        const folder = canonical(root)
+        if (!currentRoot || canonical(currentRoot) !== folder) throw new Error('지금 열린 논문 폴더가 아니에요.')
+        await selectDesign({
+          store: chat.lanesStore(), account: company => chat.laneAccount(company),
+          freshAccount: company => chat.laneAccount(company, { fresh: true }),
+          mainCompany: loadSettings().provider_choice?.provider ?? activeMainCompany,
+          applyDesign: async (_root, entry) => {
+            await chat.setModel(folder, entry.company, { model: entry.model!, effort: entry.effort })
+            return true
+          }
+        }, folder, { company: providerOf(provider), model: choice.model, effort: choice.effort, how: 'main' })
+        lanesHub.touch(folder)
+        return { result: choice }
+      }
+      return { result: await chat.setModel(root, provider, choice) }
+    } catch (e) { return chatFail(e) }
   })
 
   // 폴더 없이 쓰는 연결 — 첫 실행 화면(온보딩)이 폴더를 고르기 전에 쓴다. root 인자가 없다.
@@ -1083,5 +1118,5 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   sidecar.on('log', (entry) => win()?.webContents.send('sidecar:log', entry))
   sidecar.on('exit', (entry) => win()?.webContents.send('sidecar:exit', entry))
-  return { chat, images }
+  return { chat, images, probe: probeAccount }
 }

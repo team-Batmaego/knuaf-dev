@@ -33,6 +33,10 @@ function fixture() {
   const spec: JobSpec = { schema: 1, id: 'job', lane: 'research', task: 'Read inputs', inputs: [], outputs: ['result.md'], contractVersion: 'v1', company: 'codex', model: 'astra', effort: null }
   spec.research = { research_type: '생산량', questions: [], routes: [], keywords: [], output_file: 'result.md' }
   return { base, root, stateDir, owner, accounts, deliveries, calls, runner,
+    useWriting: () => {
+      spec.lane = 'writing'; delete spec.research
+      plan!.writing = { company: 'codex', model: 'astra', effort: null, how: 'relay' }
+    },
     enqueue: () => runner.enqueue(root, spec, owner, 'author'), revoke: () => { plan = null }, engineCalls: () => engineCalls,
     account: (fn: typeof account) => { account = fn }, behavior: (fn: typeof behavior) => { behavior = fn },
     handoff: (patch: Partial<ConversationHandoffOptions> = {}) => {
@@ -69,7 +73,7 @@ test('PUBLIC_TMP_ESCAPE: external bytes unchanged and unsafe public manifest rej
 })
 
 test('SWITCH_ORPHAN: consumed relay choice resolves limit exactly once to new owner', async () => {
-  const f = fixture(); f.accounts.codex.usage = 'limit'; f.enqueue(); await f.runner.runQueued()
+  const f = fixture(); f.useWriting(); f.accounts.codex.usage = 'limit'; f.enqueue(); await f.runner.runQueued()
   const p = f.runner.proposals()[0], gate = Promise.withResolvers<ExecutionAccount>()
   f.account(() => gate.promise)
   const click = f.runner.continue(p.proposalId)

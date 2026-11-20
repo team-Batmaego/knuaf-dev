@@ -40,7 +40,14 @@ export default defineConfig({
     'lanes-lines.spec.ts',
     'lanes-store.spec.ts',
     'lanes-settings-card.spec.ts',
-    'lanes-chat.spec.ts'
+    'lanes-chat.spec.ts',
+    'lane-placement.spec.ts',
+    'lane-card.spec.ts',
+    'lane-ipc.spec.ts',
+    'job-a-gate.spec.ts',
+    'lanes.spec.ts',
+    'jobs.spec.ts',
+    'job-control.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

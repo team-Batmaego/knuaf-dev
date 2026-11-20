@@ -510,7 +510,15 @@ for (const [trust, boundary] of [
         .map((file_path) => ({ _meta: { ...meta, tool_params: { file_path } } }))
     ]
     s.env.FAKE_CODEX_SERVER_REQUESTS = JSON.stringify([
-      ...variants.map((over) => ({ method: 'mcpServer/elicitation/request', params: { ...approval, ...over } })),
+      // 승인 대상은 `_meta` 가 아니라 같은 턴에 **진행 중인** `mcpToolCall` 이다 — 0.164.0 처럼
+      // 요청 직전에 그 호출의 `item/started` 를 보낸다(probe-run4.log 60·62행). 신뢰가 없는
+      // 갈래에서도 함께 보내, 살아 있는 호출이 신원 관문을 덮지 못함을 같은 장면에서 본다.
+      {
+        method: 'mcpServer/elicitation/request', params: { ...approval, ...variants[0] },
+        before: [{ method: 'item/started', params: { item: { type: 'mcpToolCall', id: 'exec-1', server: 'kordoc',
+          tool: 'parse_document', status: 'inProgress', arguments: meta.tool_params } } }]
+      },
+      ...variants.slice(1).map((over) => ({ method: 'mcpServer/elicitation/request', params: { ...approval, ...over } })),
       { method: 'item/permissions/requestApproval', params: { reason: 'PRIVATE_PERMISSION_TEXT' } },
       { method: 'future/approval', params: { secret: 'PRIVATE_UNKNOWN_TEXT' } }
     ])
@@ -541,3 +549,153 @@ for (const [trust, boundary] of [
     expect(s.requests().filter((r) => r.method === 'turn/start')).toHaveLength(1)
   })
 }
+
+/**
+ * **변이 확인 시험** — 동봉 Codex 0.164.0 실물 요청 모양(probe-run4.log 60~63행).
+ *
+ * 실물 `_meta` 키는 `codex_approval_kind`·`persist`·`tool_description`·`tool_params`·
+ * `tool_params_display` 다섯 개뿐이고 **`tool_name` 이 없다**. 도구 이름·인자는 요청 **직전**
+ * `item/started` 의 `mcpToolCall` 에만 있으므로 승인 대상은 그 진행 중 호출에서 하나로
+ * 특정해야 한다. 옛 코드(`_meta.tool_name` 필수)는 이 모양에서 전부 거절한다 — 그래서 이
+ * 시험은 고치기 전 코드에서 **빨강**이다.
+ *
+ * 검토 1차(FAIL, `REVIEW-VERDICT-1.md`) 뒤 손본 사건 10·12~16 은 6c21c18 에서 빨강이어야 한다:
+ * 10·13~15 는 이름 대조가 사라진 자리(기대 `name-mismatch`·`bad-name`/실제 `accept` 또는 `no-call`),
+ * 12 는 이름으로 후보를 먼저 줄여 1건이 되던 자리(기대 `ambiguous-call`/실제 `accept`),
+ * 16 은 진단이 미지 키 **이름**을 그대로 찍던 자리(개수 단언 불일치).
+ *
+ * 각 사건은 **서로 다른 `file_path`** 를 쓴다: 진행 중 표가 턴 내내 남으므로, 인자가 겹치면
+ * 앞 사건의 호출이 뒤 사건에 잡혀 무엇을 재는지 흐려진다.
+ */
+test('v071 MCP 승인: 0.164.0 실물 모양(_meta 에 tool_name 없음)은 진행 중 호출 하나로만 특정한다', async () => {
+  const s = scene('approval-real-shape')
+  const spec: KordocMcpSpec = {
+    command: '/app/node', args: ['/app/kordoc/mcp.js'],
+    env: { KORDOC_ROOT: s.root, KORDOC_OFFLINE: '1' }, version: '4.17.1'
+  }
+  const own = { command: spec.command, args: spec.args, env_vars: Object.keys(spec.env),
+    enabled_tools: [...READ_TOOLS], startup_timeout_sec: 20, tool_timeout_sec: 120 }
+  s.env.FAKE_CODEX_CONFIG_READ = JSON.stringify({
+    config: { mcp_servers: { kordoc: { ...own, enabled: true, environment_id: 'local' } }, plugins: {} },
+    layers: [{ name: { type: 'sessionFlags' }, config: { mcp_servers: { kordoc: own } } }]
+  })
+  s.env.FAKE_CODEX_MCP_STATUS = JSON.stringify([{ name: 'kordoc', runtimeStatus: 'disabled' }])
+  s.env.FAKE_CODEX_MCP_PROCESS_STATUS = JSON.stringify([{
+    name: 'kordoc', runtimeStatus: null, serverInfo: { name: 'kordoc', version: spec.version },
+    tools: Object.fromEntries(advertisedReadTools(spec.version)!.map((name) => [name, { name }])), toolsError: null
+  }])
+  s.env.FAKE_CODEX_MCP_PROBE_ROOT = s.root
+
+  const file = (n: number): string => { const p = join(s.root, `c${n}.hwpx`); writeFileSync(p, 'fixture'); return p }
+  const args = (n: number) => ({ file_path: file(n) })
+  const started = (id: string, tool: string, toolArgs: unknown, item: Record<string, unknown> = {}, outer: Record<string, unknown> = {}) => ({
+    method: 'item/started',
+    params: { ...outer, item: { type: 'mcpToolCall', id, server: 'kordoc', tool, status: 'inProgress', arguments: toolArgs, ...item } }
+  })
+  const completed = (id: string, toolArgs: unknown) => ({
+    method: 'item/completed',
+    params: { item: { type: 'mcpToolCall', id, server: 'kordoc', tool: 'parse_document', status: 'completed', arguments: toolArgs } }
+  })
+  /** 실물 `_meta` — 값은 probe-run4.log 62행의 모양. `tool_name` 은 **없다**. */
+  const meta = (n: number, extra: Record<string, unknown> = {}) => ({
+    codex_approval_kind: 'mcp_tool_call',
+    persist: ['session', 'always'],
+    tool_description: 'PRIVATE_TOOL_DESCRIPTION',
+    tool_params: args(n),
+    tool_params_display: [{ name: 'file_path', value: file(n), display_name: 'file_path' }],
+    ...extra
+  })
+  const ask = (n: number, extra: Record<string, unknown> = {}, message = 'Allow the kordoc MCP server to run tool "parse_document"?') => ({
+    serverName: 'kordoc', mode: 'form', message,
+    requestedSchema: { type: 'object', properties: {} }, _meta: meta(n, extra)
+  })
+
+  const cases: { before?: unknown[]; params: Record<string, unknown>; action: string; reason: string }[] = [
+    { // 1 실물 모양 그대로 + 진행 중 호출 하나 → 유일하게 특정된다
+      before: [started('exec-1', 'parse_document', args(1))], params: ask(1), action: 'accept', reason: 'call' },
+    { // 2 진행 중 호출 없음 → 특정 불가
+      params: ask(2), action: 'decline', reason: 'no-call' },
+    { // 3 인자가 다름 → 다른 호출이다
+      before: [started('exec-3', 'parse_document', { file_path: join(s.base, 'outside.hwpx') })],
+      params: ask(3), action: 'decline', reason: 'no-call' },
+    { // 4 같은 인자 두 건 → 어느 쪽인지 모른다
+      before: [started('exec-4a', 'parse_document', args(4)), started('exec-4b', 'parse_document', args(4))],
+      params: ask(4), action: 'decline', reason: 'ambiguous-call' },
+    { // 5 다른 턴의 호출
+      before: [started('exec-5', 'parse_document', args(5), {}, { turnId: 'other-turn' })],
+      params: ask(5), action: 'decline', reason: 'no-call' },
+    { // 6 다른 서버의 호출
+      before: [started('exec-6', 'parse_document', args(6), { server: 'student-mcp' })],
+      params: ask(6), action: 'decline', reason: 'no-call' },
+    { // 7 쓰기 도구가 진행 중 → 허용 목록 밖
+      before: [started('exec-7', 'create_document', args(7))], params: ask(7), action: 'decline', reason: 'policy' },
+    { // 8 표시 문구는 근거가 아니다 — 문구가 다른 도구를 말해도 판정은 진행 중 호출이 정한다
+      before: [started('exec-8', 'parse_document', args(8))],
+      params: ask(8, {}, 'Allow the kordoc MCP server to run tool "create_document"?'), action: 'accept', reason: 'call' },
+    { // 9 (옛 모양 호환) `tool_name` 이 있고 진행 중 호출과 일치
+      before: [started('exec-9', 'parse_document', args(9))],
+      params: ask(9, { tool_name: 'parse_document' }), action: 'accept', reason: 'call+named' },
+    { // 10 `tool_name` 이 유일한 진행 중 호출과 다름 → 이름 대조에서 거절
+      before: [started('exec-10', 'parse_document', args(10))],
+      params: ask(10, { tool_name: 'create_document' }), action: 'decline', reason: 'name-mismatch' },
+    { // 11 이미 끝난 호출은 진행 중이 아니다
+      before: [started('exec-11', 'parse_document', args(11)), completed('exec-11', args(11))],
+      params: ask(11), action: 'decline', reason: 'no-call' },
+    { // 12 같은 인자·다른 도구 두 건 + 이름 있는 요청 → 이름으로 후보를 줄이지 않고 먼저 2건으로 거절
+      before: [started('exec-12a', 'parse_document', args(12)), started('exec-12b', 'parse_metadata', args(12))],
+      params: ask(12, { tool_name: 'parse_metadata' }), action: 'decline', reason: 'ambiguous-call' },
+    { // 13 `tool_name` 키가 있는데 빈 문자열 → 생략이 아니라 불일치다
+      before: [started('exec-13', 'parse_document', args(13))],
+      params: ask(13, { tool_name: '' }), action: 'decline', reason: 'bad-name' },
+    { // 14 `tool_name` 키가 있는데 숫자 → 생략이 아니라 불일치다
+      before: [started('exec-14', 'parse_document', args(14))],
+      params: ask(14, { tool_name: 42 }), action: 'decline', reason: 'bad-name' },
+    { // 15 `tool_name` 키가 있는데 null → 생략이 아니라 불일치다
+      before: [started('exec-15', 'parse_document', args(15))],
+      params: ask(15, { tool_name: null }), action: 'decline', reason: 'bad-name' },
+    { // 16 미지 키(이름·값에 자유문) — 판정은 그대로, 진단은 개수만
+      before: [started('exec-16', 'parse_document', args(16))],
+      params: ask(16, { PRIVATE_UNKNOWN_ONE: file(16), PRIVATE_UNKNOWN_TWO: 'PRIVATE_TOOL_TEXT' }),
+      action: 'accept', reason: 'call' }
+  ]
+  s.env.FAKE_CODEX_SERVER_REQUESTS = JSON.stringify(cases.map((c) => ({
+    method: 'mcpServer/elicitation/request', params: c.params, ...(c.before ? { before: c.before } : {})
+  })))
+  const replies = join(s.base, 'replies.jsonl')
+  s.env.FAKE_CODEX_SERVER_REPLY_LOG = replies
+  const log = join(s.base, 'app.log')
+  const previous = process.env.KNUAF_APP_LOG
+  process.env.KNUAF_APP_LOG = log
+  const conn = connection(s)
+  try {
+    await conn.setMcpSpec(spec)
+    await conn.run('읽어줘', undefined, s.events)
+  } finally {
+    await conn.stop()
+    if (previous === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = previous
+  }
+
+  const responses = readFileSync(replies, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  expect(responses.map((reply) => reply.result)).toEqual(
+    cases.map((c) => ({ action: c.action, content: null, _meta: null }))
+  )
+  const appLog = readFileSync(log, 'utf8')
+  const lines = appLog.split('\n').filter((line) => line.includes('codex-mcp-approval'))
+  expect(lines.map((line) => /reason=([\w+-]+)/.exec(line)?.[1])).toEqual(cases.map((c) => c.reason))
+  // 진단 한 줄은 판정과 **개수**만: 키 이름·값·경로·학생 글은 남기지 않는다.
+  const KNOWN = ['codex_approval_kind', 'persist', 'tool_description', 'tool_params', 'tool_params_display',
+    'tool_name', 'codex_requires_user_input', 'codex_sensitive_action']
+  const counts = cases.map((c) => {
+    const meta = c.params._meta
+    const keys = meta && typeof meta === 'object' && !Array.isArray(meta) ? Object.keys(meta) : []
+    return { total: keys.length, unknown: keys.filter((k) => !KNOWN.includes(k)).length }
+  })
+  expect(lines.map((line) => /meta_key_count=(\d+)/.exec(line)?.[1])).toEqual(counts.map((c) => String(c.total)))
+  expect(lines.map((line) => /unknown_key_count=(\d+)/.exec(line)?.[1])).toEqual(counts.map((c) => String(c.unknown)))
+  // 줄 모양 자체를 고정한다: 판정·이유·두 개수 말고 덧붙는 것이 없다(키 목록·값·경로 부재).
+  expect(lines.every((line) => /^\d+ codex-mcp-approval verdict=(accept|decline) reason=[\w+-]+ meta_key_count=\d+ unknown_key_count=\d+$/.test(line))).toBe(true)
+  // 16번 사건이 미지 키 2개를 실은 채 통과한다 — 개수만 남고 이름·값은 어디에도 없다.
+  expect(counts[15]).toEqual({ total: 7, unknown: 2 })
+  expect(lines.join('\n')).not.toMatch(/PRIVATE_|\.hwpx|<경로>|codex_approval_kind|tool_params|tool_name|persist/)
+})

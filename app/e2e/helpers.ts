@@ -10,6 +10,20 @@ export const repo = resolve(app, '..')
 export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
 
+/** Check the real account row without relying on the model chip's label. */
+export async function expectConnected(page: Page, provider: 'codex' | 'claude' | 'free' = 'codex', timeout = 30000): Promise<void> {
+  const chip = page.getByTitle('이 논문의 도우미')
+  const wasOpen = await chip.getAttribute('aria-expanded') === 'true'
+  if (!wasOpen) await chip.click()
+  const popup = page.locator('.composer-model-host .popover')
+  const account = popup.locator('[data-submenu="true"]').getByText('AI 회사·로그인', { exact: true })
+  const row = popup.locator(`[data-provider="${provider}"]`)
+  await expect(account.or(row).first()).toBeVisible({ timeout })
+  if (await account.isVisible()) await account.click()
+  await expect(row).toContainText('연결됐어요', { timeout })
+  if (!wasOpen) await page.keyboard.press('Escape')
+}
+
 let dependencySeed: string | undefined
 
 /** Install once per worker, then copy real directories; every project still passes the app's doctor. */
@@ -156,8 +170,17 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   }
   try {
     markStartup('electron-launch:start')
+    /**
+     * 가짜 HOME(임시 userData)으로 띄운 Electron 이 safeStorage 를 부르면 맥이 "키체인을 찾을 수
+     * 없음" 창을 띄워 시험을 세운다 — 가짜 키체인 저장소를 써서 실제 키체인을 건드리지 않게 한다.
+     * 맥 전용 플래그라 다른 OS 에는 넘기지 않는다.
+     */
     const electronApp = await electron.launch({
-      args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      args: [
+        join(app, 'out', 'main', 'index.js'),
+        `--user-data-dir=${userData}`,
+        ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])
+      ],
       env,
       colorScheme: opts.colorScheme
     })
@@ -171,10 +194,14 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
       page.on('domcontentloaded', () => markStartup('renderer:dom-content-loaded'))
       page.on('load', () => markStartup('renderer:load'))
     }
-    /** Default tests need room for the sidebar, chat and paper; narrow tests resize separately. */
+    /**
+     * 기본 시험은 사이드바와 대화·논문의 세 칸이 들어가는 폭에서 돌린다.
+     * 좁은 배치를 검증하는 시험은 `setWindowWidth`로 별도 폭을 지정한다.
+     */
     await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, DEFAULT_WINDOW)
     if (opts.colorScheme || opts.reducedMotion) await page.emulateMedia({ colorScheme: opts.colorScheme, reducedMotion: opts.reducedMotion })
-    // Both first-run connection/folder steps retain the titlebar readiness signal.
+    // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
+    // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
     markStartup('titlebar-wait:start')
     await page.waitForSelector(opts.waitFor ?? '.titlebar')
     markStartup('titlebar-wait:done')
