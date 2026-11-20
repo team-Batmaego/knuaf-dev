@@ -64,7 +64,7 @@ def test_outline_is_read_only_and_returns_the_skill_answer(monkeypatch, project)
     assert len(calls) == 1
     root, loaded = calls[0]
     assert root == str(project)
-    assert loaded["revision"] == 1 and "sections" in loaded
+    assert loaded["revision"] == 2 and "sections" in loaded
 
 
 def test_missing_skill_module_is_unsupported_not_an_error(monkeypatch):
