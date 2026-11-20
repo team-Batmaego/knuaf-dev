@@ -356,7 +356,7 @@ test('inspect explains every blocking row with the same verdict as busy, and nev
   const sidecar = proc(20, 'C:\\App\\resources\\python\\python.exe', 'python.exe', 1, at(2000))
   const before = [proc(1, app, 'knuaf-dev.exe', 0, at(1000)), proc(4, app, 'knuaf-dev.exe', 1, at(1500)), sidecar, service, other]
   const fresh = (): OwnedProcessWatch => new OwnedProcessWatch({ processes: before, appPid: 1, appExecutable: app })
-  const view = (rows: ProcessInfo[]) => { const a = fresh().busy(rows), b = fresh().inspect(rows, true); expect(b.busy).toBe(a); expect(fresh().inspect(rows).rows).toEqual([]); return b }
+  const view = (rows: ProcessInfo[]) => { const a = fresh().busy(rows), b = fresh().inspect(rows, true), off = fresh().inspect(rows); expect(b.busy).toBe(a); expect(off).toMatchObject({ busy: a, blocked: b.blocked, counts: b.counts }); expect(off.rows()).toEqual([]); return { ...b, rows: b.rows() } }
   const only = (rows: ProcessInfo[]) => view(rows).rows.filter(r => r.role === 'block')
 
   // 부모는 살아 있는데 부모 생성 시각을 못 읽는다 → unknown, 막는다. 부모 행도 조상으로 실린다.
@@ -369,7 +369,11 @@ test('inspect explains every blocking row with the same verdict as busy, and nev
   expect(only([proc(21, 'C:\\Tools\\pip.exe', 'pip.exe', 20, at(3000))])[0]).toMatchObject({ kind: 'other', ownership: 'o', why: 'parent-history' })
   // 부모가 이미 죽었고 이력에도 없다 / 부모 PID 가 나중에 태어난 다른 프로세스다.
   expect(only([proc(40, 'C:\\x\\cmd.exe', 'cmd.exe', 555, at(9000))])[0]).toMatchObject({ kind: 'cmd', ownership: 'u', why: 'parent-missing', parentId: 'gone' })
-  expect(only([other, proc(41, 'C:\\x\\node.exe', 'node.exe', 9, at(100))])[0]).toMatchObject({ ownership: 'u', why: 'parent-reused' })
+  expect(only([other, proc(41, 'C:\\x\\node.exe', 'node.exe', 9, at(100))])[0]).toMatchObject({ ownership: 'u', why: 'parent-reused', parentId: 'gone' })
+  // 이력의 owned 부모가 죽고 같은 PID 를 늦게 태어난 다른 프로세스가 쓴다 — 부모 번호는 판정에 쓴 옛 세대를 가리킨다.
+  const reused = view([proc(20, 'C:\\Other\\late.exe', 'late.exe', 555, at(8000)), proc(21, 'C:\\Tools\\pip.exe', 'pip.exe', 20, at(3000))]).rows
+  const pip = reused.find(r => r.why === 'parent-history')!, late = reused.find(r => r.why === 'parent-missing')!, old = reused.find(r => r.kind === 'python')!
+  expect(old).toMatchObject({ role: 'ancestor', ownership: 'o', parentId: 'app' }); expect(pip.parentId).toBe(old.id); expect(late.id).not.toBe(old.id)
   // 앱 자손인데 경로를 못 읽으면 도우미 제외를 못 받는다. 경로가 읽히면 제외된다.
   expect(only([proc(4, null, 'knuaf-dev.exe', 1, at(1500))])[0]).toMatchObject({ ownership: 'o', why: 'history', pathRead: false })
   expect(view([proc(4, app, 'knuaf-dev.exe', 1, at(1500))])).toMatchObject({ busy: false, blocked: 0, counts: { helper: 1 } })
@@ -394,12 +398,25 @@ test('confirm and handoff diagnostics are silent without KNUAF_APP_LOG and name 
     sidecar: { stop: async () => {}, restart: async () => {} }, activity: new AgentActivity(), lock: new SkillSwitch(),
     windows: { captureOwned: async () => snapshot, confirmStopped: before => runtime.confirmStopped(before, 0), assertResourcesIdle: async () => { if (fail) throw new Error('busy') } }
   })
+  // 파일이 없다는 것만으로는 진단 일을 안 했다는 뜻이 아니다 — 근거 조립을 실제로 불렀는지 센다.
+  const inspect = OwnedProcessWatch.prototype.inspect, asked: boolean[] = []; let assembled = 0
+  OwnedProcessWatch.prototype.inspect = function (processes, detail) {
+    asked.push(!!detail); const view = inspect.call(this, processes, detail)
+    return { ...view, rows: () => { assembled++; return view.rows() } }
+  }
   try {
     delete process.env.KNUAF_APP_LOG
     await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
-    expect(existsSync(file)).toBe(false)
+    expect(existsSync(file)).toBe(false); expect(asked).toEqual([false]); expect(assembled).toBe(0)
     process.env.KNUAF_APP_LOG = file
     await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
+    expect(asked).toEqual([false, true]); expect(assembled).toBe(1)
+    // 줄은 판정이 끝난 뒤 한 번에 쓴다: 바쁜 표본 뒤에도 조회가 이어지고, 조회 도중에는 파일이 비어 있다.
+    writeFileSync(file, ''); let calls = 0, during = ''
+    const slow = new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, async () => { if (calls++) during += readFileSync(file, 'utf8'); return JSON.stringify({ resources: 'C:\\App\\resources', appExecutable: 'C:\\App\\app.exe', processes: calls > 2 ? [rows[0]] : rows }) })
+    await slow.confirmStopped(snapshot, 5_000)
+    expect(during).toBe(''); expect(readFileSync(file, 'utf8')).toMatch(/confirm:sample n=1 [^\n]*busy=1[\s\S]*confirm:sample n=3 [^\n]*busy=0[\s\S]*confirm:end result=ok samples=3/)
+    writeFileSync(file, ''); await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
     const log = readFileSync(file, 'utf8')
     expect(log).toMatch(/confirm:sample n=1 at=\d+ms inventoryMs=\d+ rows=2 busy=1 owned=0 unknown=1 unrelated=1 helper=0/)
     expect(log).toMatch(/confirm:block n=1 role=block id=\d+ parent=\d+ kind=other own=u why=parent-time-unreadable path=1 born=/)
@@ -414,7 +431,13 @@ test('confirm and handoff diagnostics are silent without KNUAF_APP_LOG and name 
     writeFileSync(file, '')
     await expect(handoff(true).run(async () => {})).rejects.toThrow(/busy/)
     expect(readFileSync(file, 'utf8')).toMatch(/handoff:step name=resources ms=\d+ ok=0 error=Error/)
+    // 하위 작업이 던진 임의의 code 문자열(실행 파일 이름일 수도 있다)은 그대로 싣지 않는다.
+    writeFileSync(file, '')
+    await expect(handoff(false).run(async () => { throw Object.assign(new Error('x'), { code: 'tool.exe' }) })).rejects.toThrow('x')
+    const failed = readFileSync(file, 'utf8')
+    expect(failed).toMatch(/handoff:step name=transfer ms=\d+ ok=0 error=other/); expect(failed).not.toMatch(/tool\.exe/)
   } finally {
+    OwnedProcessWatch.prototype.inspect = inspect
     if (saved === undefined) delete process.env.KNUAF_APP_LOG
     else process.env.KNUAF_APP_LOG = saved
   }

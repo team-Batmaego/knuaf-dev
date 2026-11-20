@@ -2,6 +2,9 @@ import { agentActivity, type AgentActivity } from './activity'
 import { skillSwitch, type SkillSwitch } from './switch'
 import type { ProcessSnapshot } from './processes'
 import { codeOf, diag, diagEnabled } from '../diagLog'
+/** 진단에 싣는 오류 이름은 이 목록뿐 — 하위 작업이 던진 임의의 `code`·`name` 문자열은 `other` 다. */
+const STEP_ERRORS = new Set(['installer_unknown', 'sidecar_down', 'sidecar_exited', 'sidecar_start_cancelled', 'sidecar_start_timeout',
+  'sidecar_stop_failed', 'sidecar_stop_timeout', 'spawn_failed', 'AbortError', 'Error', 'TypeError', 'RangeError', 'unknown'])
 /** 인계 단계의 소요·성패를 진단에 남긴다. 진단이 꺼져 있으면 일을 그대로 넘긴다(동작 불변). */
 async function step<T>(name: string, work: () => Promise<T>): Promise<T> {
   if (!diagEnabled()) return work()
@@ -11,7 +14,8 @@ async function step<T>(name: string, work: () => Promise<T>): Promise<T> {
     diag(`handoff:step name=${name} ms=${Date.now() - started} ok=1`)
     return value
   } catch (error) {
-    diag(`handoff:step name=${name} ms=${Date.now() - started} ok=0 error=${codeOf(error)}`)
+    const code = codeOf(error)
+    diag(`handoff:step name=${name} ms=${Date.now() - started} ok=0 error=${STEP_ERRORS.has(code) ? code : 'other'}`)
     throw error
   }
 }
