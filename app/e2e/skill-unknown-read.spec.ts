@@ -617,6 +617,25 @@ test('R-B3f cleanup never writes the backup through an existing state.json.bad l
   expect(backedUp || stopped).toBe(true)
 })
 
+test('R-B3g a failed backup replacement keeps the previous state.json.bad', async () => {
+  // roh293c N-02: 새 백업을 쓰기 전에 직전 `.bad`를 지워, 새 쓰기가 실패하면(디스크 가득) 이전 복구본이 사라졌다.
+  // 기준판은 `.bad`를 다루지 않으므로 이 시험은 기준판에서 통과한다 — 이번 판에 새로 넣은 백업 동작을 지킨다.
+  const d = disk()
+  const bad = join(d.storeDir, 'state.json.bad')
+  realFs.writeFileSync(bad, 'previous backup')
+  realFs.writeFileSync(join(d.storeDir, 'state.json'), '{')
+  const store = d.store()
+  const fault: Rule = { op: 'write', store: /^cleanup$/, code: 'ENOSPC', times: ALWAYS }
+  inject.set([fault])
+  const res = await settle(() => store.cleanup())
+  fired(fault)
+  inject.clear()
+  await faultRecord('R-B3g', d, null, res)
+  expect('threw' in res).toBe(true)
+  expect(realFs.readFileSync(bad, 'utf8')).toBe('previous backup')
+  expect(realFs.readFileSync(join(d.storeDir, 'state.json'), 'utf8')).toBe('{')
+})
+
 /* ═════════════════════════ 진단 줄(조건③) ═════════════════════════ */
 
 test('R-D5 diag: an unknown read leaves one skill line with stage and kind only', async () => {
