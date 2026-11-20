@@ -598,6 +598,24 @@ test('R-B3e cleanup of a corrupt state body keeps the original bytes as state.js
   expect(realFs.existsSync(join(d.storeDir, '1.0.15'))).toBe(true)
 })
 
+test('R-B3f cleanup never writes the backup through an existing state.json.bad link', async () => {
+  // roh293b N-01: 이미 있는 `state.json.bad`가 다른 파일을 가리키는 링크면 복사가 그 대상을 덮었다.
+  const d = disk()
+  const victim = join(d.root, 'victim.txt')
+  realFs.writeFileSync(victim, 'keep me')
+  symlinkSync(victim, join(d.storeDir, 'state.json.bad'))
+  realFs.writeFileSync(join(d.storeDir, 'state.json'), '{')
+  const store = d.store()
+  const res = await settle(() => store.cleanup())
+  await faultRecord('R-B3f', d, null, res)
+  // 링크 대상은 그대로, 백업은 링크가 아닌 새 파일로 원본 `{`를 담는다(또는 정리가 멈춰 본문이 그대로).
+  expect(realFs.readFileSync(victim, 'utf8')).toBe('keep me')
+  const bad = join(d.storeDir, 'state.json.bad')
+  const backedUp = !realFs.lstatSync(bad).isSymbolicLink() && realFs.readFileSync(bad, 'utf8') === '{'
+  const stopped = 'threw' in res && realFs.readFileSync(join(d.storeDir, 'state.json'), 'utf8') === '{'
+  expect(backedUp || stopped).toBe(true)
+})
+
 /* ═════════════════════════ 진단 줄(조건③) ═════════════════════════ */
 
 test('R-D5 diag: an unknown read leaves one skill line with stage and kind only', async () => {
@@ -666,6 +684,19 @@ test('R-D1 diag: select, rollback and restore leave their own wrote lines', asyn
   expect(rolled.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:rollback wrote-none-chosen'])
   const restored = await diagRun({ active: '1.0.14' }, d => d.corrupt('1.0.14'), u => u.updates.select('1.0.15'), { failFirstRestart: true })
   expect(restored.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:select wrote-selection', 'skill:restore wrote-none-forced'])
+})
+
+test('R-D3b diag: the kept suffix judges the version the resolver checked, not the first read', async () => {
+  // roh293b I-03: 첫 읽기는 정상 .14, resolver 읽기는 손상된 .15를 가리킨다 → .15는 보관 목록 검증도 실패 → kept-invalid.
+  const swap: Rule = { op: 'read', name: 'state.json', svc: /^status$/, store: RESOLVE, times: 1, text: t => t.replace('"active":"1.0.14"', '"active":"1.0.15"') }
+  const lines = await diagRun({ active: '1.0.14' }, d => { d.corrupt('1.0.15'); inject.set([swap]) }, u => u.updates.check(), { candidate: '1.0.16' })
+  expect(lines.filter(line => line.startsWith('skill:status.checking '))).toEqual(['skill:status.checking bundle-forced-invalid-sure-kept-invalid'])
+})
+
+test('R-D1b diag: restoring to a deliberately chosen newer bundle is wrote-none-chosen', async () => {
+  // roh293b I-03: 동봉 .15가 활성 .14보다 높아 resolver가 동봉을 고른 상태(chosen-newer)에서 .16 선택 → 재시작 실패 → 되돌림 null.
+  const lines = await diagRun({ bundledVersion: '1.0.15', versions: ['1.0.14', '1.0.16'], active: '1.0.14', highest: '1.0.16' }, () => {}, u => u.updates.select('1.0.16'), { failFirstRestart: true })
+  expect(lines.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:select wrote-selection', 'skill:restore wrote-none-chosen'])
 })
 
 /* ═════════════════════════ GOLD — 기준판 골든 대조(설계 §5.0·§5.1, 판정서 tests C-01) ═════════════════════════
