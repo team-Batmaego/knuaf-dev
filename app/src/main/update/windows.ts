@@ -4,7 +4,7 @@ import { join, win32 } from 'node:path'
 import { hash, object, version } from './manifest'
 import { NATIVE_FILES } from './nativeFiles'
 import { NATIVE_INSTALLER, type InstallerLaunch } from './nativeInstaller'
-import { MAX_BLOCK_ROWS, OwnedProcessWatch, resourcesBusy, type Inspection, type ProcessInfo, type ProcessSnapshot } from './processes'
+import { MAX_BLOCK_ROWS, OwnedProcessWatch, resourcesBusy, type ProcessInfo, type ProcessSnapshot } from './processes'
 import { NATIVE_PROCESSES } from './nativeProcesses'
 import { detectInstallMode, type InstallMode } from './installMode'
 import { diag, diagEnabled } from '../diagLog'
@@ -18,8 +18,24 @@ function shellErrorKind(stderr: string): string {
   const found = SHELL_ERRORS.find(name => stderr.includes(name))
   return found === undefined ? 'other' : found === SHELL_ERRORS[0] ? 'pid-reused' : found
 }
-/** 인계 확인 한 번이 메모리에 모으는 진단 줄 수의 상한. */
-const MAX_TRACE_LINES = 600
+/** 인계 확인 한 번이 붙잡아 두는 표본 수의 상한(마지막 표본은 상한과 무관하게 남긴다). */
+const MAX_TRACE_SAMPLES = 80
+interface TraceSample { n: number; asked: number; at: number; rows: ProcessInfo[] }
+type TraceResult = 'ok' | 'deadline' | 'error'
+/**
+ * 인계 확인이 끝난 뒤에 부른다. 같은 처음 목록과 같은 표본 순서를 새 감시에 다시 넣으면 분류가
+ * 그대로 재현된다(분류는 입력 순서에만 달려 있다) — 판정에 쓴 감시는 건드리지 않는다.
+ */
+function writeTrace(before: ProcessSnapshot, started: number, samples: TraceSample[], count: number, result: TraceResult, finished: number): void {
+  const watch = new OwnedProcessWatch(before, started)
+  for (const { n, asked, at, rows } of samples) {
+    const view = watch.inspect(rows, true)
+    diag(`confirm:sample n=${n} at=${at - started}ms inventoryMs=${at - asked} rows=${rows.length} busy=${view.busy ? 1 : 0} owned=${view.counts.owned} unknown=${view.counts.unknown} unrelated=${view.counts.unrelated} helper=${view.counts.helper}`)
+    for (const row of view.rows()) diag(`confirm:block n=${n} role=${row.role} id=${row.id} parent=${row.parentId} kind=${row.kind} own=${row.ownership} why=${row.why} path=${row.pathRead ? 1 : 0} born=${row.bornMs === null ? '-' : `${row.bornMs}ms`}`)
+    if (view.blocked > MAX_BLOCK_ROWS) diag(`confirm:block n=${n} more=+${view.blocked - MAX_BLOCK_ROWS}`)
+  }
+  diag(`confirm:end result=${result} samples=${count} elapsed=${result === 'error' ? '-' : `${finished - started}ms`}`)
+}
 const literal = (s: string): string => "'" + s.replaceAll("'", "''") + "'"
 export const runPowerShell: PowerShell = async (script, timeout, _launch, phase) => {
   if (process.platform !== 'win32') throw new Error('Windows에서만 실행할 수 있어요.')
@@ -81,37 +97,32 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
   }
   async confirmStopped(before: ProcessSnapshot, timeout = 6_000): Promise<void> {
     const end = Date.now() + timeout, watch = new OwnedProcessWatch(before)
-    // 진단(`KNUAF_APP_LOG`)이 꺼져 있으면 시계도 문자열도 만들지 않는다. 켜져 있어도 근거 조립은
-    // 판정(바쁨·마감)을 쓴 뒤에 하고, 줄은 메모리에 모았다가 끝날 때 한 번에 쓴다 — 진단의 조립·
-    // 파일 쓰기가 마감 판독이나 다음 조회 시작을 늦추지 않는다.
-    const traced = diagEnabled(), started = traced ? Date.now() : 0, lines: string[] = []
-    const note = (n: number, asked: number, at: number, count: number, view: Inspection): void => {
-      if (lines.length >= MAX_TRACE_LINES) return
-      lines.push(`confirm:sample n=${n} at=${at - started}ms inventoryMs=${at - asked} rows=${count} busy=${view.busy ? 1 : 0} owned=${view.counts.owned} unknown=${view.counts.unknown} unrelated=${view.counts.unrelated} helper=${view.counts.helper}`)
-      for (const row of view.rows()) lines.push(`confirm:block n=${n} role=${row.role} id=${row.id} parent=${row.parentId} kind=${row.kind} own=${row.ownership} why=${row.why} path=${row.pathRead ? 1 : 0} born=${row.bornMs === null ? '-' : `${row.bornMs}ms`}`)
-      if (view.blocked > MAX_BLOCK_ROWS) lines.push(`confirm:block n=${n} more=+${view.blocked - MAX_BLOCK_ROWS}`)
-    }
+    // 판정 경로는 진단이 켜져 있든 꺼져 있든 같은 일을 한다: `busy` → 마감 판독 → 다음 조회 예약.
+    // 진단(`KNUAF_APP_LOG`)이 켜져 있으면 표본(조회 결과 배열)과 시각만 붙잡아 두고, 근거 조립과
+    // 파일 쓰기는 이 함수가 끝난 **뒤**(`setImmediate`)에 같은 표본을 다시 분류해서 한다.
+    const traced = diagEnabled(), started = traced ? Date.now() : 0, samples: TraceSample[] = []
+    let count = 0, result: TraceResult = 'error', finished = 0
     try {
       for (let n = 1; ; n++) {
         const asked = traced ? Date.now() : 0
         const rows = (await this.inventory()).processes
-        const view = watch.inspect(rows, traced)
-        if (!view.busy) {
-          if (traced) { const at = Date.now(); note(n, asked, at, rows.length, view); lines.push(`confirm:end result=ok samples=${n} elapsed=${at - started}ms`) }
+        count = n
+        if (!watch.busy(rows)) {
+          if (traced) { finished = Date.now(); samples.push({ n, asked, at: finished, rows }); result = 'ok' }
           return
         }
         const now = Date.now()
         if (now >= end) {
-          if (traced) { note(n, asked, now, rows.length, view); lines.push(`confirm:end result=deadline samples=${n} elapsed=${now - started}ms`) }
+          if (traced) { finished = now; samples.push({ n, asked, at: now, rows }); result = 'deadline' }
           throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
         }
         const { promise, resolve } = Promise.withResolvers<void>()
         setTimeout(resolve, Math.min(100, Math.max(0, end - Date.now())))
-        if (traced) note(n, asked, now, rows.length, view)
+        if (traced && samples.length < MAX_TRACE_SAMPLES) samples.push({ n, asked, at: now, rows })
         await promise
       }
     } finally {
-      for (const line of lines) diag(line)
+      if (traced) setImmediate(() => { try { writeTrace(before, started, samples, count, result, finished) } catch { /* 진단이 앱 동작을 깨지 않는다 */ } })
     }
   }
   async assertResourcesIdle(): Promise<void> {

@@ -37,9 +37,8 @@ export class OwnedProcessWatch {
   private app: string
   private times = new Map<string, string | null>()
   private labels = new Map<string, number>()
-  /** 감시를 만든 시각 — 진단의 `bornMs` 기준(음수 = 인계 확인 전에 태어남). */
-  private started = Date.now()
-  constructor(private snapshot: ProcessSnapshot) {
+  /** `started`: 진단의 `bornMs` 기준 시각(음수 = 인계 확인 전에 태어남). 판정에는 쓰지 않는다. */
+  constructor(private snapshot: ProcessSnapshot, private started = 0) {
     this.app = windowsPath(snapshot.appExecutable)
     const ids = new Set([snapshot.appPid])
     let changed = true

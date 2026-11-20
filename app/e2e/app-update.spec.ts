@@ -355,7 +355,7 @@ test('inspect explains every blocking row with the same verdict as busy, and nev
   const service = proc(700, null, 'svchost.exe', 5, ''), other = proc(9, 'C:\\Other\\parent.exe', 'parent.exe', 0, at(500))
   const sidecar = proc(20, 'C:\\App\\resources\\python\\python.exe', 'python.exe', 1, at(2000))
   const before = [proc(1, app, 'knuaf-dev.exe', 0, at(1000)), proc(4, app, 'knuaf-dev.exe', 1, at(1500)), sidecar, service, other]
-  const fresh = (): OwnedProcessWatch => new OwnedProcessWatch({ processes: before, appPid: 1, appExecutable: app })
+  const fresh = (): OwnedProcessWatch => new OwnedProcessWatch({ processes: before, appPid: 1, appExecutable: app }, 5000)
   const view = (rows: ProcessInfo[]) => { const a = fresh().busy(rows), b = fresh().inspect(rows, true), off = fresh().inspect(rows); expect(b.busy).toBe(a); expect(off).toMatchObject({ busy: a, blocked: b.blocked, counts: b.counts }); expect(off.rows()).toEqual([]); return { ...b, rows: b.rows() } }
   const only = (rows: ProcessInfo[]) => view(rows).rows.filter(r => r.role === 'block')
 
@@ -404,19 +404,27 @@ test('confirm and handoff diagnostics are silent without KNUAF_APP_LOG and name 
     asked.push(!!detail); const view = inspect.call(this, processes, detail)
     return { ...view, rows: () => { assembled++; return view.rows() } }
   }
+  // 진단은 인계 확인이 끝난 다음 차례에 쓴다 — 읽기 전에 한 차례 넘긴다.
+  const settle = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
   try {
     delete process.env.KNUAF_APP_LOG
     await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
-    expect(existsSync(file)).toBe(false); expect(asked).toEqual([false]); expect(assembled).toBe(0)
+    await settle(); expect(existsSync(file)).toBe(false); expect(asked).toEqual([false]); expect(assembled).toBe(0)
     process.env.KNUAF_APP_LOG = file
     await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
-    expect(asked).toEqual([false, true]); expect(assembled).toBe(1)
-    // 줄은 판정이 끝난 뒤 한 번에 쓴다: 바쁜 표본 뒤에도 조회가 이어지고, 조회 도중에는 파일이 비어 있다.
+    // 판정 경로는 꺼짐과 같은 호출(근거 없음) 하나뿐이고, 돌아온 시점에는 아직 아무것도 쓰지 않았다.
+    expect(asked).toEqual([false, false]); expect(assembled).toBe(0); expect(existsSync(file)).toBe(false)
+    await settle(); expect(asked).toEqual([false, false, true]); expect(assembled).toBe(1)
+    // 바쁜 표본 뒤에도 조회가 이어지고, 조회 도중에는 파일이 비어 있다.
     writeFileSync(file, ''); let calls = 0, during = ''
     const slow = new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, async () => { if (calls++) during += readFileSync(file, 'utf8'); return JSON.stringify({ resources: 'C:\\App\\resources', appExecutable: 'C:\\App\\app.exe', processes: calls > 2 ? [rows[0]] : rows }) })
     await slow.confirmStopped(snapshot, 5_000)
-    expect(during).toBe(''); expect(readFileSync(file, 'utf8')).toMatch(/confirm:sample n=1 [^\n]*busy=1[\s\S]*confirm:sample n=3 [^\n]*busy=0[\s\S]*confirm:end result=ok samples=3/)
-    writeFileSync(file, ''); await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
+    expect(during).toBe(''); expect(readFileSync(file, 'utf8')).toBe(''); await settle(); expect(readFileSync(file, 'utf8')).toMatch(/confirm:sample n=1 [^\n]*busy=1[\s\S]*confirm:sample n=3 [^\n]*busy=0[\s\S]*confirm:end result=ok samples=3/)
+    writeFileSync(file, ''); await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/); await settle()
+    // 조회가 던지면 붙잡은 표본 없이 끝 줄만 남는다.
+    const broken = new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, async () => { throw new Error('shell') })
+    await expect(broken.confirmStopped(snapshot, 0)).rejects.toThrow('shell'); await settle()
+    expect(readFileSync(file, 'utf8')).toMatch(/confirm:end result=error samples=0 elapsed=-/)
     const log = readFileSync(file, 'utf8')
     expect(log).toMatch(/confirm:sample n=1 at=\d+ms inventoryMs=\d+ rows=2 busy=1 owned=0 unknown=1 unrelated=1 helper=0/)
     expect(log).toMatch(/confirm:block n=1 role=block id=\d+ parent=\d+ kind=other own=u why=parent-time-unreadable path=1 born=/)
@@ -424,7 +432,7 @@ test('confirm and handoff diagnostics are silent without KNUAF_APP_LOG and name 
     expect(log).toMatch(/confirm:end result=deadline samples=1 elapsed=\d+ms/)
     expect(log).not.toMatch(/secret-tool|Tools|id=(?:800|700)\b|parent=(?:800|700)\b/)
     rows.length = 1; writeFileSync(file, '')
-    await handoff(false).run(async () => {})
+    await handoff(false).run(async () => {}); await settle()
     const ok = readFileSync(file, 'utf8')
     expect(ok).toMatch(/confirm:end result=ok samples=1/)
     expect([...ok.matchAll(/handoff:step name=(\w+) ms=\d+ ok=1/g)].map(m => m[1])).toEqual(['drain', 'capture', 'sidecar', 'chat', 'resources', 'transfer'])
