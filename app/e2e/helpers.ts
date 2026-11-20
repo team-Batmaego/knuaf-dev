@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { DEFAULT_WINDOW } from '../src/shared/window'
+import { ATTACH_WAIT_MS, settleWithin } from '../src/main/diagLimits'
 
 export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
@@ -218,7 +219,13 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   } catch (error) {
     markStartup('launch:failed')
     if (env.KNUAF_APP_LOG && existsSync(appLog)) {
-      try { await test.info().attach('startup-log', { path: appLog, contentType: 'text/plain' }) } catch { /* Keep the original launch failure. */ }
+      // 첨부를 **짧은 상한** 안에서만 기다린다(검토 I-02). 첨부가 늦으면 지금까지는 원래 기동
+      // 오류가 안 던져지고 시험 전체 시간 초과로 보고됐다 - 그때는 제목줄이 왜 안 보였는지가
+      // 사라진다. 상한을 넘기면 첨부를 포기하고 원래 오류를 그대로 던진다(원본은 CI 가 이미 모은다).
+      await settleWithin(
+        test.info().attach('startup-log', { path: appLog, contentType: 'text/plain' }).catch(() => { /* Keep the original launch failure. */ }),
+        ATTACH_WAIT_MS
+      )
     }
     throw error
   }
