@@ -180,8 +180,13 @@ export type Rule = {
   /** 가장 안쪽 `SkillUpdates.*` 메서드 이름이 맞아야 발동. */
   svc?: RegExp
   name?: string
-  /** 파일 이름이 이 접두로 시작해야 발동 — 구현이 임시 이름을 자유롭게 고르는 자리(백업 등)를 겨냥할 때. */
+  /** 파일 이름이 이 접두로 시작해야 발동. */
   namePrefix?: string
+  /**
+   * 쓰기 내용으로 겨냥한다 — `data`는 writeFileSync가 쓰는 값, `src`는 copyFileSync의 원본 경로.
+   * 구현이 임시 이름을 자유롭게 고르는 자리(백업 등)를 이름이 아니라 '무엇을 쓰는가'로 겨냥할 때(판정서 tests r12 I-01).
+   */
+  when?: (info: { data?: unknown; src?: string }) => boolean
   skip?: number
   times?: number
   code?: string
@@ -199,7 +204,7 @@ let ops: string[] = []
 const nameOf = (path: string): string => path.slice(path.lastIndexOf(sep) + 1)
 
 /** 규칙 대조만 — 기록하지 않는다. 발동하면 `applied`를 올린다. */
-const match = (op: Op, path: string): Rule | null => {
+const match = (op: Op, path: string, info: { data?: unknown; src?: string } = {}): Rule | null => {
   if (!rules.length) return null
   let frames: Frame[] | null = null
   const name = nameOf(path)
@@ -207,6 +212,7 @@ const match = (op: Op, path: string): Rule | null => {
     if (rule.op !== op) continue
     if (rule.name !== undefined && rule.name !== name) continue
     if (rule.namePrefix !== undefined && !name.startsWith(rule.namePrefix)) continue
+    if (rule.when && !rule.when(info)) continue
     if (rule.at) {
       frames ??= framesOf()
       if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) continue
@@ -230,7 +236,7 @@ const applyOnce = (rule: Rule): void => { applied.set(rule, (applied.get(rule) ?
 const raise = (rule: Rule | null): void => { if (rule?.code) { applyOnce(rule); throw errno(rule.code) } }
 
 /** 호출 하나 = 기록 하나. */
-const hit = (op: Op, path: string): Rule | null => { ops.push(`${op}:${path}`); return match(op, path) }
+const hit = (op: Op, path: string, info: { data?: unknown; src?: string } = {}): Rule | null => { ops.push(`${op}:${path}`); return match(op, path, info) }
 
 const patched = {
   readFileSync: (path: string, opts?: unknown): unknown => {
@@ -260,7 +266,7 @@ const patched = {
     return real.statSync(path as never, opts as never)
   },
   writeFileSync: (path: string, data: unknown, opts?: unknown): void => {
-    const rule = hit('write', String(path))
+    const rule = hit('write', String(path), { data })
     raise(rule)
     real.writeFileSync(path as never, data as never, opts as never)
   },
@@ -287,7 +293,7 @@ const patched = {
   },
   /** 복사는 대상 파일 쓰기로 본다(백업을 copyFileSync로 만드는 구현도 같은 규칙으로 겨냥 — 판정서 tests r11 I-01). */
   copyFileSync: (src: string, dest: string, mode?: number): void => {
-    const rule = hit('write', String(dest))
+    const rule = hit('write', String(dest), { src: String(src) })
     raise(rule)
     real.copyFileSync(src as never, dest as never, mode as never)
   },

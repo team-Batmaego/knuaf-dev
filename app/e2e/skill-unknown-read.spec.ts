@@ -14,7 +14,7 @@
  */
 import { expect, test } from '@playwright/test'
 import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { fixture, inject, makeDisk, makeUpdater, gate, CountingSwitch, normalize, observeDisk, outcome, realFs, shownStatus, skillDiag, sweep, treePrint, type Disk, type DiskSpec, type Rule } from './skill-unknown-harness'
 
 const roots: string[] = []
@@ -625,9 +625,12 @@ test('R-B3g a failed backup replacement keeps the previous state.json.bad', asyn
   realFs.writeFileSync(bad, 'previous backup')
   realFs.writeFileSync(join(d.storeDir, 'state.json'), '{')
   const store = d.store()
-  // 판정서 tests r11 I-01: ENOSPC는 **새 백업 쓰기**에만 — 이름이 `state.json.bad`로 시작하는 파일 쓰기(이름은 구현 자유).
+  // 판정서 tests r11·r12 I-01: ENOSPC는 **새 백업 쓰기**에만 — 이름이 아니라 내용으로 겨냥한다. 백업 쓰기 = 깨진 본문의
+  // 바이트(`{`)를 쓰는 writeFileSync, 또는 `state.json`을 원본으로 하는 copyFileSync. 임시 이름·폴더는 구현 자유다.
   // 기준판에는 백업 쓰기가 없어 이 주입이 닿지 않는다(그래서 기준판에서는 '주입 규칙이 닿지 않았다'로 실패한다).
-  const fault: Rule = { op: 'write', namePrefix: 'state.json.bad', code: 'ENOSPC', times: ALWAYS }
+  const isBackup = (info: { data?: unknown; src?: string }): boolean =>
+    (info.src !== undefined && info.src.endsWith(`${sep}state.json`)) || (info.data !== undefined && Buffer.from(info.data as never).toString('utf8') === '{')
+  const fault: Rule = { op: 'write', when: isBackup, code: 'ENOSPC', times: ALWAYS }
   inject.set([fault])
   inject.mark()
   const res = await settle(() => store.cleanup())

@@ -1,5 +1,5 @@
 {
- "_made": "a340264 (src unchanged), tests r12 (R-B3g narrowed), 2026-11-21",
+ "_made": "a340264 (src unchanged), tests r13 (R-B3g by content), 2026-11-21",
  "R-B1": {
   "result": {
    "threw": "sidecar restart failed"
