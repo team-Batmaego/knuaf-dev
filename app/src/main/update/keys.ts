@@ -1,5 +1,6 @@
 import { createPublicKey } from 'node:crypto'
 import { CHANNEL_URL } from './manifest'
+import { GATE, type Gate } from './gate'
 
 // Owner-approved release prerequisite: populate both only after key provisioning.
 export const UPDATE_KEYS = {
@@ -14,8 +15,10 @@ MCowBQYDK2VwAyEAOO1nBw10mBbMZz5ajYJoM+oVKfhcgn/7nzTwYznP1FE=
 } as const
 export interface UpdateConfig { channel: string; keys: readonly string[]; development: boolean }
 function valid(key: string): boolean { try { return createPublicKey(key).asymmetricKeyType === 'ed25519' } catch { return false } }
-export function updateConfig(packaged: boolean, env: NodeJS.ProcessEnv = process.env): UpdateConfig {
+export function updateConfig(packaged: boolean, env: NodeJS.ProcessEnv = process.env, gate: Gate | null = GATE): UpdateConfig {
   const development = !packaged
+  // 관문 전용 빌드: 빌드 때 박힌 같은 PC 채널·임시 키만 쓴다. 실행 환경값은 보지 않는다.
+  if (gate) return { channel: gate.channel, keys: [gate.key], development }
   if (development && env.KNUAF_UPDATE_PUBLIC_KEY) {
     const key = env.KNUAF_UPDATE_PUBLIC_KEY
     const channel = env.KNUAF_UPDATE_CHANNEL_URL || CHANNEL_URL
