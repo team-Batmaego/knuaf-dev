@@ -5,7 +5,7 @@
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, navTo, openProject, synthProject } from './helpers'
+import { expectConnected, launch, navTo, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, scratch, userDataWith } from './fixtures/fake-codex'
 
 const BOX = 'textarea[aria-label="답변을 입력하세요"]'
@@ -19,7 +19,7 @@ test('전송하지 않은 초안이 다른 프로젝트로 넘어가지 않는�
   const { electronApp, page } = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin')) })
   await openProject(page, a)
   await navTo(page, '내 논문')
-  await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨')
+  await expectConnected(page)
   await page.fill(BOX, 'A 프로젝트에 쓰다 만 답변')
 
   await openProject(page, b)
@@ -41,7 +41,7 @@ test('앱을 껐다 켜도 초안이 남는다 (GUI-06)', async () => {
   const app1 = await launch({ userData, env })
   await openProject(app1.page, root)
   await navTo(app1.page, '내 논문')
-  await expect(app1.page.getByTitle('이 논문의 도우미')).toContainText('연결됨')
+  await expectConnected(app1.page)
   await app1.page.fill(BOX, '쓰다 만 답변')
   // 잠들 필요 없다 — 종료 직전에 메인이 동기로 쓴다.
   await app1.electronApp.close()

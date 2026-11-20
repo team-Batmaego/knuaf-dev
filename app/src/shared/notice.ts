@@ -30,7 +30,8 @@ export type NoticeChoiceValue = 'direct_tell' | 'footnote'
 /** 계약이 허용하는 값은 둘뿐이다. sidecar 도 같은 목록으로 막는다. */
 export const CHOICE_VALUES: readonly NoticeChoiceValue[] = ['direct_tell', 'footnote']
 
-export interface NoticeChoice { value: NoticeChoiceValue; label: string }
+export type NoticeActionValue = NoticeChoiceValue | 'fix' | 'proceed' | 'later'
+export interface NoticeChoice { value: NoticeActionValue; label: string }
 export interface NoticeItem {
   /** 계약의 `key`(정정 묶음 식별자). 겹칠 수 있으므로 화면 key 는 순번을 붙인다. */
   key: string
@@ -70,8 +71,15 @@ export interface NoticeRow {
   choices: NoticeChoice[]
   /** 이미 기록된 선택(없으면 null). */
   choice: NoticeChoiceValue | null
+  /** 확인 단추 이름은 알림이 준다. */
+  confirm: { label: string } | null
   /** 도구가 닫기를 허용했는가 — 기본 true. */
   dismissible: boolean
+  choicePolicy?: 'none'
+  cardKey?: string
+  blocking?: boolean
+  talkMessage?: string
+  proceedMessage?: string
 }
 
 export interface NoticeDocument { notices: NoticeRow[] }
@@ -161,12 +169,17 @@ function readItems(raw: unknown): { items: NoticeItem[]; omitted: number } {
   return { items: items.slice(0, ITEMS_MAX), omitted: Math.max(0, items.length - ITEMS_MAX) }
 }
 
-function readChoices(raw: unknown): NoticeChoice[] {
+function readChoices(raw: unknown, card: boolean): NoticeChoice[] {
   if (!Array.isArray(raw)) return []
+  /**
+   * 계약 §8-1 — 카드 단추는 `fix`·`proceed`·`later` 셋뿐이고 일반 알림은 `direct_tell`·`footnote` 둘뿐이다.
+   * 섞여 들어온 값은 버린다: 고르면 무엇이 기록될지 계약이 말하지 않는다(R280-03).
+   */
+  const allowed: readonly NoticeActionValue[] = card ? ['fix', 'proceed', 'later'] : ['direct_tell', 'footnote']
   const out: NoticeChoice[] = []
   for (const entry of raw) {
     const choice = record(entry)
-    const value = choice ? choiceValue(choice.value) : null
+    const value = choice ? allowed.find((item) => choice.value === item) ?? null : null
     if (!choice || !value) continue // 모르는 값은 그리지 않는다 — 누르면 무엇이 기록될지 말할 수 없다.
     if (out.some((c) => c.value === value)) continue
     out.push({ value, label: oneLine(choice.label, LABEL_MAX) || value })
@@ -183,15 +196,31 @@ function readNotice(raw: unknown, documentProjectId: string): NoticeRow | null {
   // 열쇠가 없으면 "닫으면 다시 안 뜸"을 지킬 수 없다 — 그런 알림은 띄우지 않는다.
   if (!title || !identity || !projectId) return null
   const { items, omitted } = readItems(notice.items)
+  // 재무 카드 판정 — `choice_policy:"none"` + 재무 종류 + **유효한 `card_key`**(계약 §8-4).
+  // 접기 키는 `card_key` 로만 갈리므로, 없거나 비었거나 문자열이 아니면 카드마다 같은 키를 나눠 쓰게 된다
+  // (한 장을 접으면 다른 카드도 접힌다 — R280-01). 그런 행은 카드로도 일반 알림으로도 그리지 않는다:
+  // 일반 알림으로 떨어뜨리면 선택지가 `direct_tell`·`footnote` 로 재해석되고 X 가 생겨 계약 밖이 된다.
+  const card = notice.choice_policy === 'none' && (notice.kind === 'finance_hole_figure' || notice.kind === 'finance_hole_deficit')
+  const rawCardKey = card ? notice.card_key : undefined
+  const cardKey = typeof rawCardKey === 'string' ? rawCardKey.trim() : ''
+  if (card && !cardKey) return null
   return {
     key: noticeKey(projectId, identity),
     title,
     items,
     omittedItems: omitted,
     receiptPath: receiptPathInside(notice.receipt_path),
-    choices: readChoices(notice.choices),
+    choices: readChoices(notice.choices, card),
     choice: choiceValue(notice.choice),
-    dismissible: notice.dismissible !== false
+    confirm: (() => { const value = record(notice.confirm); const label = value && oneLine(value.label, LABEL_MAX); return label ? { label } : null })(),
+    dismissible: card ? false : notice.dismissible !== false,
+    ...(card ? {
+      choicePolicy: 'none' as const,
+      cardKey,
+      blocking: notice.blocking === true,
+      talkMessage: typeof notice.talk_message === 'string' ? notice.talk_message : '',
+      proceedMessage: typeof notice.proceed_message === 'string' ? notice.proceed_message : ''
+    } : {})
   }
 }
 
@@ -237,7 +266,7 @@ export function firstVisible(notices: readonly NoticeRow[], dismissed: readonly 
  * `picked` 는 화면이 방금 누른 값(기록이 끝나기 전 잠금). 이미 고른 알림은 다시 묻지 않는다.
  */
 export function choiceOpen(notice: NoticeRow, picked: NoticeChoiceValue | null = null): boolean {
-  return notice.choices.length > 0 && notice.choice === null && picked === null
+  return notice.choices.length > 0 && (notice.choicePolicy === 'none' || (notice.choice === null && picked === null))
 }
 
 /** [자세히] 를 그릴까 — 보여 줄 줄이 없으면 단추도 없다. */

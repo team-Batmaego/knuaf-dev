@@ -136,7 +136,7 @@ test('limit offers a continuation only while a proposal is open and otherwise bl
   }
   expect(blocked({})).toMatchObject({ kind: 'limit-blocked', other: 'claude', reason: 'not-logged-in' })
   expect(blocked({ claude: { ...accounts.claude!, consented: false } }))
-    .toMatchObject({ kind: 'limit-blocked', reason: 'no-consent' })
+    .toMatchObject({ kind: 'limit-blocked', reason: 'model-missing' })
   expect(blocked({ claude: { ...accounts.claude!, usage: 'limit' } }))
     .toMatchObject({ kind: 'limit-blocked', reason: 'also-unavailable' })
   expect(blocked({ claude: { ...accounts.claude!, account: { company: 'claude', apiKeySource: 'ANTHROPIC', subscriptionType: 'max', models: [] } } }))
@@ -226,15 +226,11 @@ test('account labels never carry the raw account id', () => {
 
   const stored: StoredConsent[] = [
     { company: 'claude', accountId: 'claude-account', state: 'agreed', at: '2026-11-09T00:00:00.000Z' },
-    // 지금 로그인하지 않은 계정 — 거둔 기록은 남는다.
+    // 옛 계정 동의 기록도 현재 계약에서는 노출하지 않는다.
     { company: 'codex', accountId: 'codex-old', state: 'withdrawn', at: null }
   ]
   const rows = consentRows(accounts, stored)
-  expect(rows).toEqual([
-    { company: 'claude', accountId: 'claude-account', accountLabel: 'claude…', state: 'agreed', at: '2026-11-09T00:00:00.000Z', subscribed: true },
-    { company: 'codex', accountId: 'codex-account', accountLabel: 'codex-…', state: 'agreed', at: null, subscribed: true },
-    { company: 'codex', accountId: 'codex-old', accountLabel: 'codex-…', state: 'withdrawn', at: null, subscribed: false }
-  ])
+  expect(rows).toEqual([])
 })
 
 // ⑦ §5 설정 — 승인 있음 `on`, 끈 기록 있음 `off`, 없으면 `undecided`, 폴더 없으면 `null`.
@@ -304,14 +300,14 @@ test('laneInput reads accounts through the source and publishes the assembled sn
   expect(sent).toEqual([1])
   // 추천 줄은 요금제에서 파생한다 — 승인 전이므로 `undecided` + 추천 줄 미리보기.
   expect(snapshot.settings.mode).toBe('undecided')
-  expect(snapshot.settings.rows.map(row => row.entry?.model)).toEqual(['astra', 'sol', 'terra', 'astra'])
-  expect(snapshot.settings.consents.map(row => row.accountId)).toEqual(['claude-account', 'codex-account'])
+  expect(snapshot.settings.rows.map(row => row.entry?.model)).toEqual(['astra', 'terra', 'deepseek-v4.1-flash-free', 'astra'])
+  expect(snapshot.settings.consents).toEqual([])
   expect(snapshot.stopButton).toBe('chat')
 
-  // 폴더가 없으면 모드는 `null` 이지만 요금 동의는 그대로 보인다.
+  // 폴더가 없어도 제거된 동의 목록은 비어 있다.
   const global = await laneInput(source, null)
   expect(global.settings.mode).toBeNull()
-  expect(global.settings.consents).toHaveLength(2)
+  expect(global.settings.consents).toEqual([])
   expect(global.root).toBeNull()
 
   expect(recommendedRow({ claude: execution('claude'), codex: execution('codex') })).toBe('both-high')

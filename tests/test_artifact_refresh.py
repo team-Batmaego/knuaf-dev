@@ -5,7 +5,7 @@ import pytest
 from docx import Document
 
 import gg_core as core
-from conftest import bind_test_major, run_script
+from conftest import run_script
 from test_sidecar import Sidecar, _intake_fact
 
 
@@ -26,7 +26,6 @@ def build_word(root, name):
 
 
 def test_root_word_and_build_outputs_exclude_intake(sidecar, project):
-    bind_test_major(project)
     (project / "기존원고.docx").write_bytes(b"existing manuscript")
     (project / "참고자료.pdf").write_bytes(b"reference")
     (project / "입력재무.xlsx").write_bytes(b"input finance")
@@ -57,7 +56,6 @@ def test_root_word_and_build_outputs_exclude_intake(sidecar, project):
 
 @pytest.mark.parametrize("receipt_state", ["missing", "invalid-json", "wrong-kind", "wrong-hash", "changed-file"])
 def test_root_word_requires_matching_generation_receipt(sidecar, project, receipt_state):
-    bind_test_major(project)
     word = build_word(project, "다른이름.docx")
     receipt_path = word.with_suffix(".manifest.json")
     if receipt_state == "missing":
@@ -74,11 +72,10 @@ def test_root_word_requires_matching_generation_receipt(sidecar, project, receip
 
 
 def test_registered_output_is_listed_from_canonical_managed_path(sidecar, project):
-    bind_test_major(project)
     output = project / "출력본문.md"
     output.write_text("# Ⅰ. 머리말\n\n등록된 산출물 본문.\n", encoding="utf-8")
     p = core.load(project)
-    refs = [{"collection": "sections", "id": "sec-01"}]
+    refs = [{"collection": "sections", "id": "farm_status"}]
     core.adopt_output(project, {
         "id": "artifact-review", "path": output.name, "format": "md",
         "file_hash": core.digest(output.read_bytes()), "target_refs": refs,

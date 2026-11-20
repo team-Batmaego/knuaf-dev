@@ -104,26 +104,20 @@ test('research presence follows the lane and its output file must exactly match 
   expect(f.runner.records()).toEqual([]); expect(f.requests).toEqual([])
 })
 
-test('research semantics stay skill-owned and continuation resolves all outputs in the new job directory', async () => {
+test('research metadata remains skill-owned and unavailable free research continuation delivers limit without outputs', async () => {
   const f = fixture(), spec = f.spec()
   spec.outputs = ['tables/result.md', 'source.json']
   spec.research = { research_type: '', questions: [], routes: [], keywords: [], output_file: 'tables/result.md',
     conditions: { region: '미확정', year: null }, opened_routes: [{ id: 'D01', reason: '접근 실패' }] }
   f.accounts.codex.usage = 'limit'
   f.runner.enqueue(f.root, spec, owner, 'author'); await f.runner.runQueued()
-  const child = (await f.runner.continue(f.runner.proposals()[0].proposalId))!
-  f.behavior(async (request, events) => {
-    events.session(`fresh-${request.jobId}`)
-    const manifest = JSON.parse(readFileSync(join(f.root, '.knuaf-gui/jobs', `${request.jobId}.json`), 'utf8'))
-    mkdirSync(join(request.cwd, 'tables'))
-    writeFileSync(join(request.cwd, manifest.research.output_file), 'Q1: 확인 불가')
-    writeFileSync(join(request.cwd, 'source.json'), '{"status":"unavailable"}')
-  })
-  await f.runner.runQueued()
-  expect(f.deliveries.map(d => d.result.status)).toEqual(['completed'])
-  expect(f.deliveries[0].result.outputs).toEqual(spec.outputs.map(name => join(f.root, '.knuaf-gui/jobs', child.spec.id, 'out', name)))
-  expect(readFileSync(f.deliveries[0].result.outputs[0], 'utf8')).toBe('Q1: 확인 불가')
-  expect(f.runner.records()[1].spec.research).toEqual(spec.research)
+  // The new recommendation assigns Claude research to the unavailable free relay;
+  // no paid-company continuation is offered for this role.
+  expect(f.runner.proposals()).toEqual([])
+  expect(f.requests).toEqual([])
+  expect(f.deliveries.map(d => d.result.status)).toEqual(['limit'])
+  expect(f.deliveries[0].result.outputs).toEqual([])
+  expect(f.runner.records()[0].spec.research).toEqual(spec.research)
 })
 
 const researchChanges: Record<string, (research: NonNullable<JobSpec['research']>) => void> = {
@@ -135,24 +129,36 @@ const researchChanges: Record<string, (research: NonNullable<JobSpec['research']
   extension: r => { r.conditions = { region: '변경된 지역', year: 2026 } }
 }
 
-for (const phase of ['queued', 'before-click', 'after-click'] as const) test(`changed research never executes: ${phase}`, async () => {
+test('changed queued research metadata never executes', async () => {
   for (const change of Object.values(researchChanges)) {
     const f = fixture(), spec = f.spec()
     spec.outputs.push('alternate.md')
     spec.research!.conditions = { region: '미확정', year: 2025 }
-    if (phase !== 'queued') f.accounts.codex.usage = 'limit'
     f.runner.enqueue(f.root, spec, owner, 'author')
-    if (phase !== 'queued') await f.runner.runQueued()
-    if (phase === 'after-click') await f.runner.continue(f.runner.proposals()[0].proposalId)
     // Inject corruption into app-owned state; public manifests and returned records are only copies.
     const internal = f.runner as unknown as { state: { jobs: { spec: JobSpec }[] } }
     change(internal.state.jobs.at(-1)!.spec.research!)
-    if (phase === 'before-click') expect(await f.runner.continue(f.runner.proposals()[0].proposalId)).toBeNull()
-    else await f.runner.runQueued()
+    await f.runner.runQueued()
     expect(f.requests).toEqual([])
-    expect(f.deliveries.map(d => d.result.status)).toEqual([phase === 'before-click' ? 'rejected' : 'error'])
+    expect(f.deliveries.map(d => d.result.status)).toEqual(['error'])
     expect(f.deliveries[0].result.outputs).toEqual([])
   }
+})
+
+for (const phase of ['before-click', 'after-click'] as const) test(`changed continuation task never executes: ${phase}`, async () => {
+  const f = fixture()
+  f.accounts.codex.usage = 'limit'
+  f.runner.enqueue(f.root, f.spec('job-one', 'writing'), owner, 'author')
+  await f.runner.runQueued()
+  const proposal = f.runner.proposals()[0]
+  if (phase === 'after-click') await f.runner.continue(proposal.proposalId)
+  const internal = f.runner as unknown as { state: { jobs: { spec: JobSpec }[] } }
+  internal.state.jobs.at(-1)!.spec.task = 'tampered task'
+  if (phase === 'before-click') expect(await f.runner.continue(proposal.proposalId)).toBeNull()
+  else await f.runner.runQueued()
+  expect(f.runJobs()).toBe(0)
+  expect(f.deliveries.map(delivery => delivery.result.status)).toEqual([phase === 'before-click' ? 'rejected' : 'error'])
+  expect(f.deliveries[0].result.outputs).toEqual([])
 })
 
 test('untrusted job routing, fake continuation, unknown schema and changed input never execute', async () => {
@@ -176,17 +182,29 @@ for (const state of ['limit', 'unknown', 'auth'] as const) test(`start gate dist
   // 연결은 unknown 에서만 1번 생기고, 어느 상태에서도 runJob(실행)은 0번이다(Roh AG 중요 1).
   expect(f.requests.length).toBe(state === 'unknown' ? 1 : 0)
   expect(f.runJobs()).toBe(0)
-  expect(f.runner.proposals().length).toBe(state === 'limit' ? 1 : 0)
-  expect(f.deliveries.map(d => d.result.status)).toEqual(state === 'limit' ? [] : [state])
+  expect(f.runner.proposals()).toEqual([])
+  expect(f.deliveries.map(d => d.result.status)).toEqual([state])
 })
 
-test('consent and subscription gates reject API/Bedrock and withdrawn consent', async () => {
-  for (const patch of [{ consented: false }, { account: { company: 'codex', accountType: 'apiKey', models: [] } }, { account: { company: 'codex', accountType: 'amazonBedrock', models: [] } }] as const) {
-    const f = fixture(); Object.assign(f.accounts.codex, patch)
-    f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
-    expect(f.requests).toEqual([]); expect(f.runner.proposals()).toEqual([])
-    expect(f.runner.records()[0].status).toBe('consented' in patch ? 'rejected' : 'auth')
-  }
+test('legacy consent false does not block an approved subscription job', async () => {
+  const f = fixture()
+  f.accounts.codex.consented = false
+  f.runner.enqueue(f.root, f.spec(), owner, 'author')
+  await f.runner.runQueued()
+  expect(f.runJobs()).toBe(1)
+  expect(f.runner.records()[0].status).toBe('completed')
+  expect(f.deliveries.map(delivery => delivery.result.status)).toEqual(['completed'])
+})
+
+for (const accountType of ['apiKey', 'amazonBedrock']) test(`subscription gate independently rejects ${accountType}`, async () => {
+  const f = fixture()
+  f.accounts.codex.account = { company: 'codex', accountType, models: [] }
+  f.runner.enqueue(f.root, f.spec(), owner, 'author')
+  await f.runner.runQueued()
+  expect(f.requests).toEqual([])
+  expect(f.runner.proposals()).toEqual([])
+  expect(f.runJobs()).toBe(0)
+  expect(f.runner.records()[0].status).toBe('auth')
 })
 
 test('Claude tool guards reject escape paths, symlinks, shell bypass and trust fallback', () => {
@@ -220,7 +238,7 @@ test('review rejects author/main/reused sessions including continuation', async 
 
 test('double click reserves once, keeps plan, rewrites output refs and delivers root once', async () => {
   const f = fixture(), before = structuredClone(f.plan); f.accounts.codex.usage = 'limit'
-  f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
+  f.runner.enqueue(f.root, f.spec('job-one', 'writing'), owner, 'author'); await f.runner.runQueued()
   const proposal = f.runner.proposals()[0]
   expect(proposal.entry).toEqual({ company: 'claude', model: 'sonnet', effort: null, how: 'relay' })
   expect(f.deliveries).toEqual([])
@@ -237,7 +255,7 @@ test('double click reserves once, keeps plan, rewrites output refs and delivers 
 
 test('click account changes refresh the displayed proposal; input changes reject approval', async () => {
   const f = fixture(); f.accounts.codex.usage = 'limit'
-  f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
+  f.runner.enqueue(f.root, f.spec('job-one', 'writing'), owner, 'author'); await f.runner.runQueued()
   const old = f.runner.proposals()[0]
   f.accounts.claude.accountId = 'different-account'
   expect(await f.runner.continue(old.proposalId)).toBeNull()
@@ -250,12 +268,12 @@ test('click account changes refresh the displayed proposal; input changes reject
 
 test('later wins over stale click and repeat limits never return to tried route', async () => {
   const f = fixture(); f.accounts.codex.usage = 'limit'
-  f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
+  f.runner.enqueue(f.root, f.spec('job-one', 'writing'), owner, 'author'); await f.runner.runQueued()
   const p = f.runner.proposals()[0]; await f.runner.later(p.proposalId)
   expect(await f.runner.continue(p.proposalId)).toBeNull()
   expect(f.deliveries.map(d => d.result.status)).toEqual(['limit'])
   const g = fixture(); g.accounts.codex.usage = 'limit'
-  g.runner.enqueue(g.root, g.spec(), owner, 'author'); await g.runner.runQueued()
+  g.runner.enqueue(g.root, g.spec('job-one', 'writing'), owner, 'author'); await g.runner.runQueued()
   await g.runner.continue(g.runner.proposals()[0].proposalId)
   g.accounts.codex.usage = 'allowed'; g.behavior(async () => { throw new JobFailure('limit', 'fake quota') })
   await g.runner.runQueued()
@@ -266,7 +284,7 @@ test('later wins over stale click and repeat limits never return to tried route'
 test('usage loss stops active relay, suppresses partial outputs and main result waits for choice', async () => {
   const f = fixture()
   f.behavior(async (r, e) => { e.session('new'); writeFileSync(join(r.cwd, 'result.md'), 'partial'); e.availability('limit'); e.message('late', 'late original result') })
-  f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
+  f.runner.enqueue(f.root, f.spec('job-one', 'writing'), owner, 'author'); await f.runner.runQueued()
   expect(f.runner.records()[0].status).toBe('limit')
   expect(f.stops().stops).toBeGreaterThanOrEqual(1)
   expect(f.deliveries).toEqual([])
@@ -288,7 +306,7 @@ test('student stop cancels main and relay, rejects late completion and pending c
 
 test('restart invalidates reservations and running jobs without execution', async () => {
   const f = fixture(); f.accounts.codex.usage = 'limit'
-  f.runner.enqueue(f.root, f.spec(), owner, 'author'); await f.runner.runQueued()
+  f.runner.enqueue(f.root, f.spec('job-one', 'writing'), owner, 'author'); await f.runner.runQueued()
   await f.runner.continue(f.runner.proposals()[0].proposalId)
   const restarted = new JobRunner(f.options); await restarted.runQueued()
   expect(restarted.records().map(r => r.status)).toEqual(['limit', 'interrupted'])

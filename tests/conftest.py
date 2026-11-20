@@ -117,6 +117,20 @@ def empty_folder(tmp_path):
     return folder
 
 
+def apply_basic_draft(root, change, revision):
+    import gg_core as core
+
+    (root / "sources").mkdir(exist_ok=True)
+    (root / "sources" / "answers.md").write_text(
+        "# 원답변\n\n재배 면적: 600평\n\n수취가격: 모름\n", encoding="utf-8"
+    )
+    # The change identifies the school intro on seed-capable runtimes and
+    # registers that same intro on runtimes that don't seed it.
+    section = next(op["value"] for op in change["ops"] if op["collection"] == "sections")
+    write_section(root, section["path"], section["title"], "농장A의 재배 면적은 600평이다.")
+    core.apply(root, change, revision)
+
+
 @pytest.fixture
 def project(empty_folder):
     """A synthetic project with source-backed facts and an explicit test major."""
@@ -124,14 +138,9 @@ def project(empty_folder):
 
     root = empty_folder
     core.init(root)
-    (root / "sources").mkdir(exist_ok=True)  # gg_core.init already creates it
-    (root / "sources" / "answers.md").write_text(
-        "# 원답변\n\n재배 면적: 600평\n\n수취가격: 모름\n", encoding="utf-8"
-    )
-    write_section(root, "sections/01.md", "Ⅰ. 머리말", "농장A의 재배 면적은 600평이다.")
-    change = basic_change()
-    change["ops"].extend(major_ops(root, 1))
-    core.apply(root, change, 0)
+    # Binding must commit on its own before the intro can be written.
+    bind_test_major(root)
+    apply_basic_draft(root, basic_change(), core.load(root)["revision"])
     return root
 
 
@@ -165,9 +174,10 @@ def major_ops(root, revision, major_id="specialty_crops"):
 def bind_test_major(root, major_id="specialty_crops"):
     import gg_core as core
 
-    revision = core.load(root)["revision"]
+    project = core.load(root)
+    source_revision = project["sources"].get("major-answer", {}).get("revision", 0) + 1
     core.apply(root, {"request_id": "test:bind:" + major_id,
-                      "ops": major_ops(root, revision + 1, major_id)}, revision)
+                      "ops": major_ops(root, source_revision, major_id)}, project["revision"])
 
 
 def bound_test_context(root):

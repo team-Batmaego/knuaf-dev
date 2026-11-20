@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import { Script } from 'node:vm'
 import { transpileModule, ModuleKind, ScriptTarget } from 'typescript'
 import { ChatService } from '../src/main/chat/service'
+import { consumePendingDesign } from '../src/main/lanes/cards'
 import type { AgentConnection } from '../src/main/chat/contracts'
 import type * as IpcModule from '../src/main/ipc'
 import type { DependencyReport, Envelope, SidecarInfo } from '../src/shared/types'
@@ -320,3 +321,56 @@ for (const installed of [false, true]) {
     } finally { old.resolve(env(false)); await h.cleanup() }
   })
 }
+
+test('R272-01 folder switch while reservation waits never applies or consumes the old folder choice', async () => {
+  const h = harness()
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  try {
+    await h.invoke('project:open', h.root)
+    const store = h.chat.lanesStore()
+    const pending = { company: 'codex' as const, model: 'gpt-6.1-sol', effort: 'high', how: 'main' as const }
+    store.setPendingDesign(h.root, pending)
+    const held = consumePendingDesign(store, h.root, 'codex', async () => {
+      entered.resolve(); await release.promise; throw new Error('release lock without consumption')
+    }).catch(() => {})
+    await entered.promise
+    const appliedRoots: (string | null)[] = []
+    h.chat.setModel = async (root, _provider, choice) => { appliedRoots.push(root); return choice }
+    const switching = h.invoke('settings:set', { provider_choice: { provider: 'codex', at: 'synthetic' } })
+      .then(value => ({ value }), error => ({ error }))
+    await h.invoke('project:open', h.other)
+    release.resolve(); await held
+    const result = await switching
+    expect(appliedRoots).toEqual([])
+    expect(store.pendingDesign(h.root)).toEqual(pending)
+    expect(store.pendingDesign(h.other)).toBeNull()
+    expect(result).toHaveProperty('error')
+  } finally { release.resolve(); await h.cleanup() }
+})
+
+test('R272-01 folder switch during model lookup preserves the reservation', async () => {
+  const h = harness()
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+  try {
+    await h.invoke('project:open', h.root)
+    const store = h.chat.lanesStore()
+    const pending = { company: 'codex' as const, model: 'gpt-6.1-sol', effort: 'high', how: 'main' as const }
+    store.setPendingDesign(h.root, pending)
+    const lookupRoots: (string | null)[] = []
+    h.chat.models = async (root, provider) => {
+      lookupRoots.push(root); entered.resolve(); await release.promise
+      return { provider, supported: true, selected: null, models: [{
+        model: pending.model, name: 'Sol', description: '', efforts: ['high'], defaultEffort: null, isDefault: false
+      }] }
+    }
+    const switching = h.invoke('settings:set', { provider_choice: { provider: 'codex', at: 'synthetic' } })
+      .then(value => ({ value }), error => ({ error }))
+    await entered.promise
+    await h.invoke('project:open', h.other)
+    release.resolve()
+    expect(await switching).toHaveProperty('error')
+    expect(lookupRoots).toEqual([h.root])
+    expect(store.pendingDesign(h.root)).toEqual(pending)
+    expect(store.pendingDesign(h.other)).toBeNull()
+  } finally { release.resolve(); await h.cleanup() }
+})

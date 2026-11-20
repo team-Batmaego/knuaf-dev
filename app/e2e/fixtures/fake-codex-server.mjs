@@ -37,6 +37,7 @@
  *   FAKE_CODEX_EPHEMERAL_THREAD_ID_FILE  `FAKE_CODEX_EPHEMERAL_THREAD_ID_MODE` 를 **한 번만**
  *                           적용한다(읽고 지운다) — 버려진 프로세스 뒤의 재탐침이 정상 응답을 받는다
  *   FAKE_CODEX_MODELS_FAIL_TIMES  모델 목록 조회를 처음 N회 오류로 거절한다(복구 UI 시험).
+ *   FAKE_CODEX_MODELS_FAIL_WHILE_FILE  이 파일이 있는 동안 모든 모델 목록 조회가 실패한다.
  *
  * 1층 잠금(§4.1-C)·턴 원장(⑨) 시험용 노브 — **설정하지 않으면 기존 동작 그대로**다.
  *   FAKE_CODEX_CONFIG_READ          `config/read` 응답(JSON). `{config, layers}` 또는 `{fail}`/`{malformed}`
@@ -157,6 +158,7 @@ const takeEphemeralThreadIdMode = () => {
   return EPHEMERAL_THREAD_ID_MODE
 }
 let modelListFailures = Math.max(0, Number(process.env.FAKE_CODEX_MODELS_FAIL_TIMES ?? 0) || 0)
+const MODELS_FAIL_WHILE_FILE = process.env.FAKE_CODEX_MODELS_FAIL_WHILE_FILE ?? ''
 const TURN_FAILURE = process.env.FAKE_CODEX_TURN_FAILURE ?? ''
 const LOGIN_COMPLETE = process.env.FAKE_CODEX_LOGIN_COMPLETE ?? ''
 const TURN_RELEASE = process.env.FAKE_CODEX_TURN_RELEASE ?? ''
@@ -216,6 +218,11 @@ const SKILLS_LIST = jsonKnob('FAKE_CODEX_SKILLS_LIST')
 const HOOKS_LIST = jsonKnob('FAKE_CODEX_HOOKS_LIST')
 const DISABLED_PLUGIN_IDS = jsonKnob('FAKE_CODEX_DISABLED_PLUGIN_IDS')
 const REQUEST_LOG = process.env.FAKE_CODEX_REQUEST_LOG ?? ''
+/** Arbitrary server requests during a fake turn; collect replies before completing it. */
+const SERVER_REQUESTS = jsonKnob('FAKE_CODEX_SERVER_REQUESTS')
+const SERVER_REPLY_LOG = process.env.FAKE_CODEX_SERVER_REPLY_LOG ?? ''
+const pendingServerRequests = new Set()
+let serverRequestTurn
 /**
  * 턴 id 셈을 프로세스 밖에 둔다 — 앱이 프로세스를 갈아 끼워도(재시작 갈래) id 가 겹치지 않아야
  * 실제 서버와 같다. 파일이 없으면 예전처럼 프로세스 안에서만 센다.
@@ -347,6 +354,13 @@ const responseThreadId = (requested) => {
 function handle(message) {
   // Answerless notifications and responses from the app.
   if (message.method === undefined) {
+    if (pendingServerRequests.delete(message.id)) {
+      if (SERVER_REPLY_LOG) appendFileSync(SERVER_REPLY_LOG, `${JSON.stringify(message)}\n`)
+      if (pendingServerRequests.size === 0) out({ method: 'turn/completed', params: {
+        threadId: serverRequestTurn.threadId, turn: { id: serverRequestTurn.turnId, status: 'completed' }
+      } })
+      return
+    }
     if (DECISION_LOG && message.id !== undefined && message.result?.decision) {
       appendFileSync(DECISION_LOG, `${JSON.stringify({ decision: message.result.decision })}\n`)
     }
@@ -475,8 +489,8 @@ function handle(message) {
       return out({ id, result })
     }
     case 'model/list':
-      if (modelListFailures > 0) {
-        modelListFailures -= 1
+      if ((MODELS_FAIL_WHILE_FILE && existsSync(MODELS_FAIL_WHILE_FILE)) || modelListFailures > 0) {
+        if (modelListFailures > 0) modelListFailures -= 1
         return out({ id, error: { code: -32603, message: '모델 목록 임시 오류' } })
       }
       // 쪽 나눔은 흉내 내지 않는다(앱은 nextCursor 가 없으면 멈춘다).
@@ -519,6 +533,20 @@ function handle(message) {
       const started = () => out({ method: 'turn/started', params: { threadId: turnThread, turn: { id: turnId } } })
       if (TURN_NOTIFY_DELAY_MS > 0) setTimeout(started, TURN_NOTIFY_DELAY_MS)
       else started()
+      if (SERVER_REQUESTS !== undefined) {
+        serverRequestTurn = { threadId: turnThread, turnId }
+        for (const request of SERVER_REQUESTS) {
+          const requestId = ++serverSeq
+          pendingServerRequests.add(requestId)
+          // `before` 는 그 요청 **직전** 알림이다 — 0.164.0 이 승인 요청 앞에 보내는
+          // `item/started`(mcpToolCall)를 재현한다. threadId·turnId 는 서버가 붙인다.
+          for (const event of request.before ?? []) {
+            out({ ...event, params: { threadId: turnThread, turnId, ...event.params } })
+          }
+          out({ id: requestId, method: request.method, params: { threadId: turnThread, turnId, ...request.params } })
+        }
+        return
+      }
       if (TURN_FAILURE && (!LOGIN_COMPLETE || !existsSync(LOGIN_COMPLETE))) {
         const message = TURN_FAILURE === 'refresh' ? 'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.'
           : TURN_FAILURE === '401' ? 'HTTP 401 Unauthorized: authentication failed'

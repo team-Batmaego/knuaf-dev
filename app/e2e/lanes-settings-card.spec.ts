@@ -12,12 +12,9 @@ import { transpileModule, JsxEmit, ModuleKind, ScriptTarget } from 'typescript'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { CardAction, CardDecision, LaneCard, LaneLine } from '../src/shared/lanes-ipc'
-import { LANE_ACTION, LANE_CARD, LANE_EVENT, LANE_NAME, LANES_SETTINGS } from '../src/renderer/src/copy-lanes'
+import { LANE_ACTION, LANE_CARD, LANE_EVENT, LANE_NAME } from '../src/renderer/src/copy-lanes'
 import { CHAT } from '../src/renderer/src/copy'
 import { entryText, eventView } from '../src/renderer/src/laneLines'
-import {
-  cardStillApplies, cardUsable, decideIfCurrent, recheckIfCurrent, requestCard, resolveCardResponse
-} from '../src/renderer/src/laneCardGate'
 import type { LaneEvent } from '../src/shared/lanes-ipc'
 
 const SRC = join(__dirname, '../src/renderer/src')
@@ -260,37 +257,6 @@ test('C03: 거절된 설계 줄은 사유를 보이고, 처음 카드에는 칩 
   expect(firstHtml).toContain(LANE_CARD.chipref('Claude Opus'))
 })
 
-test('C03: 설정 표도 직접 맡기기를 회사·모델 대신 한 문구로 적고 어디서를 본대화로 둔다', () => {
-  const view = {
-    mode: 'on' as const,
-    source: { kind: 'recommended' as const, rowId: 'claude-high-codex-low' as const },
-    rows: [
-      { lane: 'repeat', entry: { company: 'claude', model: null, effort: null, how: 'main' }, note: null, recommendedModel: null },
-      { lane: 'research', entry: { company: 'codex', model: 'gpt-6.1-astra', effort: 'high', how: 'relay' }, note: null, recommendedModel: null }
-    ],
-    differsFromRecommendation: false,
-    temporary: [{ lane: 'writing', entry: { company: 'claude', model: null, effort: null, how: 'main' } }],
-    recommendedDesign: null,
-    nextDesignCompany: null,
-    consents: []
-  }
-  const html = renderWith(join(SRC, 'screens/LanesSettings.tsx'), 'LanesSettings', { root: '/A' }, {
-    '../store/lanes': {
-      useLanes: (selector: (s: unknown) => unknown) => selector({ snapshot: { root: '/A', settings: view }, root: '/A' }),
-      laneActions: () => ({})
-    },
-    '../store/project': { useProject: (selector: (s: unknown) => unknown) => selector({ lanesCardRequest: null, consumeLanesCardRequest: () => undefined }) }
-  })
-  // 직접 맡기기 줄: "Claude · 기본"으로 새면 학생은 누가 하는지 알 수 없다(C03 원문 재현).
-  expect(html).toContain(LANE_CARD.direct)
-  expect(html).not.toContain('Claude · 기본</td>')
-  expect(html).toContain(LANES_SETTINGS.whereMain)
-  // relay 는 새 대화 — 카드와 표가 같은 값을 적어야 한다(C2-V03).
-  expect(html).toContain('ChatGPT · Astra')
-  expect(html).toContain(LANES_SETTINGS.whereNew)
-  // [이번만] 줄도 같은 문구를 쓴다.
-  expect(html).toContain(LANES_SETTINGS.temporary(`${LANE_NAME.writing} ${LANE_CARD.direct}`))
-})
 
 /**
  * 카드 컴포넌트를 **훅 값을 주입해** 그린다 — 10초 무응답은 실제 시계를 기다리지 않고 `slow` 로 넣는다.
@@ -577,121 +543,4 @@ test('C06: 작업 분담 칸은 줄마다 주문 번호와 읽기 통로를 내�
   expect(html).toContain('전달문 원문')
 })
 
-test('C01: 설정 화면의 확인 창은 카드를 시트 안에 그린다', () => {
-  const html = renderWith(join(SRC, 'screens/LanesSettings.tsx'), 'SettingsCardSheet', {
-    open: true, card: settingsCard(), invalidReason: null,
-    onDecide: () => undefined, onStatus: () => undefined, onClose: () => undefined
-  }, {
-    '../store/lanes': { useLanes: (selector: (s: unknown) => unknown) => selector({ snapshot: null, root: null }), laneActions: () => ({}) },
-    '../store/project': { useProject: (selector: (s: unknown) => unknown) => selector({ lanesCardRequest: null, consumeLanesCardRequest: () => undefined }) }
-  })
-  expect(html).toContain('data-screen="lane-settings-card"')
-  expect(html).toContain(LANE_CARD.title['settings-enable'])
-  expect(html).toContain(LANE_CARD.act.settingsContinue)
-})
 
-/*
- * 검토 C2-C02ⓑ — 설정 창은 대화 화면 없이도 열리고 폴더가 바뀌어도 붙어 있다(`SettingsModal`).
- * "요청할 때의 폴더"만 붙잡으면, 기다리는 사이 폴더를 옮겼을 때 옛 폴더의 카드가 새 폴더 화면에 뜨고
- * 그 카드를 승인하면 엉뚱한 폴더의 배치가 바뀐다. 판정은 `laneCardGate` 한 곳에 모았다.
- */
-
-test('C02ⓑ: 늦게 온 카드 응답은 지금 폴더·카드 폴더가 모두 요청 폴더일 때만 산다', () => {
-  // 폴더가 그대로 — 산다.
-  expect(cardStillApplies('/A', '/A', '/A')).toBe(true)
-  // 응답이 닿기 전에 폴더를 옮겼다 — 옛 폴더의 카드는 죽는다.
-  expect(cardStillApplies('/A', '/A', '/B')).toBe(false)
-  // 폴더가 비었다(창 닫힘·폴더 없음).
-  expect(cardStillApplies('/A', '/A', null)).toBe(false)
-  // 지금 폴더는 맞는데 카드가 다른 폴더를 말한다 — 카드가 어긋났으므로 죽는다.
-  expect(cardStillApplies('/A', '/B', '/A')).toBe(false)
-})
-
-test('C02ⓑ: 응답 처리 — 옛 폴더의 성공·실패는 모두 조용히 버리고, 지금 폴더에서만 그린다', () => {
-  const card = settingsCard()
-  expect(resolveCardResponse('/A', '/A', { value: card })).toEqual({ action: 'show', card })
-  // 기다리는 사이 폴더를 옮겼다 — 성공도 실패도 새 폴더 화면에 닿지 않는다.
-  expect(resolveCardResponse('/A', '/B', { value: card })).toEqual({ action: 'drop' })
-  expect(resolveCardResponse('/A', '/B', { error: 'internal' })).toEqual({ action: 'drop' })
-  // 지금 폴더가 맞으면 오류는 단추 자리 실패 표시로 간다.
-  expect(resolveCardResponse('/A', '/A', { error: 'internal' })).toEqual({ action: 'error' })
-  // 지금 폴더가 맞아도 카드가 다른 폴더의 것이면 버린다.
-  expect(resolveCardResponse('/A', '/A', { value: { ...card, root: '/B' } })).toEqual({ action: 'drop' })
-  // 폴더가 비면 버린다.
-  expect(resolveCardResponse('/A', null, { value: card })).toEqual({ action: 'drop' })
-})
-
-test('C02ⓑ: 승인·재확인 문지기 — 카드가 없거나 폴더가 비면 보내지 않는다', () => {
-  const card = settingsCard()
-  expect(cardUsable(card, '/A', '/A')).toBe(true)
-  expect(cardUsable(null, '/A', '/A')).toBe(false)
-  expect(cardUsable(card, null, '/A')).toBe(false)
-  expect(cardUsable(card, '/A', '/B')).toBe(false)
-  // 보이는 카드가 옛 폴더의 카드다(지금 폴더는 /B).
-  expect(cardUsable(card, '/B', '/B')).toBe(false)
-})
-
-test('C02ⓑ: 요청은 **응답이 닿은 뒤** 폴더를 다시 읽는다 — 요청 전 폴더를 박으면 반례가 산다', async () => {
-  let live: string | null = '/A'
-  const gate = Promise.withResolvers<void>()
-  const pending = requestCard('/A', async () => {
-    await gate.promise
-    return { value: settingsCard() }
-  }, () => live)
-  // 기다리는 사이 사용자가 폴더를 옮겼다.
-  live = '/B'
-  gate.resolve()
-  expect(await pending).toEqual({ action: 'drop' })
-
-  // 폴더가 그대로면 같은 요청이 카드를 연다 — 위 결과가 "항상 버림"이 아님을 같이 잰다.
-  live = '/A'
-  expect(await requestCard('/A', async () => ({ value: settingsCard() }), () => live))
-    .toEqual({ action: 'show', card: settingsCard() })
-})
-
-test('C02ⓑ: 승인은 보이는 카드가 지금 폴더의 카드일 때만 나가고, 늦은 응답도 버린다', async () => {
-  const sent: string[] = []
-  const applied: CardDecision = {
-    outcome: 'applied', reason: null, card: settingsCard({ kind: 'applied', scope: 'continue' }), boundTurn: null
-  }
-  const send = async (root: string): Promise<CardDecision> => {
-    sent.push(root)
-    return applied
-  }
-  // 옛 폴더 카드 — 보내지 않는다.
-  expect(await decideIfCurrent(settingsCard(), '/B', () => '/B', 'card-1', 4, 'continue', send)).toEqual({ action: 'drop' })
-  expect(sent).toEqual([])
-
-  // 지금 폴더 카드 — 보내고 결과를 그린다.
-  expect(await decideIfCurrent(settingsCard(), '/A', () => '/A', 'card-1', 4, 'continue', send))
-    .toEqual({ action: 'done', decision: applied })
-  expect(sent).toEqual(['/A'])
-
-  // 보낸 뒤 답이 닿기 전에 폴더를 옮겼다 — 그 답도 버린다(옛 접힘을 새 화면에 그리지 않는다).
-  let live = '/A'
-  expect(await decideIfCurrent(settingsCard(), '/A', () => live, 'card-1', 4, 'continue', async () => {
-    live = '/B'
-    return applied
-  })).toEqual({ action: 'drop' })
-
-  // 통로가 실패하면(`null`) 단추 자리 실패다 — 조용히 넘기지 않는다.
-  expect(await decideIfCurrent(settingsCard(), '/A', () => '/A', 'card-1', 4, 'continue', async () => null))
-    .toEqual({ action: 'error' })
-})
-
-test('C02ⓑ: 재확인도 같은 문지기를 쓴다', async () => {
-  const sent: string[] = []
-  const invalid: CardDecision = {
-    outcome: 'invalid', reason: 'base-version', card: settingsCard({ kind: 'invalid' }), boundTurn: null
-  }
-  const send = async (root: string): Promise<CardDecision> => {
-    sent.push(root)
-    return invalid
-  }
-  expect(await recheckIfCurrent(null, '/A', () => '/A', 'card-1', send)).toEqual({ action: 'drop' })
-  expect(await recheckIfCurrent(settingsCard(), '/A', () => '/B', 'card-1', send)).toEqual({ action: 'drop' })
-  expect(sent).toEqual([])
-  expect(await recheckIfCurrent(settingsCard(), '/A', () => '/A', 'card-1', send))
-    .toEqual({ action: 'done', decision: invalid })
-  expect(sent).toEqual(['/A'])
-})

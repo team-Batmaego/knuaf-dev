@@ -13,6 +13,7 @@ import {
   planFromRow,
   proposeLaneRequest,
   resolveLanes,
+  resolveCodexAlias,
   selectLaneRow,
   subscriptionCheck,
   type AccountSnapshot,
@@ -45,6 +46,18 @@ const CODEX_MODELS = [
   model('gpt-6-luna', 'Luna', EFFORTS)
 ]
 
+test('Codex 레인 별칭은 GPT 6.2 id를 찾고 같은 별칭의 옛 판보다 우선한다', () => {
+  const catalog = [
+    ...CODEX_MODELS,
+    model('gpt-6.2-sol', 'GPT-6.2 Sol'),
+    model('gpt-6.2-astra', 'GPT-6.2 Astra')
+  ]
+  expect(resolveCodexAlias(catalog, 'sol')).toBe('gpt-6.2-sol')
+  expect(resolveCodexAlias(catalog, 'astra')).toBe('gpt-6.2-astra')
+  expect(resolveCodexAlias(catalog, 'terra')).toBe('gpt-6.1-terra')
+  expect(resolveCodexAlias(catalog, 'luna')).toBe('gpt-6-luna')
+})
+
 function claude(over: { apiKeySource?: string | null; subscriptionType?: string | null; models?: readonly ModelCatalogEntry[] | null } = {}): AccountSnapshot {
   return {
     company: 'claude',
@@ -72,58 +85,58 @@ const EXPECTED_LANES: Record<LaneRowId, Record<WorkLane, LaneEntry>> = {
   },
   'codex-low': {
     design: { company: 'codex', model: 'terra', effort: null, how: 'main' },
-    research: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    research: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     writing: { company: 'codex', model: 'luna', effort: null, how: 'relay' },
-    repeat: { company: 'codex', model: 'luna', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'codex', model: 'terra', effort: 'high', how: 'relay' }
   },
   'codex-high': {
     design: { company: 'codex', model: 'sol', effort: null, how: 'main' },
     research: { company: 'codex', model: 'astra', effort: null, how: 'relay' },
-    writing: { company: 'codex', model: 'sol', effort: null, how: 'relay' },
-    repeat: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    writing: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'codex', model: 'astra', effort: 'high', how: 'relay' }
   },
   'claude-low': {
     design: { company: 'claude', model: 'sonnet', effort: null, how: 'main' },
-    research: { company: 'claude', model: 'haiku', effort: null, how: 'relay' },
+    research: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     writing: { company: 'claude', model: 'sonnet', effort: null, how: 'relay' },
-    repeat: { company: 'claude', model: 'haiku', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'claude', model: 'sonnet', effort: 'high', how: 'relay' }
   },
   'claude-high': {
     design: { company: 'claude', model: 'opus', effort: null, how: 'main' },
-    research: { company: 'claude', model: 'sonnet', effort: null, how: 'relay' },
+    research: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     writing: { company: 'claude', model: 'sonnet', effort: null, how: 'relay' },
-    repeat: { company: 'claude', model: 'haiku', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'claude', model: 'opus', effort: 'high', how: 'relay' }
   },
   'both-high': {
     design: { company: 'claude', model: 'opus', effort: null, how: 'main' },
     research: { company: 'codex', model: 'astra', effort: null, how: 'relay' },
-    writing: { company: 'codex', model: 'sol', effort: null, how: 'relay' },
-    repeat: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    writing: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'codex', model: 'astra', effort: 'high', how: 'relay' }
   },
   'claude-high-codex-low': {
     design: { company: 'claude', model: 'opus', effort: null, how: 'main' },
-    research: { company: 'claude', model: 'sonnet', effort: null, how: 'relay' },
-    writing: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
-    repeat: { company: 'codex', model: 'luna', effort: null, how: 'relay' },
+    research: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    writing: { company: 'codex', model: 'luna', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'claude', model: 'opus', effort: 'high', how: 'relay' }
   },
   'claude-low-codex-high': {
     design: { company: 'codex', model: 'sol', effort: null, how: 'main' },
     research: { company: 'codex', model: 'astra', effort: null, how: 'relay' },
-    writing: { company: 'codex', model: 'sol', effort: null, how: 'relay' },
-    repeat: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    writing: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'claude', model: 'sonnet', effort: 'high', how: 'relay' }
   },
   'both-low': {
     design: { company: 'claude', model: 'sonnet', effort: null, how: 'main' },
     research: { company: 'codex', model: 'terra', effort: null, how: 'relay' },
     writing: { company: 'codex', model: 'luna', effort: null, how: 'relay' },
-    repeat: { company: 'claude', model: 'haiku', effort: null, how: 'relay' },
+    repeat: { company: 'free', model: 'deepseek-v4.1-flash-free', effort: null, how: 'relay' },
     review: { company: 'codex', model: 'terra', effort: 'high', how: 'relay' }
   }
 }
@@ -178,9 +191,7 @@ test('LANE_TABLE 9줄의 45칸이 제품 표와 일치하고 초안 표시는 �
 
 test('칩 추천표는 ChatGPT 낮음·높음 정본 레인표의 모든 Codex 칸과 일치한다', () => {
   for (const { lane } of WORK_LANES) {
-    expect(LANE_TABLE['codex-low'].lanes[lane].company).toBe('codex')
     expect(CODEX_TIER_MODELS.low[lane]).toBe(LANE_TABLE['codex-low'].lanes[lane].model)
-    expect(LANE_TABLE['codex-high'].lanes[lane].company).toBe('codex')
     expect(CODEX_TIER_MODELS.high[lane]).toBe(LANE_TABLE['codex-high'].lanes[lane].model)
   }
 })
@@ -211,17 +222,17 @@ test('검토 모델이 목록에 없으면 검토는 미실행이고 다른 레�
   })
   expect(resolved.plan.review).toBeNull()
   expect(resolved.notes).toContainEqual({ lane: 'review', kind: 'review-unavailable', model: 'sonnet' })
-  expect(laneOf(resolved.plan, 'research')).toMatchObject({ company: 'claude', model: 'haiku', how: 'relay' })
+  expect(laneOf(resolved.plan, 'research')).toMatchObject({ company: 'free', model: 'deepseek-v4.1-flash-free', how: 'relay' })
 })
 
 test('자료·글쓰기·반복 모델이 목록에 없으면 해당 레인만 본대화가 맡는다', () => {
-  const withoutSonnet = CLAUDE_MODELS.filter((entry) => entry.model !== 'sonnet')
+  const withoutTerra = CODEX_MODELS.filter((entry) => entry.model !== 'gpt-6.1-terra')
   const resolved = resolveLanes('claude-high-codex-low', {
     mainCompany: 'claude',
-    catalog: { claude: withoutSonnet, codex: CODEX_MODELS }
+    catalog: { claude: CLAUDE_MODELS, codex: withoutTerra }
   })
   expect(resolved.plan.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
-  expect(resolved.notes).toContainEqual({ lane: 'research', kind: 'main-takeover', model: 'sonnet' })
+  expect(resolved.notes).toContainEqual({ lane: 'research', kind: 'main-takeover', model: 'terra' })
   expect(laneOf(resolved.plan, 'review')).toMatchObject({ company: 'claude', model: 'opus', how: 'relay' })
 })
 
@@ -241,15 +252,15 @@ test('모델 목록을 아직 모르면 없는 것으로 단정하지 않는다'
 test('추천 줄에서 본대화 회사가 바뀌어도 담당 모델은 유지되고 모두 relay다', () => {
   const same = resolveLanes('both-high', { mainCompany: 'claude' })
   expect(laneOf(same.plan, 'research')).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
-  expect(laneOf(same.plan, 'writing')).toMatchObject({ company: 'codex', model: 'sol', how: 'relay' })
-  expect(laneOf(same.plan, 'repeat')).toMatchObject({ company: 'codex', model: 'terra', how: 'relay' })
+  expect(laneOf(same.plan, 'writing')).toMatchObject({ company: 'codex', model: 'terra', how: 'relay' })
+  expect(laneOf(same.plan, 'repeat')).toMatchObject({ company: 'free', model: 'deepseek-v4.1-flash-free', how: 'relay' })
   expect(laneOf(same.plan, 'review')).toMatchObject({ company: 'codex', model: 'astra', effort: 'high', how: 'relay' })
 
   const swapped = resolveLanes('both-high', { mainCompany: 'codex' })
   expect(laneOf(swapped.plan, 'design')).toEqual({ company: 'codex', model: null, effort: null, how: 'main' })
   expect(laneOf(swapped.plan, 'research')).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
-  expect(laneOf(swapped.plan, 'writing')).toMatchObject({ company: 'codex', model: 'sol', how: 'relay' })
-  expect(laneOf(swapped.plan, 'repeat')).toMatchObject({ company: 'codex', model: 'terra', how: 'relay' })
+  expect(laneOf(swapped.plan, 'writing')).toMatchObject({ company: 'codex', model: 'terra', how: 'relay' })
+  expect(laneOf(swapped.plan, 'repeat')).toMatchObject({ company: 'free', model: 'deepseek-v4.1-flash-free', how: 'relay' })
   expect(laneOf(swapped.plan, 'review')).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
 })
 
@@ -282,8 +293,8 @@ test('학생이 설계를 다른 회사로 옮기면 나머지 레인의 how도 
   expect(proposal.rejected).toEqual([])
   expect(proposal.next.design).toMatchObject({ company: 'codex', model: 'gpt-6.1-sol', how: 'main' })
   expect(proposal.next.research).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
-  expect(proposal.next.writing).toMatchObject({ company: 'codex', model: 'sol', how: 'relay' })
-  expect(proposal.next.repeat).toMatchObject({ company: 'codex', model: 'terra', how: 'relay' })
+  expect(proposal.next.writing).toMatchObject({ company: 'codex', model: 'terra', how: 'relay' })
+  expect(proposal.next.repeat).toMatchObject({ company: 'free', model: 'deepseek-v4.1-flash-free', how: 'relay' })
   expect(proposal.next.review).toMatchObject({ company: 'codex', model: 'astra', how: 'relay' })
 })
 
@@ -319,7 +330,7 @@ test('L-01 학생 지정·목록 부재로 main이 된 레인은 요청에 없�
 
   const missingBase = resolveLanes('claude-high', {
     mainCompany: 'claude',
-    catalog: { claude: [model('opus', 'Claude Opus', ['high'])] }
+    catalog: { claude: [model('opus', 'Claude Opus', ['high'])], free: [] }
   }).plan
   expect(missingBase.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
   const missingNext = proposeLaneRequest(request, accounts, missingBase, 'claude').next
@@ -423,10 +434,10 @@ test('L-02 Claude는 목록 ID와 정확히 같을 때만 인정하고 표시 �
 test('L-02 추천 모델 목록 대조도 표시 이름이 아니라 정확한 목록 ID로만 한다', () => {
   const resolved = resolveLanes('claude-high', {
     mainCompany: 'claude',
-    catalog: { claude: [model('opus', 'Opus (formerly Sonnet)', ['high'])] }
+    catalog: { claude: [model('opus', 'Opus (formerly Sonnet)', ['high'])], free: [] }
   })
   expect(resolved.plan.research).toEqual({ company: 'claude', model: null, effort: null, how: 'main' })
-  expect(resolved.notes).toContainEqual({ lane: 'research', kind: 'main-takeover', model: 'sonnet' })
+  expect(resolved.notes).toContainEqual({ lane: 'research', kind: 'main-takeover', model: 'deepseek-v4.1-flash-free' })
 })
 
 test('L-02 Codex 별칭이 다른 공급자 ID로만 풀리면 거절한다', () => {
@@ -525,6 +536,10 @@ test('한도 이어 하기는 8개 유료 표와 다섯 역할에서 반대 회�
           catalogFor(otherAccount)
         )
 
+        if (failedEntry.company === 'free' || target.company === 'free') {
+          expect(result).toBeNull()
+          continue
+        }
         expect(result).toEqual({
           company: otherCompany,
           model: listedTarget,
@@ -583,13 +598,13 @@ test('본대화 한도는 동의 카드 없이 반대 회사 모델로 이어 �
   ).toEqual({ company: 'claude', model: 'opus', effort: null, how: 'main' })
 })
 
-test('한도 이어 하기는 동의·기본 사용·구독·대상 모델 목록을 모두 요구한다', () => {
-  const failedCodex = LANE_TABLE['codex-low'].lanes.research
-  const failedClaude = LANE_TABLE['claude-low'].lanes.research
+test('한도 이어 하기는 기본 사용·구독·대상 모델 목록을 요구하지만 동의는 요구하지 않는다', () => {
+  const failedCodex = LANE_TABLE['codex-low'].lanes.writing
+  const failedClaude = LANE_TABLE['claude-low'].lanes.writing
   const claudeHigh = claude({ subscriptionType: 'max' })
   const codexHigh = codex()
 
-  expect(continueAfterLimit('research', failedCodex, claudeHigh, { ...CONTINUATION_STATE, consented: false }, catalogFor(claudeHigh))).toBeNull()
+  expect(continueAfterLimit('writing', failedCodex, claudeHigh, { ...CONTINUATION_STATE, consented: false }, catalogFor(claudeHigh))).toMatchObject({ company: 'claude', model: 'sonnet' })
   expect(continueAfterLimit('research', failedCodex, claudeHigh, { ...CONTINUATION_STATE, basicUsageAllowed: false }, catalogFor(claudeHigh))).toBeNull()
   expect(continueAfterLimit('research', failedCodex, codexHigh, CONTINUATION_STATE, catalogFor(codexHigh))).toBeNull()
   expect(

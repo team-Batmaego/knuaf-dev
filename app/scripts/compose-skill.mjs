@@ -109,6 +109,11 @@ export function composeFiles(input, { source, overlay, version, api = 1 }) {
     if (path.split('/').includes('tests') || path === 'install-manifest.json') files.delete(path)
   }
   const overlayFiles = readTree(overlay)
+  for (const [path, bytes] of overlayFiles) {
+    if (/\.(?:md|json)$/i.test(path) && bytes.includes(0x0d)) {
+      throw new Error(`CR byte forbidden in overlay text input: ${path}`)
+    }
+  }
   const config = JSON.parse(overlayFiles.get('overlay.json')?.toString() ?? 'null')
   if (!config || Object.keys(config).sort().join(',') !== 'append,name,remove,schema' ||
       config.schema !== 1 || config.name !== 'knuaf-dev' || !Array.isArray(config.remove) ||
