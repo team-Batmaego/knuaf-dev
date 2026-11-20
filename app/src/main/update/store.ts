@@ -1,4 +1,5 @@
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { diagSkill } from '../diagLog'
 import { readRecoverable, writeFileAtomic, type ReadFs } from '../safeWrite'
@@ -313,14 +314,20 @@ export class SkillStore {
     return Object.keys(s.kept).filter(v => compare(v, current) < 0 && compare(v, this.bundledVersion) >= 0 && this.validStrict(v, s.kept[v], 'rollback-target')).sort(compare).at(-1) ?? null
   }
   /**
-   * 깨진 본문의 원본을 `state.json.bad`로 남긴다. 기존 `.bad`가 파일이든 링크든 그 이름만 지우고(링크는 대상을 안 건드린다)
-   * 배타 생성(`wx`, 0o600)으로 새로 쓴다. 못 만들면 던진다 — 호출부는 본문 정리를 하지 않는다.
+   * 깨진 본문의 원본을 `state.json.bad`로 남긴다. 새 백업은 같은 폴더의 별도 이름에 배타 생성(`wx`, 0o600)으로 다 쓴 뒤에만
+   * `rename`으로 `.bad` 자리에 올린다 — rename은 기존 `.bad`가 파일이든 링크든 그 이름만 바꿔 끼우고 링크 대상은 건드리지 않는다.
+   * 쓰기·rename이 실패하면 임시 파일만 치우고 기존 `.bad`와 본문은 그대로 둔 채 던진다(호출부는 본문 정리를 하지 않는다).
    */
   private backupCorrupt(): void {
-    const body = join(this.root, 'state.json'), bad = `${body}.bad`
+    const body = join(this.root, 'state.json'), bad = `${body}.bad`, temp = `${bad}.new-${randomBytes(6).toString('hex')}`
     const original = readFileSync(body)
-    try { lstatSync(bad); unlinkSync(bad) } catch (e) { if (codeOfError(e) !== 'ENOENT') throw e }
-    writeFileSync(bad, original, { flag: 'wx', mode: 0o600 })
+    try {
+      writeFileSync(temp, original, { flag: 'wx', mode: 0o600 })
+      renameSync(temp, bad)
+    } catch (error) {
+      try { unlinkSync(temp) } catch { /* 만들어지지 않았거나 이미 옮겨졌다 */ }
+      throw error
+    }
   }
   /** Startup only, before any user request can hold an old source. */
   cleanup(): void {
