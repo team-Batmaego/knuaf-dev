@@ -229,6 +229,7 @@ export function SettingsScreen() {
       <section className="card" hidden={section !== 'info'}>
         <div className="card-head"><h2>{SETTINGS.appInfoTitle}</h2>{info && <Badge label={`버전 ${info.version}`} />}</div>
         <UpdateSettings />
+        {typeof __KNUAF_GATE_BUILD__ !== 'undefined' && __KNUAF_GATE_BUILD__ && <p role="note" className="caption"><strong>{SETTINGS.gateBuild}</strong></p>}
         <div className="caption">{APP_NAME} · 초기 베타{info ? ` · Electron ${info.electron} · ${info.packaged ? '설치판' : '개발 모드'}` : ''}</div>
         <p className="caption">{CREDIT.line2}<br />{CREDIT.gui}</p>
         {info && <div className="row app-build-info" style={{ marginTop: 'var(--sp-2)' }}>

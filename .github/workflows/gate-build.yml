@@ -1,0 +1,115 @@
+name: gate-build
+# 관문 전용 빌드 — 출시 전에 윈도 실기기에서 "인 앱 업데이트가 끝까지 되는지"를 보는 내부 시험판.
+# **배포·공유 금지.** 학생에게 가는 설치본은 `release.yml`(태그)만 만든다.
+#
+# - 무엇을 만드나: 같은 커밋에서 판 번호만 다른 설치본 2개(판 A = 지금 판, 판 B = 다음 패치 판)와
+#   이 실행에서만 쓰는 임시 키로 서명한 `channel.json`. 두 설치본은 **같은 PC**
+#   (`http://127.0.0.1:38473/`)의 채널만 본다 — 밖으로 새도 다른 PC 의 그 주소에는 아무것도 없다.
+# - 운영 채널(`updates/channel.json`)·운영 공개키·릴리스에는 아무것도 올리지 않는다.
+# - 트리거: 수동 실행뿐.  gh workflow run gate-build.yml --ref <branch>
+# - 비밀값: 하나도 받지 않는다(저장소 비밀값 참조 0). 임시 개인키는 러너 임시 폴더에만 있고 서명 뒤 지운다.
+# - 발행: `--publish never`, 권한 `contents: read`. 결과는 워크플로 아티팩트뿐(보존 3일).
+# - 관문 값이 들어가는 길: 아래 빌드 환경값 둘 → `app/scripts/gate-define.mjs` → main 번들 상수.
+#   이 이름은 이 파일에만 나온다(`app/scripts/check-release-update-config.mjs --workflows` 가 검사).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
+  GATE_PORT: "38473"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
+      - run: pnpm install --frozen-lockfile
+
+      # 판 A = package.json 의 판, 판 B = 패치 번호 +1. 임시 키는 이 실행에서 만든다:
+      # 개인키는 러너 임시 폴더 파일로만, 공개키(PEM)만 빌드 환경으로 넘긴다.
+      - name: 관문 값 준비
+        run: |
+          a="$(node -p "require('./package.json').version")"
+          b="$(node -p "const [x,y,z]=require('./package.json').version.split('.').map(Number); [x,y,z+1].join('.')")"
+          public_key="$(node scripts/gate-channel.mjs keygen --private "$RUNNER_TEMP/gate-key.pem")"
+          {
+            echo "GATE_VERSION_A=$a"
+            echo "GATE_VERSION_B=$b"
+            echo "KNUAF_GATE_CHANNEL=http://127.0.0.1:$GATE_PORT/channel.json"
+            echo 'KNUAF_GATE_PUBLIC_KEY<<GATE_KEY_END'
+            echo "$public_key"
+            echo 'GATE_KEY_END'
+          } >> "$GITHUB_ENV"
+          echo "판 A=$a 판 B=$b"
+
+      - run: pnpm build
+      - name: Verify staged skill against signed channel manifest
+        run: node scripts/verify-skill-staging.mjs
+      # 이 번들은 출시 검사에 **걸려야** 한다 — 걸리지 않으면 관문 값이 안 들어간 것이거나 검사가 무른 것이다.
+      - name: 관문 빌드임을 출시 검사가 알아보는지 확인
+        run: |
+          if node scripts/check-release-update-config.mjs --out out; then
+            echo "::error::출시 산출물 검사가 관문 빌드를 통과시켰습니다"; exit 1
+          fi
+      - run: pnpm prepare:resources
+
+      # 같은 번들을 판 번호만 바꿔 두 번 포장한다. 파일 이름에 GATE 가 들어가 출시 설치본과 섞이지 않는다.
+      - name: 판 A 포장
+        run: |
+          pnpm exec electron-builder --win --publish never "--config.extraMetadata.version=$GATE_VERSION_A" '--config.artifactName=knuaf-dev-GATE-${version}-${arch}.${ext}'
+          mkdir -p gate && mv "dist/knuaf-dev-GATE-$GATE_VERSION_A-x64.exe" gate/
+      - name: 판 B 포장
+        run: |
+          pnpm exec electron-builder --win --publish never "--config.extraMetadata.version=$GATE_VERSION_B" '--config.artifactName=knuaf-dev-GATE-${version}-${arch}.${ext}'
+          mv "dist/knuaf-dev-GATE-$GATE_VERSION_B-x64.exe" gate/
+
+      - name: 채널 문서 서명 (임시 키)
+        run: node scripts/gate-channel.mjs sign --private "$RUNNER_TEMP/gate-key.pem" --installer "gate/knuaf-dev-GATE-$GATE_VERSION_B-x64.exe" --version "$GATE_VERSION_B" --port "$GATE_PORT" --output gate
+      - name: 임시 개인키 지우기
+        if: always()
+        run: rm -f "$RUNNER_TEMP/gate-key.pem"
+
+      - name: 안내문·체크섬
+        working-directory: app/gate
+        run: |
+          sha256sum *.exe channel.json > SHA256SUMS-gate.txt && cat SHA256SUMS-gate.txt
+          cat > README-GATE.txt <<TEXT
+          관문 전용 빌드 - 내부 시험 전용. 배포·공유 금지. 시험이 끝나면 PC 에서 지운다.
+          커밋: $GITHUB_SHA
+
+          1. 이 폴더를 시험 PC 에 그대로 둔다.
+          2. knuaf-dev-GATE-$GATE_VERSION_A-x64.exe 를 설치한다(판 A).
+          3. 이 폴더에서:  python -m http.server $GATE_PORT --bind 127.0.0.1
+          4. 앱을 켜면 $GATE_VERSION_B 안내가 뜬다 → '지금 설치' → 설치 뒤 앱 정보가 $GATE_VERSION_B 인지 본다.
+          5. 끝나면 관문 시험판을 지우고 출시 설치본으로 되돌린다.
+          TEXT
+      - name: 아티팩트
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-build-DO-NOT-DISTRIBUTE
+          path: |
+            app/gate/*.exe
+            app/gate/channel.json
+            app/gate/SHA256SUMS-gate.txt
+            app/gate/README-GATE.txt
+          if-no-files-found: error
+          retention-days: 3
