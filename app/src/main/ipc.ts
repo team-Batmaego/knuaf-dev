@@ -54,6 +54,8 @@ import { checkDocxZip } from './docx-zip'
 import { ensureSectionBaseline } from './review-baseline'
 import { readDismissed, readNotices, writeDismissed } from './notices'
 import { CHOICE_VALUES } from '../shared/notice'
+import { diag, diagEnabled } from './diagLog'
+import { createCallGate, SETTINGS_GET_DIAG_CALLS } from './diagLimits'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -573,7 +575,22 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
 
   ipcMain.handle('window:info', () => windowInfo())
 
-  ipcMain.handle('settings:get', () => loadSettings())
+  // 설정 읽기 진단은 **첫 몇 번만** 남긴다(검토 I-01) — 설정 화면은 이 핸들러를 여러 번 부르고,
+  // 그때마다 같은 줄을 동기로 쓰면 이득 없이 main 스레드만 막는다.
+  const settingsGetDiag = createCallGate(SETTINGS_GET_DIAG_CALLS)
+  ipcMain.handle('settings:get', () => {
+    if (!diagEnabled() || !settingsGetDiag()) return loadSettings()
+    const started = Date.now()
+    diag('startup:settings-get:start')
+    try {
+      const settings = loadSettings()
+      diag(`startup:settings-get:done elapsed=${Date.now() - started}ms`)
+      return settings
+    } catch (error) {
+      diag(`startup:settings-get:error elapsed=${Date.now() - started}ms`)
+      throw error
+    }
+  })
   ipcMain.handle('settings:set', async (_e, patch) => {
     const provider = patch?.provider_choice?.provider
     const root = currentRoot
