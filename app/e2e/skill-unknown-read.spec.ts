@@ -537,6 +537,62 @@ test('R-B10 publish: state read after rename failing keeps selection and kept', 
   expect(u.phases.at(-1)).toBe('error')
 })
 
+/* ═════════════════════════ R — Roh roh293 반례(고침 1차에서 드러남) ═════════════════════════ */
+
+test('R-N6b check: an unreadable state body hides the high-water mark, so check is error', async () => {
+  // roh293 C-01: 최고판 .16은 state.json 본문에만 있고 highest.json은 없다. 본문을 통째로 읽지 못한다.
+  const d = disk({ bundledVersion: '1.0.15', versions: [], kept: [], active: null, highest: '1.0.16' })
+  realFs.rmSync(join(d.storeDir, 'highest.json'), { force: true })
+  const u = makeUpdater({ disk: d, candidate: fixture('1.0.14') })
+  const fault: Rule = { op: 'read', name: 'state.json', code: 'EACCES', times: ALWAYS }
+  inject.set([fault])
+  const status = await u.updates.check()
+  fired(fault)
+  await faultRecord('R-N6b', d, u, { ok: status })
+  // 기준판·고침 1차: 본문을 빈 상태로 접어 highest 없음 → 조기 idle('할 일 없음' 확정).
+  expect(status.phase).toBe('error')
+  expect(status.message).toMatch(UNKNOWN)
+})
+
+test('R-B2c restore: an unreadable highest backup at restore time keeps the original error and still restarts', async () => {
+  // roh293 I-01: 첫 재시작 안에서 state.json의 highest를 null로 바꾸고(백업 highest.json은 남김) 그 백업 읽기를 막는다.
+  const d = disk({ active: '1.0.14' })
+  const fault: Rule = { op: 'read', name: 'highest.json', code: 'EACCES', times: ALWAYS }
+  let n = 0
+  const u = makeUpdater({ disk: d, restart: async () => {
+    if (++n === 1) {
+      realFs.writeFileSync(join(d.storeDir, 'state.json'), JSON.stringify({ ...d.state(), highest: null }))
+      inject.set([fault])
+      throw new Error('sidecar restart failed')
+    }
+  } })
+  const res = await settle(u.updates.select('1.0.15'))
+  fired(fault)
+  await faultRecord('R-B2c', d, u, res)
+  // 기준판·고침 1차: 되돌림의 state()가 경로 든 원시 EACCES를 던져 원래 오류를 대신하고 두 번째 재시작이 없다.
+  expect(thrownOf(res)).toBeInstanceOf(Error)
+  expect((thrownOf(res) as Error).message).toBe('sidecar restart failed')
+  expect(n).toBe(2)
+  expect(u.phases.at(-1)).toBe('error')
+  inject.clear()
+  expect(d.state().active).toBe('1.0.15')
+})
+
+test('R-B3e cleanup of a corrupt state body keeps the original bytes as state.json.bad', async () => {
+  // roh293 I-02, 오모냥 t3cb 결정(다): 이번 판은 기준판처럼 정리하되 덮기 전에 원본을 `state.json.bad`로 남긴다(되짓기는 다음 판).
+  const d = disk()
+  realFs.writeFileSync(join(d.storeDir, 'state.json'), '{')
+  const store = d.store()
+  const res = await settle(() => store.cleanup())
+  await faultRecord('R-B3e', d, null, res)
+  // 기준판·고침 1차: 원본을 남기지 않고 빈 상태로 덮는다.
+  expect(realFs.readFileSync(join(d.storeDir, 'state.json.bad'), 'utf8')).toBe('{')
+  // 나머지는 기준판과 같다(선택·보관 목록은 빈 상태로, 판 폴더는 그대로).
+  expect(d.state()).toMatchObject({ active: null, kept: {} })
+  expect(realFs.existsSync(join(d.storeDir, '1.0.14'))).toBe(true)
+  expect(realFs.existsSync(join(d.storeDir, '1.0.15'))).toBe(true)
+})
+
 /* ═════════════════════════ 진단 줄(조건③) ═════════════════════════ */
 
 test('R-D5 diag: an unknown read leaves one skill line with stage and kind only', async () => {
@@ -560,6 +616,50 @@ test('R-D5 diag: an unknown read leaves one skill line with stage and kind only'
   // status 줄은 실제로 내보낸 phase와 순서·개수가 1:1(판정서 tests r3 I-04) — 호출 없는 중복·가짜 phase 금지.
   expect(lines.filter(line => line.startsWith('skill:status.')).map(line => line.slice('skill:status.'.length).split(' ')[0])).toEqual(u.phases)
   expect(lines.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:select unknown-io-eperm'])
+})
+
+/** 설계 §4 결과 문법 — 시험이 기대 줄을 고정할 때만 쓴다. */
+const ERRNO = '(eperm|ebusy|eacces|emfile|enfile|eio|enotdir|eisdir|eloop|other|na)'
+const R_RESULT = `(store|bundle-chosen-(no-active-(file|tmp|none)|newer)|bundle-forced-(invalid-(sure|io-${ERRNO})(-kept-(valid|invalid|io))?|state-(unread-(io|tmp-io|unobserved)-${ERRNO}|corrupt|recovered|error)))`
+const STATUS_LINE = new RegExp(`^skill:status\\.[a-z-]+ ${R_RESULT}$`)
+
+async function diagRun(spec: DiskSpec, prep: (d: Disk) => void, work: (u: ReturnType<typeof makeUpdater>, d: Disk) => Promise<unknown>, opts: { failFirstRestart?: boolean; candidate?: string } = {}): Promise<string[]> {
+  const log = join(disk().root, 'app.log')
+  process.env.KNUAF_APP_LOG = log
+  const d = disk(spec)
+  prep(d)
+  const u = makeUpdater({ disk: d, restart: restarter(opts.failFirstRestart).restart, candidate: opts.candidate ? fixture(opts.candidate) : undefined })
+  await settle(work(u, d))
+  inject.clear()
+  return skillDiag(log)
+}
+
+test('R-D6 diag: status lines survive log scrubbing and use the design result codes', async () => {
+  // roh293 I-03: 결과 코드가 32자 이상이면 diagLog 마스킹이 `<값>`으로 가렸다. 본문 active=null(완성), `.tmp`만 못 읽는 디스크
+  // → 설계 §3.4: 소스는 본문 값대로 동봉, 이유는 state-unread(tmp-io) → `bundle-forced-state-unread-tmp-io-eperm`(39자).
+  const fault: Rule = { op: 'read', name: 'state.json.tmp', code: EPERM, times: ALWAYS }
+  const lines = await diagRun({ active: null }, () => inject.set([fault]), u => u.updates.check(), { candidate: '1.0.16' })
+  const status = lines.filter(line => line.startsWith('skill:status.'))
+  for (const line of lines) expect(line).not.toMatch(/[<>]/)
+  for (const line of status) expect(line).toMatch(STATUS_LINE)
+  expect(status[0]).toBe('skill:status.checking bundle-forced-state-unread-tmp-io-eperm')
+})
+
+test('R-D3 diag: a resolver-only validity failure is one status line ending kept-valid', async () => {
+  // 설계 §4 판정 규칙 C: 같은 status 호출에서 resolver는 활성판을 I/O로 못 보고, 보관 목록 검증은 성공.
+  const fault: Rule = { op: 'read', name: '1.0.15.json', svc: /^status$/, store: RESOLVE, code: EPERM, times: 1 }
+  const lines = await diagRun({}, () => inject.set([fault]), u => u.updates.check(), { candidate: '1.0.16' })
+  expect(lines).toContain('skill:status.checking bundle-forced-invalid-io-eperm-kept-valid')
+})
+
+test('R-D1 diag: select, rollback and restore leave their own wrote lines', async () => {
+  // 설계 §4: B(되돌림이 null을 씀)는 `restore wrote-none-forced`, D(되돌릴 판 없음)는 `rollback wrote-none-chosen`.
+  const selected = await diagRun({ active: '1.0.14' }, () => {}, u => u.updates.select('1.0.15'))
+  expect(selected.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:select wrote-selection'])
+  const rolled = await diagRun({ versions: ['1.0.14'], active: '1.0.14' }, () => {}, u => u.updates.rollback())
+  expect(rolled.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:rollback wrote-none-chosen'])
+  const restored = await diagRun({ active: '1.0.14' }, d => d.corrupt('1.0.14'), u => u.updates.select('1.0.15'), { failFirstRestart: true })
+  expect(restored.filter(line => !line.startsWith('skill:status.'))).toEqual(['skill:select wrote-selection', 'skill:restore wrote-none-forced'])
 })
 
 /* ═════════════════════════ GOLD — 기준판 골든 대조(설계 §5.0·§5.1, 판정서 tests C-01) ═════════════════════════
@@ -734,7 +834,11 @@ test('GOLD E-STRUCT symlink folder', () => gold('ESTRUCT-link', { spec: D0, prep
 // 구조 errno를 실제로 내는 경우(변이 M19가 살아남은 구멍): proof 자리에 폴더 → readFileSync EISDIR, 고리 심볼릭 링크 → ELOOP.
 // 기준판에서 둘 다 '확정 무효'(모름 아님)다.
 test('GOLD E-STRUCT proof replaced by a folder (EISDIR)', () => gold('ESTRUCT-proof-dir', { spec: D0, prep: d => { const proof = join(d.storeDir, 'proofs', '1.0.14.json'); realFs.rmSync(proof, { force: true }); realFs.mkdirSync(proof) } }, structural))
-test('GOLD E-STRUCT proof is a symlink loop (ELOOP)', () => gold('ESTRUCT-proof-loop', { spec: D0, prep: d => { const proof = join(d.storeDir, 'proofs', '1.0.14.json'); realFs.rmSync(proof, { force: true }); symlinkSync(proof, proof) } }, structural))
+test('GOLD E-STRUCT proof is a symlink loop (ELOOP)', () => gold('ESTRUCT-proof-loop', { spec: D0, prep: d => { const proof = join(d.storeDir, 'proofs', '1.0.14.json'); realFs.rmSync(proof, { force: true }); symlinkSync(proof, proof)
+  // 판정서 tests r7 권고: 트리 지문은 고리 링크를 못 남기므로 입력이 실제로 만들어졌는지 여기서 단언한다.
+  expect(realFs.lstatSync(proof).isSymbolicLink()).toBe(true)
+  expect(() => realFs.readFileSync(proof)).toThrow(expect.objectContaining({ code: 'ELOOP' }))
+} }, structural))
 
 // 판정서 v2.3 입력 1·2와 동시성 EQ도 골든에 담는다.
 test('GOLD status with both reads succeeding', () => gold('V1-status-two-reads', { spec: { active: '1.0.14', highest: '1.0.15' } }, async c => {
