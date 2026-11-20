@@ -159,8 +159,8 @@ def test_canonical_writes_do_not_reintroduce_or_overwrite_flat_file_ledgers(proj
     assert not any((SKILL_DIR / name).exists() for name in retired)
     core.apply(project, {"request_id": "canonical-only", "ops": [
         {"collection": "tasks", "value": {"id": "canonical-task", "title": "Canonical task"}},
-    ]}, 1)
-    assert core.load(project)["revision"] == 2
+    ]}, 2)
+    assert core.load(project)["revision"] == 3
     assert not any((project / name).exists() for name in retired)
 
     # Existing student files are evidence, never a second canonical store or a write target.
@@ -169,9 +169,9 @@ def test_canonical_writes_do_not_reintroduce_or_overwrite_flat_file_ledgers(proj
     before = {name: (project / name).read_bytes() for name in retired}
     core.apply(project, {"request_id": "preserve-flat-inputs", "ops": [
         {"collection": "tasks", "value": {"id": "canonical-task", "title": "Updated canonical task"}},
-    ]}, 2)
+    ]}, 3)
     current = core.load(project)
-    assert current["revision"] == 3
+    assert current["revision"] == 4
     assert current["tasks"]["canonical-task"]["title"] == "Updated canonical task"
     assert current["facts"]["fact-area"]["value"] == "600"
     assert {name: (project / name).read_bytes() for name in retired} == before
