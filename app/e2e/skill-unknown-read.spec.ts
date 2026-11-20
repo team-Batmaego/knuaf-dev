@@ -581,14 +581,19 @@ test('R-B2c restore: an unreadable highest backup at restore time keeps the orig
 test('R-B3e cleanup of a corrupt state body keeps the original bytes as state.json.bad', async () => {
   // roh293 I-02, 오모냥 t3cb 결정(다): 이번 판은 기준판처럼 정리하되 덮기 전에 원본을 `state.json.bad`로 남긴다(되짓기는 다음 판).
   const d = disk()
+  const highestBefore = realFs.readFileSync(join(d.storeDir, 'highest.json'), 'utf8')
+  const highestValue = d.state().highest
   realFs.writeFileSync(join(d.storeDir, 'state.json'), '{')
   const store = d.store()
   const res = await settle(() => store.cleanup())
   await faultRecord('R-B3e', d, null, res)
   // 기준판·고침 1차: 원본을 남기지 않고 빈 상태로 덮는다.
   expect(realFs.readFileSync(join(d.storeDir, 'state.json.bad'), 'utf8')).toBe('{')
-  // 나머지는 기준판과 같다(선택·보관 목록은 빈 상태로, 판 폴더는 그대로).
-  expect(d.state()).toMatchObject({ active: null, kept: {} })
+  // 나머지는 기준판과 같다(판정서 tests r8 I-01): 정리는 성공하고, 선택·보관 목록은 빈 상태로,
+  // 최고판은 백업에서 살아남아 본문에도 그대로 쓰이며, 백업 파일과 판 폴더는 그대로다.
+  expect('ok' in res).toBe(true)
+  expect(d.state()).toEqual({ active: null, kept: {}, highest: highestValue })
+  expect(realFs.readFileSync(join(d.storeDir, 'highest.json'), 'utf8')).toBe(highestBefore)
   expect(realFs.existsSync(join(d.storeDir, '1.0.14'))).toBe(true)
   expect(realFs.existsSync(join(d.storeDir, '1.0.15'))).toBe(true)
 })
@@ -649,7 +654,8 @@ test('R-D3 diag: a resolver-only validity failure is one status line ending kept
   // 설계 §4 판정 규칙 C: 같은 status 호출에서 resolver는 활성판을 I/O로 못 보고, 보관 목록 검증은 성공.
   const fault: Rule = { op: 'read', name: '1.0.15.json', svc: /^status$/, store: RESOLVE, code: EPERM, times: 1 }
   const lines = await diagRun({}, () => inject.set([fault]), u => u.updates.check(), { candidate: '1.0.16' })
-  expect(lines).toContain('skill:status.checking bundle-forced-invalid-io-eperm-kept-valid')
+  // 판정서 tests r8 권고: '한 줄'을 고정한다 — checking 줄은 정확히 하나이고 그 줄이 kept-valid다.
+  expect(lines.filter(line => line.startsWith('skill:status.checking '))).toEqual(['skill:status.checking bundle-forced-invalid-io-eperm-kept-valid'])
 })
 
 test('R-D1 diag: select, rollback and restore leave their own wrote lines', async () => {
