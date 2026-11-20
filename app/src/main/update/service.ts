@@ -4,7 +4,7 @@ import { downloadToFile } from '../runtimeDownload'
 import { compatible, compare, verifySkill, version, type VerifiedSkill } from './manifest'
 import { type UpdateConfig } from './keys'
 import { boundedFetch, downloadLimit, readChannel, type Transport } from './network'
-import { diag } from '../diagLog'
+import { diagSkill } from '../diagLog'
 import { SkillStore, SkillUnknown, type Site } from './store'
 import { skillSwitch, type SkillSwitch } from './switch'
 import { agentActivity } from './activity'
@@ -36,8 +36,11 @@ export class SkillUpdates {
       const s = d.value, r = this.store.resolve(), bundled = r.source === this.store.bundled
       // 정상이면 기준판처럼 첫 읽기의 active를 쓴다. 첫 읽기를 못 읽었을 때만 resolver가 고른 판을 쓴다.
       const current = !d.selection.known ? r.version : bundled ? this.store.bundledVersion : s.active!
-      this.lastReason = r.reason
-      return { ...this.statusValue, current, bundled, highest: s.highest?.version ?? null, kept: Object.keys(s.kept).filter(v => this.store.valid(v, s.kept[v])) }
+      // 목록 검증은 한 번만 하고, 그 결과로 kept와 진단의 '같은 호출 안 보관 목록이 그 판을 어떻게 봤나'를 함께 낸다(설계 §4 C).
+      const checks = Object.keys(s.kept).map(v => [v, this.store.check(v, s.kept[v])] as const)
+      const seen = s.active ? checks.find(([v]) => v === s.active)?.[1] : undefined
+      this.lastReason = r.reason.startsWith('bundle-forced-invalid-') && seen ? `${r.reason}-kept-${seen.ok ? 'valid' : seen.sure ? 'invalid' : 'io'}` : r.reason
+      return { ...this.statusValue, current, bundled, highest: s.highest?.version ?? null, kept: checks.filter(([, c]) => c.ok).map(([v]) => v) }
     } catch {
       this.lastReason = 'bundle-forced-state-error'
       return { ...this.statusValue, current: this.store.bundledVersion, bundled: true, kept: [] }
@@ -46,7 +49,7 @@ export class SkillUpdates {
   private set(patch: Partial<UpdateStatus>): UpdateStatus {
     this.statusValue = { ...this.statusValue, received: undefined, total: undefined, message: undefined, ...patch }
     const status = this.status(); this.opts.emit?.(status)
-    diag(`skill:status.${status.phase} ${this.lastReason}`)
+    diagSkill(`status.${status.phase}`, this.lastReason)
     return status
   }
   check(): Promise<UpdateStatus> {
@@ -139,14 +142,19 @@ export class SkillUpdates {
     agentActivity.ensureActive()
     return this.lock.switch(() => this.activateLocked(v, signal, stage))
   }
+  /** 쓴 결과의 진단 줄 — 단계와 종류만(값·판 번호 없음). `forced`는 기록상 선택이 있었으나 못 써서 동봉으로 내려간 경우다. */
+  private wrote(stage: Site, written: string | null, before: string | null, forced: boolean): void {
+    diagSkill(stage, written === before ? 'wrote-unchanged' : written !== null ? 'wrote-selection' : forced ? 'wrote-none-forced' : 'wrote-none-chosen')
+  }
   private async activateLocked(v: string | null, signal: AbortSignal | undefined, stage: Site): Promise<UpdateStatus> {
     if (signal?.aborted) throw new Error('업데이트를 취소했어요.')
     // 이전 선택을 못 읽으면 null로 접지 않고 여기서 멈춘다(되돌릴 곳을 모르는 채 쓰지 않는다).
-    const previous = this.store.effStrict(stage) === this.store.bundled ? null : this.store.strict(stage).active
+    const eff = { forced: false }
+    const previous = this.store.effStrict(stage, eff) === this.store.bundled ? null : this.store.strict(stage).active
     this.set({ phase: 'switching' })
     let selected = false
     try {
-      this.store.select(v, stage)
+      this.wrote(stage, v, this.store.select(v, stage), eff.forced)
       selected = true
       if (signal?.aborted) throw new Error('업데이트를 취소했어요.')
       await this.opts.restartSidecar()
@@ -158,7 +166,7 @@ export class SkillUpdates {
         throw error
       }
       // Restore effective previous selection even after a complete newer .tmp.
-      try { this.store.select(previous, 'restore') } catch (restoreError) {
+      try { this.wrote('restore', previous, this.store.select(previous, 'restore'), eff.forced) } catch (restoreError) {
         // 되돌림을 못 읽었으면 요청한 값을 그대로 두고 재시작 → 오류 → 원래 오류로 간다. 확정 무효 등은 기준판처럼 던진다.
         if (!(restoreError instanceof SkillUnknown)) throw restoreError
       }

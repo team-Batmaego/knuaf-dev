@@ -1,6 +1,6 @@
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { diag } from '../diagLog'
+import { diagSkill } from '../diagLog'
 import { readRecoverable, writeFileAtomic, type ReadFs } from '../safeWrite'
 import { compatible, compare, exact, hash, MAX_BYTES, MAX_FILES, object, sha256, SKILL_API, verifySkill, version, type VerifiedSkill } from './manifest'
 import { extractSkill } from './archive'
@@ -33,7 +33,7 @@ const classOf = (e: unknown): ErrnoClass => {
 export class SkillUnknown extends Error {
   constructor(readonly site: Site, readonly why: Why, readonly errno?: ErrnoClass, label?: string) {
     super('규칙집 기록을 지금 읽지 못했어요.')
-    diag(`skill:${site} ${label ?? `unknown-${why}-${errno ?? 'na'}`}`)
+    diagSkill(site, label ?? `unknown-${why}-${errno ?? 'na'}`)
   }
 }
 const unknownOf = (site: Site, o: Obs, label?: string): SkillUnknown => {
@@ -145,19 +145,28 @@ export class SkillStore {
     if (d.legacy) throw d.legacy.error
     return d.value
   }
-  /** 쓰기를 결정하는 자리용 — 선택·highest를 못 읽었으면 접지 않고 던진다. `healCorrupt`는 시작 정리만(깨진 본문은 기준판처럼 비운다). */
-  strict(site: Site, healCorrupt = false): SkillState {
+  /**
+   * 쓰기를 결정하는 자리용 — 선택·highest를 못 읽었으면 접지 않고 던진다. 모름은 기준판이 던졌을 원시 오류(`legacy`)보다 먼저
+   * 가른다: 엄격한 자리에서 경로가 든 원시 오류가 나가면 호출부가 '모름'으로 처리하지 못한다(roh293 I-01).
+   * `healCorrupt`는 시작 정리만(깨진 본문은 기준판처럼 비운다).
+   */
+  private strictDetail(site: Site, healCorrupt: boolean): StateDetail {
     const d = this.stateDetail()
-    if (d.legacy) throw d.legacy.error
     if (!d.selection.known && !(healCorrupt && d.selection.why === 'corrupt')) throw unknownOf(site, d.selection)
     if (!d.highest.known) throw unknownOf(site, d.highest)
-    return d.value
+    if (d.legacy) throw d.legacy.error
+    return d
   }
-  /** `checkNow`용 — highest만 본다. */
+  strict(site: Site): SkillState { return this.strictDetail(site, false).value }
+  /**
+   * `checkNow`용 — 최고판은 본문(`state.json`)과 백업(`highest.json`) 양쪽에 있으므로 어느 쪽을 못 읽어도 모른다.
+   * 본문을 못 읽으면 본문에 든 최고판도 모른다(roh293 C-01).
+   */
   strictHighest(site: Site, label?: string): Highest | null {
     const d = this.stateDetail()
-    if (d.legacy) throw d.legacy.error
+    if (!d.selection.known) throw unknownOf(site, d.selection, label)
     if (!d.highest.known) throw unknownOf(site, d.highest, label)
+    if (d.legacy) throw d.legacy.error
     return d.value.highest
   }
   private write(s: SkillState): void {
@@ -220,9 +229,11 @@ export class SkillStore {
   }
   resolveSkillSource(): string { return this.resolve().source }
   /** 쓰기를 결정하는 자리용 resolver — 모름이면 동봉으로 접지 않고 던진다. */
-  effStrict(site: Site): string {
+  effStrict(site: Site, out?: { forced: boolean }): string {
     const s = this.strict(site), v = s.active
     if (v && compare(v, this.bundledVersion) >= 0 && this.validStrict(v, s.kept[v], site)) return join(this.root, v)
+    // 기록상 선택이 있는데 못 쓰는 판이라 동봉으로 내려갔다(진단 줄의 chosen/forced 구분용).
+    if (out) out.forced = v !== null
     return this.bundled
   }
   private matchesBundle(p: VerifiedSkill): boolean {
@@ -247,9 +258,9 @@ export class SkillStore {
   }
   disposition(p: VerifiedSkill): 'new' | 'repair' | 'kept' {
     const m = p.manifest, d = this.stateDetail(), s = d.value
+    if (!d.highest.known) throw unknownOf('disposition', d.highest, 'unknown-highest')
     if (d.legacy) throw d.legacy.error
     if (!compatible(m, this.appVersion)) throw new Error('이 규칙집은 앱 새 판이 필요해요.')
-    if (!d.highest.known) throw unknownOf('disposition', d.highest, 'unknown-highest')
     if (!d.selection.known) {
       // 선택을 못 읽었다 — 어느 갈래로 가든 결과가 같을 때만 기준판 식으로 끝낸다. 갈래가 갈리면 모름이다.
       const fail = (): never => { throw unknownOf('disposition', d.selection, 'unknown-selection') }
@@ -303,7 +314,9 @@ export class SkillStore {
   }
   /** Startup only, before any user request can hold an old source. */
   cleanup(): void {
-    const s = this.strict('cleanup', true), versions = Object.keys(s.kept).sort(compare).reverse()
+    const d = this.strictDetail('cleanup', true), s = d.value, versions = Object.keys(s.kept).sort(compare).reverse()
+    // 깨진 본문은 기준판처럼 비운 상태로 덮되, 덮기 전에 원본을 남긴다(되짓기는 다음 판). 남기지 못하면 덮지 않는다.
+    if (!d.selection.known) copyFileSync(join(this.root, 'state.json'), join(this.root, 'state.json.bad'))
     const retain = new Set([...new Set([s.active, s.highest?.version, ...versions].filter((v): v is string => !!v))].slice(0, 2))
     for (const v of versions) if (!retain.has(v)) {
       rmSync(join(this.root, v), { recursive: true, force: true })
