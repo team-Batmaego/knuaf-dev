@@ -1,6 +1,20 @@
 import { agentActivity, type AgentActivity } from './activity'
 import { skillSwitch, type SkillSwitch } from './switch'
 import type { ProcessSnapshot } from './processes'
+import { codeOf, diag, diagEnabled } from '../diagLog'
+/** 인계 단계의 소요·성패를 진단에 남긴다. 진단이 꺼져 있으면 일을 그대로 넘긴다(동작 불변). */
+async function step<T>(name: string, work: () => Promise<T>): Promise<T> {
+  if (!diagEnabled()) return work()
+  const started = Date.now()
+  try {
+    const value = await work()
+    diag(`handoff:step name=${name} ms=${Date.now() - started} ok=1`)
+    return value
+  } catch (error) {
+    diag(`handoff:step name=${name} ms=${Date.now() - started} ok=0 error=${codeOf(error)}`)
+    throw error
+  }
+}
 // `closeForUpdate` 는 `'settled' | 'pending'` 를 돌려준다 — 인계는 그 분류를 쓰지 않지만(정착한
 // 거절만 던지는 계약은 그대로), 마감을 넘긴 연결은 서비스가 소유권을 남긴다. 넓게 받아 둔다.
 export interface HandoffChat { hasPendingLogin(): boolean; flushDrafts(): void; closeForUpdate(confirmStopped: () => Promise<void>): Promise<unknown> }
@@ -25,16 +39,16 @@ export class AppHandoff {
     try {
       if (this.opts.chat.hasPendingLogin()) throw new Error('브라우저에서 진행 중인 로그인을 마친 뒤 다시 눌러 주세요.')
       await lock.switch(async () => {
-        await activity.drain(Math.max(0, timeout - (Date.now() - start)))
+        await step('drain', () => activity.drain(Math.max(0, timeout - (Date.now() - start))))
         if (signal?.aborted) throw new Error('앱 업데이트를 취소했어요.')
-        const owned = await this.opts.windows.captureOwned()
+        const owned = await step('capture', () => this.opts.windows.captureOwned())
         try {
-          await this.opts.sidecar.stop()
-          await this.opts.chat.closeForUpdate(() => this.opts.windows.confirmStopped(owned))
-          await this.opts.windows.assertResourcesIdle()
+          await step('sidecar', () => this.opts.sidecar.stop())
+          await step('chat', () => this.opts.chat.closeForUpdate(() => this.opts.windows.confirmStopped(owned)))
+          await step('resources', () => this.opts.windows.assertResourcesIdle())
           if (signal?.aborted) throw new Error('앱 업데이트를 취소했어요.')
           this.opts.chat.flushDrafts()
-          await transfer()
+          await step('transfer', () => transfer())
           committed = true
         } catch (error) {
           try { await this.opts.sidecar.restart() }
