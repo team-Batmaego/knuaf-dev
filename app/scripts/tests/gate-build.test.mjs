@@ -88,7 +88,8 @@ test('release environments and workflows carry no gate names; gate-build stays s
   writeFileSync(join(dir, 'release.yml'), 'run: node scripts/gate-channel.mjs keygen\n')
   assert.throws(() => checkWorkflows(dir), /release\.yml/)
 
-  const gate = readFileSync(join(workflows, 'gate-build.yml'), 'utf8')
+  // 윈도 체크아웃은 줄 끝이 CRLF 일 수 있다 — 아래 단언은 LF 기준이다(`check-skill-workflow.mjs` 와 같은 처리).
+  const gate = readFileSync(join(workflows, 'gate-build.yml'), 'utf8').replace(/\r\n/g, '\n')
   const on = /^on:\n((?:  .*\n|\n)+)/m.exec(gate)?.[1] ?? ''
   assert.deepEqual([...on.matchAll(/^  ([\w-]+):/gm)].map(m => m[1]), ['workflow_dispatch'])
   assert.match(gate, /^permissions:\n  contents: read\n/m); assert.equal((gate.match(/^\s*permissions:/gm) ?? []).length, 1)
