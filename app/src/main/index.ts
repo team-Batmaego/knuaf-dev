@@ -15,6 +15,7 @@ import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
+import { createStartupDiag, STARTUP_WINDOW_MS } from './diagLimits'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
 if (process.env.KNUAF_USER_DATA) app.setPath('userData', process.env.KNUAF_USER_DATA)
@@ -41,14 +42,22 @@ const SHUTDOWN_DEADLINE_MS = 10_000
 const diagStart = Date.now()
 let lastStage = 'boot'
 let quitPasses = 0
+/**
+ * 배경 진단(`lastStage` — heartbeat 가 다시 적는 값)을 건드리지 않고 **단계 줄 하나만** 쓴다.
+ * 기동 표식이 `lastStage` 를 덮으면, 종료가 멈췄을 때 "어디서 멈췄는지"가 늘 `startup:*` 로 보인다
+ * (검토 I-01).
+ */
+const writeStage = (stage: string, detail: string | (() => string) = ''): void => {
+  const text = typeof detail === 'function' ? detail() : detail
+  diag(`stage=${stage}${text ? ` ${text}` : ''} elapsed=${Date.now() - diagStart}ms uptime=${process.uptime().toFixed(2)}s`)
+}
 const trace = (stage: string, detail: string | (() => string) = ''): void => {
   // 진단이 꺼져 있으면 **아무 일도 하지 않는다**(검토 RT3 권고). `lastStage` 는 heartbeat 만
   // 읽는데 그 타이머도 아래 가드 안에서만 등록되므로, 꺼진 상태에서는 쓸 소비자가 없다.
   // `detail` 을 함수로 넘기면 그 계산(예: 자식 pid 수집)도 꺼진 상태에서 아예 돌지 않는다.
   if (!diagEnabled()) return
   lastStage = stage
-  const text = typeof detail === 'function' ? detail() : detail
-  diag(`stage=${stage}${text ? ` ${text}` : ''} elapsed=${Date.now() - diagStart}ms uptime=${process.uptime().toFixed(2)}s`)
+  writeStage(stage, detail)
 }
 if (diagEnabled()) {
   // 이벤트 루프가 살아 있는 한 5초마다 현재 단계를 남긴다. unref — 이 타이머가 종료를 붙잡지 않는다.
@@ -132,6 +141,92 @@ function createWindow(): void {
       ...(hidden ? { backgroundThrottling: false } : {})
     }
   })
+  // Subscribe before navigation: Playwright may receive the window after preload has failed.
+  // No URL, console text, error message, settings value or document content enters this log.
+  if (diagEnabled()) {
+    const contents = win.webContents
+    /**
+     * 기동 표식은 **창이 닫히거나 시간 상한(60초)에 닿을 때까지** 남긴다(검토 I-01·roh290b).
+     * 첫 load 완료·첫 표시는 **구간을 닫지 않는다** — 그 둘은 문서 로드가 끝났다는 신호일 뿐이고,
+     * React 의 `.titlebar` 는 그 뒤에 뜬다(`TitleBar.tsx`, `e2e/helpers.ts` 의 `waitForSelector`).
+     * 그때 닫으면 정작 봐야 할 제목줄 대기 구간의 renderer-gone·unresponsive·콘솔 오류를 놓친다.
+     * 끝나면 구독을 전부 떼고, 그 뒤에 울린 이벤트는 계수기에서 조용히 사라진다.
+     * `console-message`·`unresponsive` 같은 반복 이벤트는 단계당 3줄·창당 40줄로 막는다 —
+     * 구간이 길어진 비용도 이 줄 상한이 막는다.
+     */
+    const budget = createStartupDiag()
+    // 해제 클로저가 `win`(모듈 지역 `let`)을 다시 읽으면 TS 는 `null` 가능성을 되살린다 — 이 창을
+    // 지역 상수로 붙잡아 등록·해제가 같은 객체를 가리키게 한다.
+    const owner = win
+    const offs: Array<() => void> = []
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    /** `detach: false` 는 창이 이미 닫힌 경우다 — 그때는 구독 해제를 부르지 않는다(파괴된 webContents). */
+    const stopStartup = (reason: string, detach = true): void => {
+      if (!budget.close(reason)) return
+      writeStage('startup:closed', `reason=${reason} lines=${budget.count()}`)
+      if (deadline) clearTimeout(deadline)
+      if (detach) for (const off of offs.splice(0)) off()
+      else offs.length = 0
+    }
+    /** 단계 줄 하나 — 상한에 걸리면 파일에 아무것도 쓰지 않는다. */
+    const mark = (stage: string, detail?: string | (() => string)): void => {
+      if (!budget.allow(stage)) return
+      writeStage(stage, detail)
+    }
+    deadline = setTimeout(() => stopStartup('deadline'), STARTUP_WINDOW_MS)
+    deadline.unref?.()
+    mark('startup:window-created')
+    // 등록과 해제는 **같은 참조**로 짝을 맞춘다. Electron 의 `off` 는 이벤트 이름마다 시그니처가
+    // 달라 이름을 문자열로 받는 도우미를 쓸 수 없다 — 한 줄씩 적는 편이 타입에 정직하다.
+    // 첫 표시·첫 load 완료는 **값만 남기고 구간은 닫지 않는다**(검토 roh290b 새 결함) — 제목줄은
+    // 그 뒤에 뜬다. 구간을 닫는 자리는 `closed`(창 닫힘)와 `deadline`(시간 상한) 둘뿐이다.
+    const onReadyToShow = (): void => mark('startup:ready-to-show')
+    const onLoadStart = (): void => mark('startup:load-start')
+    const onDomReady = (): void => mark('startup:dom-ready')
+    const onLoadFinished = (): void => mark('startup:load-finished')
+    // did-stop-loading 은 구간을 닫지 않는다 — 첫 load 가 실패해도 울려서, 정작 봐야 할
+    // `startup:load-failed` 를 덮고 로그를 닫아 버린다. 값만 남긴다.
+    const onLoadStopped = (): void => mark('startup:load-stopped')
+    const onLoadFailed = (_event: Electron.Event, code: number, _description: string, _url: string, mainFrame: boolean): void => {
+      mark('startup:load-failed', `code=${code} mainFrame=${mainFrame}`)
+    }
+    const onPreloadError = (): void => mark('startup:preload-error')
+    const onRendererGone = (_event: Electron.Event, details: Electron.RenderProcessGoneDetails): void => {
+      mark('startup:renderer-gone', `reason=${details.reason} exitCode=${details.exitCode}`)
+    }
+    const onUnresponsive = (): void => mark('startup:renderer-unresponsive')
+    const onResponsive = (): void => mark('startup:renderer-responsive')
+    const onConsoleMessage = (details: Electron.Event<Electron.WebContentsConsoleMessageEventParams>): void => {
+      if (details.level === 'error' || details.level === 'warning') mark('startup:renderer-console', `level=${details.level}`)
+    }
+    const onClosed = (): void => stopStartup('window-closed', false)
+    owner.once('ready-to-show', onReadyToShow)
+    owner.once('closed', onClosed)
+    contents.on('did-start-loading', onLoadStart)
+    contents.on('dom-ready', onDomReady)
+    contents.on('did-finish-load', onLoadFinished)
+    contents.on('did-stop-loading', onLoadStopped)
+    contents.on('did-fail-load', onLoadFailed)
+    contents.on('preload-error', onPreloadError)
+    contents.on('render-process-gone', onRendererGone)
+    contents.on('unresponsive', onUnresponsive)
+    contents.on('responsive', onResponsive)
+    contents.on('console-message', onConsoleMessage)
+    offs.push(
+      () => owner.off('ready-to-show', onReadyToShow),
+      () => owner.off('closed', onClosed),
+      () => contents.off('did-start-loading', onLoadStart),
+      () => contents.off('dom-ready', onDomReady),
+      () => contents.off('did-finish-load', onLoadFinished),
+      () => contents.off('did-stop-loading', onLoadStopped),
+      () => contents.off('did-fail-load', onLoadFailed),
+      () => contents.off('preload-error', onPreloadError),
+      () => contents.off('render-process-gone', onRendererGone),
+      () => contents.off('unresponsive', onUnresponsive),
+      () => contents.off('responsive', onResponsive),
+      () => contents.off('console-message', onConsoleMessage)
+    )
+  }
   if (!hidden) win.once('ready-to-show', () => win?.show())
   win.webContents.on('did-finish-load', () => { if (pendingOpen) { sendMenu({ type: 'open-recent', root: pendingOpen }); pendingOpen = null } })
   win.on('closed', () => { win = null })

@@ -288,6 +288,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
       - run: pnpm build
         if: needs.changes.outputs.docs_only != 'true'
+      # 평소 빌드(내부 시험용 값 없음)의 번들이 운영 채널·운영 공개키 2개만 담는지 매 PR 에서 본다.
+      # 출시 워크플로에 내부 시험용 빌드 이름이 섞이지 않았는지도 같이 본다.
+      - run: node scripts/check-release-update-config.mjs --workflows --out out
+        if: needs.changes.outputs.docs_only != 'true'
       # xlsx-preview.spec.ts uses Playwright's browser page fixture; cache and install only its headless Chromium shell.
       - name: Cache Playwright Chromium (macOS)
         if: needs.changes.outputs.docs_only != 'true' && runner.os == 'macOS'

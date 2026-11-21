@@ -37,6 +37,7 @@ export default defineConfig({
     'guard-codex-connection.spec.ts',
     'guard-claude-skill-host.spec.ts',
     'notice-bubble.spec.ts',
+    'diag-limits.spec.ts',
     'lanes-lines.spec.ts',
     'lanes-store.spec.ts',
     'lanes-settings-card.spec.ts',

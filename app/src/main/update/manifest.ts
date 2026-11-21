@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, verify } from 'node:crypto'
+import { GATE, gateAsset, type Gate } from './gate'
 
 export const SKILL_API = 1
 export const MAX_FILES = 600
@@ -37,7 +38,9 @@ export function safePath(value: string): void {
     if (!part || part === '.' || part === '..' || /[. ]$/.test(part) || /[<>"|?*]/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) throw new Error('안전하지 않은 파일 경로예요.')
   }
 }
-export function assetUrl(value: unknown): asserts value is string {
+export function assetUrl(value: unknown, gate: Gate | null = GATE): asserts value is string {
+  // 관문 전용 빌드만 이 분기로 온다(빌드 시점 상수). 평소·출시 빌드는 아래 GitHub 릴리스 검사 그대로다.
+  if (gate) return gateAsset(value, gate)
   if (typeof value !== 'string' || !value.startsWith(ASSET_PREFIX)) throw new Error('허용되지 않은 내려받기 주소예요.')
   const u = new URL(value)
   if (u.username || u.password || u.search || u.hash || u.href !== value || !u.pathname.startsWith('/team-Batmaego/knuaf-dev/releases/download/')) throw new Error('허용되지 않은 내려받기 주소예요.')
