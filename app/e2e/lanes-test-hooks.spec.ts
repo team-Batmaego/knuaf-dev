@@ -12,6 +12,8 @@
  */
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { launch, openProject } from './helpers'
 import { fakeCodexEnv, questionProject, scratch, seedChat, userDataWith } from './fixtures/fake-codex'
 import { at, MESSAGES, progressLine, snapshot } from './fixtures/lanes'
@@ -59,6 +61,10 @@ test('제품 조건(시험 신호 off)에서는 세 시험 사건이 화면을 �
   await withApp('0', async (page, root) => {
     // 신호가 실제로 꺼져 있는가 — 이 단언이 없으면 "리스너는 걸렸는데 무시"도 통과한다.
     expect(await page.evaluate(() => window.knuaf.testHooks)).toBe(false)
+    // 렌더러 store 를 읽는 통로도 없다 — 세 사건과 **같은 게이트**(`testHooks`)로만 열린다.
+    // 창에 속성이 아예 서지 않았는지 본다(값이 undefined 인 속성이 남는 것과 구별한다).
+    expect(await page.evaluate(() => Object.prototype.hasOwnProperty.call(window, '__knuafProjectProbe')))
+      .toBe(false)
 
     await injectProbe(page, root)
     await page.waitForTimeout(800)
@@ -77,5 +83,21 @@ test('시험 신호 on 에서는 같은 주입이 실제로 화면에 닿는다'
     await injectProbe(page, root)
     // 주입 묶음의 폴더가 지금 열어 둔 폴더와 같아야 화면에 그려진다(store 의 root 검사, I-01 (b)).
     await expect(page.locator(`#${LINE_ID}`)).toBeVisible({ timeout: 15_000 })
+
+    // 같은 게이트로 열린 store 통로는 **지금 열어 둔 폴더와 디스크의 개정**을 그대로 준다.
+    // 음성 시험(위)이 "아무것도 안 열려서 통과"가 아님을 여기서 함께 잰다. 디스크 개정은
+    // 회차마다 새로 읽는다 — 한 번 읽은 값을 기대값으로 굳히면 그 뒤 정본이 앞서 나갈 때
+    // 통로가 옳아도 실패한다. 어긋나면 지금 값을 그대로 실어 실패 사유를 남긴다.
+    await expect.poll(async () => {
+      const onDisk = JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }
+      const probe = await page.evaluate(() => {
+        const host = window as unknown as { __knuafProjectProbe?: { root: string | null; revision: number | null } }
+        return host.__knuafProjectProbe ?? null
+      })
+      if (probe === null) return '통로 없음'
+      if (probe.root !== root) return `다른 폴더: ${probe.root}`
+      if (probe.revision !== onDisk.revision) return `개정 ${probe.revision} ≠ 디스크 ${onDisk.revision}`
+      return '맞음'
+    }, { timeout: 15_000 }).toBe('맞음')
   })
 })

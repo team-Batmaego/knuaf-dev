@@ -16,9 +16,26 @@ import { launch, openProject, paperReady, synthProject, rewriteSection } from '.
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 import type { RpcResult, SectionRow, Status } from '../src/shared/types'
 
-type ViewerEditProbe = { statusRevisions: { root: string; revision: number }[]; sent: Record<string, unknown> | null }
+type ViewerEditProbe = { sent: Record<string, unknown> | null }
 type ViewerEditHost = typeof globalThis & { __viewerEdit: ViewerEditProbe }
 type SavePollHost = typeof globalThis & { __savePoll: { held: boolean; statusReads: number; release: () => void } }
+type ProjectProbe = { root: string | null; revision: number | null }
+
+/**
+ * 지금 창의 렌더러 store 가 들고 있는 (폴더, 개정).
+ *
+ * `main.tsx` 가 시험 신호가 켜진 실행에서만 `window.__knuafProjectProbe` getter 로 내보낸다
+ * (읽기 전용, 쓰기·함수 없음). 통로가 없으면 null — 제품 실행이 그렇다. IPC 응답을 세는
+ * 대신 store 값을 직접 읽으므로, 응답이 늦게 반영돼 버려지는 경우(`store/project.ts` 의
+ * `refresh`)에도 "화면이 실제로 무엇을 보고 있는가"를 잰다(검토 roh292 중요 1).
+ */
+async function readProjectProbe(page: Page): Promise<ProjectProbe | null> {
+  return page.evaluate(() => {
+    const host = window as unknown as { __knuafProjectProbe?: ProjectProbe }
+    const probe = host.__knuafProjectProbe
+    return probe ? { root: probe.root, revision: probe.revision } : null
+  })
+}
 
 /**
  * 도우미 연결이 **확인된** 상태로 앱을 띄운다. 막대(`.selbar`)는 연결이 끊겨 있으면 서지 않는다 —
@@ -298,7 +315,8 @@ test(`저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다 
     const input = page.locator('.edit-slot-input')
     await expect(input).toBeVisible({ timeout: 15_000 })
     await input.fill('700평')
-    // Observe the real IPC payload; advance the actual renderer poll before pressing save.
+    // 저장이 실제로 보내는 payload 를 붙잡는다. 아래 (나)는 이 기록이 아니라 렌더러 store 를
+    // 직접 읽어 판정한다 — 응답을 받았다는 사실은 store 반영을 뜻하지 않는다.
     const initial = await electronApp.evaluate(async ({ ipcMain }, folder) => {
       type Handler = (...args: unknown[]) => Promise<unknown>
       // Electron's existing private handler registry is the in-process test seam.
@@ -307,22 +325,13 @@ test(`저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다 
       const status = await real({}, 'project.status', { root: folder }) as RpcResult<Status>
       const sections = await real({}, 'project.sections', { root: folder }) as RpcResult<SectionRow[]>
       if (!status.result || !sections.result) throw new Error('initial project snapshot failed')
-      const probe: ViewerEditProbe = { statusRevisions: [], sent: null }
+      const probe: ViewerEditProbe = { sent: null }
       const host = globalThis as ViewerEditHost
       host.__viewerEdit = probe
       ipcMain.removeHandler('rpc')
       ipcMain.handle('rpc', async (...args: unknown[]) => {
         if (args[1] === 'section.edit') probe.sent = args[2] as Record<string, unknown>
-        const reply = await real(...args)
-        // 렌더러가 받은 `project.status` 응답만 적는다 — 폴더와 개정을 함께 남겨야 "같은
-        // 프로젝트의 외부 변경 개정을 관측했다"를 폴더·기준 개정 없이 주장하지 않는다.
-        if (args[1] === 'project.status') {
-          const params = args[2] as { root?: unknown } | undefined
-          const rootParam = params?.root
-          const result = (reply as RpcResult<Status>).result
-          if (typeof rootParam === 'string' && result) probe.statusRevisions.push({ root: rootParam, revision: result.revision })
-        }
-        return reply
+        return await real(...args)
       })
       return { revision: status.result.revision, hash: sections.result.find((row) => row.id === 'sec-01')!.draft_hash }
     }, root)
@@ -348,32 +357,25 @@ test(`저장이 실패하면 원고는 그대로이고 실패 한 줄이 뜬다 
     // `bumpRevision` 은 본문을 그대로 두므로 본문만으로는 '정말 바뀌었나'를 말할 수 없다.
     const onDisk = JSON.parse(readFileSync(join(root, 'project.json'), 'utf-8')) as { revision: number }
     expect(onDisk.revision).toBe(initial.revision + 1)
-    // (나) 렌더러가 **이 폴더의** 외부 변경 개정(`initial.revision + 1`)을 받은 상태.
-    // 기록은 위에서 빈 채로 시작했고 외부 변경은 그 뒤에 일어났으므로, +1 이 적혀 있다는
-    // 것 자체가 "바뀐 뒤에 읽었다"는 뜻이다. 이미 자연 틱이 따라잡았으면 시계를 더 밀지
-    // 않는다(`watchCanon` 은 개정이 같으면 읽지 않고 돌아간다). 아직 못 봤을 때만 민다 —
-    // 한 번 밀면 그 응답이 실제로 돌아온 뒤에만 다음 번을 민다(`statusInFlight` 인 동안의
-    // 틱은 아무 일도 안 하고 돌아가므로 몰아 밀면 빈 틱만 쌓인다). 밀 횟수는 여섯 번까지만.
-    let forcedTicks = 0
-    let repliesAtLastTick = -1
-    let idle = 0
+    // (나) 렌더러 **store** 가 이 폴더의 외부 변경 개정(`initial.revision + 1`)을 들고 있다.
+    // IPC 응답을 세지 않고 `window.__knuafProjectProbe` getter 로 store 값을 직접 읽는다 —
+    // `refresh` 는 응답 뒤 `peekProject` 를 한 번 더 기다리고 그 사이 방문이 바뀌면 결과를
+    // 버리므로, 응답을 받았다는 사실은 store 반영을 뜻하지 않는다(검토 roh292 중요 1).
+    //
+    // 시계가 멈춰 있어 감시 타이머(2초)가 저절로 돌지 않는다. 아직 못 봤으면 회차마다 시계를
+    // 한 번 밀고, 민 직후에 store 를 다시 읽는다. 회차 사이에는 `expect.poll` 이 실제 시간을
+    // 두므로 앞 갱신이 실제 IPC 를 마칠 틈이 생긴다(`statusInFlight` 인 동안의 틱은 아무 일도
+    // 안 하고 돌아간다). 민 횟수는 판정 근거가 아니다 — 판정은 store 값 하나로만 한다.
+    const target = initial.revision + 1
+    let ticks = 0
     await expect.poll(async () => {
-      const observed = await electronApp.evaluate((): { root: string; revision: number }[] => {
-        const host = globalThis as ViewerEditHost
-        return host.__viewerEdit.statusRevisions
-      })
-      const forRoot = observed.filter((read) => read.root === root)
-      const seen = forRoot.filter((read) => read.revision === initial.revision + 1).length
-      if (seen > 0) return seen
-      // 응답이 돌아왔거나, 두 번 두어도 아무 응답이 없으면(그 호출이 실패했을 수 있다) 다시 민다.
-      if (forcedTicks < 6 && (repliesAtLastTick < 0 || forRoot.length > repliesAtLastTick || idle >= 2)) {
-        repliesAtLastTick = forRoot.length
-        idle = 0
-        forcedTicks++
-        await page.clock.runFor(2100)
-      } else idle++
-      return 0
-    }, { timeout: 15_000 }).toBeGreaterThan(0)
+      const probe = await readProjectProbe(page)
+      if (probe === null || probe.root !== root || probe.revision !== target) {
+        if (ticks < 8) { ticks++; await page.clock.runFor(2100) }
+        return await readProjectProbe(page)
+      }
+      return probe
+    }, { timeout: 20_000, intervals: [100, 150, 250, 400, 600, 800] }).toEqual({ root, revision: target })
     await page.clock.runFor(32)
     await input.press('Enter')
 
