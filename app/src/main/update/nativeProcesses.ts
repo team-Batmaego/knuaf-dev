@@ -21,8 +21,20 @@ namespace KnuafUpdate {
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder path,ref uint size);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   public static List<Row> Read(int collector) {
-   DateTime captured=DateTime.UtcNow;
+   for(int attempt=1;;attempt++) {
+    try { return ReadOnce(collector); }
+    // A process born while the walk is running (cleanup taskkill/conhost) or a real
+    // PID reuse is a reason to take a fresh snapshot, not to fail the whole handoff.
+    // No exception filter (the C# 6 'when' clause): Windows PowerShell 5.1's Add-Type
+    // compiles with the C# 5 compiler, which does not know filters. The third failure propagates.
+    catch(InvalidOperationException) { if(attempt>=3) throw; }
+   }
+  }
+  static List<Row> ReadOnce(int collector) {
    var snapshot=CreateToolhelp32Snapshot(2,0); if(snapshot==new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());
+   // Everything already in this snapshot was born before it was taken; only a later
+   // birth time is a genuine PID reuse.
+   DateTime captured=DateTime.UtcNow;
    var rows=new List<Row>();
    try {
     var entry=new Entry(); entry.size=(uint)Marshal.SizeOf(typeof(Entry));

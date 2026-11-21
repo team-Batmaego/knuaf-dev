@@ -20,6 +20,8 @@ function shellErrorKind(stderr: string): string {
 }
 /** 인계 확인 한 번이 붙잡아 두는 표본 수의 상한(마지막 표본은 상한과 무관하게 남긴다). */
 const MAX_TRACE_SAMPLES = 80
+/** 마감이 지나도 이만큼은 조회한다 — 느린 조회 한두 번으로 '종료 확인'을 끝내지 않는다. */
+const MIN_SAMPLES = 3
 interface TraceSample { n: number; asked: number; at: number; rows: ProcessInfo[] }
 type TraceResult = 'ok' | 'deadline' | 'error'
 /**
@@ -96,23 +98,26 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
     return { processes: inventory.processes, appPid: this.appPid, appExecutable: inventory.appExecutable }
   }
   async confirmStopped(before: ProcessSnapshot, timeout = 6_000): Promise<void> {
-    const end = Date.now() + timeout, watch = new OwnedProcessWatch(before)
+    const watch = new OwnedProcessWatch(before)
     // 판정 경로는 진단이 켜져 있든 꺼져 있든 같은 일을 한다: `busy` → 마감 판독 → 다음 조회 예약.
     // 진단(`KNUAF_APP_LOG`)이 켜져 있으면 표본(조회 결과 배열)과 시각만 붙잡아 두고, 근거 조립과
     // 파일 쓰기는 이 함수가 끝난 **뒤**(`setImmediate`)에 같은 표본을 다시 분류해서 한다.
     const traced = diagEnabled(), started = traced ? Date.now() : 0, samples: TraceSample[] = []
-    let count = 0, result: TraceResult = 'error', finished = 0
+    let count = 0, result: TraceResult = 'error', finished = 0, end = 0
     try {
       for (let n = 1; ; n++) {
         const asked = traced ? Date.now() : 0
         const rows = (await this.inventory()).processes
         count = n
+        // 마감은 첫 조회가 **돌아온 뒤**부터 센다 — 느린 첫 조회가 표본 수를 깎지 않게.
+        if (n === 1) end = Date.now() + timeout
         if (!watch.busy(rows)) {
           if (traced) { finished = Date.now(); samples.push({ n, asked, at: finished, rows }); result = 'ok' }
           return
         }
         const now = Date.now()
-        if (now >= end) {
+        // 마감이 지났어도 최소 표본 수는 채운다(조회 하나의 상한은 그대로라 전체가 끝없이 늘지 않는다).
+        if (now >= end && n >= MIN_SAMPLES) {
           if (traced) { finished = now; samples.push({ n, asked, at: now, rows }); result = 'deadline' }
           throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
         }

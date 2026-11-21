@@ -19,7 +19,7 @@ export function resourcesBusy(processes: ProcessInfo[], resources: string, names
 export interface ProcessSnapshot { processes: ProcessInfo[]; appPid: number; appExecutable: string }
 type Ownership = 'owned' | 'unrelated' | 'unknown'
 interface Generation { process: ProcessInfo; ownership: Ownership }
-export type InspectWhy = 'app' | 'history' | 'parent-live' | 'parent-app' | 'parent-history' | 'parent-missing' | 'parent-time-unreadable' | 'own-time-unreadable' | 'parent-reused' | 'cycle'
+export type InspectWhy = 'app' | 'history' | 'parent-live' | 'parent-app' | 'parent-history' | 'parent-missing' | 'parent-time-unreadable' | 'parent-foreign' | 'own-time-unreadable' | 'parent-reused' | 'cycle'
 export interface InspectRow {
   role: 'block' | 'ancestor'; id: number; parentId: number | 'app' | 'gone' | 'cut'
   kind: string; ownership: 'o' | 'u' | 'x'; why: InspectWhy; pathRead: boolean; bornMs: number | null
@@ -101,7 +101,15 @@ export class OwnedProcessWatch {
         }
         // Missing or unreadable parent identity remains unknown: cancel handoff.
         else if (!parent) { reason = 'parent-missing'; via?.set(p.pid, 'gone') }
-        else if (this.time(parent.created) === null) { reason = 'parent-time-unreadable'; via?.set(p.pid, parent) }
+        // A process whose creation time cannot be read belongs to another account —
+        // this app could read anything it started itself. So if that exact parent
+        // generation was already unrelated in the first listing, its new child is
+        // unrelated too (sameGeneration demands PID+parent+name+path when unreadable).
+        // An owned or still-unknown parent keeps the old, safe answer.
+        else if (this.time(parent.created) === null) {
+          if (classify(parent) === 'unrelated') { ownership = 'unrelated'; reason = 'parent-foreign'; via?.set(p.pid, parent) }
+          else { reason = 'parent-time-unreadable'; via?.set(p.pid, parent) }
+        }
         else if (this.time(p.created) === null) { reason = 'own-time-unreadable'; via?.set(p.pid, parent) }
         // 지금 그 PID 를 쓰는 프로세스는 자식보다 늦게 태어났다 — 진짜 부모는 이미 없다.
         else { reason = 'parent-reused'; via?.set(p.pid, 'gone') }
