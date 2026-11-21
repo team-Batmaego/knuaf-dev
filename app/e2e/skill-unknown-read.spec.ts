@@ -37,7 +37,14 @@ const READ_STATE = /^(state|strict|stateDetail)$/
 const EFFECTIVE = /^(resolveSkillSource|resolve|effStrict|state|strict|stateDetail)$/
 
 /** 시험이 주입한 규칙이 실제로 닿았는지 — 조용히 빗나간 주입을 통과로 치지 않는다. */
-function fired(...list: Rule[]): void { for (const rule of list) expect(inject.fired(rule), `주입 규칙이 닿지 않았다: ${JSON.stringify({ ...rule, store: String(rule.store), svc: String(rule.svc) })}`).toBeGreaterThan(0) }
+function fired(...list: Rule[]): void { firedAfter('', ...list) }
+/** `fired`와 같은 단언 — 닿지 않았을 때 문구에 규칙 호출 진단(`inject.explain`)과 `note`(그 시험의 조작 결과)를 싣는다. */
+function firedAfter(note: string, ...list: Rule[]): void {
+  for (const rule of list) {
+    const count = inject.fired(rule)
+    expect(count, count > 0 ? '' : `주입 규칙이 닿지 않았다: ${JSON.stringify({ ...rule, store: String(rule.store), svc: String(rule.svc) })}\n  진단: ${inject.explain(rule)}${note ? `\n  조작 결과: ${note}` : ''}`).toBeGreaterThan(0)
+  }
+}
 
 /** state.json 쓰기(원자 쓰기의 `.tmp` 쓰기·이름바꾸기) 수. */
 const stateWrites = (): number => inject.writes().filter(line => /state\.json(\.tmp)?$/.test(line) && line.startsWith('write:')).length
@@ -526,7 +533,8 @@ test('R-B10 publish: state read after rename failing keeps selection and kept', 
   inject.set([fault])
   const res = await settle(() => u.updates.install())
   const thrown = thrownOf(res)
-  fired(fault)
+  // 진단 문구만 더한다 — 닿지 않았을 때 설치가 먼저 다른 이유로 던졌는지(phase 순서·던진 문구)를 같이 보이게.
+  firedAfter(`${'threw' in res ? `던짐: ${String(res.threw instanceof Error ? res.threw.message : res.threw).slice(0, 300)}` : '성공(던지지 않음)'} · phases=${u.phases.join('>')}`, fault)
   await faultRecord('R-B10', d, u, res)
   inject.clear()
   // 기준판: 빈 상태 위에 kept={.15}·active=null을 써서 선택과 .14 기록을 잃는다.

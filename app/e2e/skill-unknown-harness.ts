@@ -209,6 +209,9 @@ export type Rule = {
 const errno = (code: string): Error => Object.assign(new Error(`${code}: injected`), { code })
 
 const tally = new Map<Rule, number>()
+/** 진단 전용(동작 무관): 규칙의 op·name에 맞은 호출이 왜 발동하지 않았는지 — `explain()`이 실패 문구에 싣는다. */
+const trace = new Map<Rule, string[]>()
+const traced = new Map<Rule, number>()
 const applied = new Map<Rule, number>()
 let rules: Rule[] = []
 let ops: string[] = []
@@ -222,6 +225,14 @@ const match = (op: Op, path: string, info: { data?: unknown; src?: string } = {}
   if (!rules.length) return null
   let frames: Frame[] | null = null
   const name = nameOf(path)
+  // 진단 기록만 한다 — 규칙 대조의 순서·조건·`tally`는 건드리지 않는다.
+  const note = (rule: Rule, verdict: string): void => {
+    frames ??= framesOf()
+    traced.set(rule, (traced.get(rule) ?? 0) + 1)
+    const list = trace.get(rule) ?? []
+    trace.set(rule, list)
+    if (list.length < 24) list.push(`${op}:${name} 바깥store=${outerStore(frames) ?? '-'} 안쪽svc=${innerService(frames) ?? '-'} 프레임=${frames.length} → ${verdict}`)
+  }
   for (const rule of rules) {
     if (rule.op !== op) continue
     if (rule.name !== undefined && rule.name !== name) continue
@@ -229,16 +240,17 @@ const match = (op: Op, path: string, info: { data?: unknown; src?: string } = {}
     if (rule.when && !rule.when(info)) continue
     if (rule.at) {
       frames ??= framesOf()
-      if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) continue
+      if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) { note(rule, 'at 불일치'); continue }
     }
     if (rule.store || rule.svc) {
       frames ??= framesOf()
-      if (rule.store && !rule.store.test(outerStore(frames) ?? '')) continue
-      if (rule.svc && !rule.svc.test(innerService(frames) ?? '')) continue
+      if (rule.store && !rule.store.test(outerStore(frames) ?? '')) { note(rule, 'store 불일치'); continue }
+      if (rule.svc && !rule.svc.test(innerService(frames) ?? '')) { note(rule, 'svc 불일치'); continue }
     }
     const n = (tally.get(rule) ?? 0) + 1
     tally.set(rule, n)
     const skip = rule.skip ?? 0, times = rule.times ?? 1
+    note(rule, `조건 일치 n=${n} ${n <= skip ? 'skip 소비' : n <= skip + times ? '발동 대상' : 'times 소진'}`)
     if (n > skip && n <= skip + times) return rule
   }
   return null
@@ -332,9 +344,9 @@ Object.assign(fs, patched)
 
 export const inject = {
   /** 규칙을 갈아 끼운다 — 시험마다 `clear()` 뒤 새로 넣는다. */
-  set(list: Rule[]): void { rules = list.slice(); tally.clear(); applied.clear() },
+  set(list: Rule[]): void { rules = list.slice(); tally.clear(); applied.clear(); trace.clear(); traced.clear() },
   /** 규칙과 기록을 모두 비운다(대역 해제). */
-  clear(): void { rules = []; tally.clear(); applied.clear(); ops = [] },
+  clear(): void { rules = []; tally.clear(); applied.clear(); trace.clear(); traced.clear(); ops = [] },
   /** 호출 기록만 비운다 — 시험의 조작 구간만 세고 싶을 때. */
   mark(): void { ops = [] },
   /** 모든 파일 접근 기록(`op:절대경로`). */
@@ -348,6 +360,15 @@ export const inject = {
   },
   /** 규칙이 실제로 오류를 던지거나 값을 바꾼 횟수 — "주입이 안 닿았다"를 조용히 넘기지 않게. */
   fired(rule: Rule): number { return applied.get(rule) ?? 0 },
+  /**
+   * 규칙이 닿지 않았을 때 실패 문구에 싣는 진단 — 규칙의 op·name에 맞은 호출마다 바깥 store·안쪽 svc 이름과 판정을 적는다.
+   * 동작·단언과 무관하다(읽기만 한다).
+   */
+  explain(rule: Rule): string {
+    const list = trace.get(rule) ?? []
+    const total = traced.get(rule) ?? 0
+    return `op·name이 맞은 호출 ${total}회${total > list.length ? `(앞 ${list.length}회만 적음)` : ''} · 조건까지 맞음 ${tally.get(rule) ?? 0}회 · 적용 ${applied.get(rule) ?? 0}회 · stackTraceLimit=${Error.stackTraceLimit} · 호출: ${list.length ? list.join(' | ') : '없음 — 그 읽기가 일어나지 않았다'}`
+  },
   /** 규칙 조건이 맞은 호출 수(`skip` 포함). */
   matched(rule: Rule): number { return tally.get(rule) ?? 0 },
   /** 경로가 들어간 호출 기록. */
