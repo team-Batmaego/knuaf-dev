@@ -4,20 +4,53 @@ import { join, win32 } from 'node:path'
 import { hash, object, version } from './manifest'
 import { NATIVE_FILES } from './nativeFiles'
 import { NATIVE_INSTALLER, type InstallerLaunch } from './nativeInstaller'
-import { OwnedProcessWatch, resourcesBusy, type ProcessInfo, type ProcessSnapshot } from './processes'
+import { MAX_BLOCK_ROWS, OwnedProcessWatch, resourcesBusy, type ProcessInfo, type ProcessSnapshot } from './processes'
 import { NATIVE_PROCESSES } from './nativeProcesses'
 import { detectInstallMode, type InstallMode } from './installMode'
+import { diag, diagEnabled } from '../diagLog'
 
-export type PowerShell = (script: string, timeout: number, launch?: InstallerLaunch & { elevate: boolean }) => Promise<string>
+/** 어느 호출이 실패했는지 진단에 남기는 이름 — 동작에는 쓰지 않는다. */
+export type ShellPhase = 'inventory' | 'mode' | 'install'
+export type PowerShell = (script: string, timeout: number, launch?: InstallerLaunch & { elevate: boolean }, phase?: ShellPhase) => Promise<string>
+/** stderr 본문은 싣지 않는다 — 알려진 오류 종류 이름만 고른다. */
+const SHELL_ERRORS = ['PID reused while reading process snapshot', 'InvalidOperationException', 'Win32Exception', 'UnauthorizedAccessException', 'IOException', 'ParseException', 'RuntimeException'] as const
+function shellErrorKind(stderr: string): string {
+  const found = SHELL_ERRORS.find(name => stderr.includes(name))
+  return found === undefined ? 'other' : found === SHELL_ERRORS[0] ? 'pid-reused' : found
+}
+/** 인계 확인 한 번이 붙잡아 두는 표본 수의 상한(마지막 표본은 상한과 무관하게 남긴다). */
+const MAX_TRACE_SAMPLES = 80
+interface TraceSample { n: number; asked: number; at: number; rows: ProcessInfo[] }
+type TraceResult = 'ok' | 'deadline' | 'error'
+/**
+ * 인계 확인이 끝난 뒤에 부른다. 같은 처음 목록과 같은 표본 순서를 새 감시에 다시 넣으면 분류가
+ * 그대로 재현된다(분류는 입력 순서에만 달려 있다) — 판정에 쓴 감시는 건드리지 않는다.
+ */
+function writeTrace(before: ProcessSnapshot, started: number, samples: TraceSample[], count: number, result: TraceResult, finished: number): void {
+  const watch = new OwnedProcessWatch(before, started)
+  for (const { n, asked, at, rows } of samples) {
+    const view = watch.inspect(rows, true)
+    diag(`confirm:sample n=${n} at=${at - started}ms inventoryMs=${at - asked} rows=${rows.length} busy=${view.busy ? 1 : 0} owned=${view.counts.owned} unknown=${view.counts.unknown} unrelated=${view.counts.unrelated} helper=${view.counts.helper}`)
+    for (const row of view.rows()) diag(`confirm:block n=${n} role=${row.role} id=${row.id} parent=${row.parentId} kind=${row.kind} own=${row.ownership} why=${row.why} path=${row.pathRead ? 1 : 0} born=${row.bornMs === null ? '-' : `${row.bornMs}ms`}`)
+    if (view.blocked > MAX_BLOCK_ROWS) diag(`confirm:block n=${n} more=+${view.blocked - MAX_BLOCK_ROWS}`)
+  }
+  diag(`confirm:end result=${result} samples=${count} elapsed=${result === 'error' ? '-' : `${finished - started}ms`}`)
+}
 const literal = (s: string): string => "'" + s.replaceAll("'", "''") + "'"
-export const runPowerShell: PowerShell = async (script, timeout) => {
+export const runPowerShell: PowerShell = async (script, timeout, _launch, phase) => {
   if (process.platform !== 'win32') throw new Error('Windows에서만 실행할 수 있어요.')
   const { promise, resolve, reject } = Promise.withResolvers<string>()
   const exe = win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   script = '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; ' + script
   const bootstrap = 'Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))'
-  const child = execFile(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-Command', bootstrap], { windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (error, stdout) => {
-    if (error) { reject(Object.assign(new Error('Windows 실행 결과를 확인하지 못했어요.'), { code: 'installer_unknown', cause: error })); return }
+  const started = Date.now()
+  const child = execFile(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-Command', bootstrap], { windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
+    if (error) {
+      // 시간 초과(killed·signal)와 비정상 종료(exit)가 같은 문구로 뭉개지기 전에 모양만 남긴다.
+      if (diagEnabled()) diag(`shell:error phase=${phase ?? '-'} elapsed=${Date.now() - started}ms timeout=${timeout}ms code=${String(error.code ?? '-')} killed=${error.killed ? 1 : 0} signal=${error.signal ?? '-'} stderrLen=${String(stderr ?? '').length} kind=${shellErrorKind(String(stderr ?? ''))}`)
+      reject(Object.assign(new Error('Windows 실행 결과를 확인하지 못했어요.'), { code: 'installer_unknown', cause: error }))
+      return
+    }
     resolve(stdout.replace(/^\uFEFF/, '').trim())
   })
   child.stdin?.end(Buffer.from(script, 'utf8').toString('base64'))
@@ -42,13 +75,13 @@ ${NATIVE_PROCESSES}
 export interface Inventory { resources: string; appExecutable: string; processes: ProcessInfo[] }
 export class WindowsUpdateRuntime {
   constructor(private resources: string, private appExecutable: string, private appPid = process.pid, private shell: PowerShell = runPowerShell,
-    private mode: () => Promise<InstallMode> = () => detectInstallMode(appExecutable, process.env, runPowerShell)) {}
+    private mode: () => Promise<InstallMode> = () => detectInstallMode(appExecutable, process.env, (script, timeout) => runPowerShell(script, timeout, undefined, 'mode'))) {}
   async inventory(): Promise<Inventory> {
     const text = await this.shell(`$ErrorActionPreference='Stop'; ${LONG_PATH}
 $r=[UpdateNativePath]::Expand(${literal(this.resources)}); if (!$r) { throw 'resources path unavailable' };
 $e=[UpdateNativePath]::Expand(${literal(this.appExecutable)}); if (!$e) { throw 'app path unavailable' };
 $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
-@{resources=$r;appExecutable=$e;processes=$rows} | ConvertTo-Json -Depth 5 -Compress`, 15_000)
+@{resources=$r;appExecutable=$e;processes=$rows} | ConvertTo-Json -Depth 5 -Compress`, 15_000, undefined, 'inventory')
     const data = object(JSON.parse(text))
     if (typeof data.resources !== 'string' || typeof data.appExecutable !== 'string' || !Array.isArray(data.processes)) throw new Error('프로세스 목록을 확인하지 못했어요.')
     const processes = data.processes.map(value => {
@@ -64,12 +97,32 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
   }
   async confirmStopped(before: ProcessSnapshot, timeout = 6_000): Promise<void> {
     const end = Date.now() + timeout, watch = new OwnedProcessWatch(before)
-    for (;;) {
-      if (!watch.busy((await this.inventory()).processes)) return
-      if (Date.now() >= end) throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
-      const { promise, resolve } = Promise.withResolvers<void>()
-      setTimeout(resolve, Math.min(100, Math.max(0, end - Date.now())))
-      await promise
+    // 판정 경로는 진단이 켜져 있든 꺼져 있든 같은 일을 한다: `busy` → 마감 판독 → 다음 조회 예약.
+    // 진단(`KNUAF_APP_LOG`)이 켜져 있으면 표본(조회 결과 배열)과 시각만 붙잡아 두고, 근거 조립과
+    // 파일 쓰기는 이 함수가 끝난 **뒤**(`setImmediate`)에 같은 표본을 다시 분류해서 한다.
+    const traced = diagEnabled(), started = traced ? Date.now() : 0, samples: TraceSample[] = []
+    let count = 0, result: TraceResult = 'error', finished = 0
+    try {
+      for (let n = 1; ; n++) {
+        const asked = traced ? Date.now() : 0
+        const rows = (await this.inventory()).processes
+        count = n
+        if (!watch.busy(rows)) {
+          if (traced) { finished = Date.now(); samples.push({ n, asked, at: finished, rows }); result = 'ok' }
+          return
+        }
+        const now = Date.now()
+        if (now >= end) {
+          if (traced) { finished = now; samples.push({ n, asked, at: now, rows }); result = 'deadline' }
+          throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+        }
+        const { promise, resolve } = Promise.withResolvers<void>()
+        setTimeout(resolve, Math.min(100, Math.max(0, end - Date.now())))
+        if (traced && samples.length < MAX_TRACE_SAMPLES) samples.push({ n, asked, at: now, rows })
+        await promise
+      }
+    } finally {
+      if (traced) setImmediate(() => { try { writeTrace(before, started, samples, count, result, finished) } catch { /* 진단이 앱 동작을 깨지 않는다 */ } })
     }
   }
   async assertResourcesIdle(): Promise<void> {
@@ -95,7 +148,7 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
     const text = await this.shell(`$ErrorActionPreference='Stop'; Add-Type -ReferencedAssemblies System.dll,System.Core.dll -TypeDefinition @'
 ${NATIVE_FILES}
 ${NATIVE_INSTALLER}
-'@; [KnuafUpdate.Installer]::Execute(${literal(request.userData)},${literal(request.path)},${literal(request.version)},${request.size},${literal(request.sha256)},${elevate ? '$true' : '$false'}) | ConvertTo-Json -Compress`, 0, { ...request, elevate })
+'@; [KnuafUpdate.Installer]::Execute(${literal(request.userData)},${literal(request.path)},${literal(request.version)},${request.size},${literal(request.sha256)},${elevate ? '$true' : '$false'}) | ConvertTo-Json -Compress`, 0, { ...request, elevate }, 'install')
     const unknown = (): Error => Object.assign(new Error('설치 파일 시작 여부를 확인하지 못했어요. 설치 기록을 보관했어요.'), { code: 'installer_unknown' })
     let result: Record<string, unknown>
     try { result = object(JSON.parse(text)) } catch { throw unknown() }
