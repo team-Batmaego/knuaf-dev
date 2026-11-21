@@ -11,9 +11,11 @@ import { SKILL_MIN_APP, signedChannel } from '../sign-skill.mjs'
 import { checkSkillReleaseWorkflow } from './check-skill-workflow.mjs'
 
 // The pinned value is the delivered fact, not a second source: the signer reads SKILL_MIN_APP, and
-// this line only fails when that declaration moves without a decision. v0.7.1 shipped without #165,
-// so the first app release that renders the finance cards is v0.7.2.
-const DECIDED_FLOOR = '0.7.2'
+// this line only fails when that declaration moves without a decision. The floor is v0.7.3 because
+// that is the first app release carrying the #193 fix: an app that cannot read the skill state file
+// used to drop the release it was handed and fall back to its own bundled copy, so the v0.6.1
+// rulebook must not reach anything older than that fix.
+const DECIDED_FLOOR = '0.7.3'
 const signer = resolve(import.meta.dirname, '../sign-skill.mjs')
 const composer = resolve(import.meta.dirname, '../compose-skill.mjs')
 const workflowPath = resolve(import.meta.dirname, '../../..', '.github/workflows/skill-release.yml')

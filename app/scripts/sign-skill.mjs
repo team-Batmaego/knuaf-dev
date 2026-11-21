@@ -9,10 +9,13 @@ export const RELEASE_PREFIX = 'https://github.com/team-Batmaego/knuaf-dev/releas
 
 // The lowest app release that can read this skill contract, declared once and only here.
 // Older apps ignore a skill release whose minApp is above their own version (main/update/manifest.ts),
-// which is how a contract change (finance cards) stays away from releases that cannot render it.
+// which is how a contract change stays away from releases that cannot render it. The floor now
+// follows the bundled-rulebook defect fixed in #193: an app that cannot read the skill state file
+// used to discard the release it was given and fall back to its own copy, so the v0.6.1 rulebook
+// must not reach anything below the first release that carries that fix (v0.7.3).
 // There is deliberately no CLI override and the workflow must not pass one: a second place for this
 // number is how a stale `0.6.0` kept signing new contracts. check-skill-workflow.mjs locks all three.
-export const SKILL_MIN_APP = '0.7.2'
+export const SKILL_MIN_APP = '0.7.3'
 
 export function signManifest(manifestBytes, privateKey) {
   let key
