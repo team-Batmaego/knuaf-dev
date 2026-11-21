@@ -355,7 +355,8 @@ test('state damage falls back to bundle but highest backup still prevents replay
   expect(reopened.resolveSkillSource()).toBe(bundled)
   expect(reopened.state().highest?.version).toBe('1.0.2')
   expect(() => reopened.disposition(fixture('1.0.1').verified())).toThrow(/이전 판/)
-  expect(reopened.disposition(f.verified())).toBe('repair')
+  // 설계 v2.3 §3.5-4: 깨진 기록(선택을 모름)에서 kept/repair 갈래는 'repair'로 접지 않고 모름으로 멈춘다.
+  expect(() => reopened.disposition(f.verified())).toThrow(/읽지 못/)
 })
 
 test('newer bundle wins and cleanup runs only on explicit startup, retaining active plus previous', () => {
