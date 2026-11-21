@@ -299,7 +299,8 @@ def test_stop_failure_when_leader_exits_but_descendant_survives(tmp_path, monkey
             proc = contexts[0].process
             try:
                 killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            # 맥에서는 리더가 이미 회수되고 자손 좀비만 남은 그룹의 killpg가 EPERM(PermissionError)으로 떨어진다.
+            except (ProcessLookupError, PermissionError):
                 pass
             proc.wait(timeout=5)
         if connection:
