@@ -212,6 +212,8 @@ const tally = new Map<Rule, number>()
 /** 진단 전용(동작 무관): 규칙의 op·name에 맞은 호출이 왜 발동하지 않았는지 — `explain()`이 실패 문구에 싣는다. */
 const trace = new Map<Rule, string[]>()
 const traced = new Map<Rule, number>()
+/** 진단 전용: op는 맞았지만 name·namePrefix·when에서 탈락한 호출 수. */
+const missed = new Map<Rule, Record<string, number>>()
 const applied = new Map<Rule, number>()
 let rules: Rule[] = []
 let ops: string[] = []
@@ -225,32 +227,38 @@ const match = (op: Op, path: string, info: { data?: unknown; src?: string } = {}
   if (!rules.length) return null
   let frames: Frame[] | null = null
   const name = nameOf(path)
-  // 진단 기록만 한다 — 규칙 대조의 순서·조건·`tally`는 건드리지 않는다.
-  const note = (rule: Rule, verdict: string): void => {
-    frames ??= framesOf()
+  // 진단 기록만 한다. **판정용 `frames`는 건드리지 않는다** — 판정이 `frames`를 채우는 시점·위치(이 함수 프레임에서 직접 `framesOf()`)는
+  // 진단 추가 전과 같고, 진단은 이미 구한 `frames`를 읽기만 하거나(스택 조건이 있는 갈래), 따로 한 번 더 구한 스택(`framesOf()`를
+  // 이 함수 프레임에서 인자로 직접 호출 — 호출 깊이가 같다)만 쓴다.
+  const count = (rule: Rule, key: string): void => {
+    const miss = missed.get(rule) ?? {}
+    miss[key] = (miss[key] ?? 0) + 1
+    missed.set(rule, miss)
+  }
+  const note = (rule: Rule, stack: Frame[], verdict: string): void => {
     traced.set(rule, (traced.get(rule) ?? 0) + 1)
     const list = trace.get(rule) ?? []
     trace.set(rule, list)
-    if (list.length < 24) list.push(`${op}:${name} 바깥store=${outerStore(frames) ?? '-'} 안쪽svc=${innerService(frames) ?? '-'} 프레임=${frames.length} → ${verdict}`)
+    if (list.length < 24) list.push(`${op}:${name} 바깥store=${outerStore(stack) ?? '-'} 안쪽svc=${innerService(stack) ?? '-'} 프레임=${stack.length} → ${verdict}`)
   }
   for (const rule of rules) {
     if (rule.op !== op) continue
-    if (rule.name !== undefined && rule.name !== name) continue
-    if (rule.namePrefix !== undefined && !name.startsWith(rule.namePrefix)) continue
-    if (rule.when && !rule.when(info)) continue
+    if (rule.name !== undefined && rule.name !== name) { count(rule, 'name 불일치'); continue }
+    if (rule.namePrefix !== undefined && !name.startsWith(rule.namePrefix)) { count(rule, 'namePrefix 불일치'); continue }
+    if (rule.when && !rule.when(info)) { count(rule, 'when 탈락'); continue }
     if (rule.at) {
       frames ??= framesOf()
-      if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) { note(rule, 'at 불일치'); continue }
+      if (!frames.some(frame => basename(frame.file) === basename(rule.at!.file) && frame.line === rule.at!.line)) { note(rule, frames, 'at 불일치'); continue }
     }
     if (rule.store || rule.svc) {
       frames ??= framesOf()
-      if (rule.store && !rule.store.test(outerStore(frames) ?? '')) { note(rule, 'store 불일치'); continue }
-      if (rule.svc && !rule.svc.test(innerService(frames) ?? '')) { note(rule, 'svc 불일치'); continue }
+      if (rule.store && !rule.store.test(outerStore(frames) ?? '')) { note(rule, frames, 'store 불일치'); continue }
+      if (rule.svc && !rule.svc.test(innerService(frames) ?? '')) { note(rule, frames, 'svc 불일치'); continue }
     }
     const n = (tally.get(rule) ?? 0) + 1
     tally.set(rule, n)
     const skip = rule.skip ?? 0, times = rule.times ?? 1
-    note(rule, `조건 일치 n=${n} ${n <= skip ? 'skip 소비' : n <= skip + times ? '발동 대상' : 'times 소진'}`)
+    note(rule, frames ?? framesOf(), `조건 일치 n=${n} ${n <= skip ? 'skip 소비' : n <= skip + times ? '발동 대상' : 'times 소진'}`)
     if (n > skip && n <= skip + times) return rule
   }
   return null
@@ -344,9 +352,9 @@ Object.assign(fs, patched)
 
 export const inject = {
   /** 규칙을 갈아 끼운다 — 시험마다 `clear()` 뒤 새로 넣는다. */
-  set(list: Rule[]): void { rules = list.slice(); tally.clear(); applied.clear(); trace.clear(); traced.clear() },
+  set(list: Rule[]): void { rules = list.slice(); tally.clear(); applied.clear(); trace.clear(); traced.clear(); missed.clear() },
   /** 규칙과 기록을 모두 비운다(대역 해제). */
-  clear(): void { rules = []; tally.clear(); applied.clear(); trace.clear(); traced.clear(); ops = [] },
+  clear(): void { rules = []; tally.clear(); applied.clear(); trace.clear(); traced.clear(); missed.clear(); ops = [] },
   /** 호출 기록만 비운다 — 시험의 조작 구간만 세고 싶을 때. */
   mark(): void { ops = [] },
   /** 모든 파일 접근 기록(`op:절대경로`). */
@@ -367,7 +375,10 @@ export const inject = {
   explain(rule: Rule): string {
     const list = trace.get(rule) ?? []
     const total = traced.get(rule) ?? 0
-    return `op·name이 맞은 호출 ${total}회${total > list.length ? `(앞 ${list.length}회만 적음)` : ''} · 조건까지 맞음 ${tally.get(rule) ?? 0}회 · 적용 ${applied.get(rule) ?? 0}회 · stackTraceLimit=${Error.stackTraceLimit} · 호출: ${list.length ? list.join(' | ') : '없음 — 그 읽기가 일어나지 않았다'}`
+    const miss = Object.entries(missed.get(rule) ?? {}).map(([k, v]) => `${k} ${v}회`).join(', ')
+    return `규칙 op는 맞았고 name·namePrefix·when도 통과해 스택 조건 검사까지 간 호출 ${total}회${total > list.length ? `(앞 ${list.length}회만 적음)` : ''}`
+      + `${miss ? ` · op만 맞고 탈락: ${miss}` : ''} · 조건까지 맞음 ${tally.get(rule) ?? 0}회 · 적용 ${applied.get(rule) ?? 0}회 · stackTraceLimit=${Error.stackTraceLimit}`
+      + ` · 검사까지 간 호출: ${list.length ? list.join(' | ') : '없음(op만 맞고 name·namePrefix·when에서 모두 탈락했거나 op가 맞는 호출이 없다)'}`
   },
   /** 규칙 조건이 맞은 호출 수(`skip` 포함). */
   matched(rule: Rule): number { return tally.get(rule) ?? 0 },
