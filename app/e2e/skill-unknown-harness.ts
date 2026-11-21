@@ -165,14 +165,27 @@ export function framesOf(): Frame[] {
  * `store`: 스택에서 **가장 바깥** `SkillStore.*` 메서드(서비스가 직접 부른 store 진입점).
  * `svc`: 스택에서 **가장 안쪽** `SkillUpdates.*` 메서드.
  */
-const methodOf = (fn: string, cls: string): string | null => fn.startsWith(`${cls}.`) ? fn.slice(cls.length + 1) : null
+/**
+ * 이 하네스 파일 **자신의** 프레임 — 하네스가 제품 메서드를 감싸 끼운 함수(`makeUpdater`의 `store.publish` 감싸기)를 가리킨다.
+ * V8은 그 감싸기 함수를 `SkillStore.store.publish`처럼(받는 쪽 클래스 이름 + 추론한 함수 이름) 표시할 수 있고, 이 표시는 환경에 따라
+ * 달라졌다. 그러면 가장 바깥 `SkillStore.*`가 제품의 `publish`가 아니라 감싸기 함수의 `store.publish`로 잡혀 `/^publish$/` 규칙이 안 맞았다
+ * (맥 CI 2번 묶음 R-B10). 표시 이름이 아니라 **프레임이 속한 파일**로 하네스 프레임을 건너뛰어, 제품 코드(`update/store.ts`·`service.ts`)의
+ * 프레임만으로 판별한다. 규칙 정규식은 그대로다.
+ */
+const OWN_FILE = basename(__filename)
+const isHarnessFrame = (f: Frame): boolean => basename(f.file) === OWN_FILE
+const methodOf = (f: Frame, cls: string): string | null => {
+  if (isHarnessFrame(f) || !f.fn.startsWith(`${cls}.`)) return null
+  // `SkillStore.publish [as alias]` 표기의 별칭 꼬리는 메서드 이름이 아니다.
+  return f.fn.slice(cls.length + 1).replace(/ \[as [^\]]*\]$/, '')
+}
 export function outerStore(frames: Frame[]): string | null {
   let found: string | null = null
-  for (const f of frames) { const m = methodOf(f.fn, 'SkillStore'); if (m) found = m }
+  for (const f of frames) { const m = methodOf(f, 'SkillStore'); if (m) found = m }
   return found
 }
 export function innerService(frames: Frame[]): string | null {
-  for (const f of frames) { const m = methodOf(f.fn, 'SkillUpdates'); if (m) return m }
+  for (const f of frames) { const m = methodOf(f, 'SkillUpdates'); if (m) return m }
   return null
 }
 
