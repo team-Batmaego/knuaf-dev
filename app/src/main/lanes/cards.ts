@@ -274,8 +274,8 @@ export async function setPlacement(
     if (deps.store.versionOf(folder) !== baseVersion) return { outcome: 'invalid', reason: 'base-version' }
     if (nextDesign) await selectDesignLocked(deps, folder, nextDesign)
     if (nextDesign?.company === deps.mainCompany) proposal.next.design = nextDesign
-    // 설계 적용(`applyDesign`)이 await 라 그 사이에도 정지될 수 있다 — 승인 쓰기 직전에 마지막으로 본다.
-    deps.ensureActive?.()
+    // 여기서는 다시 보지 않는다 — 설계 적용(`applyDesign`)이 이미 첫 쓰기라, 그 뒤에 던지면
+    // 주 모델만 바뀌고 승인 배치·판 번호는 그대로 남는다. 시작한 변경은 끝까지 함께 쓴다.
     deps.store.approve(folder, proposal.next, origin)
     deps.store.bumpVersion(folder)
     return { outcome: 'applied', version: deps.store.versionOf(folder) }
