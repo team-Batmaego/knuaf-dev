@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { usePrep, type DependencyPreparation } from './prep'
 import type { ArtifactItem, MaterialsData, ProjectPeek, SectionRow, Settings, SidecarInfo, Status } from '../../../shared/types'
 import type { StageBuildTree } from '../../../shared/stage'
+import { outlineStateOf, type OutlineState } from '../../../shared/outline'
 import type { EventHandler, ProjectLoad } from '../rpc'
 import { CHAT, HELPER, describeError, type DescribedError } from '../copy'
 import { rpc, RpcFailure } from '../rpc'
@@ -89,14 +90,6 @@ interface ProjectState {
   consumeQuoteIntent: (seq: number) => void
   setFoldNotice: () => void
   settingsFocus: SettingsFocus
-  /**
-   * 대화의 [나눠 맡기기 켜기](설계 §2-2 지속 안내)가 설정 화면의 승인 카드까지 가야 한다.
-   * `settingsFocus` 는 펼침만 열 수 있어(`Settings.tsx` 의 `details[data-preset]`) 카드 요청은 따로 둔다.
-   * 설정 화면이 소비하면 곧바로 비운다 — 다시 열 때 옛 요청이 되살아나면 안 된다.
-   */
-  lanesCardRequest: 'enable' | 'revert' | null
-  requestLanesCard: (kind: 'enable' | 'revert') => void
-  consumeLanesCardRequest: () => void
   logs: { stream: string; line: string }[]
   openSheet: (s: Screen) => void
   closeSheet: () => void
@@ -116,6 +109,13 @@ interface ProjectState {
    */
   sections: SectionRow[] | null
   loadSections: () => Promise<void>
+  /**
+   * 학교 차례 상태(`project.outline`, CONTRACT-A4 §2) — **장이 0개일 때만** 읽는다.
+   * 제목줄이 "이 전공은 정해진 학교 차례가 없어요"를 말할 근거이고, 그 밖에는 쓰지 않는다.
+   * 마지막 읽기 이후 장이 생겼거나 폴더가 바뀌면 null 로 되돌린다 — 옛 폴더의 판정이 남으면
+   * 다른 논문의 제목줄이 남의 전공 이야기를 한다.
+   */
+  outline: OutlineState | null
   /**
    * 학생이 직접 고친 절을 **내가 고친 절**로 표시한다(설계 §3-3 정제 3-4).
    *
@@ -217,6 +217,7 @@ function stopCanonPoll(): void { if (canonPoll) { clearInterval(canonPoll); cano
  * 앱을 켠 직후 첫 읽기에서는 아무 일도 알리지 않는다.
  */
 let sectionHashes: Record<string, string> | null = null
+let sectionHashesRoot: string | null = null
 /**
  * 학생이 **방금 직접 고친** 절과 그때 저장한 지문. 다음 읽기 한 번만 '바뀐 절'에서 뺀다.
  *
@@ -247,6 +248,22 @@ const dependencyRuns = new Map<string, { visit: number; operationId: string; can
 function visitOf(root: string): () => boolean {
   const visit = currentVisit
   return () => currentVisit === visit && useProject.getState().root === root
+}
+
+/**
+ * `project.outline` — 장이 0개일 때만 부르는 읽기.
+ *
+ * 실패는 **오류가 아니라 '모른다'** 이다: 사이드카가 아직 그 메서드를 모르거나(옛 실행기),
+ * 규칙집 판이 `gg_outline` 이전이거나(그때 사이드카가 주는 것은 `unsupported`), 전공이 아직
+ * 확정되지 않았다. 어느 쪽이든 제목줄은 지금 문구 그대로여야 하므로 null 로 접는다
+ * (CONTRACT-A4 §2). 읽기 실패 한 번으로 학생 화면에 오류를 띄우지도 않는다.
+ */
+async function readOutline(root: string): Promise<OutlineState | null> {
+  try {
+    return outlineStateOf(await rpc.outline(root))
+  } catch {
+    return null
+  }
 }
 
 export const useProject = create<ProjectState>((set, get) => ({
@@ -283,9 +300,9 @@ export const useProject = create<ProjectState>((set, get) => ({
   consumeQuoteIntent: (seq) => set((s) => s.quoteIntent?.seq === seq ? { quoteIntent: null } : s),
   setFoldNotice: () => { if (get().paperClosed) set({ foldNotice: true }) },
   settingsFocus: null,
-  lanesCardRequest: null,
   logs: [],
   sections: null,
+  outline: null,
   materials: null,
   artifacts: null,
   artifactsError: null,
@@ -319,8 +336,6 @@ export const useProject = create<ProjectState>((set, get) => ({
   setPreviewNotice: (previewNotice) => set({ previewNotice }),
   openSettings: (focus = null) => { set({ sheet: 'settings', settingsFocus: focus }); location.hash = 'settings' },
   clearSettingsFocus: () => set({ settingsFocus: null }),
-  requestLanesCard: (kind) => set({ lanesCardRequest: kind }),
-  consumeLanesCardRequest: () => set({ lanesCardRequest: null }),
   loadSettings: async () => {
     const settings = await window.knuaf.getSettings()
     const root = get().root
@@ -345,7 +360,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     // 한 절이고 그 절의 지문을 받았으면 그 지문으로 기억한다(가장 정확한 기준).
     if (draftHash && ids.length === 1) {
       ownEdited.set(ids[0], draftHash)
-      if (sectionHashes !== null) sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
+      if (sectionHashes !== null && sectionHashesRoot === get().root) sectionHashes = { ...sectionHashes, [ids[0]]: draftHash }
       return
     }
     // 지문을 모르면(묶음 응답의 `draft_hash` 는 첫 절 것뿐) **기억하지 않는다** — 절 ID 만으로
@@ -353,7 +368,7 @@ export const useProject = create<ProjectState>((set, get) => ({
   },
   loadSections: async () => {
     const root = get().root
-    if (!root) { set({ sections: null }); return }
+    if (!root) { set({ sections: null, outline: null }); return }
     // 이 읽기를 시작한 방문. A→B→A 에서 첫 A 방문의 늦은 응답은 root 가 같아도 지금 방문의 것이 아니다 —
     // 옛 목록으로 덮으면 지금 방문의 status 는 이미 최신 개정이라 주기 감시가 다시 읽지 않는다(검토 OPEN-STALE-R1-01).
     const visit = visitOf(root)
@@ -384,7 +399,7 @@ export const useProject = create<ProjectState>((set, get) => ({
         if (mine()) await get().loadSections()
         return
       }
-      const prev = sectionHashes
+      const prev = sectionHashesRoot === root ? sectionHashes : null
       // 내가 방금 고친 절은 이번 읽기에서 '도우미가 바꾼 절'이 아니다 — 한 번만 건너뛴다.
       // 내가 저장한 그 지문과 **같을 때만** '내 변경'이다 — 다르면 도우미가 그사이 다시 썼다.
       const justMine = new Map(ownEdited)
@@ -419,10 +434,17 @@ export const useProject = create<ProjectState>((set, get) => ({
       const published = events.filter((event) => ownEdited.get(event.sectionId) !== rows.find((row) => row.id === event.sectionId)?.draft_hash)
       ownEdited.clear()
       sectionHashes = Object.fromEntries(rows.map((r) => [r.id, r.draft_hash]))
+      sectionHashesRoot = root
       set((s) => ({ sections: rows, events: [...s.events, ...published].slice(-20), foldNotice: s.foldNotice || (s.paperClosed && published.length > 0) }))
+      // 장이 0개일 때만 학교 차례 상태를 묻는다(CONTRACT-A4 §2) — 새 타이머를 만들지 않고 이
+      // 재조회 흐름에 얹는다. 목록을 먼저 올린 뒤에 묻는다: 이 읽기가 느리거나 멈춰도 종이 칸은
+      // 이미 서 있다. 장이 있으면 묻지 않고 지운다 — 옛 폴더·옛 상태의 `no_school_toc` 판정이
+      // 제목줄에 남아 남의 전공 이야기를 하면 안 된다.
+      const outline = rows.length === 0 ? await readOutline(root) : null
+      if (mine()) set({ outline })
     } catch {
       // 읽지 못한 것을 "등록된 절이 없다"로 꾸미지 않는다 — null 은 모른다는 뜻이다.
-      if (mine()) set({ sections: null })
+      if (mine()) set({ sections: null, outline: null })
     }
   },
   setWindowWidth: (windowWidth) => set({ windowWidth }),
@@ -507,7 +529,8 @@ export const useProject = create<ProjectState>((set, get) => ({
     quietFailures = 0
     // 다른 논문의 이벤트 줄·직전 지문을 들고 가지 않는다.
     sectionHashes = null
-    set({ events: [], sections: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat', paneHold: false, docReturn: null, foldNotice: false, listIntent: null, quoteIntent: null, paneTab: 'paper', docPath: null })
+    sectionHashesRoot = null
+    set({ events: [], sections: null, outline: null, materials: null, artifacts: null, artifactsError: null, buildTree: null, projectLoad: null, focusedSection: null, paneView: 'chat', paneHold: false, docReturn: null, foldNotice: false, listIntent: null, quoteIntent: null, paneTab: 'paper', docPath: null })
     canonPoll = setInterval(() => { void get().watchCanon() }, 2000)
     // 도우미가 하위 폴더에 init한 경우 — 빈 화면으로 두지 않고 어디에 만들었는지 알린다.
     const nested = opened.nestedProject
@@ -515,7 +538,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     await get().loadSettings()
     if (superseded()) return null
     if (opened.hasProject) await get().refresh()
-    else { set({ loading: false }); set({ sections: null }) }
+    else { set({ loading: false }); set({ sections: null, outline: null }) }
     // 학생이 그 사이 다른 폴더를 눌렀다 — 준비·대화 읽기는 새 열기가 한다. 여기서 이전 폴더로 대화를 읽기
     // 시작하면 지금 폴더의 대화·오류 줄이 잠깐 비고, 그 틈에 누른 닫기가 사라진다(검토 CI43-R1-01).
     if (superseded()) return null

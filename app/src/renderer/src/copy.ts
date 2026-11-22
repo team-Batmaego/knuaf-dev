@@ -1384,6 +1384,11 @@ export const TITLEBAR = {
   noRecent: '최근에 연 논문이 없어요',
   /** 첫 대화는 한 칸 — 옆 칸이 왜 비어 있는지 한 줄로 말한다(시안 ③). */
   paperLater: '내 논문 · 첫 장을 쓰면 옆에 열려요',
+  /**
+   * 학교 고정 차례가 없는 전공(산업곤충·원예환경시스템)은 전공을 확정해도 장이 0개로 남는다 —
+   * "첫 장을 쓰면 열려요"는 그때 사실이 아니다(CONTRACT-A4 §2, 결정 후보 1).
+   */
+  noSchoolToc: '내 논문 · 이 전공은 정해진 학교 차례가 없어요. 도우미와 자료를 보며 차례를 함께 정해요.',
   /** 좁은 창의 바꾸기(⑯). */
   segChat: '대화',
   segPaper: '내 논문',
@@ -1619,6 +1624,7 @@ export const SETTINGS = {
   pythonTitle: 'Python 실행기',
   appInfoTitle: '앱 정보',
   buildInfo: (date: string, commit: string) => `빌드 ${date} · 커밋 ${commit}`,
+  gateBuild: '관문 시험판 — 내부 시험 전용이에요. 배포·공유하지 않아요.',
   copyBuildInfo: '빌드 정보 복사',
   buildInfoCopied: '복사했어요',
   buildInfoCopyFailed: '복사하지 못했어요'
@@ -1718,6 +1724,9 @@ export const NOTICE = {
   confirmFailed: '확인을 기록하지 못했어요. 잠시 뒤 다시 눌러 주세요.',
   footnoteAction: '각주 넣어 줘',
   footnoteNote: '논문에 적을 문장을 입력칸에 채워 드려요.',
+  blocking: '제출 전에 꼭 고쳐야 해요',
+  expand: '다시 보기',
+  cardMore: '외 {n}건',
   choiceNote: '계산 방식을 다르게 한 곳은 알려 주셔야 해요.'
 } as const
 

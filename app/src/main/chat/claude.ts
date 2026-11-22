@@ -919,7 +919,7 @@ const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 
 /** 모델 고르기가 저장된 선택을 되돌릴 수 없을 때의 문구(main·renderer 공통). */
 export const CLAUDE_MODEL_COPY = {
-  unsetNeedsChoice: '이 대화에서 모델을 골랐던 적이 있어서, "안 고름"으로 되돌리려면 계정 기본 모델을 알아야 해요. 지금은 그 값을 확인하지 못했어요. 모델 칩에서 모델을 하나 골라 주세요. (새 대화를 열면 계정 기본값을 다시 확인해요.)',
+  unsetNeedsChoice: '지금은 이 대화의 계정 기본 모델을 확인하지 못했어요. 모델 칩에서 모델을 하나 골라 주세요. (새 대화를 열면 계정 기본값을 다시 확인해요.)',
   defaultMismatch: (requested: string, actual: string) => `고른 모델(${requested})로 대화가 열리지 않았어요. 이 대화는 ${actual}로 진행되고 있어요. 모델 칩에서 다시 확인해 주세요.`
 }
 
@@ -1785,7 +1785,7 @@ export class ClaudeConnection implements AgentConnection {
    * 로 접혀서, CLI 가 잠깐 멈추기만 해도 학생에게 로그인을 다시 시키는 문구가 떴다
    * (IMPL-R1-04). `probe:'failed'` 가 그 구분이고, 폴더별 화면도 같은 필드를 쓴다.
    */
-  async status(): Promise<ConnectionStatus> {
+  async status(signal?: AbortSignal): Promise<ConnectionStatus> {
     // auth status는 만료된 자격정보에도 loggedIn:true일 수 있다. 새 로그인 프로세스가
     // 성공 종료하기 전에는 그 옛 응답으로 재인증 성공을 선언하지 않는다.
     if (this.loginProcess) return { installed: true, connected: false, version: null, probe: 'ok', detail: CLAUDE_AUTH_COPY.required }
@@ -1793,8 +1793,13 @@ export class ClaudeConnection implements AgentConnection {
     // 윈도우에서 npm 이 깐 claude 는 `.cmd` 다 — Node 가 셸 없이 띄우지 못해 cmd.exe 로 감싼다
     // (맥·리눅스와 `.exe` 는 그대로 — winSpawn 이 빈 옵션을 돌려준다).
     const probe = winSpawn(this.options.binary, ['auth', 'status'])
-    try { output = (await promisify(execFile)(probe.command, probe.args, { env: this.options.env, timeout: this.options.statusTimeoutMs ?? 12_000, ...probe.options })).stdout }
-    catch (e) { output = (e as { stdout?: string }).stdout ?? '' }
+    try {
+      if (signal?.aborted) throw new Error('aborted')
+      const pending = promisify(execFile)(probe.command, probe.args, { env: this.options.env, timeout: this.options.statusTimeoutMs ?? 12_000, ...probe.options })
+      const abort = () => killTree(pending.child)
+      signal?.addEventListener('abort', abort, { once: true })
+      try { output = (await pending).stdout } finally { signal?.removeEventListener('abort', abort) }
+    } catch (e) { output = (e as { stdout?: string }).stdout ?? '' }
     let r: Record<string, unknown> | null = null
     try { const parsed = JSON.parse(output); if (parsed && typeof parsed === 'object') r = parsed as Record<string, unknown> } catch { /* 실행 실패·시간 초과·깨진 JSON → 확인 실패 */ }
     if (!r) return { installed: true, connected: false, version: null, probe: 'failed', detail: 'Claude 연결 상태를 확인하지 못했어요. 잠시 후 "다시 확인"을 눌러 주세요.' }
@@ -2246,10 +2251,12 @@ export class ClaudeRelayConnection implements JobConnection {
    * 지어내면 한도를 넘은 계정에 주문을 열어 주게 된다.
    */
   async availability(): Promise<ExecutionAccount> {
-    const status = await this.status()
-    if (!status.connected) return { ...claudeExecutionAccount(this.options, null), connected: false, usage: 'auth' }
     const controller = new AbortController()
-    const q = query({ prompt: (async function* () {})(), options: this.queryOptions(controller) })
+    this.controller = controller
+    const status = await new ClaudeConnection(this.options).status(controller.signal)
+    if (controller.signal.aborted) throw new Error('담당이 중단됐어요.')
+    if (!status.connected) { this.controller = undefined; return { ...claudeExecutionAccount(this.options, null), connected: false, usage: 'auth' } }
+    const q = this.active = query({ prompt: (async function* () {})(), options: this.queryOptions(controller) })
     try {
       // 초기화 응답 한 번으로 명령·모델·계정을 함께 받는다. `supportedModels()` 는 별도 왕복이다.
       const init = await q.initializationResult()
@@ -2267,10 +2274,11 @@ export class ClaudeRelayConnection implements JobConnection {
       const keyed = Boolean(account?.apiKeySource) && account?.apiKeySource !== 'none'
       const provider = account?.apiProvider
       return { ...known, connected: !keyed && (!provider || provider === 'firstParty'), usage: keyed ? 'auth' : 'unknown' }
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted) throw error
       // 초기화를 못 받았다 = 지금 쓸 수 있는지 모른다. 모름을 `allowed` 로 바꾸지 않는다.
       return { ...claudeExecutionAccount(this.options, null), usage: 'unknown' }
-    } finally { q.close() }
+    } finally { q.close(); if (this.active === q) this.active = undefined; if (this.controller === controller) this.controller = undefined }
   }
 
   /** 주문 한 건. 순서와 관문은 `runJob` 주석 참조. */

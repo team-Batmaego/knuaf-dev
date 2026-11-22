@@ -34,7 +34,9 @@
       "win-reqa-layout",
       "guard-codex-marketplace",
       "guard-codex-connection",
-      "kordoc-mcp-lifecycle"
+      "kordoc-mcp-lifecycle",
+      "news-storage-failure",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -77,7 +79,9 @@
       "edits-store",
       "sameword",
       "guard-codex-thread-lock",
-      "kordoc-mcp-policy"
+      "kordoc-mcp-policy",
+      "support-sidebar",
+      "finance-hole-card"
     ],
     [
       "artifacts-states",
@@ -86,6 +90,7 @@
       "close-app",
       "current-root",
       "diag-log",
+      "diag-limits",
       "job-a-gate",
       "job-wire",
       "lane-handoff",
@@ -122,6 +127,7 @@
       "viewer-edit",
       "guard-codex-tool-lock",
       "kordoc-mcp-real",
+      "news-release-notes",
       "formula-notice-confirm"
     ],
     [
@@ -141,6 +147,8 @@
       "job-c3",
       "job-public-write",
       "layout",
+      "lane-menu-d2",
+      "lane-placement",
       "model-picker-ui",
       "paper-events",
       "preparation-state",
@@ -157,7 +165,9 @@
       "recheck-screen",
       "guard-claude-skill-host",
       "guard-key",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "app-update-recheck",
+      "empty-toc"
     ],
     [
       "agent",
@@ -192,7 +202,8 @@
       "update-poll",
       "kordoc-mcp-codex",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "skill-unknown-read"
     ]
   ],
   "macos": [
@@ -213,6 +224,7 @@
       "connect",
       "current-root",
       "diag-log",
+      "diag-limits",
       "draft",
       "drawer-region",
       "file-change",
@@ -279,6 +291,7 @@
       "notice-bubble",
       "notice-real-screen",
       "formula-notice-confirm",
+      "finance-hole-card",
       "progress-list",
       "token-usage",
       "edits-store",
@@ -289,7 +302,10 @@
       "guard-codex-tool-lock",
       "kordoc-mcp-codex",
       "kordoc-mcp-policy",
-      "kordoc-mcp-registry"
+      "kordoc-mcp-registry",
+      "support-sidebar",
+      "app-update-recheck",
+      "outline-note"
     ],
     [
       "agent-busy",
@@ -320,6 +336,8 @@
       "real-skill-delegation",
       "lane-handoff",
       "lane-ipc-wiring",
+      "lane-menu-d2",
+      "lane-placement",
       "lane-store",
       "lanes",
       "lanes-lines",
@@ -382,7 +400,11 @@
       "kordoc-mcp-lifecycle",
       "kordoc-mcp-real",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "news-release-notes",
+      "news-storage-failure",
+      "empty-toc",
+      "skill-unknown-read"
     ]
   ]
 }

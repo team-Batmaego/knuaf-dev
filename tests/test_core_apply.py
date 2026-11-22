@@ -5,37 +5,40 @@ from pathlib import Path
 import pytest
 
 import gg_core as core
-from conftest import basic_change, bound_test_context, major_ops
+from conftest import basic_change, bind_test_major
 
 
 def test_integer_id_is_rejected_before_save(project):
+    revision = core.load(project)["revision"]
     change = {"request_id": "bad-id", "ops": [{"collection": "tasks", "value": {"id": 7, "title": "x"}}]}
     with pytest.raises(ValueError):
-        core.apply(project, change, 1)
+        core.apply(project, change, revision)
     # and the project must still load afterwards
-    assert core.load(project)["revision"] == 1
+    assert core.load(project)["revision"] == revision
 
 
 def test_null_or_empty_id_is_rejected(project):
+    revision = core.load(project)["revision"]
     for bad in (None, ""):
         change = {"request_id": "bad-id-" + str(bad), "ops": [{"collection": "tasks", "value": {"id": bad}}]}
         with pytest.raises(ValueError):
-            core.apply(project, change, 1)
-    assert core.load(project)["revision"] == 1
+            core.apply(project, change, revision)
+        assert core.load(project)["revision"] == revision
 
 
 def test_apply_is_idempotent_per_request_id(project):
     before = core.load(project)
-    change = basic_change()
-    change["ops"].extend(major_ops(project, 1))
-    after = core.apply(project, change, 99)  # exact replay ignores a stale expected revision
-    assert after["revision"] == before["revision"] == 1
+    after = core.apply(project, basic_change(), 99)  # exact replay ignores a stale expected revision
+    assert after == before
 
 
 def test_snapshot_written_per_apply(project):
     snap = project / "migration" / "revision-0.json"
     assert snap.exists()
     assert json.loads(snap.read_text(encoding="utf-8"))["revision"] == 0
+    bound = json.loads((project / "migration" / "revision-1.json").read_text(encoding="utf-8"))
+    assert bound["facts"]["selected-major"]["value"] == "specialty_crops"
+    assert "fact-area" not in bound["facts"]
 
 
 def test_unknown_answer_is_asked_then_helped_then_deferred(project):
@@ -60,9 +63,12 @@ def test_export_refuses_a_project_with_no_sections(empty_folder):
     파일이 생기고 호출자는 경로를 받아 "완료"로 읽는다 — 앱이 실제로 그렇게
     안내했다(GUI 감사 GUI-03). 하지 않은 일을 했다고 말하지 않는다."""
     core.init(empty_folder)
-    bound_test_context(empty_folder)
-    with pytest.raises(ValueError):
-        core.export(empty_folder, "draft", major_id="specialty_crops")
+    # This major supports draft export but has no school outline to seed.
+    major = "hort_env_systems"
+    bind_test_major(empty_folder, major)
+    assert core.load(empty_folder)["sections"] == {}
+    with pytest.raises(core.OperationError, match="empty_export_body"):
+        core.export(empty_folder, "draft", major_id=major)
     assert not (empty_folder / "build").exists() or not list(
         (empty_folder / "build").rglob("*.md")
     )

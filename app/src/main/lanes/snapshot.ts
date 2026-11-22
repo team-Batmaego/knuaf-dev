@@ -131,44 +131,9 @@ export function maskAccount(accountId: string): string {
 
 // ---------------------------------------------------------------- §5 설정 "작업 분담"
 
-/**
- * §5 요금 동의 줄 — 지금 로그인한 계정마다 한 줄. 저장된 동의 중 지금 로그인하지 않은 계정도
- * 남긴다(거둔 기록이 사라지면 화면이 거짓말한다). 원문 계정 id 는 `accountId` 로만 나간다.
- */
-export function consentRows(accounts: Partial<Record<Provider, LaneAccountView>>, stored: StoredConsent[]): ConsentRow[] {
-  const saved = new Map(stored.map(entry => [`${entry.company}\0${entry.accountId}`, entry]))
-  const rows: ConsentRow[] = []
-  const seen = new Set<string>()
-  for (const company of ['claude', 'codex'] as const) {
-    const view = accounts[company]
-    if (!view) continue
-    const key = `${company}\0${view.accountId}`
-    const saved_ = saved.get(key)
-    seen.add(key)
-    rows.push({
-      company,
-      accountId: view.accountId,
-      accountLabel: maskAccount(view.accountId),
-      state: saved_?.state ?? (view.consented ? 'agreed' : 'none'),
-      at: saved_?.at ?? null,
-      subscribed: subscriptionCheck(view.account).usable
-    })
-  }
-  for (const entry of stored) {
-    const key = `${entry.company}\0${entry.accountId}`
-    if (seen.has(key)) continue
-    if (entry.company === 'free') continue
-    rows.push({
-      company: entry.company,
-      accountId: entry.accountId,
-      accountLabel: maskAccount(entry.accountId),
-      state: entry.state,
-      at: entry.at,
-      // 지금 로그인하지 않은 계정 — 요금제를 확인할 수 없으므로 쓰지 않음으로 본다.
-      subscribed: false
-    })
-  }
-  return rows
+/** r12j: 계약만 보존한다. 회사별 동의 목록은 없다. */
+export function consentRows(_accounts: Partial<Record<Provider, LaneAccountView>>, _stored: StoredConsent[]): ConsentRow[] {
+  return []
 }
 
 /** 승인된 배치가 추천과 같은가 — 값 비교(참조 비교 아님). */
@@ -194,6 +159,7 @@ export function lanesSettings(input: LaneSettingsInput): LanesSettingsView {
   if (!root) {
     return {
       mode: null, source: { kind: 'none' }, rows: [], differsFromRecommendation: false,
+      recommendedRowId: input.recommended?.rowId ?? null,
       temporary: [], recommendedDesign: null, nextDesignCompany: null, consents
     }
   }
@@ -209,6 +175,8 @@ export function lanesSettings(input: LaneSettingsInput): LanesSettingsView {
     }]))
   } : recommendedPlan
   const at = store.approvedAt(root) ?? EPOCH
+  const origin = store.placementOrigin(root)
+  const pending = store.pendingDesign(root)
 
   const rows = modesRows(mode, shown)
   const notes = new Map((input.recommended?.notes ?? []).map(note => [note.lane, note]))
@@ -229,18 +197,21 @@ export function lanesSettings(input: LaneSettingsInput): LanesSettingsView {
   const design = recommendedPlan?.design ?? approved?.design ?? null
   return {
     mode,
+    recommendedRowId: input.recommended?.rowId ?? null,
     source: approved
-      ? recommendedPlan && input.recommended && samePlan(approved, recommendedPlan)
-        ? { kind: 'recommended', rowId: input.recommended.rowId }
-        : store.approvedAt(root) ? { kind: 'mine', at } : { kind: 'recommendation-changed' }
+      ? origin?.kind === 'recommended' ? origin
+        : origin?.kind === 'mine' ? { kind: 'mine', at }
+        : recommendedPlan && input.recommended && samePlan(approved, recommendedPlan)
+          ? { kind: 'recommended', rowId: input.recommended.rowId }
+          : store.approvedAt(root) ? { kind: 'mine', at } : { kind: 'recommendation-changed' }
       : { kind: 'none' },
     rows,
-    differsFromRecommendation: Boolean(approved && recommendedPlan && !samePlan(approved, recommendedPlan)),
+    differsFromRecommendation: origin?.kind === 'mine' || Boolean(approved && recommendedPlan && !samePlan(approved, recommendedPlan)),
     temporary: input.temporary ?? [],
     recommendedDesign: design?.model ? { company: design.company, model: design.model, effort: design.effort } : null,
     // "다음 메시지부터: 설계 {회사}" — [이번만] 배치가 지금 설계 회사와 다를 때만.
-    nextDesignCompany:
-      input.temporaryDesign && input.temporaryDesign !== design?.company ? input.temporaryDesign : null,
+    nextDesignCompany: pending?.company ?? null,
+    pendingDesign: pending?.model ? { company: pending.company, model: pending.model, effort: pending.effort } : null,
     consents
   }
 }
@@ -298,7 +269,6 @@ function blockedReason(
 ): Extract<LaneLine, { kind: 'limit-blocked' }>['reason'] {
   const view = accounts[other]
   if (!view || !view.connected) return 'not-logged-in'
-  if (!view.consented) return 'no-consent'
   if (view.usage !== 'allowed') return 'also-unavailable'
   return 'model-missing'
 }
@@ -485,6 +455,7 @@ export function assembleLanes(input: LaneInput): SnapshotBody {
     : []
   return {
     root,
+    version: root ? input.store.versionOf(root) : 0,
     lines,
     cards,
     events,

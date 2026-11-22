@@ -1,0 +1,17 @@
+.tbtn.news-button { color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 7px; padding: 4px 10px; gap: 6px; font-weight: 700; white-space: nowrap; }
+.tbtn.news-button:hover { background: var(--accent-soft); }
+.news-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.tbtn.news-app-update { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 7px; padding: 5px 10px; font-weight: 700; white-space: nowrap; }
+.tbtn.news-app-update:hover { background: var(--accent); }
+.release-current { display: flex; flex-wrap: wrap; gap: 12px 28px; padding: 14px; background: var(--bg-2); border-radius: 8px; }
+.release-current strong { margin-inline-start: 8px; }
+.release-entry { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.release-heading { display: flex; justify-content: space-between; gap: 12px; }
+.release-heading span { color: var(--muted); }
+.release-entry ul { padding-inline-start: 22px; margin-bottom: 0; }
+.release-entry li + li { margin-top: 6px; }
+.release-action { margin-top: 12px; padding: 12px; background: var(--bg-2); border-radius: 6px; }
+.news-dialog .sheet-body { max-height: 65vh; overflow-y: auto; }
+@media (min-width: 1370px) { .news-app-update { display: none !important; } }
+
+@media (max-width: 1369px) { .news-defer-narrow { display: none !important; } }

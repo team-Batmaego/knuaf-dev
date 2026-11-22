@@ -134,7 +134,7 @@ test('card: a request opens one row per changed lane and [계속] stores the exa
   expect(opened.quote).toBe('글쓰기는 Claude 로 맡아요')
   expect(opened.rows.map(row => row.lane)).toEqual(['writing'])
   expect(opened.rows[0]).toMatchObject({
-    before: { company: 'codex', model: 'sol', how: 'relay' },
+    before: { company: 'codex', model: 'terra', how: 'relay' },
     after: { company: 'claude', model: 'sonnet', how: 'relay' },
     rejected: null, designSwitchTo: null, requested: null
   })
@@ -156,8 +156,7 @@ test('card: a request opens one row per changed lane and [계속] stores the exa
   expect(approved.writing).toEqual({ company: 'claude', model: 'sonnet', effort: null, how: 'relay' })
   expect(approved.research.company).toBe('codex')
   expect(f.store.approvedAt(f.root)).toEqual(expect.any(String))
-  expect(f.store.consents().map(entry => `${entry.company}:${entry.state}`).sort())
-    .toEqual(['claude:agreed', 'codex:agreed'])
+  expect(f.store.consents()).toEqual([])
   expect(f.store.temporary(f.root)).toBeNull()
 
   const body = await snapshot(f)
@@ -275,8 +274,8 @@ test('card: rejected rows keep the old entry and record what the student asked f
   expect(opened.rows).toHaveLength(1)
   expect(opened.rows[0]).toMatchObject({
     lane: 'writing',
-    before: { company: 'codex', model: 'sol', how: 'relay' },
-    after: { company: 'codex', model: 'sol', how: 'relay' },
+    before: { company: 'codex', model: 'terra', how: 'relay' },
+    after: { company: 'codex', model: 'terra', how: 'relay' },
     rejected: 'model-not-listed',
     requested: { main: false, model: 'gpt-6.1-astra', effort: null }
   })
@@ -450,8 +449,7 @@ test('card: disable stops only this folder\'s live jobs and revokes the plan', a
   expect(f.store.approvedPlan(f.root)).toBeNull()
   expect(f.store.temporary(f.root)).toBeNull()
   expect(f.store.events(f.root).map(event => event.kind)).toEqual(['lanes-declined'])
-  // 끄기는 요금 동의를 건드리지 않는다 — 동의는 계정 단위다.
-  expect(f.store.consent('claude', 'claude-account')).toMatchObject({ state: 'agreed' })
+  expect(f.store.consents()).toEqual([])
   expect((await snapshot(f)).settings.mode).toBe('off')
 })
 
@@ -569,7 +567,7 @@ test('card fix: apply re-reads the account instead of trusting a cached probe', 
   f.freshReads.length = 0
   await decideCard(f.deps, f.root, opened.cardId, opened.baseVersion, 'continue')
   // 카드가 묶은 두 회사 중 하나라도 캐시를 건너뛰지 않으면 15초 동안 계정 변경을 못 본다.
-  expect(f.freshReads).toEqual(['claude', 'codex'])
+  expect(f.freshReads).toEqual(['claude', 'codex', 'free'])
 })
 
 // ---------------------------------------------------------------------------------

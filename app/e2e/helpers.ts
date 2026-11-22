@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test'
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -9,6 +9,20 @@ export const app = resolve(__dirname, '..')
 export const repo = resolve(app, '..')
 export const scripts = process.env.KNUAF_SCRIPTS_DIR ?? join(app, 'resources', 'skill', 'scripts')
 export const python = process.env.KNUAF_PYTHON ?? join(repo, '.venv-dev', 'bin', 'python')
+
+/** Check the real account row without relying on the model chip's label. */
+export async function expectConnected(page: Page, provider: 'codex' | 'claude' | 'free' = 'codex', timeout = 30000): Promise<void> {
+  const chip = page.getByTitle('이 논문의 도우미')
+  const wasOpen = await chip.getAttribute('aria-expanded') === 'true'
+  if (!wasOpen) await chip.click()
+  const popup = page.locator('.composer-model-host .popover')
+  const account = popup.locator('[data-submenu="true"]').getByText('AI 회사·로그인', { exact: true })
+  const row = popup.locator(`[data-provider="${provider}"]`)
+  await expect(account.or(row).first()).toBeVisible({ timeout })
+  if (await account.isVisible()) await account.click()
+  await expect(row).toContainText('연결됐어요', { timeout })
+  if (!wasOpen) await page.keyboard.press('Escape')
+}
 
 let dependencySeed: string | undefined
 
@@ -150,30 +164,67 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
    * 않으므로 리스너가 아예 없다** — 음성 시험은 `env: { KNUAF_E2E_TEST_HOOKS: '0' }` 로 끈다.
    */
   if (env.KNUAF_E2E_TEST_HOOKS === undefined) env.KNUAF_E2E_TEST_HOOKS = '1'
-  const electronApp = await electron.launch({
-    args: [join(app, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
-    env,
-    colorScheme: opts.colorScheme
-  })
-  const page = await electronApp.firstWindow()
-  /**
-   * 기본 시험은 사이드바와 대화·논문의 세 칸이 들어가는 폭에서 돌린다.
-   * 좁은 배치를 검증하는 시험은 `setWindowWidth`로 별도 폭을 지정한다.
-   */
-  await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, DEFAULT_WINDOW)
-  if (opts.colorScheme || opts.reducedMotion) await page.emulateMedia({ colorScheme: opts.colorScheme, reducedMotion: opts.reducedMotion })
-  // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
-  // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
-  await page.waitForSelector(opts.waitFor ?? '.titlebar')
-  const splash = page.locator('.splash')
-  if (opts.splash !== 'keep') {
-    await splash.waitFor({ state: 'visible', timeout: 30_000 })
-    // The skip key listener is attached before the first animation frame marks this node.
-    await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
-    await page.keyboard.press('Escape')
-    await splash.waitFor({ state: 'detached' })
+  const markStartup = (stage: string): void => {
+    if (!env.KNUAF_APP_LOG) return
+    try { appendFileSync(appLog, `${Date.now()} [test:startup] ${stage}\n`) } catch { /* Diagnosis must not replace the launch error. */ }
   }
-  return { electronApp, page, appLog }
+  try {
+    markStartup('electron-launch:start')
+    /**
+     * 가짜 HOME(임시 userData)으로 띄운 Electron 이 safeStorage 를 부르면 맥이 "키체인을 찾을 수
+     * 없음" 창을 띄워 시험을 세운다 — 가짜 키체인 저장소를 써서 실제 키체인을 건드리지 않게 한다.
+     * 맥 전용 플래그라 다른 OS 에는 넘기지 않는다.
+     */
+    const electronApp = await electron.launch({
+      args: [
+        join(app, 'out', 'main', 'index.js'),
+        `--user-data-dir=${userData}`,
+        ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])
+      ],
+      env,
+      colorScheme: opts.colorScheme
+    })
+    markStartup('electron-launch:done')
+    const page = await electronApp.firstWindow()
+    markStartup('first-window:done')
+    // Error kinds only: messages/stacks can include credentials, paths or student text.
+    if (env.KNUAF_APP_LOG) {
+      page.on('pageerror', () => markStartup('renderer:page-error'))
+      page.on('crash', () => markStartup('renderer:crash'))
+      page.on('domcontentloaded', () => markStartup('renderer:dom-content-loaded'))
+      page.on('load', () => markStartup('renderer:load'))
+    }
+    /**
+     * 기본 시험은 사이드바와 대화·논문의 세 칸이 들어가는 폭에서 돌린다.
+     * 좁은 배치를 검증하는 시험은 `setWindowWidth`로 별도 폭을 지정한다.
+     */
+    await electronApp.evaluate(({ BrowserWindow }, size) => { BrowserWindow.getAllWindows()[0].setBounds(size) }, DEFAULT_WINDOW)
+    if (opts.colorScheme || opts.reducedMotion) await page.emulateMedia({ colorScheme: opts.colorScheme, reducedMotion: opts.reducedMotion })
+    // 첫 화면은 재실행에서 **두 단계 부품**(제목줄 아래)이 덮는다 — 연결이 확인돼 있으면 폴더
+    // 단계, 끊겨 있으면 1단계(AI 연결). 둘 다에 있는 제목줄을 준비 신호로 기다린다.
+    markStartup('titlebar-wait:start')
+    await page.waitForSelector(opts.waitFor ?? '.titlebar')
+    markStartup('titlebar-wait:done')
+    const splash = page.locator('.splash')
+    if (opts.splash !== 'keep') {
+      await splash.waitFor({ state: 'visible', timeout: 30_000 })
+      // The skip key listener is attached before the first animation frame marks this node.
+      await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
+      await page.keyboard.press('Escape')
+      await splash.waitFor({ state: 'detached' })
+    }
+    markStartup('launch:done')
+    return { electronApp, page, appLog }
+  } catch (error) {
+    // 원래 기동 오류를 **가리지 않는다**(검토 I-02). 예전에는 실패 경로에서 `app-log.txt` 사본을
+    // 첨부하느라 최대 3초를 기다렸는데, 시험 마감(90초) 직전 실패면 그 대기 중에 마감이 먼저 와
+    // 원래 오류(예: 제목줄이 왜 안 떴는지)가 사라졌다. 그래서 여기서는 아무것도 기다리지 않고
+    // 곧바로 재던진다. `app-log.txt` 는 CI 가 이미 아티팩트로 모으므로(ci.yml `app-log.txt`)
+    // 사본을 Playwright 첨부로 한 번 더 남길 이유가 없다 — 공용 로그 전체 사본 첨부(권고 R-01)도
+    // 함께 없어진다.
+    markStartup('launch:failed')
+    throw error
+  }
 }
 
 /** 앱 화면이 준비됐다는 표시 — v5 에는 "내 논문" h1 이 없다(대화 칸 자체가 그 화면이다). */

@@ -19,25 +19,29 @@ const PIN = { repo: 'starceas/knuaf-doc', tag: 'v0.4.8', commit: '8450b9d5051bcb
 const sha256 = text => createHash('sha256').update(text).digest('hex')
 
 /** 핀이 맞는 트리를 만들고, `files` 만 바꿔 끼운다. `files` 가 `undefined` 면 키 자체를 뺀다. */
-function tree(files) {
+function tree(files, channelSkill = { version: '1.0.13', manifest: '' }) {
   const repo = mkdtempSync(join(tmpdir(), 'skill-staging-'))
   const bundle = join(repo, 'app', 'resources', 'skill')
   mkdirSync(join(bundle, 'scripts'), { recursive: true })
   mkdirSync(join(repo, 'app', 'scripts'), { recursive: true })
+  mkdirSync(join(repo, 'updates'), { recursive: true })
+  writeFileSync(join(repo, 'updates', 'channel.json'), JSON.stringify({ skill: channelSkill ? {
+    ...channelSkill,
+    manifest: channelSkill.manifest || Buffer.from(JSON.stringify({ version: '1.0.13', files: {} })).toString('base64'),
+  } : null }))
   writeFileSync(join(repo, 'app', 'skill-source.json'), JSON.stringify(PIN))
   writeFileSync(join(bundle, 'skill.json'), JSON.stringify({ version: '1.0.2', api: 1, source: PIN }))
   writeFileSync(join(bundle, 'SKILL.md'), '# skill\n')
   writeFileSync(join(bundle, 'scripts', 'gg.py'), 'print(1)\n')
   copyFileSync(verifier, join(repo, 'app', 'scripts', 'verify-skill-staging.mjs'))
-  const manifest = { schema: 1 }
-  if (files !== undefined) manifest.files = files
-  writeFileSync(join(bundle, 'install-manifest.json'), JSON.stringify(manifest))
+  const manifest = { files, schema: 'knuaf-doc/install-manifest@1' }
+  writeFileSync(join(bundle, 'install-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
   return repo
 }
 
 /** 검증기를 실제 실행 파일로 돌린다(성공 요약은 stdout, 실패 이유는 stderr). */
-function run(files) {
-  const repo = tree(files)
+function run(files, channelSkill) {
+  const repo = tree(files, channelSkill)
   try {
     const result = spawnSync(process.execPath, [join(repo, 'app', 'scripts', 'verify-skill-staging.mjs')], {
       cwd: repo,
@@ -56,6 +60,28 @@ test('선언이 온전하면 0 이고 선언 개수를 말한다', () => {
   const { status, stdout, stderr } = run(GOOD)
   assert.equal(status, 0, `온전한 트리가 실패했다: ${stderr}`)
   assert.match(stdout, /선언 2개 파일 \d+ B 해시 일치/, stdout)
+})
+test('같은 동봉 버전이면 정확한 서명 manifest 해시를 통과한다', () => {
+  const installManifest = JSON.stringify({ files: GOOD, schema: 'knuaf-doc/install-manifest@1' }, null, 2) + '\n'
+  const signed = {
+    version: '1.0.2',
+    files: { ...GOOD, 'install-manifest.json': sha256(installManifest) },
+  }
+  const channelSkill = { version: '1.0.2', manifest: Buffer.from(JSON.stringify(signed)).toString('base64') }
+  const { status, stderr } = run(GOOD, channelSkill)
+  assert.equal(status, 0, stderr)
+})
+
+test('같은 동봉 버전이면 서명 manifest 파일 해시가 일치해야 한다', () => {
+  const installManifest = JSON.stringify({ files: GOOD, schema: 'knuaf-doc/install-manifest@1' }, null, 2) + '\n'
+  const signed = {
+    version: '1.0.2',
+    files: { ...GOOD, 'SKILL.md': sha256('# tampered\n'), 'install-manifest.json': sha256(installManifest) },
+  }
+  const channelSkill = { version: '1.0.2', manifest: Buffer.from(JSON.stringify(signed)).toString('base64') }
+  const { status, stderr } = run(GOOD, channelSkill)
+  assert.notEqual(status, 0)
+  assert.match(stderr, /동봉 해시가 같은 버전의 서명 manifest 와 다르다: SKILL\.md/)
 })
 
 test('선언 해시가 어긋나면 0 이 아니다', () => {

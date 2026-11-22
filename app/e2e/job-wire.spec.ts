@@ -225,8 +225,8 @@ test('a delivery claimed before shutdown is surfaced once and never resent', asy
   await w.svc.close()
 })
 
-// ② 승인·동의는 앱 저장소만 근거다. 폴더 안 lanes.json 은 무시하고, 동의 철회는 다음 실행부터 즉시다.
-test('approval and billing consent come from app storage, never the thesis folder', async () => {
+// ② 승인 근거는 앱 저장소뿐이다. 폴더 파일·구 동의 setter는 승인 권한이 없다.
+test('approval comes only from app storage and legacy consent changes cannot revoke it', async () => {
   let n = 0
   const w = wire({ orders: (root, text) => (text.startsWith('자료 담당') ? [] : [order(root, `job-${++n}`)]) })
   // 폴더 안 가짜 승인 — both-low 라서 both-high 주문과 맞지 않는다. 근거가 되면 아래가 전부 실패한다.
@@ -247,9 +247,9 @@ test('approval and billing consent come from app storage, never the thesis folde
   w.svc.setConsent('codex', 'codex-account', false)
   await w.svc.send(w.root, 'codex', '동의 철회 뒤', 'req-3')
   await until(() => w.deliveries().length === 3)
-  await until(() => statusOf(w.root, 'job-3') === 'rejected')
-  expect(w.jobRuns).toEqual(['job-1', 'job-2'])
-  expect(w.deliveries()[2].text).toContain('결과: rejected')
+  await until(() => statusOf(w.root, 'job-3') === 'completed')
+  expect(w.jobRuns).toEqual(['job-1', 'job-2', 'job-3'])
+  expect(w.deliveries()[2].text).toContain('작업 끝')
   await w.svc.close()
 })
 
@@ -284,7 +284,7 @@ test('student stop stops the running job and its main turn and invalidates hando
 
 // ③-2 업데이트 준비: 열린 이어하기 제안을 버리고 담당을 멈춘다. 종료도 같은 통로를 지난다.
 test('update teardown discards open continuation proposals and stops jobs', async () => {
-  const w = wire({ usage: 'limit', orders: (root, text) => (text.startsWith('자료 담당') ? [] : [order(root, 'job-one')]) })
+  const w = wire({ usage: 'limit', orders: (root, text) => (text.startsWith('자료 담당') ? [] : [order(root, 'job-one', 'writing')]) })
   w.svc.approvePlan(w.root, planFromRow('both-high'))
   w.svc.setConsent('codex', 'codex-account', true)
   w.svc.setConsent('claude', 'claude-account', true)

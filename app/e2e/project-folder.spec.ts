@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { probeProjectWritable } from '../src/main/project-write'
-import { launch } from './helpers'
+import { expectConnected, launch } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, userDataWith } from './fixtures/fake-codex'
 
 test('첫 메시지 뒤 자동 폴더를 만들되 같은 이름의 기존 폴더는 보존한다', async () => {
@@ -18,7 +18,7 @@ test('첫 메시지 뒤 자동 폴더를 만들되 같은 이름의 기존 폴�
       app.setPath('documents', docs)
       shell.openPath = async (path) => { Object.assign(globalThis, { folderOpened: path }); return '' }
     }, dir)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('딸기 농장 창업 계획')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
@@ -42,7 +42,7 @@ test('첫 논문 폴더에서 항상 허용을 고르면 모든 폴더의 전역
   const { electronApp, page } = await launch({ env, permissionPrompt: true })
   try {
     await electronApp.evaluate(({ app }, docs) => app.setPath('documents', docs), dir)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('첫 논문')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await page.getByRole('button', { name: /앱이 만들어 둘게요/ }).click()
@@ -115,7 +115,7 @@ test('Windows write-failure recovery sends the queued first request exactly once
   const { electronApp, page } = await launch({ env, permissionPrompt: true })
   const originalPlatform = await electronApp.evaluate(() => process.platform)
   try {
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill(firstRequest)
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('논문 파일을 어디에 둘까요?')).toBeVisible()
@@ -230,7 +230,7 @@ test('카드가 떠 있을 때 메뉴로 연 폴더에도 첫 메시지를 전�
   const { electronApp, page } = await launch({ onboarded: false, env })
   try {
     // 앱 시작의 세션 기본 선택이 먼저 끝나도 첫 구독 전송은 저장해야 한다.
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     expect((await page.evaluate(() => window.knuaf.getSettings())).provider_choice).toBeNull()
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('기존 논문 이어 쓰기')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
@@ -277,7 +277,7 @@ for (const route of ['menu', 'picker'] as const) {
       await page.waitForFunction(() => document.querySelector<HTMLElement>('.splash__track > div')?.style.transform.startsWith('scaleX(') ?? false)
       await page.keyboard.press('Escape')
       await page.locator('.splash').waitFor({ state: 'detached' })
-      await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+      await expectConnected(page, 'free')
       expect((await page.evaluate(() => window.knuaf.getSettings())).provider_choice).toBeNull()
       await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('무료로 첫 요청')
       await page.getByRole('button', { name: '보내기', exact: true }).click()
@@ -325,7 +325,7 @@ test('돌아가 고친 메시지만 기존 생성 폴더로 보낸다 (C1-01)', 
       })
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [args.root] })) as typeof dialog.showOpenDialog
     }, { docs: dir, root })
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('폐기할 첫 메시지')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await page.getByRole('textbox', { name: '논문 이름' }).fill('재시도')
@@ -364,7 +364,7 @@ test('폴더 열기 실패 후 재시도는 만든 폴더를 다시 사용한다
         return original(...args)
       })
     }, dir)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('재시도할 메시지')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await page.getByRole('textbox', { name: '논문 이름' }).fill('재시도')
@@ -404,7 +404,7 @@ test('새 논문 시작 뒤 늦은 폴더 생성 응답은 새 제출을 바꾸�
         return result
       })
     }, dir)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('취소한 이전 논문 메시지')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await page.getByRole('textbox', { name: '논문 이름' }).fill('이전 논문')

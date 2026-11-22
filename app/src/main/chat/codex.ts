@@ -66,6 +66,42 @@ function fileChangeKey(thread: unknown, turn: unknown, item: unknown): string | 
     ? JSON.stringify([thread, turn, item]) : undefined
 }
 
+/**
+ * 배열 아닌 객체 — 이 파일이 다루는 JSON-RPC 봉투(`params`·`item`·`_meta`)의 공통 모양 검사.
+ * 필드 타입은 좁히지 않는다(필드는 쓰는 자리에서 `typeof` 로 본다).
+ */
+function plainObject(value: unknown): Record<string, unknown> | undefined {
+  return !!value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+/**
+ * JSON 값의 깊은 동등 — 키 **순서**는 무시하고 배열은 순서를 본다. 승인 요청의 `_meta.tool_params`와
+ * 진행 중 호출의 `item.arguments`를 대조하는 데만 쓴다(둘 다 JSON 직렬화에서 온 값이다).
+ */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => sameJson(v, b[i]))
+  }
+  const left = plainObject(a)
+  const right = plainObject(b)
+  if (left && right) {
+    const keys = Object.keys(left)
+    return keys.length === Object.keys(right).length
+      && keys.every((k) => Object.hasOwn(right, k) && sameJson(left[k], right[k]))
+  }
+  return false
+}
+
+/**
+ * 승인 요청 `_meta` 에서 이름을 아는 키 — 실물 0.164.0 다섯 개와 옛 모양·위험 플래그 셋.
+ * 진단은 이 목록에 없는 키를 **개수로만** 남긴다(미지 키 이름에 경로·자유문이 실릴 수 있다).
+ */
+const KNOWN_META_KEYS: readonly string[] = [
+  'codex_approval_kind', 'persist', 'tool_description', 'tool_params', 'tool_params_display',
+  'tool_name', 'codex_requires_user_input', 'codex_sensitive_action'
+]
+
 function readFileChanges(value: unknown): PermissionFileChange[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined
   const changes: PermissionFileChange[] = []
@@ -124,6 +160,13 @@ export class CodexConnection implements AgentConnection {
   private messages = new Map<string, string>()
   private fileChanges = new Map<string, PermissionFileChange[]>()
   private pendingFileApprovals = new Map<string, { key: string; reason: unknown }>()
+  /**
+   * 이 프로세스가 지금 도는 중인 MCP 도구 호출(`item/started`→`item/completed`).
+   * 동봉 Codex 0.164.0 의 승인 요청 `_meta` 에는 **`tool_name` 이 없고**, 도구 이름은 같은 턴의
+   * `item/started` 안 `mcpToolCall.tool` 에만 있다(실기기 run4:60~62). 승인은 이 표에서
+   * 같은 턴·서버·인자로 **하나로 특정된** 호출에만 준다 — 표시 문구(`message`)는 근거가 아니다.
+   */
+  private mcpCalls = new Map<string, { thread: string; turn: string; server: string; tool: string; args: unknown }>()
   /** 이 프로세스에 붙일 kordoc MCP 사양(§3.3). 미부착이면 undefined/null. */
   private mcpSpec?: KordocMcpSpec | null
   /** MCP 기동 검증(§3.3 4단계)을 이미 통과한 프로세스 — 프로세스당 1회만 부른다. */
@@ -497,6 +540,8 @@ export class CodexConnection implements AgentConnection {
     // 구버전에는 필요했으므로 평문을 먼저 쓰고 실패하면 옛 인자로 한 번 더 시도한다.
     const rpc = this.rpc = new JsonRpcProcess(this.options.binary, this.spawnArgs(), this.options.root,
       { ...this.options.env, ...(this.mcpSpec ? codexMcpEnv(this.mcpSpec) : {}) })
+    // 새 프로세스에는 진행 중 호출이 없다 — 이전 프로세스의 표를 물려받지 않는다.
+    this.mcpCalls.clear()
     rpc.onNotification = (method, p) => {
       if (method === 'account/login/completed' && this.loginPending && typeof p?.loginId === 'string') {
         if (!this.loginInfo) this.earlyLogin = { id: p.loginId, success: p.success === true }
@@ -525,6 +570,7 @@ export class CodexConnection implements AgentConnection {
           }
         }
       }
+      if ((method === 'item/started' || method === 'item/completed') && p.item?.type === 'mcpToolCall') this.observeMcpCall(method, p)
       if (method === 'item/started' && p.item?.type === 'fileChange') {
         this.rememberFileChanges(fileChangeKey(p.threadId, p.turnId, p.item.id), p.item.changes)
       } else if (method === 'item/fileChange/patchUpdated') {
@@ -551,7 +597,7 @@ export class CodexConnection implements AgentConnection {
         this.events?.message(p.item.id, p.item.text)
       } else if (method === 'turn/started') this.turn = p.turn.id
       else if (method === 'turn/completed') {
-        this.fileChanges.clear(); this.pendingFileApprovals.clear()
+        this.fileChanges.clear(); this.pendingFileApprovals.clear(); this.mcpCalls.clear()
         const w = this.waiter; this.waiter = undefined; this.turn = undefined
         if (p.turn.status === 'completed') {
           if (this.free && !this.freeAnswered) w?.reject(new FreeRelayError('free-no-answer'))
@@ -590,21 +636,15 @@ export class CodexConnection implements AgentConnection {
       } else if (method === 'mcpServer/elicitation/request') {
         // Codex 0.169 mcp_tool_call.rs: tool approval is a form with an empty object
         // schema and codex_approval_kind=mcp_tool_call. Never accept arbitrary MCP forms.
-        const meta = p?._meta
-        const schema = p?.requestedSchema
-        const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
-        const allow = this.rpc === rpc && this.verifiedOn === rpc && !rpc.closed && !!this.mcpSpec
-          && this.turnActive && !!this.turn && p?.threadId === this.thread && p?.turnId === this.turn
-          && p?.serverName === MCP_SERVER_NAME && p?.mode === 'form' && typeof p?.message === 'string'
-          && record(schema) && schema.type === 'object' && record(schema.properties)
-          && Object.keys(schema.properties).length === 0
-          && Object.keys(schema).every((key) => key === 'type' || key === 'properties')
-          && record(meta) && meta.codex_approval_kind === 'mcp_tool_call'
-          && meta.codex_requires_user_input !== true && meta.codex_sensitive_action !== true
-          && typeof meta.tool_name === 'string' && record(meta.tool_params)
-          && mcpPolicy(this.options.root, MCP_TOOL_PREFIX + meta.tool_name, meta.tool_params)?.behavior === 'allow'
+        // 승인 대상은 `_meta` 가 아니라 같은 턴의 진행 중 `mcpToolCall` 에서 특정한다(0.164.0 실물).
+        const verdict = this.mcpApprovalVerdict(rpc, p ?? {})
+        // 개수만 남긴다 — 미지 키의 **이름**에도 자유문·경로가 실릴 수 있어 이름 자체를 쓰지 않는다.
+        const metaKeys = Object.keys(plainObject(p?._meta) ?? {})
+        const unknownKeys = metaKeys.filter((key) => !KNOWN_META_KEYS.includes(key)).length
+        diag(`codex-mcp-approval verdict=${verdict.allow ? 'accept' : 'decline'} reason=${verdict.reason}`
+          + ` meta_key_count=${metaKeys.length} unknown_key_count=${unknownKeys}`)
         // One call only: no persist/session metadata and no student-config writes.
-        rpc.send({ id, result: { action: allow ? 'accept' : 'decline', content: null, _meta: null } })
+        rpc.send({ id, result: { action: verdict.allow ? 'accept' : 'decline', content: null, _meta: null } })
       } else if (method === 'item/permissions/requestApproval') {
         rpc.send({ id, result: { permissions: { network: null, fileSystem: null }, scope: 'turn' } })
       } else {
@@ -616,7 +656,7 @@ export class CodexConnection implements AgentConnection {
     rpc.onClose = () => { this.waiter?.reject(new Error('Codex 연결이 종료됐어요. 답변은 자동 재전송하지 않아요.')); this.waiter = undefined }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.7.0' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.7.2' }, capabilities: { experimentalApi: true } })
     } catch (e) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})
@@ -637,6 +677,65 @@ export class CodexConnection implements AgentConnection {
     this.serverVersion = /^[^/\s]+\/([^\s]+)/.exec(ua)?.[1] ?? /(\d+\.\d+\.\d+)/.exec(ua)?.[1] ?? null
     rpc.send({ method: 'initialized', params: {} })
     return rpc
+  }
+  /** `item/started`/`item/completed` 의 `mcpToolCall` 한 건 — 진행 중 표에 넣거나 지운다. */
+  private observeMcpCall(method: string, p: Record<string, unknown>): void {
+    const item = plainObject(p.item)
+    if (!item || item.type !== 'mcpToolCall') return
+    const key = fileChangeKey(p.threadId, p.turnId, item.id)
+    if (!key) return
+    if (method === 'item/completed') { this.mcpCalls.delete(key); return }
+    if (typeof item.server !== 'string' || typeof item.tool !== 'string') { this.mcpCalls.delete(key); return }
+    this.mcpCalls.set(key, {
+      thread: p.threadId as string, turn: p.turnId as string,
+      server: item.server, tool: item.tool, args: item.arguments
+    })
+  }
+  /**
+   * MCP 도구 승인 요청(`mcpServer/elicitation/request`)의 판정.
+   *
+   * 동봉 Codex 0.164.0 의 `_meta` 키는 `codex_approval_kind`·`persist`·`tool_description`·
+   * `tool_params`·`tool_params_display` 다섯 개뿐이고 **`tool_name` 이 없다**(실기기
+   * `probe-run4.log` 62행). 도구 이름은 같은 턴의 `item/started` 안 `mcpToolCall.tool` 에만 있으므로,
+   * 승인 대상은 그 표에서 **같은 턴·서버·인자로 하나만 특정되는** 호출이다. 0건이거나 2건 이상이면
+   * 거절한다 — 표시 문구(`message`)는 모델이 쓴 글이라 근거로 쓰지 않는다(검토 g2-4).
+   */
+  private mcpApprovalVerdict(rpc: JsonRpcProcess, p: Record<string, unknown>): { allow: boolean; reason: string } {
+    const no = (reason: string) => ({ allow: false, reason })
+    if (this.rpc !== rpc || this.verifiedOn !== rpc || rpc.closed || !this.mcpSpec) return no('not-verified')
+    if (!this.turnActive || typeof this.turn !== 'string' || !this.turn) return no('no-active-turn')
+    if (p.threadId !== this.thread) return no('wrong-thread')
+    if (p.turnId !== this.turn) return no('wrong-turn')
+    if (p.serverName !== MCP_SERVER_NAME) return no('wrong-server')
+    if (p.mode !== 'form') return no('mode')
+    if (typeof p.message !== 'string') return no('message')
+    // 승인 폼은 **빈 객체 스키마**뿐이다 — 그 밖의 폼은 학생 입력을 요구하는 다른 흐름이다.
+    const schema = plainObject(p.requestedSchema)
+    if (!schema || schema.type !== 'object' || !plainObject(schema.properties)) return no('schema')
+    if (Object.keys(schema.properties as object).length !== 0) return no('schema')
+    if (!Object.keys(schema).every((key) => key === 'type' || key === 'properties')) return no('schema')
+    const meta = plainObject(p._meta)
+    if (!meta) return no('meta')
+    if (meta.codex_approval_kind !== 'mcp_tool_call') return no('kind')
+    if (meta.codex_requires_user_input === true || meta.codex_sensitive_action === true) return no('risk-flag')
+    const params = plainObject(meta.tool_params)
+    if (!params) return no('no-params')
+    // 이름이 있으면 **키가 있는지**와 **값이 맞는지**를 나눈다: 키가 없으면 생략(실물 0.164.0),
+    // 키가 있는데 빈 문자열·비문자열이면 불일치다 — 생략으로 봐 주면 이름 위조가 통한다.
+    const hasName = Object.hasOwn(meta, 'tool_name')
+    const named = typeof meta.tool_name === 'string' && meta.tool_name !== '' ? meta.tool_name : undefined
+    if (hasName && !named) return no('bad-name')
+    // 이름으로 후보를 **먼저** 줄이지 않는다 — 같은 인자의 다른 도구 두 건이 이름 하나로 1건이 되면
+    // 어느 호출을 승인하는지 정해지지 않은 채 정책만 통과한다(검토 차단 1).
+    const matches = [...this.mcpCalls.values()].filter((call) => call.thread === p.threadId && call.turn === p.turnId
+      && call.server === p.serverName && sameJson(call.args, params))
+    if (matches.length === 0) return no('no-call')
+    if (matches.length > 1) return no('ambiguous-call')
+    const call = matches[0]
+    if (named && call.tool !== named) return no('name-mismatch')
+    const verdict = mcpPolicy(this.options.root, MCP_TOOL_PREFIX + call.tool, params)
+    if (verdict?.behavior !== 'allow') return no(verdict ? 'policy' : 'not-mcp')
+    return { allow: true, reason: named ? 'call+named' : 'call' }
   }
   private rememberFileChanges(key: string | undefined, raw: unknown): void {
     if (!key) return
@@ -1061,7 +1160,7 @@ export class CodexConnection implements AgentConnection {
       try { await Promise.race([this.rpc.request('turn/interrupt', { threadId: this.thread, turnId: this.turn }), promise]) } catch { /* process termination below */ } finally { clearTimeout(budget) }
     }
     await this.rpc?.stop(); this.rpc = undefined; this.approvals.clear()
-    this.fileChanges.clear(); this.pendingFileApprovals.clear()
+    this.fileChanges.clear(); this.pendingFileApprovals.clear(); this.mcpCalls.clear()
     this.dropGuard()
   }
 }
@@ -1501,7 +1600,7 @@ export class CodexRelayConnection implements JobConnection {
     }
     let init: { userAgent?: string } | undefined
     try {
-      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.7.0' }, capabilities: { experimentalApi: true } })
+      init = await rpc.request('initialize', { clientInfo: { name: 'knuaf_dev_gui', version: '0.7.2' }, capabilities: { experimentalApi: true } })
     } catch (error) {
       this.rpc = undefined
       await rpc.stop().catch(() => {})

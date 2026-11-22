@@ -22,7 +22,7 @@ const appRoot = resolve(__dirname, '..')
 /** 실제 계정 목록의 모양을 옮긴 가짜 초기화 응답 — Opus 는 max 까지, Sonnet 은 high 까지. */
 const MODELS = [
   { value: 'default', resolvedModel: 'claude-opus-5', displayName: 'Default (recommended)', description: '계정 기본 모델', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { value: 'opus', resolvedModel: 'claude-opus-5', displayName: 'Opus', description: '가장 깊은 작업', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: '가장 깊은 작업', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
   { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: '일상 작업', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] }
 ]
 
@@ -73,7 +73,7 @@ async function settled(svc: ChatService, root: string): Promise<ChatSnapshot> {
 
 test('U1: SDK 모델 목록을 앱 목록으로 옮긴다 — 깊이는 모델이 준 그대로', () => {
   expect(toChatModelInfo(MODELS[1])).toEqual({
-    model: 'opus', name: 'Opus', description: '가장 깊은 작업',
+    model: 'opus', name: 'Opus 5.5', description: '가장 깊은 작업',
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: null, isDefault: false
   })
   // 모델마다 목록이 다르다 — Sonnet 은 xhigh·max 가 없다(줄이지도, 더하지도 않는다).
@@ -94,6 +94,7 @@ test('U1: Claude 칩 — 계정 모델 목록을 받고, 고른 모델·깊이�
     expect(list.supported).toBe(true)
     expect(list.error).toBeUndefined()
     expect(list.models.map((m) => m.model)).toEqual(['default', 'opus', 'sonnet'])
+    expect(list.models.find((m) => m.model === 'opus')?.name).toBe('Opus 5.5')
     expect(list.selected).toBeNull()
     // 목록 조회는 턴을 보내지 않는다 — 초기화 요청만 나가고 사용자 프롬프트는 없다.
     expect(r.launches().length).toBeGreaterThan(0)
@@ -114,7 +115,7 @@ test('U1: 고른 모델·깊이가 다음 턴의 CLI 인자로 나간다', async
     const s = await settled(r.svc, r.root)
     expect(s.state, s.error).toBe('idle')
     const args = r.launches().at(-1)!.args
-    expect(args).toEqual(expect.arrayContaining(['--model', 'opus', '--effort', 'high']))
+    expect(args).toEqual(expect.arrayContaining(['--model=opus', '--effort=high']))
   } finally { await r.svc.close() }
 })
 
@@ -125,13 +126,13 @@ test('U1: "안 고름" 되돌리기 — 덮어쓴 대화에서 해제하면 기�
     await r.svc.send(r.root, 'claude', '첫 턴', 'u1-first')
     expect((await settled(r.svc, r.root)).state).toBe('idle')
     // 첫 턴은 모델 키 없이 나갔다(학생 설정을 덮지 않는다).
-    expect(r.launches().at(-1)!.args).not.toContain('--model')
+    expect(r.launches().at(-1)!.args.some((arg) => arg === '--model' || arg.startsWith('--model='))).toBe(false)
 
     // 2) 칩에서 Opus 로 고른다 → 다음 턴은 그 모델.
     await r.svc.setModel(r.root, 'claude', { model: 'opus', effort: null })
     await r.svc.send(r.root, 'claude', '두 번째 턴', 'u1-second')
     expect((await settled(r.svc, r.root)).state).toBe('idle')
-    expect(r.launches().at(-1)!.args).toEqual(expect.arrayContaining(['--model', 'opus']))
+    expect(r.launches().at(-1)!.args).toContain('--model=opus')
 
     // 3) "안 고름"으로 되돌린다 → 생략이 아니라 **기본 모델 명시**(생략하면 CLI 가 마지막
     //    모델을 복원한다 — 실측). 기본값은 1)의 init 에서 확인한 `claude-opus-5` 다.
@@ -139,8 +140,8 @@ test('U1: "안 고름" 되돌리기 — 덮어쓴 대화에서 해제하면 기�
     await r.svc.send(r.root, 'claude', '세 번째 턴', 'u1-third')
     expect((await settled(r.svc, r.root)).state).toBe('idle')
     const args = r.launches().at(-1)!.args
-    expect(args).toEqual(expect.arrayContaining(['--model', 'claude-opus-5']))
-    expect(args).not.toContain('opus')
+    expect(args).toContain('--model=claude-opus-5')
+    expect(args).not.toContain('--model=opus')
   } finally { await r.svc.close() }
 })
 

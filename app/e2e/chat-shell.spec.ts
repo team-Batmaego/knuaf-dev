@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { launch, openProject, synthProject } from './helpers'
+import { expectConnected, launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, writeFakeClaude } from './fixtures/fake-codex'
 
 test('첫 메시지에서 폴더를 열고 가짜 도우미에 전달한다', async () => {
@@ -12,7 +12,7 @@ test('첫 메시지에서 폴더를 열고 가짜 도우미에 전달한다', as
   try {
     await electronApp.evaluate(({ dialog }, selected) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selected], bookmarks: [] }) }, root)
     await expect(page.getByText('어떤 논문을 쓰고 있어요?')).toBeVisible()
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨', { timeout: 30000 })
+    await expectConnected(page)
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('딸기 농장 창업 논문을 쓰고 싶어요')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     await expect(page.getByText('딸기 농장 창업 논문을 쓰고 싶어요', { exact: true })).toBeVisible({ timeout: 30000 })
@@ -53,6 +53,7 @@ test('다른 회사로 바꾸기 전과 후에 맥락 손실을 알린다', asyn
     const chip = page.getByTitle('이 논문의 도우미')
     await expect(chip).toBeVisible({ timeout: 30000 })
     await chip.click()
+    await page.getByRole('button', { name: /^AI 회사·로그인/ }).click()
     await expect(page.getByText('AI 회사를 바꾸면 이전 대화 맥락이 이어지지 않을 수 있어요.')).toBeVisible()
     await page.getByRole('button', { name: 'Claude로 바꾸기' }).click()
     const warning = page.getByRole('status').filter({ hasText: 'Claude는 다른 AI와 나눈 대화를 볼 수 없어요.' })

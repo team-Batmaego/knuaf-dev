@@ -6,10 +6,12 @@ import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 import {
   JOBS_INVOKE, LANES_INVOKE, LANES_PUSH,
   type ArchivedChat, type ArchivedChatSummary, type CardAction, type CardDecision, type ConsentRow,
-  type LaneCard, type LanesReply, type LanesSnapshot, type ReviewModelGroup
+  type LaneCard, type LanesReply, type LanesSnapshot, type ReviewModelGroup,
+  type PlacementEntries, type PlacementOrigin, type PlacementDecision, type LaneModelsResult
 } from '../shared/lanes-ipc'
 import type { ProgressFile } from '../shared/progress-file'
 import type { LinkOpenReply } from '../shared/link'
+import type { NewsState } from '../shared/types'
 export interface UpdateStatus {
   phase: 'idle' | 'checking' | 'available' | 'repair' | 'ready' | 'needs-app' | 'downloading' | 'switching' | 'error' | 'unavailable'
   current: string; bundled: boolean; highest: string | null; available: string | null
@@ -116,6 +118,10 @@ const api = {
   windowInfo: () => ipcRenderer.invoke('window:info'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: Record<string, unknown>) => ipcRenderer.invoke('settings:set', patch),
+  news: {
+    state: (): Promise<NewsState> => ipcRenderer.invoke('news:state'),
+    seen: (versions: { app: string; skill: string | null }): Promise<void> => ipcRenderer.invoke('news:seen', versions)
+  },
   sidecarInfo: () => ipcRenderer.invoke('sidecar:info'),
   sidecarRestart: () => ipcRenderer.invoke('sidecar:restart'),
   update: {
@@ -206,6 +212,9 @@ const api = {
   lanes: {
     snapshot: (root: string | null): Promise<LanesReply<LanesSnapshot>> => ipcRenderer.invoke(LANES_INVOKE.snapshot, root),
     onSnapshot: (fn: (snapshot: LanesSnapshot) => void): (() => void) => subscribe(LANES_PUSH.snapshot, fn),
+    setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin): Promise<LanesReply<PlacementDecision>> =>
+      ipcRenderer.invoke(LANES_INVOKE.setPlacement, root, baseVersion, entries, origin),
+    laneModels: (root: string, fresh?: boolean): Promise<LanesReply<LaneModelsResult>> => ipcRenderer.invoke(LANES_INVOKE.laneModels, root, fresh),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction): Promise<LanesReply<CardDecision>> =>
       ipcRenderer.invoke(LANES_INVOKE.decideCard, root, cardId, baseVersion, action),
     cardStatus: (root: string, cardId: string): Promise<LanesReply<CardDecision>> =>

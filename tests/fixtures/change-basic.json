@@ -2,7 +2,7 @@
   "request_id": "fixture:basic:1",
   "ops": [
     {"collection": "sources", "value": {"id": "src-answers", "path": "sources/answers.md", "kind": "interview", "claims": {}}},
-    {"collection": "sections", "value": {"id": "sec-01", "title": "Ⅰ. 머리말", "order": 1, "path": "sections/01.md", "status": "drafting"}},
+    {"collection": "sections", "value": {"id": "farm_status", "title": "Ⅰ. 머리말", "order": 1, "path": "sections/farm_status.md", "status": "drafting"}},
     {"collection": "facts", "value": {
       "id": "fact-area", "field_id": "farm.area", "kind": "reported_fact",
       "value": "600", "unit": "평", "value_type": "decimal", "period": "2026", "scope": "농장A",

@@ -115,6 +115,99 @@ test('P9 기호·말 어긋남 ✓ 3–7단계 남음 — 버림', () => {
   const text = '창업논문 진행 목록 · 7단계 중 2단계 진행 중\n✓ 1 자료·전공 확인\n▶ 2 계획 인터뷰\n✓ 3–7단계 남음'
   expect(parseProgress(text).blocks).toEqual([])
 })
+test('구두점·메모 구분 변형과 여러 현재 단계 표기를 읽는다', () => {
+  const text = [
+    '창업논문 진행 목록 · 7단계 중 2단계 진행 중 · 독립 내용검토 전 (논문은 아직 완성 전)',
+    '✓ 1. 자료·전공 확인 끝',
+    '▶ 2. 계획 인터뷰: 작목·지역은 정했어요. 규모·시설·자금은 아직 정하지 않았어요.',
+    '▶ 4. 본문 초안: 이번에 I장 머리말에 그림 1을 넣었어요.',
+    '○ 3·5–7단계 남음',
+    '다음 작업: 학교 지침을 확인합니다.',
+    '그 뒤: 한글 마무리와 교수 승인',
+  ].join('\n')
+  const { blocks, hide } = parseProgress(text)
+  expect(blocks).toHaveLength(1)
+  expect(states(text)).toBe('✓▶○▶○○○')
+  expect(blocks[0].n).toBe(4)
+  expect(blocks[0].steps[1].note).toBe('작목·지역은 정했어요. 규모·시설·자금은 아직 정하지 않았어요.')
+  expect(blocks[0].steps[3].note).toBe('이번에 I장 머리말에 그림 1을 넣었어요.')
+  expect(hide).toEqual([{ start: 0, end: 4 }])
+  expect(stripLines(text, hide)).toContain('다음 작업: 학교 지침을 확인합니다.')
+})
+
+
+test('여러 숫자·범위 표기는 겹치지 않게 펼친다', () => {
+  const text = '창업논문 진행 목록 · 7단계 중 2–4단계 진행 중\n✓ 1·3단계 끝남\n○ 5–7단계 남음\n▶ 2 계획 인터뷰\n▶ 4 본문 초안'
+  expect(states(text)).toBe('✓▶✓▶○○○')
+})
+
+test('뜻이 모호한 진행 목록은 여전히 보존하고 무효 처리한다', () => {
+  const text = '창업논문 진행 목록 · 7단계 중 2단계 진행 중\n▶ 1 자료·전공 확인\n▶ 2 계획 인터뷰\n○ 3–7단계 남음'
+  const { blocks, hide } = parseProgress(text)
+  expect(blocks).toEqual([])
+  expect(hide).toEqual([])
+})
+
+test('F1 현재 단계 없는 미완료 목록은 원문을 감추지 않는다', () => {
+  for (const rows of ['✓ 1단계 끝남\n○ 2–7단계 남음', '○ 1–7단계 남음']) {
+    const text = `창업논문 진행 목록 · 7단계 중 2단계 진행 중\n${rows}`
+    const parsed = parseProgress(text)
+    expect(parsed).toEqual({ blocks: [], hide: [] })
+    expect(stripLines(text, parsed.hide)).toBe(text)
+  }
+})
+
+test('F2 단계명 내부 범위와 뒤 메모 구분자를 구별한다', () => {
+  for (const name of ['본문 I–VI 초안', '본문 Ⅰ–Ⅵ 초안', '본문 I-VI 초안', '본문 I~VI 초안']) {
+    for (const separator of ['', ' — 메모', ' – 메모', ' - 메모', ': 메모', '： 메모']) {
+      const text = `창업논문 진행 목록 · 7단계 중 4단계 진행 중\n✓ 1–3단계 끝남\n▶ 4 ${name}${separator}\n○ 5–7단계 남음`
+      const { blocks, hide } = parseProgress(text)
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0].n).toBe(4)
+      expect(blocks[0].steps[3].note).toBe(separator ? '메모' : undefined)
+      expect(hide).toEqual([{ start: 0, end: 3 }])
+    }
+  }
+})
+
+test('규칙집의 완료 범위와 3단계 메모는 유효하다', () => {
+  const text = '창업논문 진행 목록 · 7단계 중 3단계 진행 중\n✓ 1–2단계 끝남\n▶ 3 조사·근거 정리 — 메모\n○ 4–7단계 남음'
+  const { blocks, hide } = parseProgress(text)
+  expect(states(text)).toBe('✓✓▶○○○○')
+  expect(blocks[0].n).toBe(3)
+  expect(blocks[0].steps[2].note).toBe('메모')
+  expect(hide).toEqual([{ start: 0, end: 3 }])
+})
+
+test('F4 완료 꼬리말은 ✓에만 허용하고 충돌하는 원문을 남긴다', () => {
+  for (const suffix of ['끝', '완료']) {
+    for (const sym of ['▶', '○']) {
+      const tail = sym === '▶' ? '○ 3–7단계 남음' : '▶ 3 조사·근거 정리\n○ 4–7단계 남음'
+      const current = sym === '▶' ? 2 : 3
+      const text = `창업논문 진행 목록 · 7단계 중 ${current}단계 진행 중\n✓ 1 자료·전공 확인\n${sym} 2 계획 인터뷰 ${suffix}\n${tail}`
+      const parsed = parseProgress(text)
+      expect(parsed).toEqual({ blocks: [], hide: [] })
+      expect(stripLines(text, parsed.hide)).toBe(text)
+    }
+    const text = `창업논문 진행 목록 · 7단계 중 3단계 진행 중\n✓ 1 자료·전공 확인 ${suffix}\n✓ 2 계획 인터뷰 ${suffix}\n▶ 3 조사·근거 정리\n○ 4–7단계 남음`
+    expect(states(text)).toBe('✓✓▶○○○○')
+  }
+})
+
+test('진행 목록을 코드·인용·표·설명·번호 목록으로 감싸면 원문을 보존한다', () => {
+  const body = '창업논문 진행 목록 · 7단계 중 4단계 진행 중\n✓ 1–3단계 끝남\n▶ 4 본문 I–VI 초안\n○ 5–7단계 남음'
+  for (const text of [
+    `\`\`\`\n${body}\n\`\`\``,
+    body.split('\n').map(line => `> ${line}`).join('\n'),
+    `| 진행 |\n| --- |\n${body.split('\n').map(line => `| ${line} |`).join('\n')}`,
+    `참고 예시: ${body}`,
+    body.split('\n').map((line, i) => `${i + 1}. ${line}`).join('\n'),
+  ]) {
+    const parsed = parseProgress(text)
+    expect(parsed).toEqual({ blocks: [], hide: [] })
+    expect(stripLines(text, parsed.hide)).toBe(text)
+  }
+})
 
 test('P10 접힌 끝남 + ▶4 + ⚑ + ○ 5–7 + 그 뒤 — 유효, flags 1', () => {
   const text = [

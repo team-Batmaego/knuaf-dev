@@ -1,5 +1,6 @@
 import { assetUrl, MAX_BYTES, object, verifySkill, type VerifiedSkill } from './manifest'
 import type { UpdateConfig } from './keys'
+import { GATE, type Gate } from './gate'
 import { codeOf, diag } from '../diagLog'
 /**
  * `redirect: 'manual'` 의 뜻은 **전송 계층이** 3xx 를 따라가지 않고 응답으로 돌려준다는 것이다
@@ -12,12 +13,12 @@ const REDIRECTS: readonly number[] = [301, 302, 303, 307, 308]
 const CDN: Record<string, true> = { 'release-assets.githubusercontent.com': true, 'objects.githubusercontent.com': true, 'github-releases.githubusercontent.com': true }
 
 /** Redirects are inspected before the next request, not just after fetching an arbitrary host. */
-export async function boundedFetch(url: string, signal: AbortSignal, fetch: Transport, limit: number, config: UpdateConfig, channel = false): Promise<Response> {
+export async function boundedFetch(url: string, signal: AbortSignal, fetch: Transport, limit: number, config: UpdateConfig, channel = false, gate: Gate | null = GATE): Promise<Response> {
   const stage = channel ? 'channel' : 'asset'
   // 실패 로그의 재료 — 값이 아니라 모양만 남긴다(호스트·상태 코드). 쿼리 문자열은 싣지 않는다.
   let host = '', status: number | null = null
   try {
-    if (channel) { if (url !== config.channel) throw new Error('채널 주소가 달라요.') } else assetUrl(url)
+    if (channel) { if (url !== config.channel) throw new Error('채널 주소가 달라요.') } else assetUrl(url, gate)
     host = new URL(url).hostname
     for (let redirects = 0; redirects <= 5; redirects++) {
       const response = await fetch(url, { signal, redirect: 'manual' })
@@ -25,7 +26,8 @@ export async function boundedFetch(url: string, signal: AbortSignal, fetch: Tran
       if (REDIRECTS.includes(response.status)) {
         await response.body?.cancel()
         const location = response.headers.get('location')
-        if (!location || channel || redirects === 5) throw new Error('허용되지 않은 업데이트 이동 주소예요.')
+        // 관문 전용 빌드는 같은 PC 밖으로 한 번도 나가지 않는다 — 자산의 이동(3xx)도 전부 거절한다.
+        if (!location || channel || gate || redirects === 5) throw new Error('허용되지 않은 업데이트 이동 주소예요.')
         const next = new URL(location, url)
         if (next.protocol !== 'https:' || next.username || next.password || next.port || next.hash || !Object.hasOwn(CDN, next.hostname)) throw new Error('허용되지 않은 업데이트 이동 주소예요.')
         url = next.href
