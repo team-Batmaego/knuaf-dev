@@ -77,7 +77,11 @@ jobs:
           if node scripts/check-release-update-config.mjs --out out; then
             echo "::error::출시 산출물 검사가 관문 빌드를 통과시켰습니다"; exit 1
           fi
+      # 이 잡의 기본 셸은 bash(Git for Windows)라 PATH 맨 앞의 GNU tar 가 `D:\...` 경로를 원격 호스트로 읽어
+      # 파이썬 런타임 풀기가 깨진다(run 44941723931). 출시 워크플로(build-installers.yml)처럼 pwsh 로 돌려
+      # 윈도 기본 tar(bsdtar)를 쓰게 한다.
       - run: pnpm prepare:resources
+        shell: pwsh
 
       # 같은 번들을 판 번호만 바꿔 두 번 포장한다. 파일 이름에 GATE 가 들어가 출시 설치본과 섞이지 않는다.
       - name: 판 A 포장
