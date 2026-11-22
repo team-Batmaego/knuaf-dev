@@ -128,10 +128,20 @@ export interface LaneHandlers {
  * 22 요청을 등록한다. 반환한 표는 시험이 IPC 를 거치지 않고 같은 함수를 직접 부르는 통로다.
  */
 export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
+  /**
+   * 인계(정지) 중에는 **상태를 바꾸는 요청을 문 앞에서** 닫는다. 카드가 `applying` 으로 저장된
+   * 뒤에 막으면 카드가 영영 적용 중으로 남고, 계정 조회(자식 프로세스)가 인계 중에 뜬다.
+   * 읽기 요청은 그대로 통과시킨다(화면이 정지 중에도 상태를 볼 수 있어야 한다).
+   *
+   * 문 앞 검사만으로는 폴더 대기열에 선 요청을 못 막는다 — 그 요청은 검사를 통과한 뒤 잠금을
+   * 기다리다 정지될 수 있다. 그래서 카드 쪽에도 같은 장부를 넘겨 저장 직전에 다시 보게 한다.
+   */
+  const activity = deps.activity ?? agentActivity
   const cards: CardDeps = {
     store: deps.store,
     account: deps.account,
     freshAccount: deps.freshAccount,
+    ensureActive: () => activity.ensureActive(),
     get mainCompany() { return deps.mainCompany },
     designChoice: deps.designChoice,
     runner: deps.runner ? { records: () => deps.runner!.records(), stopJob: id => deps.runner!.stopJob(id) } : null,
@@ -170,13 +180,6 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
    */
   const withFolder = <T>(root: unknown, run: (folder: string) => Promise<T> | T, touch = true): Promise<LanesReply<T>> =>
     reply<T>(typeof root === 'string' && root ? root : null, () => run(folderAllowed(deps, root)), touch)
-
-  /**
-   * 인계(정지) 중에는 **상태를 바꾸는 요청을 문 앞에서** 닫는다. 카드가 `applying` 으로 저장된
-   * 뒤에 막으면 카드가 영영 적용 중으로 남고, 계정 조회(자식 프로세스)가 인계 중에 뜬다.
-   * 읽기 요청은 그대로 통과시킨다(화면이 정지 중에도 상태를 볼 수 있어야 한다).
-   */
-  const activity = deps.activity ?? agentActivity
 
   const lanes = {
     snapshot: (root: string | null) => reply<LanesSnapshot>(
