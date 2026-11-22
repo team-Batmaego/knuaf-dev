@@ -18,7 +18,7 @@ import { CodexRelayConnection } from '../chat/codex'
 import type { AgentOptions } from '../chat/contracts'
 import { isProvider } from './providers'
 import { freeExecutionAccount } from '../free/provider'
-import { agentActivity, type AgentActivity } from '../update/activity'
+import { agentActivity, UpdateSuspendedError, type AgentActivity } from '../update/activity'
 
 /** 계정 값 캐시 수명. 짧게 — 요금제·한도는 몇 초 사이에 바뀌지 않는다. */
 const TTL_MS = 15_000
@@ -65,6 +65,26 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
   const active = new Set<CodexRelayConnection | ClaudeRelayConnection>()
   let closing = false
   let closePromise: Promise<void> | undefined
+  /** 조회가 띄운 연결의 종료 약속 — 정지 알림이 끊고, 조회의 `finally` 가 그 약속을 기다린다. */
+  const halts = new Map<CodexRelayConnection | ClaudeRelayConnection, Promise<void>>()
+  /** 정지 횟수 — 조회 시작 때 잡아 두고, 끝났을 때 같을 때만 캐시·메모에 쓴다. */
+  let suspensions = 0
+  const halt = (connection: CodexRelayConnection | ClaudeRelayConnection): Promise<void> => {
+    const running = halts.get(connection)
+    if (running) return running
+    // 종료 실패는 삼킨다 — 인계는 '자식이 죽었는가'를 이 약속으로만 기다린다.
+    const stopped = connection.stop().catch(() => {})
+    halts.set(connection, stopped)
+    return stopped
+  }
+  /**
+   * 정지는 **지금 도는 조회의 자식**을 곧바로 끊는다. 그러지 않으면 인계는 `drain()` 상한(30초)을
+   * 다 기다린 뒤 실패하고, 학생에게는 "작업이 끝난 뒤 다시 눌러 주세요"만 남는다.
+   */
+  const unsubscribe = activity.onSuspend(() => {
+    suspensions++
+    for (const connection of active) void halt(connection)
+  })
 
   /**
    * `probe()` 는 **임대를 쥔 채** 돈다. 인계는 `suspend()` 뒤 `drain()` 으로 임대가 0이 되기를
@@ -72,6 +92,8 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
    * 놓는 자리는 `probe()` 의 마지막 `finally` — 자식 종료 **뒤**다.
    */
   const probe = async (company: Provider, release: () => void): Promise<ExecutionAccount | null> => {
+    // 조회 시작 시점의 정지 세대 — 끝났을 때 같을 때만 값을 돌려주고 저장한다.
+    const generation = suspensions
     try {
       if (closing) return null
       // [C1-01] 자기 방어 — 이 함수만 따로 불려도 허용 회사 밖의 이름이 실행 파일 탐색에 닿지 않는다.
@@ -97,8 +119,15 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
         ? new ClaudeRelayConnection(options, request, deps.appDir)
         : new CodexRelayConnection(options, request)
       active.add(connection)
-      try { const result = await connection.availability(); return closing ? null : result } finally {
-        try { if (!closing) await connection.stop() } finally { active.delete(connection) }
+      try {
+        const result = await connection.availability()
+        // 정지가 끼어들었으면 그 값은 새 세대의 답이 아니다 — 캐시에 굳히지 않는다.
+        return closing || suspensions !== generation ? null : result
+      } finally {
+        // 정지 알림이 이미 끊었으면 그 종료를 **기다린다** — 임대는 자식이 죽은 뒤에 놓인다.
+        const halted = halts.get(connection)
+        try { if (halted) await halted; else if (!closing) await connection.stop() }
+        finally { halts.delete(connection); active.delete(connection) }
       }
     } finally { release() }
   }
@@ -117,7 +146,9 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
     if (!isProvider(company)) return Promise.resolve(null)
     if (activity.suspended) {
       // `null` 은 캐시에 쓰지 않는다: 인계가 실패해 앱이 계속 살 때 '모름'이 15초 굳으면 안 된다.
-      if (options?.fresh) return Promise.resolve(null)
+      // `fresh` 는 "지금 관측"이 계약인데 정지 중에는 관측을 못 한다 — `null`(모름)을 주면 호출부가
+      // '계정이 바뀜'으로 읽어 카드·제안을 닫으므로, 정지 사실을 그대로 알린다.
+      if (options?.fresh) return Promise.reject(new UpdateSuspendedError())
       return inflight.get(company) ?? Promise.resolve(cache.get(company)?.value ?? null)
     }
     if (!options?.fresh) {
@@ -127,10 +158,12 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
       if (running) return running
     }
     // 정지 검사(위)와 같은 동기 구간 — 여기서 `enter()` 가 던지지 않는다.
+    const generation = suspensions
     const started = probe(company, activity.enter())
       .catch((): null => null)
       .then(value => {
-        cache.set(company, { at: Date.now(), value })
+        // 정지가 끼어들어 끊긴 조회는 값이 아니다 — 새 세대의 캐시로 굳히지 않는다.
+        if (suspensions === generation) cache.set(company, { at: Date.now(), value })
         return value
       })
       .finally(() => { inflight.delete(company) })
@@ -143,9 +176,9 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
     if (!isProvider(company)) return Promise.resolve(null)
     if (activity.suspended) {
       // `once` 는 실패를 저장하지 않는 계약이다 — 정지 중에도 메모에 아무것도 쓰지 않는다.
-      // 세대가 다르면 옛 값도 옛 진행 약속도 새 세대의 답이 아니다.
+      // 세대가 다르면 옛 값도 옛 진행 약속도 새 세대의 답이 아니다: `null` 대신 정지 사실을 알린다.
       const known = memo.get(company)
-      if (!known || known.generation !== epoch) return Promise.resolve(null)
+      if (!known || known.generation !== epoch) return Promise.reject(new UpdateSuspendedError())
       return known.inflight ?? Promise.resolve('value' in known ? known.value ?? null : null)
     }
     let entry = memo.get(company)
@@ -159,11 +192,12 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
     if ('value' in entry) return Promise.resolve(entry.value ?? null)
     const running = entry.inflight
     if (running) return running
+    const generation = suspensions
     const release = activity.enter()
     // `.catch` 없음 — 실패는 저장하지 않고 대기자 전원에게 그대로 간다.
     const started = probe(company, release)
       .then(value => {
-        if (entry.generation === epoch) entry.value = value
+        if (entry.generation === epoch && suspensions === generation) entry.value = value
         return value
       })
       .finally(() => { if (entry.inflight === started) entry.inflight = undefined })
@@ -172,5 +206,5 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
   }
 
   const fn = (company: Provider, options?: { fresh?: boolean }) => read(company, options)
-  return Object.assign(fn, { once, close: () => { closing = true; return closePromise ??= Promise.all([...active].map(connection => connection.stop())).then(() => undefined) } })
+  return Object.assign(fn, { once, close: () => { closing = true; unsubscribe(); return closePromise ??= Promise.all([...active].map(connection => halt(connection))).then(() => undefined) } })
 }

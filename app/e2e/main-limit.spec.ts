@@ -569,10 +569,11 @@ test('handoff: 인계 중 계정 조회는 새 프로세스를 띄우지 않고 
     // 평범한 읽기는 관측해 둔 값을 그대로 준다 — 새 프로세스 0.
     expect(await probe('claude')).toEqual(primed)
     // `fresh` 는 "지금 관측"이 계약이라 묵은 값을 주지 않는다(권한을 바꾸는 자리가 옛 계정으로 통과하면 안 된다).
-    expect(await probe('claude', { fresh: true })).toBeNull()
-    // 상한 조회도 같은 세대면 메모 값을, 세대가 다르면 `null`(옛 세대 답은 새 세대의 답이 아니다).
+    // `null`(모름)이면 호출부가 '계정이 바뀜'으로 읽어 카드·제안을 닫으므로 정지 사실을 그대로 알린다.
+    await expect(probe('claude', { fresh: true })).rejects.toMatchObject({ code: 'update_suspended' })
+    // 상한 조회도 같은 세대면 메모 값을, 세대가 다르면 거절한다(옛 세대 답은 새 세대의 답이 아니다).
     expect(await probe.once('claude', 0)).toEqual(primedOnce)
-    expect(await probe.once('claude', 9)).toBeNull()
+    await expect(probe.once('claude', 9)).rejects.toMatchObject({ code: 'update_suspended' })
     expect(spawns(rig)).toBe(2)
 
     // 재개하면 다시 띄운다 — 정지가 조회를 영구히 죽이지 않는다.
@@ -582,9 +583,10 @@ test('handoff: 인계 중 계정 조회는 새 프로세스를 띄우지 않고 
   } finally { await probe.close() }
 })
 
-test('handoff: 인계 drain 은 도는 계정 조회가 끝난 뒤에 풀린다', async () => {
+test('handoff: 정지하면 도는 계정 조회의 자식이 회수되고 drain 이 그것을 기다린 뒤 풀린다', async () => {
   // 조회의 자식이 살아 있는 동안 drain 이 풀리면, 인계는 아직 도는 프로세스를 남긴 채 설치기로
-  // 넘어간다(그게 실기기에서 갈린 자리다). 자식이 죽은 **뒤** 풀리는지 본다.
+  // 넘어간다(그게 실기기에서 갈린 자리다). 정지가 자식을 끊고, 조회가 그 종료를 기다린 **뒤**
+  // 임대를 놓아 drain 이 풀리는지 본다 — 느린 조회(Codex RPC 등)도 30초 마감까지 붙잡히지 않는다.
   const dir = mkdtempSync(join(tmpdir(), 'kd-probe-drain-'))
   const pidFile = join(dir, 'pid')
   const countFile = join(dir, 'starts')
@@ -610,19 +612,16 @@ test('handoff: 인계 drain 은 도는 계정 조회가 끝난 뒤에 풀린다'
     pid = Number(readFileSync(pidFile, 'utf8'))
     activity.suspend()
     const draining = activity.drain()
-    // 도는 조회가 임대를 쥐고 있으므로 drain 은 아직 풀리지 않는다 — 자식이 살아 있는 한
-    // 임대 수가 0 이 될 수 없으니 매크로태스크 한 번 뒤에도 `pending` 이어야 한다.
-    const tick = Promise.withResolvers<'pending'>()
-    setTimeout(() => tick.resolve('pending'), 0)
-    expect(await Promise.race([draining.then(() => 'drained' as const), tick.promise])).toBe('pending')
-    // 정지 중 새 조회는 자식을 하나도 더 띄우지 않는다.
-    expect(await probe('claude', { fresh: true })).toBeNull()
-    expect(readFileSync(countFile, 'utf8')).toBe('x')
-    // 조회를 닫으면(자식 종료 → 임대 반납) drain 이 풀린다.
-    await probe.close()
+    // `probe.close()` 없이 풀린다 — 정지 알림이 자식을 끊고 조회가 그 종료를 기다렸기 때문이다.
     await draining
     expect(await pending).toBeNull()
-    await expect.poll(() => alive(pid)).toBe(false)
+    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다.
+    expect(alive(pid)).toBe(false)
+    // 끊긴 조회의 결과는 캐시에 남지 않는다 — 재개하면 다시 띄운다.
+    activity.resume()
+    const again = probe('claude', { fresh: true })
+    again.catch(() => {})
+    await expect.poll(() => readFileSync(countFile, 'utf8'), { timeout: 15000 }).toBe('xx')
   } finally {
     await probe.close()
     if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }

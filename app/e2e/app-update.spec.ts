@@ -359,11 +359,16 @@ test('inspect explains every blocking row with the same verdict as busy, and nev
   const view = (rows: ProcessInfo[]) => { const a = fresh().busy(rows), b = fresh().inspect(rows, true), off = fresh().inspect(rows); expect(b.busy).toBe(a); expect(off).toMatchObject({ busy: a, blocked: b.blocked, counts: b.counts }); expect(off.rows()).toEqual([]); return { ...b, rows: b.rows() } }
   const only = (rows: ProcessInfo[]) => view(rows).rows.filter(r => r.role === 'block')
 
-  // 첫 목록에서 이미 무관으로 본 판독 불가 부모(같은 PID·부모·이름·경로) 아래 새 프로세스는 무관하다 —
-  // 생성 시각을 못 읽는 프로세스는 이 앱 계정이 열 수 없으므로 앱이 띄운 것이 아니다.
+  // 판독 불가 부모 아래 새 프로세스는 **부모가 처음 목록에서 무관이었어도** 막는다 — 생성 시각
+  // 없이는 PID·부모·이름·경로가 같아도 같은 세대라는 보장이 없다(추측으로 '무관'을 만들지 않는다).
   const foreign = view([service, proc(800, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 700, at(9000))])
-  expect(foreign).toMatchObject({ busy: false, blocked: 0, counts: { unknown: 0, unrelated: 2 } })
-  expect(foreign.rows).toEqual([])
+  expect(foreign).toMatchObject({ busy: true, blocked: 1, counts: { unknown: 1, unrelated: 1 } })
+  expect(foreign.rows.map(r => [r.role, r.kind, r.ownership, r.why])).toEqual([['block', 'pythonw', 'u', 'parent-time-unreadable'], ['ancestor', 'svchost', 'x', 'history']])
+  // 실기기 모양: 부모의 생성 시각이 **읽히는** 다른 계정 프로세스(첫 목록에 무관으로 있음) 아래
+  // 새 자식은 `parent-live` 로 무관이 된다 — 판정 규칙이 그대로 돌아 F1 없이도 막지 않는다.
+  const readable = view([other, proc(900, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 9, at(9000))])
+  expect(readable).toMatchObject({ busy: false, blocked: 0, counts: { unknown: 0, unrelated: 2 } })
+  expect(readable.rows).toEqual([])
   // 같은 PID 라도 이름·부모 PID 가 다르면 다른 세대다 → 무관으로 넘기지 않고 그대로 unknown, 막는다.
   const stranger = view([proc(801, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 700, at(9000)), proc(700, null, 'dllhost.exe', 6, '')])
   expect(stranger.busy).toBe(true); expect(stranger.counts).toMatchObject({ unknown: 2, unrelated: 0 })
@@ -495,6 +500,10 @@ test('confirmStopped starts the deadline at the first sample and never stops bef
   const stuck = fake(120, () => [blocked])
   await expect(stuck.runtime.confirmStopped(emptySnapshot(), 50)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
   expect(stuck.returned.length).toBe(3)
+  // ⑤ 느린 조회가 최소 표본을 채우기 전에 상한(50ms)을 넘기면 표본 1~2번이어도 막는다 — 무한 연장 금지.
+  const capped = fake(80, () => [blocked])
+  await expect(capped.runtime.confirmStopped(emptySnapshot(), 10, 50)).rejects.toThrow(/종료/)
+  expect(capped.returned.length).toBe(2)
 })
 
 test('native inventory consumes expanded 8.3 paths; tree and resources checks fail closed on missing helpers', async () => {

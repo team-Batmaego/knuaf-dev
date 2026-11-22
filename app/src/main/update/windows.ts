@@ -13,15 +13,16 @@ import { diag, diagEnabled } from '../diagLog'
 export type ShellPhase = 'inventory' | 'mode' | 'install'
 export type PowerShell = (script: string, timeout: number, launch?: InstallerLaunch & { elevate: boolean }, phase?: ShellPhase) => Promise<string>
 /** stderr 본문은 싣지 않는다 — 알려진 오류 종류 이름만 고른다. */
-const SHELL_ERRORS = ['PID reused while reading process snapshot', 'InvalidOperationException', 'Win32Exception', 'UnauthorizedAccessException', 'IOException', 'ParseException', 'RuntimeException'] as const
+const SHELL_ERRORS = ['InvalidOperationException', 'Win32Exception', 'UnauthorizedAccessException', 'IOException', 'ParseException', 'RuntimeException'] as const
 function shellErrorKind(stderr: string): string {
-  const found = SHELL_ERRORS.find(name => stderr.includes(name))
-  return found === undefined ? 'other' : found === SHELL_ERRORS[0] ? 'pid-reused' : found
+  return SHELL_ERRORS.find(name => stderr.includes(name)) ?? 'other'
 }
 /** 인계 확인 한 번이 붙잡아 두는 표본 수의 상한(마지막 표본은 상한과 무관하게 남긴다). */
 const MAX_TRACE_SAMPLES = 80
 /** 마감이 지나도 이만큼은 조회한다 — 느린 조회 한두 번으로 '종료 확인'을 끝내지 않는다. */
 const MIN_SAMPLES = 3
+/** 최소 표본을 채우는 데 쓰는 시간의 상한 — 느린 조회가 표본 수를 채우며 확인을 끝없이 늘리지 않게. */
+const CONFIRM_HARD_MS = 20_000
 interface TraceSample { n: number; asked: number; at: number; rows: ProcessInfo[] }
 type TraceResult = 'ok' | 'deadline' | 'error'
 /**
@@ -97,12 +98,15 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
     const inventory = await this.inventory()
     return { processes: inventory.processes, appPid: this.appPid, appExecutable: inventory.appExecutable }
   }
-  async confirmStopped(before: ProcessSnapshot, timeout = 6_000): Promise<void> {
+  /** `hard`: 최소 표본을 채우는 데 쓰는 시간의 상한 — 기본값이 운영 값이고, 셋째 인자는 시험 이음매다. */
+  async confirmStopped(before: ProcessSnapshot, timeout = 6_000, hard = CONFIRM_HARD_MS): Promise<void> {
     const watch = new OwnedProcessWatch(before)
     // 판정 경로는 진단이 켜져 있든 꺼져 있든 같은 일을 한다: `busy` → 마감 판독 → 다음 조회 예약.
     // 진단(`KNUAF_APP_LOG`)이 켜져 있으면 표본(조회 결과 배열)과 시각만 붙잡아 두고, 근거 조립과
     // 파일 쓰기는 이 함수가 끝난 **뒤**(`setImmediate`)에 같은 표본을 다시 분류해서 한다.
     const traced = diagEnabled(), started = traced ? Date.now() : 0, samples: TraceSample[] = []
+    // 느린 조회가 최소 표본을 채우며 확인을 무한히 늘리지 않게 상한 시각을 함수 진입에 잡는다.
+    const entered = Date.now()
     let count = 0, result: TraceResult = 'error', finished = 0, end = 0
     try {
       for (let n = 1; ; n++) {
@@ -116,8 +120,8 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
           return
         }
         const now = Date.now()
-        // 마감이 지났어도 최소 표본 수는 채운다(조회 하나의 상한은 그대로라 전체가 끝없이 늘지 않는다).
-        if (now >= end && n >= MIN_SAMPLES) {
+        // 마감이 지났어도 최소 표본 수는 채운다 — 단 상한(`hard`)을 넘기면 표본이 모자라도 막는다.
+        if (now >= end && (n >= MIN_SAMPLES || now >= entered + hard)) {
           if (traced) { finished = now; samples.push({ n, asked, at: now, rows }); result = 'deadline' }
           throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
         }
