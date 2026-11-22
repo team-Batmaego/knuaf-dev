@@ -18,6 +18,7 @@ import { CodexRelayConnection } from '../chat/codex'
 import type { AgentOptions } from '../chat/contracts'
 import { isProvider } from './providers'
 import { freeExecutionAccount } from '../free/provider'
+import { agentActivity, type AgentActivity } from '../update/activity'
 
 /** 계정 값 캐시 수명. 짧게 — 요금제·한도는 몇 초 사이에 바뀌지 않는다. */
 const TTL_MS = 15_000
@@ -28,6 +29,12 @@ export interface AccountProbeDeps {
   env: () => NodeJS.ProcessEnv
   openExternal: (url: string) => Promise<void>
   binary: (company: Provider) => string | null
+  /**
+   * 인계(`update/handoff.ts`)와 **같은** 임대 장부. 인계가 정지시키면 조회는 새 프로세스를
+   * 띄우지 않고, 이미 도는 조회는 인계의 `drain()` 이 끝날 때까지 붙잡는다. 시험이 새 인스턴스를
+   * 넣을 수 있게 선택 항목이다(기본 = 앱 전역 장부).
+   */
+  activity?: AgentActivity
 }
 
 /**
@@ -52,55 +59,75 @@ export type AccountProbe = ((company: Provider, options?: { fresh?: boolean }) =
  * 모르는 값을 `allowed` 로 지어내지 않는다.
  */
 export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
+  const activity = deps.activity ?? agentActivity
   const cache = new Map<Provider, { at: number; value: ExecutionAccount | null }>()
   const inflight = new Map<Provider, Promise<ExecutionAccount | null>>()
   const active = new Set<CodexRelayConnection | ClaudeRelayConnection>()
   let closing = false
   let closePromise: Promise<void> | undefined
 
-  const probe = async (company: Provider): Promise<ExecutionAccount | null> => {
-    if (closing) return null
-    // [C1-01] 자기 방어 — 이 함수만 따로 불려도 허용 회사 밖의 이름이 실행 파일 탐색에 닿지 않는다.
-    if (!isProvider(company)) return null
-    const binary = deps.binary(company)
-    if (!binary) return null
-    if (company === 'free') return freeExecutionAccount()
-    mkdirSync(deps.appDir, { recursive: true })
-    const options: AgentOptions = {
-      binary, root: deps.appDir, skill: '', env: deps.env(), openExternal: deps.openExternal
-    }
-    const request = {
-      key: `${deps.appDir}\0${company}\0account-probe`,
-      jobId: 'account-probe',
-      company,
-      cwd: deps.appDir,
-      skill: '',
-      model: '',
-      effort: null,
-      isolation: relayIsolation(deps.appDir, [], false)
-    }
-    const connection = company === 'claude'
-      ? new ClaudeRelayConnection(options, request, deps.appDir)
-      : new CodexRelayConnection(options, request)
-    active.add(connection)
-    try { const result = await connection.availability(); return closing ? null : result } finally {
-      try { if (!closing) await connection.stop() } finally { active.delete(connection) }
-    }
+  /**
+   * `probe()` 는 **임대를 쥔 채** 돈다. 인계는 `suspend()` 뒤 `drain()` 으로 임대가 0이 되기를
+   * 기다리므로, 이 임대가 있어야 인계가 조회의 자식(`connection.stop()` 까지)을 기다린다.
+   * 놓는 자리는 `probe()` 의 마지막 `finally` — 자식 종료 **뒤**다.
+   */
+  const probe = async (company: Provider, release: () => void): Promise<ExecutionAccount | null> => {
+    try {
+      if (closing) return null
+      // [C1-01] 자기 방어 — 이 함수만 따로 불려도 허용 회사 밖의 이름이 실행 파일 탐색에 닿지 않는다.
+      if (!isProvider(company)) return null
+      const binary = deps.binary(company)
+      if (!binary) return null
+      if (company === 'free') return freeExecutionAccount()
+      mkdirSync(deps.appDir, { recursive: true })
+      const options: AgentOptions = {
+        binary, root: deps.appDir, skill: '', env: deps.env(), openExternal: deps.openExternal
+      }
+      const request = {
+        key: `${deps.appDir}\0${company}\0account-probe`,
+        jobId: 'account-probe',
+        company,
+        cwd: deps.appDir,
+        skill: '',
+        model: '',
+        effort: null,
+        isolation: relayIsolation(deps.appDir, [], false)
+      }
+      const connection = company === 'claude'
+        ? new ClaudeRelayConnection(options, request, deps.appDir)
+        : new CodexRelayConnection(options, request)
+      active.add(connection)
+      try { const result = await connection.availability(); return closing ? null : result } finally {
+        try { if (!closing) await connection.stop() } finally { active.delete(connection) }
+      }
+    } finally { release() }
   }
 
   // 인계 제안 판정용 실행 메모 — 15초 캐시와 **분리**한다(위 `once` 주석).
   const memo = new Map<Provider, { value?: ExecutionAccount | null; generation: number; inflight?: Promise<ExecutionAccount | null> }>()
 
+  /**
+   * 인계(정지) 중에는 프로세스를 띄우지 않고 **이미 아는 값**만 돌려준다. `fresh` 는 예외다 —
+   * "지금 관측"이 계약이라(권한을 바꾸는 자리가 옛 계정으로 통과하면 안 된다) 묵은 값 대신
+   * `null`(모름)을 준다. 임대(`activity.enter()`)는 이 정지 검사와 **같은 동기 구간**에서 잡는다 —
+   * 그 사이에 `suspend()` 가 끼어들 수 없으므로 "임대는 잡았는데 이미 정지"인 창이 없다.
+   */
   const read = (company: Provider, options?: { fresh?: boolean }): Promise<ExecutionAccount | null> => {
     if (closing) return Promise.resolve(null)
     if (!isProvider(company)) return Promise.resolve(null)
+    if (activity.suspended) {
+      // `null` 은 캐시에 쓰지 않는다: 인계가 실패해 앱이 계속 살 때 '모름'이 15초 굳으면 안 된다.
+      if (options?.fresh) return Promise.resolve(null)
+      return inflight.get(company) ?? Promise.resolve(cache.get(company)?.value ?? null)
+    }
     if (!options?.fresh) {
       const hit = cache.get(company)
       if (hit && Date.now() - hit.at < TTL_MS) return Promise.resolve(hit.value)
       const running = inflight.get(company)
       if (running) return running
     }
-    const started = probe(company)
+    // 정지 검사(위)와 같은 동기 구간 — 여기서 `enter()` 가 던지지 않는다.
+    const started = probe(company, activity.enter())
       .catch((): null => null)
       .then(value => {
         cache.set(company, { at: Date.now(), value })
@@ -114,6 +141,13 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
   const once = (company: Provider, epoch: number): Promise<ExecutionAccount | null> => {
     if (closing) return Promise.resolve(null)
     if (!isProvider(company)) return Promise.resolve(null)
+    if (activity.suspended) {
+      // `once` 는 실패를 저장하지 않는 계약이다 — 정지 중에도 메모에 아무것도 쓰지 않는다.
+      // 세대가 다르면 옛 값도 옛 진행 약속도 새 세대의 답이 아니다.
+      const known = memo.get(company)
+      if (!known || known.generation !== epoch) return Promise.resolve(null)
+      return known.inflight ?? Promise.resolve('value' in known ? known.value ?? null : null)
+    }
     let entry = memo.get(company)
     if (!entry) { entry = { generation: epoch }; memo.set(company, entry) }
     // 로그인이 바뀌었으면 옛 값·옛 진행 약속 둘 다 버린다 — 옛 연결의 답이 새 세대에 남으면 안 된다.
@@ -125,8 +159,9 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
     if ('value' in entry) return Promise.resolve(entry.value ?? null)
     const running = entry.inflight
     if (running) return running
+    const release = activity.enter()
     // `.catch` 없음 — 실패는 저장하지 않고 대기자 전원에게 그대로 간다.
-    const started = probe(company)
+    const started = probe(company, release)
       .then(value => {
         if (entry.generation === epoch) entry.value = value
         return value
