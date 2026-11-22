@@ -164,7 +164,7 @@ test('이유만 있는 요청을 명령으로 오분류하지 않는다 (QA2A-R1
   }
 })
 
-test('칩 팝오버는 위로 열려 Claude 행·깊이 줄이 화면 안에 있다 (QA2A-R1-01)', async () => {
+test('칩 팝오버의 계정 행과 추론 단계가 화면 안에 있다 (QA2A-R1-01)', async () => {
   const dir = scratch()
   const bin = join(dir, 'bin')
   const env = fakeCodexEnv(bin, { FAKE_CODEX_MODE: 'logged-in' })
@@ -180,20 +180,27 @@ test('칩 팝오버는 위로 열려 Claude 행·깊이 줄이 화면 안에 있
       await chip.click()
       const pop = page.locator('.chat-composer .popover')
       await expect(pop).toBeVisible()
-      // 목록이 길어져도 팝오버는 창 안에 남고 각 조작에 스크롤로 도달할 수 있다.
-      for (const sel of ['.chat-composer .popover', '[data-provider="claude"]', '.chat-composer .model-depth']) {
-        await page.locator(sel).first().scrollIntoViewIfNeeded()
-        const b = await box(page, sel)
-        expect(b, `${sel} 이 없다`).not.toBeNull()
-        expect(b!.y, `${w}×${h}: ${sel} 이 화면 위로 나갔다`).toBeGreaterThanOrEqual(0)
-        expect(b!.y + b!.height, `${w}×${h}: ${sel} 이 화면 아래로 잘렸다`).toBeLessThanOrEqual(h + 0.5)
-      }
-      // Claude 변경 버튼도 화면 안.
-      const btn = page.locator('[data-provider="claude"]').getByRole('button', { name: 'Claude로 바꾸기' })
+      await pop.getByRole('button', { name: /^AI 회사·로그인/ }).click()
+      const accountRow = pop.locator('[data-provider="claude"]')
+      await accountRow.scrollIntoViewIfNeeded()
+      await expect(accountRow).toBeVisible()
+      const accountBounds = await accountRow.boundingBox()
+      expect(accountBounds!.y).toBeGreaterThanOrEqual(0)
+      expect(accountBounds!.y + accountBounds!.height).toBeLessThanOrEqual(h + 0.5)
+      const btn = accountRow.getByRole('button', { name: 'Claude로 바꾸기' })
       await btn.scrollIntoViewIfNeeded()
       await expect(btn).toBeVisible()
       const bb = await btn.boundingBox()
       expect(bb!.y + bb!.height).toBeLessThanOrEqual(h + 0.5)
+      await pop.getByRole('button', { name: 'AI 회사·로그인', exact: true }).click()
+      await pop.locator('[data-submenu="true"]').first().click()
+      await pop.locator('.pop-row[aria-pressed]').first().click()
+      const efforts = pop.getByRole('group', { name: '추론 단계' })
+      await efforts.scrollIntoViewIfNeeded()
+      await expect(efforts).toBeVisible()
+      const effortBounds = await efforts.boundingBox()
+      expect(effortBounds!.y).toBeGreaterThanOrEqual(0)
+      expect(effortBounds!.y + effortBounds!.height).toBeLessThanOrEqual(h + 0.5)
     } finally {
       await electronApp.close()
     }

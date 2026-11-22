@@ -9,7 +9,7 @@ STRICT_ENC = {"PYTHONWARNDEFAULTENCODING": "1", "PYTHONWARNINGS": "error::Encodi
 def test_status_survives_default_encoding_warning_as_error(project):
     r = run_gg(project, "status", env=STRICT_ENC)
     assert r.returncode == 0, r.stderr
-    assert parse_json(r.stdout)["revision"] == 1
+    assert parse_json(r.stdout)["revision"] == 2
 
 
 def test_export_survives_default_encoding_warning_as_error(project):

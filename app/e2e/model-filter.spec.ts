@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { launch, openProject, synthProject } from './helpers'
@@ -37,9 +37,11 @@ async function api(page: Page, request: ApiRequest) {
   }, request)
 }
 
-async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, failList = false) {
+async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice | null = rejected, outage = false, requestLog?: string) {
   const dir = scratch(), root = synthProject({ withContent: false })
   const turns = join(dir, 'turns.jsonl'), applied = join(dir, 'applied.jsonl'), thread = join(dir, 'thread.json')
+  const failureFile = join(dir, 'models-unavailable')
+  if (outage) writeFileSync(failureFile, '')
   writeFileSync(turns, '')
   if (resumed) {
     seedChat(root, [{ id: 'old', role: 'assistant', text: '이전 답변', at: new Date().toISOString() }])
@@ -50,14 +52,19 @@ async function scene(resumed: boolean, defaultModel: string, stored: ModelChoice
   const userData = userDataWith(dir, { helper_mode: 'codex-chat', provider_choice: { provider: 'codex', at: '' }, chat_models: { codex: stored } })
   const app = await launch({ userData, env: fakeCodexEnv(join(dir, 'bin'), {
     FAKE_CODEX_MODELS: JSON.stringify(models), FAKE_CODEX_DEFAULT_MODEL: defaultModel,
-    FAKE_CODEX_MODELS_FAIL_TIMES: failList ? '1' : '0', FAKE_CODEX_THREAD_STATE: thread,
+    FAKE_CODEX_THREAD_STATE: thread,
+    ...(outage ? { FAKE_CODEX_MODELS_FAIL_WHILE_FILE: failureFile } : {}),
+    ...(requestLog ? { FAKE_CODEX_REQUEST_LOG: requestLog } : {}),
     FAKE_CODEX_TURN_LOG: turns, FAKE_CODEX_APPLIED_LOG: applied, FAKE_CODEX_REPLY: replyFile(dir, 'MF1 응답')
   }) })
   await openProject(app.page, root)
-  await expect(app.page.getByTitle('이 논문의 도우미')).toContainText(
-    stored?.model.includes('/') ? MODEL_PICKER.reselectionTitle : stored?.model ?? '연결됨'
-  )
-  return { ...app, root, turns, applied, userData }
+  if (stored?.model.includes('/')) await expect(app.page.getByTitle('이 논문의 도우미')).toContainText(MODEL_PICKER.reselectionTitle)
+  else if (stored) await expect(app.page.getByTitle('이 논문의 도우미')).toContainText(stored.model)
+  else {
+    await expect(app.page.getByTitle('이 논문의 도우미')).not.toContainText(MODEL_PICKER.reselectionTitle)
+    await expect(app.page.getByTitle('이 논문의 도우미')).toContainText(defaultModel)
+  }
+  return { ...app, root, turns, applied, userData, failureFile }
 }
 
 async function send(page: Page, root: string, id: string) {
@@ -88,12 +95,13 @@ for (const scenario of [
       await expect(draft).toHaveValue('보존할 초안')
       await page.getByTitle('이 논문의 도우미').click()
       const popup = page.locator('.composer-model-host .popover')
-      await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'false')
+      await popup.locator('[data-submenu="true"]').first().click()
+      await expect(popup.locator('.pop-row[aria-pressed="true"]')).toHaveCount(0)
       if (scenario.name === 'fresh') {
         mkdirSync(captures, { recursive: true })
         await page.screenshot({ path: join(captures, 'mf1-reselection.png') })
       }
-      await popup.getByRole('button', { name: /^GPT-6.1-Sol / }).click()
+      await popup.getByRole('button', { name: allowed.model, exact: true }).click()
       await page.keyboard.press('Escape')
       await expect(page.getByTitle('이 논문의 도우미')).toContainText(allowed.model)
       expect((await send(page, root, 'allowed')).error).toBeUndefined()
@@ -102,30 +110,26 @@ for (const scenario of [
   })
 }
 
-test('MF1-02: 목록 실패에도 외부 선택은 재선택 표시·전송 차단을 유지하며 명시적 기본 선택 뒤 복구한다', async () => {
-  const { electronApp, page, root, turns, applied } = await scene(true, 'GPT-6-Astra', rejected, true)
+test('MF1-02: 목록 실패에도 외부 선택은 전송을 차단하고 재조회·허용 모델 선택 뒤 복구한다', async ({}, info) => {
+  const { electronApp, page, root, turns, failureFile } = await scene(true, 'GPT-6-Astra', rejected, true, info.outputPath('requests.jsonl'))
   try {
     await page.getByTitle('이 논문의 도우미').click()
     const popup = page.locator('.composer-model-host .popover')
-    await expect(popup.getByText(MODEL_PICKER.listFailed, { exact: true })).toBeVisible()
+    await expect(popup.getByRole('alert')).toContainText(MODEL_PICKER.listFailed)
     await expect(page.getByTitle('이 논문의 도우미')).toContainText(MODEL_PICKER.reselectionTitle)
     await expect(page.getByTitle('이 논문의 도우미')).not.toContainText(rejected.model)
     expect((await send(page, root, 'failed-list')).error?.message).toBe(MODEL_PICKER.reselectionRequired)
     expect(records(turns)).toEqual([])
     mkdirSync(captures, { recursive: true })
     await page.screenshot({ path: join(captures, 'mf1-list-failed.png') })
-    await popup.getByRole('button', { name: /안 고름/ }).click()
-    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveAttribute('aria-pressed', 'true')
-    expect((await send(page, root, 'explicit-default')).error).toBeUndefined()
-    // 지킴이 장부(§4.1-C)가 이 대화를 잠금 전에 시작한 대화로 보고 **새 대화로 갈아탄다** —
-    // `tmp/design-4.1-CE.md` L68ⓐ. 새 스레드는 서버 기본값으로 열리므로 되돌릴 것이 없고,
-    // 앱은 model·effort 키를 **싣지 않는다**(생략 = 지금 값 유지). 학생이 고른 것이 없는 한
-    // 요청은 종전과 똑같아야 하므로 키가 없는 쪽이 계약이고, 그 턴에 실제로 적용된 값이
-    // 계정 기본값이어야 복구다.
-    await expect.poll(() => records(turns)).toEqual([{}])
-    expect(records(applied)).toEqual([{ model: 'GPT-6-Astra', effort: 'medium' }])
-    // 학생이 본 것: 지난 대화는 그대로 두고, 왜 새 대화인지 한 줄이 남는다.
-    await expect(page.getByText(/Codex 도우미가 새 대화로 이어 갈게요/)).toBeVisible()
+    await expect(popup.getByRole('button', { name: /안 고름/ })).toHaveCount(0)
+    unlinkSync(failureFile)
+    await popup.getByRole('button', { name: MODEL_PICKER.reload, exact: true }).click()
+    await popup.locator('[data-submenu="true"]').first().click()
+    await popup.getByRole('button', { name: allowed.model, exact: true }).click()
+    await expect(page.getByTitle('이 논문의 도우미')).toContainText(allowed.model)
+    expect((await send(page, root, 'allowed-after-reload')).error).toBeUndefined()
+    await expect.poll(() => records(turns)).toEqual([{ model: allowed.model, effort: 'medium' }])
   } finally { await electronApp.close() }
 })
 
@@ -135,18 +139,19 @@ test('명시적 계정 기본 선택 뒤에도 외부 공급자 기본값은 차
     expect((await api(page, { action: 'setModel', root, choice: null })).error).toBeUndefined()
     expect((await send(page, root, 'cross-default')).error?.message).toBe(MODEL_PICKER.crossProviderDefault)
     expect(records(turns)).toEqual([])
-    await api(page, { action: 'setModel', root, choice: allowed })
+    expect((await api(page, { action: 'setModel', root, choice: allowed })).error).toBeUndefined()
     expect((await send(page, root, 'safe-model')).error).toBeUndefined()
     await expect.poll(() => records(turns)).toEqual([allowed])
   } finally { await electronApp.close() }
 })
 
 test('정상 OpenAI 저장 선택은 목록 실패로 지우지 않고 그대로 전송한다', async () => {
-  const { electronApp, page, root, turns } = await scene(false, 'GPT-6-Astra', allowed, true)
+  const { electronApp, page, root, turns, failureFile } = await scene(false, 'GPT-6-Astra', allowed, true)
   try {
     const result = await api(page, { action: 'models', root })
     expect(result.result?.error).toBeTruthy()
     expect(result.result?.selected).toEqual(allowed)
+    unlinkSync(failureFile)
     expect((await send(page, root, 'normal-choice')).error).toBeUndefined()
     await expect.poll(() => records(turns)).toEqual([allowed])
   } finally { await electronApp.close() }

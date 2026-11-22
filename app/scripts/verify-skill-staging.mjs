@@ -54,8 +54,9 @@ function describe(value) {
 const source = readJson(join(REPO, 'app', 'skill-source.json'), 'app/skill-source.json')
 const staged = source && readJson(join(BUNDLE, 'skill.json'), 'app/resources/skill/skill.json')
 const manifest = source && readJson(join(BUNDLE, 'install-manifest.json'), 'app/resources/skill/install-manifest.json')
+const channel = source && readJson(join(REPO, 'updates', 'channel.json'), 'updates/channel.json')
 
-if (source && staged && manifest) {
+if (source && staged && manifest && channel) {
   const pinned = `${source.tag}@${source.commit}`
   const found = staged.source && `${staged.source.tag}@${staged.source.commit}`
 
@@ -64,7 +65,34 @@ if (source && staged && manifest) {
   } else if (!isFileMap(manifest.files)) {
     fail(`install-manifest.json 의 files 가 비어 있지 않은 객체가 아니다(${describe(manifest.files)})`)
   } else {
-    // 매니페스트는 자기 자신을 해시할 수 없다(compose-skill.mjs:129). 선언된 파일만 본다.
+    const channelSkill = channel.skill
+    let signed
+    if (channelSkill?.version === staged.version) {
+      try {
+        signed = JSON.parse(Buffer.from(channelSkill.manifest, 'base64').toString('utf8'))
+      } catch (error) {
+        fail(`채널 서명 manifest 를 읽을 수 없다: ${error.message}`)
+      }
+    }
+    if (signed) {
+      if (signed.version !== staged.version || !isFileMap(signed.files)) {
+        fail('동봉 판과 같은 채널 버전의 서명 manifest 형식이 잘못됐다')
+      } else {
+        const names = Object.keys(manifest.files).sort()
+        const signedNames = Object.keys(signed.files).filter(name => name !== 'install-manifest.json').sort()
+        if (JSON.stringify(names) !== JSON.stringify(signedNames)) {
+          fail('동봉 파일 목록이 같은 버전의 서명 manifest 와 다르다')
+        } else {
+          for (const name of names) {
+            if (manifest.files[name] !== signed.files[name]) {
+              fail(`동봉 해시가 같은 버전의 서명 manifest 와 다르다: ${name}`)
+              break
+            }
+          }
+        }
+      }
+    }
+
     let hashed = 0
     let bytes = 0
     for (const [rel, want] of Object.entries(manifest.files)) {
@@ -82,6 +110,10 @@ if (source && staged && manifest) {
         fail(`선언된 해시와 내용이 다르다: ${rel}`)
         break
       }
+    }
+    if (signed && signed.files['install-manifest.json'] !== createHash('sha256')
+      .update(readFileSync(join(BUNDLE, 'install-manifest.json'))).digest('hex')) {
+      fail('install-manifest.json 해시가 같은 버전의 서명 manifest 와 다르다')
     }
     try {
       if (statSync(join(BUNDLE, 'scripts')).isDirectory()) {

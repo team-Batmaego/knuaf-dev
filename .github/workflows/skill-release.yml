@@ -144,7 +144,7 @@ jobs:
           NODE
       - name: Signer and composition regression suite
         if: steps.plan.outputs.changed == 'true'
-        run: node --test app/scripts/tests/skill-release.test.mjs
+        run: node --test app/scripts/tests/skill-release.test.mjs app/scripts/tests/skill-min-app.test.mjs
       # Uploaded before any upstream dependency or test code executes.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.plan.outputs.changed == 'true' && success()
@@ -160,11 +160,14 @@ jobs:
         env:
           VERSION: ${{ steps.reserve.outputs.version }}
         run: |
+          FLOOR=$(node --input-type=module -e "import { SKILL_MIN_APP } from './app/scripts/sign-skill.mjs'; console.log(SKILL_MIN_APP)")
           {
             echo "## 규칙집 $VERSION 게시 대기"
             echo
             echo "이 실행은 \`publish\` 잡에서 \`skill-release\` 환경 승인을 기다립니다(승인 전에는 아무 것도 게시되지 않습니다)."
             echo "승인 화면: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "최소 앱 판(minApp): \`$FLOOR\` — 이보다 낮은 앱은 이 판을 받지 않습니다(서명 값은 \`app/scripts/sign-skill.mjs\`의 SKILL_MIN_APP 한 곳)."
             echo
             echo "승인하지 않으면 채널 가지와 릴리스는 만들어지지 않습니다. 이 실행을 방치하면 다음 정기 실행도 같은 지점에서 대기합니다."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -266,7 +269,11 @@ jobs:
           VERSION: ${{ needs.compose.outputs.version }}
           OVERLAY: ${{ needs.compose.outputs.overlay }}
         run: |
-          node app/scripts/sign-skill.mjs --directory app/resources/skill-release/bundle --zip "app/resources/skill-release/knuaf-dev-skill-$VERSION.zip" --upstream app/resources/skill-upstream --source app/resources/trusted-source.json --version "$VERSION" --expected-overlay "$OVERLAY" --min-app 0.6.0 --output app/resources/skill-release/signed
+          node app/scripts/sign-skill.mjs --directory app/resources/skill-release/bundle --zip "app/resources/skill-release/knuaf-dev-skill-$VERSION.zip" --upstream app/resources/skill-upstream --source app/resources/trusted-source.json --version "$VERSION" --expected-overlay "$OVERLAY" --output app/resources/skill-release/signed
+          # The floor a release carries is declared once in app/scripts/sign-skill.mjs (SKILL_MIN_APP)
+          # and is not a workflow input: it is what keeps this release away from apps that cannot
+          # read it, so it must move with the contract and be reviewed here, not typed per run.
+          node --input-type=module -e "import { SKILL_MIN_APP } from './app/scripts/sign-skill.mjs'; console.log('minApp ' + SKILL_MIN_APP)"
       - name: Publish immutable skill assets (no clobber)
         env:
           GH_TOKEN: ${{ github.token }}

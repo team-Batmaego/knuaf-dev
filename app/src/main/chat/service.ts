@@ -800,8 +800,10 @@ export class ChatService {
    * 선택은 마지막 것이 이긴다: 호출마다 번호를 올리고, 목록을 기다리는 동안 더 새 선택이
    * 들어왔으면 저장하지 않고 **지금 설정값**을 돌려준다. 해제(null)는 목록을 기다리지 않으므로
    * 느린 선택 검증이 그 뒤에 끝나도 해제를 되살리지 못한다(검토 MC1-03).
+   * `beforeStore`는 예약 소비 호출자의 폴더 방문 검사다. 모델 목록 await 뒤 실제 설정 쓰기
+   * 직전에 검사하므로 다른 폴더로 이동한 요청은 전역 모델 선택을 바꾸지 않는다.
    */
-  async setModel(root: string | null, provider: Provider, choice: ModelChoice | null): Promise<ModelChoice | null> {
+  async setModel(root: string | null, provider: Provider, choice: ModelChoice | null, beforeStore?: () => void): Promise<ModelChoice | null> {
     return agentActivity.run(async () => {
     const seq = (this.selectionSeq.get(provider) ?? 0) + 1
     this.selectionSeq.set(provider, seq)
@@ -818,6 +820,7 @@ export class ChatService {
     const picked = effectiveModelChoice(choice, list.models)
     if (!picked) throw new Error('이 계정에서 쓸 수 없는 모델이에요. 목록을 다시 불러와 주세요.')
     if (choice.effort && !picked.effort) throw new Error('이 모델은 그 생각 깊이를 지원하지 않아요.')
+    beforeStore?.()
     this.opts.storeModelChoice?.(provider, picked)
     return picked
     })
@@ -968,6 +971,7 @@ export class ChatService {
     // item-N/msg_* id가 달라 중복으로 들어온다.
     const replayHistory = !s.messages.some(m => m.role === 'assistant')
     const authGeneration = this.authGeneration[s.provider]
+    let answered = false
     /**
      * 답장이 오기 시작했으면 전달된 것이다. 예전에는 run() 이 끝나야 'sent' 로 바꿨는데,
      * 에이전트 턴은 몇 분씩 가므로 도우미가 눈앞에서 말하는 내내 학생 메시지에
@@ -990,6 +994,7 @@ export class ChatService {
         session: id => { s.sessionId = id; this.publish(s) },
         skill: () => { s.skillLoaded = true; this.publish(s) },
         message: (id, text) => {
+          if (text.trim()) answered = true
           const old = s.messages.find(m => m.id === id)
           if (old) old.text = text
           else s.messages.push({ id, role: 'assistant', text, at: new Date().toISOString() })
@@ -1014,7 +1019,13 @@ export class ChatService {
           delivered(); this.publish(s)
         }
       }, replayHistory)
-      delivered(); s.state = 'idle'
+      delivered()
+      // 정상 종료는 답변 도착을 보장하지 않는다. 원인(문맥 소진 등)은 단정하지 않는다.
+      // 중단·복구·승인 대기는 기존 상태를 유지하고 무료 본대화에만 안내한다.
+      if (s.provider === 'free' && s.state === 'running' && !answered && !s.permission) {
+        throw new FreeRelayError('free-no-answer')
+      }
+      if (s.provider !== 'free' || s.state === 'running') s.state = 'idle'
     } catch (e) {
       // 이미 답장이 왔다면 전달은 된 것이다 — 그 뒤에 실패한 것은 턴이지 전송이 아니다.
       const sentMsg = s.messages.find(m => m.id === requestId)!
@@ -1086,24 +1097,9 @@ export class ChatService {
    */
   approvePlan(root: string, plan: LanePlan): void { this.store().approve(root, plan) }
   revokePlan(root: string): void { this.store().revokePlan(root) }
-  /**
-   * 동의를 거두면 그 회사 계정으로 맡긴 **대기·진행** 주문을 그 자리에서 멈춘다(계약
-   * `lanes:set-consent`). 저장은 동기(옛 호출자·시험 그대로)이고, 멈추기는 러너의 비동기
-   * 경로라 기다리지 않고 넘긴다 — 저장이 늦어지면 그 사이 주문이 시작될 수 있다.
-   */
-  setConsent(company: Provider, accountId: string, on: boolean): ConsentRecord {
-    const record = this.store().setConsent(company, accountId, on)
-    if (!on) {
-      for (const job of this.jobRunner?.records() ?? []) {
-        if (job.spec.company !== company) continue
-        // 아직 계정을 고정하지 않은 대기 주문은 이 회사 하나뿐이라 그대로 멈춘다.
-        if (job.accountId !== undefined && job.accountId !== accountId) continue
-        if (!['queued', 'running', 'limit'].includes(job.status)) continue
-        void this.jobRunner!.stopJob(job.spec.id).catch(error => console.error('[knuaf] jobs',
-          JSON.stringify({ type: 'stop-job', jobId: job.spec.id, error: error instanceof Error ? error.message : String(error) })))
-      }
-    }
-    return record
+  /** 보존된 구 계약. 동의는 저장하거나 실행 상태를 바꾸지 않는다. */
+  setConsent(_company: Provider, _accountId: string, _on: boolean): ConsentRecord {
+    return { state: 'withdrawn', at: null }
   }
   /** §2-1 [이 담당 멈추기] — 그 주문 하나만. 본대화·다른 주문은 그대로다(Q2). */
   async stopJob(root: string, jobId: string): Promise<JobRecord> {
@@ -1125,7 +1121,7 @@ export class ChatService {
     return runner.beginOwnerTransition(root)
   }
   /**
-   * 지금 담당 회사의 계정 — `consented` 는 앱 저장소 값으로 덮인다(엔진은 그 값을 모른다).
+   * 지금 담당 회사의 계정. 동의 필드는 호환용일 뿐 저장·검사하지 않는다.
    * `once` 면 **인계 제안 판정용 실행 메모**를 쓴다(실행당 회사당 1회, 로그인 세대가 바뀌면 1회 더).
    * 세대는 여기서 읽는 순간의 값이다 — 늦게 온 답은 엔진 쪽 세대 비교가 버린다.
    */
@@ -1133,7 +1129,7 @@ export class ChatService {
     const account = await this.opts.jobAccount?.(company,
       options?.once ? { once: { epoch: this.authEpoch(company) } } : { fresh: options?.fresh })
     if (!account) return null
-    return { ...account, consented: company === 'free' || this.store().consented(company, account.accountId) }
+    return account
   }
   /** 로그인 세대 — 성공한 로그인 확인마다 하나씩 오른다(§5 "로그인 변경 뒤 1회"). */
   authEpoch(company: Provider): number { return this.authGeneration[company] }
@@ -1217,11 +1213,7 @@ export class ChatService {
     this.jobRunner = new JobRunner({
       stateDir: join(this.opts.userData, 'jobs'),
       approvedPlan: root => store.effectivePlan(root),
-      // 동의는 앱 저장소가 정본이다 — 엔진이 준 계정 값 위에 앱의 동의만 얹는다.
-      account: async company => {
-        const account = await this.opts.jobAccount!(company)
-        return account ? { ...account, consented: company === 'free' || store.consented(company, account.accountId) } : null
-      },
+      account: company => this.opts.jobAccount!(company),
       skill: () => {
         if (!this.jobSkill) throw new Error('설치된 스킬에서 주문 판 선언을 찾지 못했어요.')
         return this.jobSkill

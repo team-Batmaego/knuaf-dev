@@ -253,9 +253,6 @@ export const useChat = create<ChatState>((set, get) => ({
       ...(draftMoved || get().draft !== '' ? {} : { draft: savedDraft, draftSeq: get().draftSeq + 1 }),
       error: messageOf(snap) ?? messageOf(st)
     })
-    // 모델 목록은 **자동으로 부르지 않는다** — 칩 화면이 열릴 때 `loadModels()` 를 부른다.
-    // 지금까지 모델을 고른 적 없는 학생에게 `model/list` 왕복을 얹지 않고, 이 호출을 모르는
-    // 화면 대역(시험의 가짜 window.knuaf)에서도 대화 로드가 그대로 돈다.
   },
   refreshStatus: async () => {
     const { root, provider } = get()

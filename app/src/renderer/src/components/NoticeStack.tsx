@@ -15,6 +15,7 @@ export interface NoticesApi {
   read: (root: string) => Promise<RpcResult<NoticesRead>>
   dismiss: (root: string, key: string) => Promise<RpcResult<string[]>>
   choose: (root: string, identity: string, value: NoticeChoiceValue) => Promise<RpcResult<Envelope>>
+  confirm: (root: string, identity: string) => Promise<RpcResult<Envelope>>
 }
 
 export interface NoticeStackProps {
@@ -42,7 +43,8 @@ function defaultApi(): NoticesApi {
   return {
     read: (root) => window.knuaf.notices.read(root),
     dismiss: (root, key) => window.knuaf.notices.dismiss(root, key),
-    choose: (root, identity, value) => window.knuaf.notices.choose(root, identity, value)
+    choose: (root, identity, value) => window.knuaf.notices.choose(root, identity, value),
+    confirm: (root, identity) => window.knuaf.notices.confirm(root, identity)
   }
 }
 
@@ -84,6 +86,14 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
   const [reload, setReload] = useState(0)
   // 저장이 확인된 선택. 파일이 아니라 **화면의 기억**이라, 옛 파일의 `choice:null` 을 이긴다.
   const [picked, setPicked] = useState<Readonly<Record<string, NoticeChoiceValue>>>({})
+  // 접기는 알림 닫기와 별도이며 폴더와 카드 내용 지문에 묶는다.
+  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set())
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  // 생산자는 내용이 바뀌면 identity도 바꾸므로, 직전 읽기의 표시 자리와 비교한다.
+  // **폴더별로** 보관한다 — 한 목록만 들면 A→B→A 왕복 뒤 A 의 직전 목록을 잃어 바뀐 카드가 안 펼쳐진다
+  // (R280-02). 접기·펼치기 집합은 이미 `[root, cardKey]` 로 폴더에 묶여 있다.
+  const previousCards = useRef<Map<string, string[]> | null>(null)
+  const cardsByRoot = previousCards.current ??= new Map<string, string[]>()
   // X 로 닫은 **그 다시 보기 요청**의 열쇠 — 요청이 끝났으니 목록에 남아 있어도 다시 그리지 않는다.
   // 요청은 "열쇠가 `forceOpenKeys` 에 없었다가 새로 들어옴"이다(아래 render-phase 비교).
   const [consumed, setConsumed] = useState<readonly string[]>([])
@@ -130,6 +140,16 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
         return
       }
       const next: StackState = { root, notices: reply.result.notices, dismissed: reply.result.dismissed }
+      const keys = next.notices.filter((notice) => notice.choicePolicy === 'none')
+        .sort((a, b) => Number(!!b.blocking) - Number(!!a.blocking))
+        .slice(0, 3).map((notice) => JSON.stringify([root, notice.cardKey]))
+      const previous = cardsByRoot.get(root)
+      const changed = previous ? keys.filter((key, index) => previous[index] !== undefined && previous[index] !== key && !previous.includes(key)) : []
+      cardsByRoot.set(root, keys)
+      if (changed.length > 0) {
+        setExpanded((prev) => new Set([...prev, ...changed]))
+        setFolded((prev) => { const nextFolded = new Set(prev); changed.forEach((key) => nextFolded.delete(key)); return nextFolded })
+      }
       setState(next)
       // 파일에서 사라진 알림의 로컬 선택은 버린다 — 같은 열쇠가 다시 생기면 그때는 새 알림이다.
       setPicked((prev) => {
@@ -179,6 +199,16 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
     setReload((count) => count + 1)
   }
 
+  const confirm = async (key: string): Promise<void> => {
+    const at = root
+    if (!at) throw new Error(NOTICE.confirmFailed)
+    const reply = await apiRef.current.confirm(at, key.slice(key.indexOf(':') + 1))
+    if (reply.error || !reply.result?.ok || reply.result.status !== 'acknowledged') {
+      throw new Error(reply.result?.block_reason || NOTICE.confirmFailed)
+    }
+    if (rootRef.current === at) setReload((count) => count + 1)
+  }
+
   if (!root || state.root !== root) return null
   const reopened = (key: string): boolean => forceOpenKeys.includes(key) && !consumed.includes(key)
   const shown = state.notices
@@ -186,22 +216,40 @@ export function NoticeStack({ root, reloadKey = 0, forceOpenKeys = [], onFootnot
       const local = picked[notice.key]
       return local && notice.choice !== local ? { ...notice, choice: local } : notice
     })
-    .filter((notice) => noticeVisible(notice, state.dismissed, reopened(notice.key)))
+    .filter((notice) => notice.choicePolicy === 'none' || noticeVisible(notice, state.dismissed, reopened(notice.key)))
+  const cards = shown.filter((notice) => notice.choicePolicy === 'none')
+    .sort((a, b) => Number(!!b.blocking) - Number(!!a.blocking))
+  const visibleCards = cards.slice(0, 3)
+  const legacy = shown.filter((notice) => notice.choicePolicy !== 'none')
   if (shown.length === 0) return null
 
   return (
     <div className="notice-zone">
       <div className="notice-stack">
-        {shown.map((notice) => (
+        {[...visibleCards, ...legacy].map((notice, index) => (
           <NoticeBubble
             key={notice.key}
             notice={notice}
+            collapsed={notice.choicePolicy === 'none' && (folded.has(JSON.stringify([root, notice.cardKey])) || (index > 0 && !expanded.has(JSON.stringify([root, notice.cardKey]))))}
+            onExpand={() => {
+              const key = JSON.stringify([root, notice.cardKey])
+              setFolded((prev) => { const next = new Set(prev); next.delete(key); return next })
+              setExpanded((prev) => new Set(prev).add(key))
+            }}
+            onCardAction={(value) => {
+              if (notice.choicePolicy !== 'none') return
+              if (value === 'later') setFolded((prev) => new Set(prev).add(JSON.stringify([root, notice.cardKey])))
+              if (value === 'fix' && notice.talkMessage) onWriteTalk?.(notice.talkMessage)
+              if (value === 'proceed' && notice.proceedMessage) onWriteTalk?.(notice.proceedMessage)
+            }}
             onDismiss={dismiss}
             onChoose={(value) => choose(notice.key, value)}
+            onConfirm={() => confirm(notice.key)}
             onFootnote={() => { onFootnote?.(); onWriteTalk?.(NOTICE.footnoteAction) }}
             forceOpen={reopened(notice.key)}
           />
         ))}
+        {cards.length > 3 && <p className="notice-note">{NOTICE.cardMore.replace('{n}', String(cards.length - 3))}</p>}
       </div>
     </div>
   )

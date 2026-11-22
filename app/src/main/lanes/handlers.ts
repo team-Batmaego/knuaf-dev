@@ -9,12 +9,11 @@
  * - **이음매가 없으면 `unavailable`**: 가짜 기본값으로 성공을 만들지 않는다.
  */
 import type { Provider } from '../../shared/chat'
-import { judgePlan } from '../../shared/lanes'
 import {
   JOBS_INVOKE, LANES_INVOKE,
   type ArchivedChat, type ArchivedChatSummary, type CardAction, type CardDecision, type ConsentRow,
   type LaneCard, type LaneLine, type LanesErrorCode, type LanesReply, type LanesSnapshot,
-  type ReviewModelGroup
+  type ReviewModelGroup, type PlacementEntries, type PlacementOrigin
 } from '../../shared/lanes-ipc'
 import type { JobRunner } from '../chat/jobs'
 import { statSync } from 'node:fs'
@@ -22,11 +21,11 @@ import { canonical } from '../chat/jobs/isolation'
 import type { JobStore } from '../chat/jobs/store'
 import type { ExecutionAccount, JobRecord } from '../chat/jobs/types'
 import {
-  cardStatus, decideCard, disable, pickReview, reviewModels, settingsCard, type CardDeps
+  cardStatus, decideCard, disable, pickReview, reviewModels, settingsCard, laneModels, setPlacement, type CardDeps
 } from './cards'
 import { LaneFailure } from './failure'
 import { providerOf } from './providers'
-import { consentRows, maskAccount, type LaneAccountView } from './snapshot'
+import { maskAccount } from './snapshot'
 
 /** IPC 등록 통로 — 시험에서 가짜 `ipcMain` 을 끼울 수 있게 최소만 요구한다. */
 export interface LaneIpcChannel {
@@ -133,23 +132,6 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     applyDesign: deps.applyDesign
   }
   const diagnostic = deps.diagnostic ?? (() => {})
-  /** 방금 읽은 계정 — 요금제 판정에 쓰고, 화면으로는 가린 표시만 나간다. */
-  const accounts = new Map<Provider, ExecutionAccount>()
-
-  const refreshAccounts = async (): Promise<LaneAccountView[]> => {
-    const views: LaneAccountView[] = []
-    for (const company of ['claude', 'codex', 'free'] as const) {
-      const account = await deps.account(company)
-      if (!account) { accounts.delete(company); continue }
-      accounts.set(company, account)
-      views.push({
-        connected: account.connected, consented: account.consented, usage: account.usage,
-        accountId: account.accountId, account: account.account
-      })
-    }
-    return views
-  }
-
   /**
    * 모든 요청의 공통 껍데기 — 오류를 `LanesReply` 로 접고, 바뀌었으면 묶음을 민다.
    *
@@ -183,31 +165,16 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
   const withFolder = <T>(root: unknown, run: (folder: string) => Promise<T> | T, touch = true): Promise<LanesReply<T>> =>
     reply<T>(typeof root === 'string' && root ? root : null, () => run(folderAllowed(deps, root)), touch)
 
-  const consentRow = (company: Provider, accountId: string): ConsentRow => {
-    const account = accounts.get(company)
-    const saved = deps.store.consent(company, accountId)
-    const connected = account?.accountId === accountId
-    return {
-      company,
-      accountId,
-      accountLabel: maskAccount(accountId),
-      state: saved?.state ?? 'none',
-      at: saved?.at ?? null,
-      // 지금 로그인한 계정일 때만 요금제를 확인할 수 있다.
-      subscribed: connected ? judgePlan(account.account).usable : false
-    }
-  }
-
   const lanes = {
-    // [C1-16] 폴더 해석이 `reply` 밖에서 평가되면 그 예외가 응답을 지나쳐 IPC 로 샌다.
     snapshot: (root: string | null) => reply<LanesSnapshot>(
       typeof root === 'string' && root ? root : null,
-      () => deps.hub.snapshot(typeof root === 'string' && root ? folderAllowed(deps, root) : null),
-      false
+      () => deps.hub.snapshot(typeof root === 'string' && root ? folderAllowed(deps, root) : null), false
     ),
+    setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin) => withFolder(root,
+      folder => setPlacement(cards, folder, baseVersion, entries, origin)),
+    laneModels: (root: string, fresh?: boolean) => withFolder(root, () => laneModels(cards, { fresh: fresh === true }), false),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) => withFolder(root,
       folder => decideCard(cards, folder, cardId, baseVersion, action)),
-    // [다시 확인]은 아무것도 바꾸지 않는다 — 묶음도 다시 지을 이유가 없다.
     cardStatus: (root: string, cardId: string) => withFolder(root,
       folder => cardStatus(cards, folder, cardId), false),
     settingsCard: (root: string, kind: 'enable' | 'revert') => withFolder(root,
@@ -224,38 +191,10 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
       try { provider = providerOf(company) } catch (error) { return reply(root ?? null, () => { throw error }, false) }
       return withFolder(root, folder => pickReview(cards, folder, provider, model))
     },
-    consents: () => reply(null, async () => {
-      const views = await refreshAccounts()
-      return consentRows(
-        Object.fromEntries(views.map(view => [view.account.company, view])),
-        deps.store.consents()
-      )
-    }, false),
-    setConsent: (company: Provider, accountId: string, on: boolean) => reply(null, async () => {
-      const provider = providerOf(company)
-      if (typeof accountId !== 'string' || !accountId) throw new LaneFailure('not-found', '계정을 찾지 못했어요.')
-      // [C1-07] 동의를 켜는 자리는 **권한을 새로 주는** 자리다 — 카드 적용(C1-06)과 같은 기준을
-      // 쓴다. 예전에는 15초 캐시와 id 일치만 봐서, 실제 계정이 B 로 바뀐 뒤에도 캐시된 A 의
-      // 동의가 저장됐고 연결되지 않은 API 계정에도 성공 응답이 나갔다. 세 가지를 **지금** 본다:
-      // ① 캐시를 건너뛴 관측(모르면 닫는다) ② 실제로 연결됨 ③ 그 계정 요금제로 맡길 수 있음.
-      const observe = deps.freshAccount ?? deps.account
-      const observed = await observe(provider)
-      if (observed) accounts.set(provider, observed)
-      else accounts.delete(provider)
-      if (on === true) {
-        if (!observed) throw new LaneFailure('not-found', '지금 로그인한 계정을 확인하지 못했어요.')
-        if (!observed.connected) throw new LaneFailure('not-found', '지금 로그인한 계정이 아니에요.')
-        if (observed.accountId !== accountId) throw new LaneFailure('not-found', '지금 로그인한 계정이 아니에요.')
-        // 구독이 아닌 경로(Claude API 키 등)로는 맡기지 않는다 — 동의만 남으면 화면이 "동의함"을
-        // 그리는데 주문은 열리지 않는다(`judgePlan` 이 주문 판정의 정본과 같은 함수다).
-        if (!judgePlan(observed.account).usable) {
-          throw new LaneFailure('unavailable', '이 계정의 요금제로는 작업을 맡길 수 없어요.')
-        }
-      }
-      // 거두기는 과거 계정에도 허용한다 — 지난 동의를 되돌릴 길을 막으면 안 된다.
-      deps.setConsent(provider, accountId, on === true)
-      return consentRow(provider, accountId)
-    }),
+    consents: () => reply<ConsentRow[]>(null, () => [], false),
+    setConsent: (company: Provider, accountId: string, _on: boolean) => reply<ConsentRow>(null, () => ({
+      company: providerOf(company), accountId, accountLabel: maskAccount(accountId), state: 'none', at: null, subscribed: false
+    }), false),
     dismiss: (root: string, lineId: string) => withFolder(root, async folder => {
       const line = await findLine(deps, folder, lineId)
       if (!line) throw new LaneFailure('not-found', '그 줄을 찾지 못했어요.')

@@ -110,6 +110,18 @@ export function checkSkillReleaseWorkflow(text) {
   if (!/gh release edit "skill-v\$VERSION" --draft=false --latest=false/.test(publishRun)) {
     throw new Error('The skill release must publish with --latest=false so releases/latest stays on the app')
   }
+  // The skill floor (`minApp`) used to have two homes — a literal in this workflow and a default in
+  // sign-skill.mjs — and both sat at 0.6.0 while the bundled contract grew past it. It now has one
+  // home (SKILL_MIN_APP in sign-skill.mjs): the sign step must not pass any value, and the summary a
+  // person approves must state the value the run will actually sign with.
+  const signRun = runBody(stepBlock(text, '- name: Sign exact manifest bytes'))
+  if (/--min-app/.test(signRun)) {
+    throw new Error('The sign step must not pass --min-app; the floor is declared once in sign-skill.mjs')
+  }
+  const approvalRun = runBody(stepBlock(text, '- name: Note pending publish approval'))
+  if (!/SKILL_MIN_APP/.test(approvalRun)) {
+    throw new Error('The approval summary must name the declared skill floor (SKILL_MIN_APP)')
+  }
   // Actions cannot open pull requests in this repository; failing that step must leave a person
   // one copy-paste command instead of a silent "released but no channel PR".
   const prIndex = text.indexOf('- uses: peter-evans/create-pull-request@')

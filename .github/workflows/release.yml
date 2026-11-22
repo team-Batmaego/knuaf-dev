@@ -173,6 +173,11 @@ jobs:
       # dist:mac = build → prepare:resources(번들 CPython·휠하우스·아이콘·안내 PDF·스킬) → electron-builder.
       # PBS_SHA256 은 선택이다. 없으면 fetch-python.mjs 가 릴리스의 SHA256SUMS 를 받아 대조한다.
       #
+      # 출시 설치본에는 운영 채널·운영 공개키만 들어간다. 내부 시험용 빌드 값이 이 빌드 환경이나
+      # 출시 워크플로에 섞여 있으면 빌드 전에 멈춘다(`app/scripts/check-release-update-config.mjs`).
+      - name: 업데이트 채널 설정 확인 (빌드 전)
+        working-directory: app
+        run: node scripts/check-release-update-config.mjs --env --workflows
       # 서명 자격을 "있을 때만" 내보낸다. 시크릿이 없으면 ${{ }} 가 빈 문자열로 펼쳐지고,
       # env: 에 그대로 쓰면 CSC_LINK 가 "정의됐지만 빈 값"이 된다. electron-builder 는
       # 정의된 CSC_LINK 를 인증서 파일 경로로 읽으므로 빈 값은 작업 디렉터리로 풀려
@@ -197,6 +202,17 @@ jobs:
           # 빌드 환경으로 들어간다. `electron.vite.config.ts` 가 메인 define 으로 접어 넣는다.
           KNUAF_FREE_RELAY_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
 
+      # 만들어진 번들과 포장된 app.asar 를 바이트로 본다: 운영 채널 주소와 운영 공개키 2개가 있고
+      # 내부 시험용 빌드의 표식·같은 PC 채널 주소·다른 키가 없어야 한다. 올리기 전에 돈다.
+      - name: 업데이트 채널 설정 확인 (산출물)
+        working-directory: app
+        run: |
+          args=(--out out)
+          for asar in dist/mac*/*.app/Contents/Resources/app.asar; do
+            [ -f "$asar" ] || { echo "::error::app.asar 를 찾지 못했습니다"; exit 1; }
+            args+=(--asar "$asar")
+          done
+          node scripts/check-release-update-config.mjs "${args[@]}"
       # 무료 모델은 이 출입증이 설치본에 박혀야만 뜬다. 값이 비면 앱은 조용히 '무료 회사 없음'으로
       # 동작하므로(설계상 정상) 릴리스가 멀쩡해 보인다 — 그래서 빌드가 스스로 확인하고 죽는다.
       # 값을 로그에 찍지 않는다(grep -q / Contains 만 쓴다).
@@ -315,7 +331,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
         working-directory: app
-
+      # 출시 설치본에는 운영 채널·운영 공개키만 들어간다. 내부 시험용 빌드 값이 이 빌드 환경이나
+      # 출시 워크플로에 섞여 있으면 빌드 전에 멈춘다(`app/scripts/check-release-update-config.mjs`).
+      - name: 업데이트 채널 설정 확인 (빌드 전)
+        working-directory: app
+        run: node scripts/check-release-update-config.mjs --env --workflows
       # 서명 없음 — CSC_*/APPLE_* 를 넘기지 않는다(formac job 과 달리 env 자체가 없다).
       - name: 설치본 빌드
         working-directory: app
@@ -323,7 +343,15 @@ jobs:
         env:
           # 무료 중계 출입증 — 맥 job 과 같은 이유로 빌드 환경에만 넣는다.
           KNUAF_FREE_RELAY_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
+      - name: Verify staged skill against signed channel manifest
+        working-directory: app
+        run: node scripts/verify-skill-staging.mjs
 
+      # 만들어진 번들과 포장된 app.asar 를 바이트로 본다: 운영 채널 주소와 운영 공개키 2개가 있고
+      # 내부 시험용 빌드의 표식·같은 PC 채널 주소·다른 키가 없어야 한다. 올리기 전에 돈다.
+      - name: 업데이트 채널 설정 확인 (산출물)
+        working-directory: app
+        run: node scripts/check-release-update-config.mjs --out out --asar dist/win-unpacked/resources/app.asar
       # 맥 job 과 같은 검사(출입증이 설치본 메인에 박혔는지, 화면 번들엔 없는지).
       # 값을 로그에 찍지 않는다 - Select-String/-Contains 의 참·거짓만 쓴다.
       - name: 무료 중계 출입증 주입 확인
