@@ -26,6 +26,7 @@ import {
 import { LaneFailure } from './failure'
 import { providerOf } from './providers'
 import { maskAccount } from './snapshot'
+import { agentActivity, type AgentActivity } from '../update/activity'
 
 /** IPC 등록 통로 — 시험에서 가짜 `ipcMain` 을 끼울 수 있게 최소만 요구한다. */
 export interface LaneIpcChannel {
@@ -73,6 +74,11 @@ export interface LaneHandlerDeps {
     deliveryText: (root: string, jobId: string) => string | null
   }
   diagnostic?: (record: object) => void
+  /**
+   * 인계(정지) 장부 — 상태를 바꾸는 요청은 **문 앞에서** 정지 여부를 본다. 없으면 앱 전역 장부.
+   * 시험이 새 인스턴스를 넣을 수 있게 선택 항목이다.
+   */
+  activity?: AgentActivity
 }
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
@@ -165,16 +171,23 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
   const withFolder = <T>(root: unknown, run: (folder: string) => Promise<T> | T, touch = true): Promise<LanesReply<T>> =>
     reply<T>(typeof root === 'string' && root ? root : null, () => run(folderAllowed(deps, root)), touch)
 
+  /**
+   * 인계(정지) 중에는 **상태를 바꾸는 요청을 문 앞에서** 닫는다. 카드가 `applying` 으로 저장된
+   * 뒤에 막으면 카드가 영영 적용 중으로 남고, 계정 조회(자식 프로세스)가 인계 중에 뜬다.
+   * 읽기 요청은 그대로 통과시킨다(화면이 정지 중에도 상태를 볼 수 있어야 한다).
+   */
+  const activity = deps.activity ?? agentActivity
+
   const lanes = {
     snapshot: (root: string | null) => reply<LanesSnapshot>(
       typeof root === 'string' && root ? root : null,
       () => deps.hub.snapshot(typeof root === 'string' && root ? folderAllowed(deps, root) : null), false
     ),
     setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin) => withFolder(root,
-      folder => setPlacement(cards, folder, baseVersion, entries, origin)),
+      folder => { activity.ensureActive(); return setPlacement(cards, folder, baseVersion, entries, origin) }),
     laneModels: (root: string, fresh?: boolean) => withFolder(root, () => laneModels(cards, { fresh: fresh === true }), false),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) => withFolder(root,
-      folder => decideCard(cards, folder, cardId, baseVersion, action)),
+      folder => { activity.ensureActive(); return decideCard(cards, folder, cardId, baseVersion, action) }),
     cardStatus: (root: string, cardId: string) => withFolder(root,
       folder => cardStatus(cards, folder, cardId), false),
     settingsCard: (root: string, kind: 'enable' | 'revert') => withFolder(root,
@@ -189,7 +202,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     pickReview: (root: string, company: Provider, model: string) => {
       let provider: Provider
       try { provider = providerOf(company) } catch (error) { return reply(root ?? null, () => { throw error }, false) }
-      return withFolder(root, folder => pickReview(cards, folder, provider, model))
+      return withFolder(root, folder => { activity.ensureActive(); return pickReview(cards, folder, provider, model) })
     },
     consents: () => reply<ConsentRow[]>(null, () => [], false),
     setConsent: (company: Provider, accountId: string, _on: boolean) => reply<ConsentRow>(null, () => ({
@@ -202,7 +215,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
       deps.store.dismiss(folder, lineId)
     }),
     handoffContinue: (root: string, proposalId: string) => withFolder(root,
-      folder => deps.handoff.continue(folder, proposalId)),
+      folder => { activity.ensureActive(); return deps.handoff.continue(folder, proposalId) }),
     handoffLater: (root: string, proposalId: string) => withFolder(root,
       folder => { deps.handoff.later(folder, proposalId) }),
     archives: (root: string) => withFolder(root, folder => deps.handoff.archives(folder), false),

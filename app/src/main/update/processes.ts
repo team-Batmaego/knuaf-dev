@@ -101,6 +101,8 @@ export class OwnedProcessWatch {
         }
         // Missing or unreadable parent identity remains unknown: cancel handoff.
         else if (!parent) { reason = 'parent-missing'; via?.set(p.pid, 'gone') }
+        // A parent whose creation time cannot be read is not evidence of safety — PID,
+        // parent, name and path can repeat across generations. Keep the safe answer.
         else if (this.time(parent.created) === null) { reason = 'parent-time-unreadable'; via?.set(p.pid, parent) }
         else if (this.time(p.created) === null) { reason = 'own-time-unreadable'; via?.set(p.pid, parent) }
         // 지금 그 PID 를 쓰는 프로세스는 자식보다 늦게 태어났다 — 진짜 부모는 이미 없다.
