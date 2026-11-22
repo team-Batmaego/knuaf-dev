@@ -500,10 +500,11 @@ test('confirmStopped starts the deadline at the first sample and never stops bef
   const stuck = fake(120, () => [blocked])
   await expect(stuck.runtime.confirmStopped(emptySnapshot(), 50)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
   expect(stuck.returned.length).toBe(3)
-  // ⑤ 느린 조회가 최소 표본을 채우기 전에 상한(50ms)을 넘기면 표본 1~2번이어도 막는다 — 무한 연장 금지.
+  // ⑤ 느린 조회가 최소 표본을 채우기 전에 상한(50ms)을 넘기면 첫 표본에서 바로 막는다 — 상한은
+  //    마감(`end`)과 따로 보므로, 마감(10초)이 아직 멀어도 새 조회를 예약하지 않는다.
   const capped = fake(80, () => [blocked])
-  await expect(capped.runtime.confirmStopped(emptySnapshot(), 10, 50)).rejects.toThrow(/종료/)
-  expect(capped.returned.length).toBe(2)
+  await expect(capped.runtime.confirmStopped(emptySnapshot(), 10_000, 50)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+  expect(capped.returned.length).toBe(1)
 })
 
 test('native inventory consumes expanded 8.3 paths; tree and resources checks fail closed on missing helpers', async () => {

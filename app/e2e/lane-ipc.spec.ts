@@ -9,6 +9,7 @@ import { JobRunner } from '../src/main/chat/jobs'
 import { canonical } from '../src/main/chat/jobs/isolation'
 import { registerLaneHandlers, type LaneIpcChannel } from '../src/main/lanes/handlers'
 import { LanesHub, connectChanges } from '../src/main/lanes/hub'
+import { AgentActivity } from '../src/main/update/activity'
 import type { JobRecord, ExecutionAccount, JobConnection, RelayRequest } from '../src/main/chat/jobs/types'
 import type { Provider } from '../src/shared/chat'
 import { planFromRow } from '../src/shared/lanes'
@@ -31,7 +32,7 @@ function fakeIpc(): LaneIpcChannel & { channels: string[]; call(channel: string,
   }
 }
 
-function fixture() {
+function fixture(options: { activity?: AgentActivity } = {}) {
   const base = canonical(mkdtempSync(join(tmpdir(), 'kd-ipc-')))
   const root = join(base, 'thesis')
   const elsewhere = join(base, 'other')
@@ -143,6 +144,7 @@ function fixture() {
     mainCompany: 'claude',
     // [C1-08] 허용 폴더 경계 — 이 시험은 한 폴더만 연다.
     allowed: folder => folder === root,
+    activity: options.activity,
     applyDesign: undefined,
     setConsent: (company, accountId, on) => store.setConsent(company, accountId, on),
     handoff: {
@@ -227,6 +229,36 @@ test('cardStatus answers without pushing a new bundle', async () => {
   const status = resultOf(await f.ipc.call(LANES_INVOKE.cardStatus, f.root, card.cardId) as LanesReply<{ outcome: string }>)
   expect(status.outcome).toBe('open')
   expect(f.sent).toEqual([])
+})
+
+// [검토 중요 2] 인계(정지) 중에는 상태를 바꾸는 요청이 문 앞에서 닫힌다 — 카드가 `applying` 으로
+// 저장된 뒤에 막으면 다시 눌러도 `already-handled` 라 영영 적용되지 않는다.
+test('a suspended handoff refuses card decisions before they touch state; the same card applies after resume', async () => {
+  const activity = new AgentActivity()
+  const f = fixture({ activity })
+  const card = resultOf(await f.ipc.call(LANES_INVOKE.settingsCard, f.root, 'enable') as LanesReply<{ cardId: string; baseVersion: number }>)
+  activity.suspend()
+  const refused = await f.ipc.call(LANES_INVOKE.decideCard, f.root, card.cardId, card.baseVersion, 'continue') as LanesReply<unknown>
+  expect(errorOf(refused).message).toMatch(/업데이트를 준비하고 있어요/)
+  // 카드는 열린 채 그대로다 — 다시 누를 수 있고, 아무것도 적용되지 않았다.
+  const status = resultOf(await f.ipc.call(LANES_INVOKE.cardStatus, f.root, card.cardId) as LanesReply<{ outcome: string }>)
+  expect(status.outcome).toBe('open')
+  expect(f.store.approvedPlan(f.root)).toBeNull()
+  // 같은 정지 동안 나머지 상태 변경 요청도 문 앞에서 닫힌다.
+  expect(errorOf(await f.ipc.call(LANES_INVOKE.setPlacement, f.root, card.baseVersion,
+    { research: null, repeat: null, review: null, writing: null }, { kind: 'mine' }) as LanesReply<unknown>).message)
+    .toMatch(/업데이트를 준비하고 있어요/)
+  expect(errorOf(await f.ipc.call(LANES_INVOKE.pickReview, f.root, 'claude', 'opus') as LanesReply<unknown>).message)
+    .toMatch(/업데이트를 준비하고 있어요/)
+  expect(errorOf(await f.ipc.call(LANES_INVOKE.handoffContinue, f.root, 'proposal-x') as LanesReply<unknown>).message)
+    .toMatch(/업데이트를 준비하고 있어요/)
+  // 읽기 요청은 정지 중에도 답한다.
+  expect(resultOf(await f.ipc.call(LANES_INVOKE.snapshot, f.root) as LanesReply<{ root: string | null }>).root).toBe(f.root)
+  // 재개하면 같은 카드가 그대로 처리된다.
+  activity.resume()
+  const decision = resultOf(await f.ipc.call(LANES_INVOKE.decideCard, f.root, card.cardId, card.baseVersion, 'continue') as LanesReply<{ outcome: string }>)
+  expect(decision.outcome).toBe('applied')
+  f.hub.dispose()
 })
 
 test('legacy consent IPC is inert and exposes no consent rows', async () => {

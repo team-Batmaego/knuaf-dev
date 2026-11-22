@@ -583,10 +583,10 @@ test('handoff: 인계 중 계정 조회는 새 프로세스를 띄우지 않고 
   } finally { await probe.close() }
 })
 
-test('handoff: 정지하면 도는 계정 조회의 자식이 회수되고 drain 이 그것을 기다린 뒤 풀린다', async () => {
-  // 조회의 자식이 살아 있는 동안 drain 이 풀리면, 인계는 아직 도는 프로세스를 남긴 채 설치기로
-  // 넘어간다(그게 실기기에서 갈린 자리다). 정지가 자식을 끊고, 조회가 그 종료를 기다린 **뒤**
-  // 임대를 놓아 drain 이 풀리는지 본다 — 느린 조회(Codex RPC 등)도 30초 마감까지 붙잡히지 않는다.
+test('handoff: 정지해도 도는 계정 조회를 끊지 않는다 — drain 은 조회가 끝날 때까지 안 풀린다', async () => {
+  // 정지가 도는 조회의 자식을 끊으면, 그 자식이 첫 프로세스 목록을 뜨기 전에 부모가 죽어
+  // 손자만 남고 '무관'으로 적힌 채 인계가 통과한다(2회째 검토 차단). 그래서 조회는 끝까지 가고,
+  // 인계의 `drain()` 은 그 조회가 임대를 놓을 때까지 풀리지 않아야 한다 — 자식이 죽은 **뒤**에 풀린다.
   const dir = mkdtempSync(join(tmpdir(), 'kd-probe-drain-'))
   const pidFile = join(dir, 'pid')
   const countFile = join(dir, 'starts')
@@ -612,16 +612,20 @@ test('handoff: 정지하면 도는 계정 조회의 자식이 회수되고 drain
     pid = Number(readFileSync(pidFile, 'utf8'))
     activity.suspend()
     const draining = activity.drain()
-    // `probe.close()` 없이 풀린다 — 정지 알림이 자식을 끊고 조회가 그 종료를 기다렸기 때문이다.
-    await draining
+    // 매크로태스크 한 번(타이머 0) 뒤에도 drain 은 pending 이어야 한다 — 조회는 아직 도는 중이다.
+    const tick = Promise.withResolvers<string>()
+    setTimeout(() => tick.resolve('pending'), 0)
+    expect(await Promise.race([draining.then(() => 'drained', () => 'drained'), tick.promise])).toBe('pending')
+    // 정지가 조회의 자식을 끊지 않았다 — 인계는 이 자식이 죽을 때까지 기다린다.
+    expect(alive(pid)).toBe(true)
+    // 조회를 끝내는 쪽은 인계의 정지가 아니라 조회 자신의 종료(`close`)다.
+    await probe.close()
     expect(await pending).toBeNull()
-    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다.
+    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다(다른 await 없이 바로 확인).
+    await draining
     expect(alive(pid)).toBe(false)
-    // 끊긴 조회의 결과는 캐시에 남지 않는다 — 재개하면 다시 띄운다.
-    activity.resume()
-    const again = probe('claude', { fresh: true })
-    again.catch(() => {})
-    await expect.poll(() => readFileSync(countFile, 'utf8'), { timeout: 15000 }).toBe('xx')
+    // 정지·drain 이 조회를 하나 더 띄우지 않았다 — 임대는 조회 하나에만 붙는다.
+    expect(readFileSync(countFile, 'utf8')).toBe('x')
   } finally {
     await probe.close()
     if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }

@@ -120,8 +120,9 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
           return
         }
         const now = Date.now()
-        // 마감이 지났어도 최소 표본 수는 채운다 — 단 상한(`hard`)을 넘기면 표본이 모자라도 막는다.
-        if (now >= end && (n >= MIN_SAMPLES || now >= entered + hard)) {
+        // 마감이 지났어도 최소 표본 수는 채운다 — 단 상한(`hard`)은 마감과 **따로** 본다: 상한을
+        // 넘기면 표본이 모자라도 같은 문구로 막고 새 조회를 예약하지 않는다(최악 = 상한 + 진행 중이던 조회 1건).
+        if ((now >= end && n >= MIN_SAMPLES) || now >= entered + hard) {
           if (traced) { finished = now; samples.push({ n, asked, at: now, rows }); result = 'deadline' }
           throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
         }

@@ -65,10 +65,11 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
   const active = new Set<CodexRelayConnection | ClaudeRelayConnection>()
   let closing = false
   let closePromise: Promise<void> | undefined
-  /** 조회가 띄운 연결의 종료 약속 — 정지 알림이 끊고, 조회의 `finally` 가 그 약속을 기다린다. */
+  /**
+   * 조회가 띄운 연결의 종료 약속 — 연결마다 **하나**만 시작하고, 뒤에 온 쪽은 그 약속을 같이
+   * 기다린다. `stop()` 이 두 번 걸리지 않고, 조회의 `finally` 와 `close()` 가 서로의 종료를 기다린다.
+   */
   const halts = new Map<CodexRelayConnection | ClaudeRelayConnection, Promise<void>>()
-  /** 정지 횟수 — 조회 시작 때 잡아 두고, 끝났을 때 같을 때만 캐시·메모에 쓴다. */
-  let suspensions = 0
   const halt = (connection: CodexRelayConnection | ClaudeRelayConnection): Promise<void> => {
     const running = halts.get(connection)
     if (running) return running
@@ -77,23 +78,14 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
     halts.set(connection, stopped)
     return stopped
   }
-  /**
-   * 정지는 **지금 도는 조회의 자식**을 곧바로 끊는다. 그러지 않으면 인계는 `drain()` 상한(30초)을
-   * 다 기다린 뒤 실패하고, 학생에게는 "작업이 끝난 뒤 다시 눌러 주세요"만 남는다.
-   */
-  const unsubscribe = activity.onSuspend(() => {
-    suspensions++
-    for (const connection of active) void halt(connection)
-  })
 
   /**
    * `probe()` 는 **임대를 쥔 채** 돈다. 인계는 `suspend()` 뒤 `drain()` 으로 임대가 0이 되기를
    * 기다리므로, 이 임대가 있어야 인계가 조회의 자식(`connection.stop()` 까지)을 기다린다.
-   * 놓는 자리는 `probe()` 의 마지막 `finally` — 자식 종료 **뒤**다.
+   * 놓는 자리는 `probe()` 의 마지막 `finally` — 자식 종료 **뒤**다. 정지가 끼어들어도 조회는
+   * 끊지 않고 끝까지 간다: 끊으면 남은 자식이 '무관'으로 적힌 채 인계가 통과한다.
    */
   const probe = async (company: Provider, release: () => void): Promise<ExecutionAccount | null> => {
-    // 조회 시작 시점의 정지 세대 — 끝났을 때 같을 때만 값을 돌려주고 저장한다.
-    const generation = suspensions
     try {
       if (closing) return null
       // [C1-01] 자기 방어 — 이 함수만 따로 불려도 허용 회사 밖의 이름이 실행 파일 탐색에 닿지 않는다.
@@ -121,13 +113,11 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
       active.add(connection)
       try {
         const result = await connection.availability()
-        // 정지가 끼어들었으면 그 값은 새 세대의 답이 아니다 — 캐시에 굳히지 않는다.
-        return closing || suspensions !== generation ? null : result
+        return closing ? null : result
       } finally {
-        // 정지 알림이 이미 끊었으면 그 종료를 **기다린다** — 임대는 자식이 죽은 뒤에 놓인다.
-        const halted = halts.get(connection)
-        try { if (halted) await halted; else if (!closing) await connection.stop() }
-        finally { halts.delete(connection); active.delete(connection) }
+        // 종료는 연결당 한 약속(`halt`)으로만 — `close()` 가 먼저 시작했으면 그 약속을 같이 기다리고,
+        // `close()` 가 이 연결을 보기 전에 닫혔으면 여기서 시작한다(그 창에서도 자식이 남지 않는다).
+        try { await halt(connection) } finally { halts.delete(connection); active.delete(connection) }
       }
     } finally { release() }
   }
@@ -158,12 +148,10 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
       if (running) return running
     }
     // 정지 검사(위)와 같은 동기 구간 — 여기서 `enter()` 가 던지지 않는다.
-    const generation = suspensions
     const started = probe(company, activity.enter())
       .catch((): null => null)
       .then(value => {
-        // 정지가 끼어들어 끊긴 조회는 값이 아니다 — 새 세대의 캐시로 굳히지 않는다.
-        if (suspensions === generation) cache.set(company, { at: Date.now(), value })
+        cache.set(company, { at: Date.now(), value })
         return value
       })
       .finally(() => { inflight.delete(company) })
@@ -192,12 +180,11 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
     if ('value' in entry) return Promise.resolve(entry.value ?? null)
     const running = entry.inflight
     if (running) return running
-    const generation = suspensions
     const release = activity.enter()
     // `.catch` 없음 — 실패는 저장하지 않고 대기자 전원에게 그대로 간다.
     const started = probe(company, release)
       .then(value => {
-        if (entry.generation === epoch && suspensions === generation) entry.value = value
+        if (entry.generation === epoch) entry.value = value
         return value
       })
       .finally(() => { if (entry.inflight === started) entry.inflight = undefined })
@@ -206,5 +193,5 @@ export function laneAccountProbe(deps: AccountProbeDeps): AccountProbe {
   }
 
   const fn = (company: Provider, options?: { fresh?: boolean }) => read(company, options)
-  return Object.assign(fn, { once, close: () => { closing = true; unsubscribe(); return closePromise ??= Promise.all([...active].map(connection => halt(connection))).then(() => undefined) } })
+  return Object.assign(fn, { once, close: () => { closing = true; return closePromise ??= Promise.all([...active].map(connection => halt(connection))).then(() => undefined) } })
 }
