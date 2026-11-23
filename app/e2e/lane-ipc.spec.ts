@@ -9,7 +9,8 @@ import { JobRunner } from '../src/main/chat/jobs'
 import { canonical } from '../src/main/chat/jobs/isolation'
 import { registerLaneHandlers, type LaneIpcChannel } from '../src/main/lanes/handlers'
 import { LanesHub, connectChanges } from '../src/main/lanes/hub'
-import { AgentActivity } from '../src/main/update/activity'
+import { AgentActivity, UpdateSuspendedError } from '../src/main/update/activity'
+import { decideCard } from '../src/main/lanes/cards'
 import type { JobRecord, ExecutionAccount, JobConnection, RelayRequest } from '../src/main/chat/jobs/types'
 import type { Provider } from '../src/shared/chat'
 import { planFromRow } from '../src/shared/lanes'
@@ -161,7 +162,7 @@ function fixture(options: { activity?: AgentActivity } = {}) {
       deliveryText: (_root, jobId) => store.deliveryTextOf(jobId)
     }
   })
-  return { ipc, handlers, store, root, elsewhere, sent, stopped, records, retried: () => retried, accountIds, hub, state }
+  return { ipc, handlers, store, root, elsewhere, sent, stopped, records, retried: () => retried, accountIds, hub, state, account, freshAccount }
 }
 
 const resultOf = <T,>(reply: LanesReply<T>): T => {
@@ -258,6 +259,33 @@ test('a suspended handoff refuses card decisions before they touch state; the sa
   activity.resume()
   const decision = resultOf(await f.ipc.call(LANES_INVOKE.decideCard, f.root, card.cardId, card.baseVersion, 'continue') as LanesReply<{ outcome: string }>)
   expect(decision.outcome).toBe('applied')
+  f.hub.dispose()
+})
+
+// [검토 중요 3] 문 앞 검사를 **이미 지난** 요청이 폴더 대기열에서 기다리다 정지되는 창.
+// 핸들러를 거치면 문 앞에서 닫히므로 그 창을 못 만든다 — 카드 쪽 저장 직전 재검사만 직접 본다.
+test('a decision that already passed the door check is refused when the handoff suspends while it waits', async () => {
+  const f = fixture()
+  const card = resultOf(await f.ipc.call(LANES_INVOKE.settingsCard, f.root, 'enable') as LanesReply<{ cardId: string; baseVersion: number }>)
+  let suspended = true
+  const deps = {
+    store: f.store,
+    account: f.account,
+    freshAccount: f.freshAccount,
+    mainCompany: 'claude' as const,
+    // 대기열에서 기다리는 사이 정지된 상태를 흉내 낸다.
+    ensureActive: () => { if (suspended) throw new UpdateSuspendedError() }
+  }
+  await expect(decideCard(deps, f.root, card.cardId, card.baseVersion, 'continue'))
+    .rejects.toThrow(/업데이트를 준비하고 있어요/)
+  // 저장(`beginCard`) **전에** 막았으므로 카드는 열린 채 남고 배치도 바뀌지 않는다.
+  expect(f.store.card(card.cardId)?.state.kind).toBe('open')
+  expect(f.store.approvedPlan(f.root)).toBeNull()
+  // 재개하면 같은 카드가 그대로 적용된다 — `already-handled` 로 굳지 않는다.
+  suspended = false
+  const decision = await decideCard(deps, f.root, card.cardId, card.baseVersion, 'continue')
+  expect(decision.outcome).toBe('applied')
+  expect(f.store.approvedPlan(f.root)).not.toBeNull()
   f.hub.dispose()
 })
 

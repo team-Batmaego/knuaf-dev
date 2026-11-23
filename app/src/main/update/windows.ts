@@ -23,6 +23,8 @@ const MAX_TRACE_SAMPLES = 80
 const MIN_SAMPLES = 3
 /** 최소 표본을 채우는 데 쓰는 시간의 상한 — 느린 조회가 표본 수를 채우며 확인을 끝없이 늘리지 않게. */
 const CONFIRM_HARD_MS = 20_000
+/** 상한·마감 어느 쪽으로 막혀도 학생이 보는 말은 하나다 — 시험도 이 문구로 분기를 확인한다. */
+const CONFIRM_FAILED = '대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.'
 interface TraceSample { n: number; asked: number; at: number; rows: ProcessInfo[] }
 type TraceResult = 'ok' | 'deadline' | 'error'
 /**
@@ -124,12 +126,18 @@ $rows=@([KnuafUpdate.ProcessSnapshot]::Read($PID));
         // 넘기면 표본이 모자라도 같은 문구로 막고 새 조회를 예약하지 않는다(최악 = 상한 + 진행 중이던 조회 1건).
         if ((now >= end && n >= MIN_SAMPLES) || now >= entered + hard) {
           if (traced) { finished = now; samples.push({ n, asked, at: now, rows }); result = 'deadline' }
-          throw new Error('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+          throw new Error(CONFIRM_FAILED)
         }
         const { promise, resolve } = Promise.withResolvers<void>()
         setTimeout(resolve, Math.min(100, Math.max(0, end - Date.now())))
         if (traced && samples.length < MAX_TRACE_SAMPLES) samples.push({ n, asked, at: now, rows })
         await promise
+        // 대기(최대 100ms) 사이에 상한이 지났으면 다음 조회를 **시작하지 않는다** — 상한 직전에
+        // 돌아온 표본 뒤로 조회 한 건이 더 붙던 창을 닫는다. 표본은 위에서 이미 넣었다.
+        if (Date.now() >= entered + hard) {
+          if (traced) { finished = Date.now(); result = 'deadline' }
+          throw new Error(CONFIRM_FAILED)
+        }
       }
     } finally {
       if (traced) setImmediate(() => { try { writeTrace(before, started, samples, count, result, finished) } catch { /* 진단이 앱 동작을 깨지 않는다 */ } })
