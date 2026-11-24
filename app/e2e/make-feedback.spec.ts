@@ -113,9 +113,9 @@ test('점검에서 파일을 열 때 프로젝트 기준 경로를 넘긴다 (P3
 
 test('검토본 줄은 각자 자기 기록 기준으로 말한다 (P3-R1-03)', async () => {
   const root = synthProject()
-  exportReview(root)                                       // build/1/review/검토용.md
-  rewriteSection(root, { body: '고친 본문이다.', expected: 1 })   // revision 2
   exportReview(root)                                       // build/2/review/검토용.md
+  rewriteSection(root, { body: '고친 본문이다.', expected: 2 })   // revision 3
+  exportReview(root)                                       // build/3/review/검토용.md
   const { electronApp, page } = await launch()
   try {
     await openProject(page, root)
@@ -123,8 +123,8 @@ test('검토본 줄은 각자 자기 기록 기준으로 말한다 (P3-R1-03)', 
     await page.locator('.paper-head').getByRole('button', { name: /파일 \d+$/ }).click()
     const pop = page.locator('.paper-head .popover')
     // 두 줄이 서로 다른 기준을 말한다 — 최신 N 을 둘 다에 붙이면 여기서 걸린다.
+    await expect(pop).toContainText('3번째 기록 기준')
     await expect(pop).toContainText('2번째 기록 기준')
-    await expect(pop).toContainText('1번째 기록 기준')
   } finally {
     await electronApp.close()
   }

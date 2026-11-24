@@ -38,7 +38,18 @@ function seedDependencies(root: string): void {
   cpSync(dependencySeed, join(root, '.venv'), { recursive: true, dereference: true })
 }
 
-/** init-only project (revision 0) or a project with a source, a section and a fact (revision 1). */
+/**
+ * init-only project (revision 0) or a project with a source, a section and facts (revision 2).
+ *
+ * 저장 순서: 규칙집 v0.6.x 는 전공 사실(`common.major_id`)이 든 change 에 학교 차례와 다른 장이
+ * 같이 실리면 `outline_caller_sections_incomplete` 로 거절한다. 그래서 전공은 따로 apply 한다
+ * (본문 장·사실·재무 게이트 revision 0→1, 전공 revision 1→2 — 두 규칙집 판 모두 최종 revision 2).
+ *
+ * 순서 주의(후속 과제): 전공을 '먼저' 저장하면 v0.6.x 가 학교 차례 장 6개를 심어 `sec-01` 하드코딩·
+ * "등록된 절만" 화면 기대가 수십 군데 바뀌어야 한다. 여기선 장이 이미 있는 상태에서 전공을 저장해
+ * (옛 장이 있으면 검사·seed 가 안 탄다) 장 구성을 그대로 둔다. 규칙집이 이 빈틈을 막으면
+ * 장 ID·경로를 심긴 차례 장에 맞추는 후속 작업이 필요하다.
+ */
 export function synthProject(opts: { withContent?: boolean; financeGate?: boolean } = { withContent: true }): string {
   const root = mkdtempSync(join(tmpdir(), 'kd-e2e-'))
   const r = spawnSync(python, [join(scripts, 'gg.py'), 'init', root], { encoding: 'utf-8' })
@@ -47,16 +58,20 @@ export function synthProject(opts: { withContent?: boolean; financeGate?: boolea
   mkdirSync(join(root, 'sections'), { recursive: true }); mkdirSync(join(root, 'sources'), { recursive: true })
   writeFileSync(join(root, 'sources', 'answers.md'), '# 원답변\n\n재배 면적: 600평\n', 'utf-8')
   writeFileSync(join(root, 'sections', '01.md'), '# Ⅰ. 머리말\n\n<!-- gg:draft:start -->\n농장A의 재배 면적은 600평이다. 정읍 일대 기후를 고려해 작목을 선택했다.\n<!-- gg:draft:end -->\n', 'utf-8')
-  const change = join(root, 'change.json')
-  writeFileSync(change, JSON.stringify({ request_id: 'e2e:1', ops: [
+  const applyChange = (name: string, ops: unknown[], expected: number): void => {
+    const change = join(root, `change-${name}.json`)
+    writeFileSync(change, JSON.stringify({ request_id: `e2e:${name}`, ops }), 'utf-8')
+    const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(expected)], { encoding: 'utf-8' })
+    if (a.status !== 0) throw new Error(a.stdout + a.stderr)
+    rmSync(change, { force: true })
+  }
+  applyChange('content', [
     { collection: 'sources', value: { id: 'src-answers', path: 'sources/answers.md', claims: {} } },
     { collection: 'sections', value: { id: 'sec-01', title: 'Ⅰ. 머리말', order: 1, path: 'sections/01.md', status: 'drafting' } },
     { collection: 'facts', value: { id: 'fact-area', field_id: 'farm.area', kind: 'reported_fact', value: '600', unit: '평', value_type: 'decimal', period: '2026', scope: '농장A', answer_state: 'provided', verification: 'unreviewed', source_refs: [{ id: 'src-answers', revision: 1, locator: 'L3' }] } },
-    ...syntheticMajor(root),
     ...(opts.financeGate === false ? [] : syntheticFinanceGate(root))
-  ] }), 'utf-8')
-  const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '0'], { encoding: 'utf-8' })
-  if (a.status !== 0) throw new Error(a.stdout + a.stderr)
+  ], 0)
+  applyChange('major', syntheticMajor(root), 1)
   return root
 }
 
@@ -634,7 +649,7 @@ export function markSectionReady(root: string, opts: { id?: string; expected?: n
   writeFileSync(change, JSON.stringify({ request_id: `e2e:p3:${id}:ready`, ops: [
     { collection: 'sections', value: { id, title: 'Ⅰ. 머리말', order: 1, path: `sections/01.md`, status: 'review_ready' } }
   ] }), 'utf-8')
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(opts.expected ?? 1)], { encoding: 'utf-8' })
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', String(opts.expected ?? 2)], { encoding: 'utf-8' })
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
 }
 
