@@ -59,6 +59,18 @@ export interface ExecutionAccount {
   consented: boolean
   usage: UsageState
 }
+/**
+ * 사용량 관문 — 대화 넘기기(`conversation.ts`)와 Team 배치 저장(`lanes/cards.ts`)이 **같은 함수**를 쓴다.
+ * `allowed` 면 통과. `unknown`(사용량을 모름)은 대상이 Claude 이고 그 연결이 첫 턴 안 확인을
+ * 선언했을 때만 통과 — 첫 턴에서 한도가 드러나면 주문 실행 쪽(`jobs.ts`)이 되돌린다.
+ * `limit`·`auth`·`null` 은 막는다. 두 벌로 만들면 제안은 뜨는데 클릭이 거절되는 일이 난다(REVIEW-C4 I-02).
+ */
+export function usageGateAllowed(
+  account: ExecutionAccount | null, gateInTurn?: (company: Provider) => boolean
+): boolean {
+  return account?.usage === 'allowed' ||
+    (account?.usage === 'unknown' && account.account.company === 'claude' && gateInTurn?.('claude') === true)
+}
 export interface JobEvents extends AgentEvents {
   availability: (state: UsageState) => void
   tokens: (event: TokenEvent) => void

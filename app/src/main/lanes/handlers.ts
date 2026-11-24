@@ -46,6 +46,8 @@ export interface LaneHandlerDeps {
   account: (company: Provider) => Promise<ExecutionAccount | null>
   /** 캐시를 건너뛴 계정 조회([C1-06]) — 카드 적용 직전 대조가 쓴다. 없으면 `account`. */
   freshAccount?: (company: Provider) => Promise<ExecutionAccount | null>
+  /** 사용량을 모르는 계정을 첫 턴 안 확인으로 넘길 회사 — 대화 넘기기와 같은 선언. 없으면 `unknown` 은 막힌다. */
+  gateInTurn?: (company: Provider) => boolean
   /**
    * 허용 폴더 경계([C1-08]) — main 이 지금 열어 둔 폴더(와 그 밖의 허용 폴더)만 통과시킨다.
    * 화면이 보낸 root 두 개를 서로 대조하는 것만으로는 **둘 다 바꿔** 다른 폴더의 저장 상태·
@@ -141,6 +143,7 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
     store: deps.store,
     account: deps.account,
     freshAccount: deps.freshAccount,
+    gateInTurn: deps.gateInTurn,
     ensureActive: () => activity.ensureActive(),
     get mainCompany() { return deps.mainCompany },
     designChoice: deps.designChoice,
@@ -187,7 +190,14 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
       () => deps.hub.snapshot(typeof root === 'string' && root ? folderAllowed(deps, root) : null), false
     ),
     setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin) => withFolder(root,
-      folder => { activity.ensureActive(); return setPlacement(cards, folder, baseVersion, entries, origin) }),
+      folder => {
+        activity.ensureActive()
+        return setPlacement(cards, folder, baseVersion, entries, origin).then(decision => {
+          // 까닭 코드만 남긴다 — 계정·모델 이름 같은 개인 값은 넣지 않는다.
+          if (decision.outcome !== 'applied') diagnostic({ type: 'lanes-placement', outcome: decision.outcome, reason: decision.outcome === 'invalid' ? decision.reason : 'rejected' })
+          return decision
+        })
+      }),
     laneModels: (root: string, fresh?: boolean) => withFolder(root, () => laneModels(cards, { fresh: fresh === true }), false),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) => withFolder(root,
       folder => { activity.ensureActive(); return decideCard(cards, folder, cardId, baseVersion, action) }),
