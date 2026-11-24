@@ -54,10 +54,24 @@ jobs:
           python-version: "3.13"
       - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
       - run: pnpm install --frozen-lockfile
+      # 출시 설치본에는 운영 채널·운영 공개키만 들어간다. 내부 시험용 빌드 값이 이 빌드 환경이나
+      # 출시 워크플로에 섞여 있으면 빌드 전에 멈춘다(`app/scripts/check-release-update-config.mjs`).
+      - name: 업데이트 채널 설정 확인 (빌드 전)
+        run: node scripts/check-release-update-config.mjs --env --workflows
       - run: pnpm build
       - run: pnpm prepare:resources
       # dist:mac 과 같은 빌드지만 공증을 끈다(`--config.mac.notarize=false`).
       - run: pnpm exec electron-builder --mac --publish never --config.mac.notarize=false
+      # 만들어진 번들과 포장된 app.asar 를 바이트로 본다: 운영 채널 주소와 운영 공개키 2개가 있고
+      # 내부 시험용 빌드의 표식·같은 PC 채널 주소·다른 키가 없어야 한다. 올리기 전에 돈다.
+      - name: 업데이트 채널 설정 확인 (산출물)
+        run: |
+          args=(--out out)
+          for asar in dist/mac*/*.app/Contents/Resources/app.asar; do
+            [ -f "$asar" ] || { echo "::error::app.asar 를 찾지 못했습니다"; exit 1; }
+            args+=(--asar "$asar")
+          done
+          node scripts/check-release-update-config.mjs "${args[@]}"
       - name: 체크섬
         working-directory: app/dist
         run: shasum -a 256 *.dmg *.zip > SHA256SUMS-macos.txt && cat SHA256SUMS-macos.txt
@@ -93,9 +107,19 @@ jobs:
           python-version: "3.13"
       - run: python -m pip install -r "$(node scripts/fetch-skill.mjs --requirements)" pytest pytest-timeout
       - run: pnpm install --frozen-lockfile
+      # 출시 설치본에는 운영 채널·운영 공개키만 들어간다. 내부 시험용 빌드 값이 이 빌드 환경이나
+      # 출시 워크플로에 섞여 있으면 빌드 전에 멈춘다(`app/scripts/check-release-update-config.mjs`).
+      - name: 업데이트 채널 설정 확인 (빌드 전)
+        run: node scripts/check-release-update-config.mjs --env --workflows
       - run: pnpm build
+      - name: Verify staged skill against signed channel manifest
+        run: node scripts/verify-skill-staging.mjs
       - run: pnpm prepare:resources
       - run: pnpm exec electron-builder --win --publish never
+      # 만들어진 번들과 포장된 app.asar 를 바이트로 본다: 운영 채널 주소와 운영 공개키 2개가 있고
+      # 내부 시험용 빌드의 표식·같은 PC 채널 주소·다른 키가 없어야 한다. 올리기 전에 돈다.
+      - name: 업데이트 채널 설정 확인 (산출물)
+        run: node scripts/check-release-update-config.mjs --out out --asar dist/win-unpacked/resources/app.asar
 
       # 동봉한 Codex CLI 가 설치본 안에 실제로 들어갔고 실행되는지 본다. 로그인·AI 호출은 하지
       # 않는다(`--version` 만). 버전은 스크립트의 고정 상수에서 읽어 온다 — 한 곳만 고치면 된다.

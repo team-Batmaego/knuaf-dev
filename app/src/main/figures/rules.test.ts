@@ -187,7 +187,13 @@ describe('pageQuery — 공용 로더 벡터', () => {
       context.skip('stage:skill 동봉 산출물 없음 — 실제 규칙 파일 검증 미실행')
       return
     }
-    assert.deepEqual(rulesMod.parseRules(text).map((rule) => rule.id), ['nongsaro-curation'])
+    // 규칙집 판(v0.5.1 nongsaro-curation → v0.5.8 rda-* → v0.6.x …)이 바뀌어도 변하지 않는 조건만 본다:
+    // 파일에 적힌 규칙이 하나도 버려지지 않고(전부 이 앱 검사를 통과) 1개 이상이며 id 가 겹치지 않는다.
+    const raw = (JSON.parse(text) as { rules: { id: string }[] }).rules.map((rule) => rule.id)
+    const loaded = rulesMod.parseRules(text).map((rule) => rule.id)
+    assert.ok(raw.length > 0, '동봉 규칙 파일에 규칙이 없다')
+    assert.deepEqual(loaded, raw)
+    assert.equal(new Set(loaded).size, loaded.length)
   })
 })
 

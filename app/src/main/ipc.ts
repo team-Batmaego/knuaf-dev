@@ -29,8 +29,9 @@ import { ClaudeRelayConnection } from './chat/claude'
 import { CodexRelayConnection } from './chat/codex'
 import { subscriptionEnv, type AgentOptions } from './chat/contracts'
 import { ConversationHandoff } from './chat/jobs/conversation'
-import { laneAccountProbe } from './lanes/accounts'
+import { laneAccountProbe, type AccountProbe } from './lanes/accounts'
 import { registerLaneHandlers } from './lanes/handlers'
+import { consumePendingDesign, selectDesign } from './lanes/cards'
 import { LanesHub, connectChanges } from './lanes/hub'
 import { LANES_PUSH } from '../shared/lanes-ipc'
 import { loadGuardKey } from './guard/key'
@@ -56,6 +57,8 @@ import { checkDocxZip } from './docx-zip'
 import { ensureSectionBaseline } from './review-baseline'
 import { readDismissed, readNotices, writeDismissed } from './notices'
 import { CHOICE_VALUES } from '../shared/notice'
+import { diag, diagEnabled } from './diagLog'
+import { createCallGate, SETTINGS_GET_DIAG_CALLS } from './diagLimits'
 
 /** V8's Error cloning does not preserve custom fields; pause codes must cross IPC plainly. */
 const ipcError = (error: unknown): unknown => error instanceof UpdateSuspendedError ? { code: error.code, message: error.message } : error
@@ -151,7 +154,7 @@ export function registerIpc(
    * "열지 않음"이고, 여는 쪽이 자기 정리 의무를 명시한다.
    */
   runFigures = false
-): { chat: ChatService; images: PaperImages; figures: FigureChannel | null } {
+): { chat: ChatService; images: PaperImages; figures: FigureChannel | null; probe: AccountProbe } {
   let currentRoot: string | null = null
   // progress (v0.6.4 2단계): 진행 파일 IPC 등록 — main이 아는 `currentRoot`만 읽고 감시한다.
   const progress = registerProgressIpc(() => currentRoot, win, ipcMain)
@@ -650,8 +653,40 @@ export function registerIpc(
 
   ipcMain.handle('window:info', () => windowInfo())
 
-  ipcMain.handle('settings:get', () => loadSettings())
-  ipcMain.handle('settings:set', (_e, patch) => { const s = saveSettings(patch); onRecentsChanged(); return s })
+  // 설정 읽기 진단은 **첫 몇 번만** 남긴다(검토 I-01) — 설정 화면은 이 핸들러를 여러 번 부르고,
+  // 그때마다 같은 줄을 동기로 쓰면 이득 없이 main 스레드만 막는다.
+  const settingsGetDiag = createCallGate(SETTINGS_GET_DIAG_CALLS)
+  ipcMain.handle('settings:get', () => {
+    if (!diagEnabled() || !settingsGetDiag()) return loadSettings()
+    const started = Date.now()
+    diag('startup:settings-get:start')
+    try {
+      const settings = loadSettings()
+      diag(`startup:settings-get:done elapsed=${Date.now() - started}ms`)
+      return settings
+    } catch (error) {
+      diag(`startup:settings-get:error elapsed=${Date.now() - started}ms`)
+      throw error
+    }
+  })
+  ipcMain.handle('settings:set', async (_e, patch) => {
+    const provider = patch?.provider_choice?.provider
+    const root = currentRoot
+    const visit = currentVisit
+    const assertCurrent = (): void => {
+      if (currentRoot !== root || currentVisit !== visit) throw new Error('논문 폴더가 바뀌어 주 모델을 바꾸지 않았어요.')
+    }
+    if (root && provider && provider !== loadSettings().provider_choice?.provider) {
+      await consumePendingDesign(chat.lanesStore(), root, provider, async pending => {
+        assertCurrent()
+        if (!pending.model) throw new Error('예약 모델이 없어요.')
+        await chat.setModel(root, provider, { model: pending.model, effort: pending.effort }, assertCurrent)
+        assertCurrent()
+      })
+      assertCurrent()
+    }
+    const s = saveSettings(patch); onRecentsChanged(); return s
+  })
   const agentCtx = (): AgentCtx => ({
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
@@ -947,7 +982,24 @@ export function registerIpc(
   ipcMain.handle('chat:models', async (_e, root: string | null, provider: Provider) => { try { return { result: await chat.models(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:set-model', async (_e, root: string | null, provider: Provider, choice: ModelChoice | null) => {
     // 저장·순서는 ChatService 가 맡는다(목록 검증과 저장 사이에 새 선택이 끼어드는 경합).
-    try { return { result: await chat.setModel(root, provider, choice) } } catch (e) { return chatFail(e) }
+    try {
+      if (root && choice) {
+        const folder = canonical(root)
+        if (!currentRoot || canonical(currentRoot) !== folder) throw new Error('지금 열린 논문 폴더가 아니에요.')
+        await selectDesign({
+          store: chat.lanesStore(), account: company => chat.laneAccount(company),
+          freshAccount: company => chat.laneAccount(company, { fresh: true }),
+          mainCompany: loadSettings().provider_choice?.provider ?? activeMainCompany,
+          applyDesign: async (_root, entry) => {
+            await chat.setModel(folder, entry.company, { model: entry.model!, effort: entry.effort })
+            return true
+          }
+        }, folder, { company: providerOf(provider), model: choice.model, effort: choice.effort, how: 'main' })
+        lanesHub.touch(folder)
+        return { result: choice }
+      }
+      return { result: await chat.setModel(root, provider, choice) }
+    } catch (e) { return chatFail(e) }
   })
 
   // 폴더 없이 쓰는 연결 — 첫 실행 화면(온보딩)이 폴더를 고르기 전에 쓴다. root 인자가 없다.
@@ -1177,5 +1229,5 @@ export function registerIpc(
   sidecar.on('log', (entry) => win()?.webContents.send('sidecar:log', entry))
   sidecar.on('exit', (entry) => win()?.webContents.send('sidecar:exit', entry))
   // figures (v0.7 그림 갈래): 통로는 `index.ts` 가 종료에 닫는다(창·IPC 는 이 값을 모른다).
-  return { chat, images, figures }
+  return { chat, images, figures, probe: probeAccount }
 }

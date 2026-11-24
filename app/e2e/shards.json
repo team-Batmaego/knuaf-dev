@@ -92,6 +92,7 @@
       "close-app",
       "current-root",
       "diag-log",
+      "diag-limits",
       "job-a-gate",
       "job-wire",
       "lane-handoff",
@@ -148,6 +149,8 @@
       "job-c3",
       "job-public-write",
       "layout",
+      "lane-menu-d2",
+      "lane-placement",
       "model-picker-ui",
       "paper-events",
       "preparation-state",
@@ -201,7 +204,8 @@
       "update-poll",
       "kordoc-mcp-codex",
       "kordoc-mcp-wiring",
-      "kordoc-runtime"
+      "kordoc-runtime",
+      "skill-unknown-read"
     ]
   ],
   "macos": [
@@ -222,6 +226,7 @@
       "connect",
       "current-root",
       "diag-log",
+      "diag-limits",
       "draft",
       "drawer-region",
       "file-change",
@@ -334,6 +339,8 @@
       "real-skill-delegation",
       "lane-handoff",
       "lane-ipc-wiring",
+      "lane-menu-d2",
+      "lane-placement",
       "lane-store",
       "lanes",
       "lanes-lines",
@@ -400,7 +407,8 @@
       "news-release-notes",
       "news-storage-failure",
       "empty-toc",
-      "figure-wiring"
+      "figure-wiring",
+      "skill-unknown-read"
     ]
   ]
 }

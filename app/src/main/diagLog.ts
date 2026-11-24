@@ -77,3 +77,18 @@ export function diag(message: string): void {
   if (!path) return
   try { appendFileSync(path, `${Date.now()} ${scrub(message)}\n`) } catch { /* 진단이 앱 동작을 깨지 않는다 */ }
 }
+
+/**
+ * `skill:` 진단 줄 전용 — 설계 §4의 고정 코드만 받는다. `scrub`을 타지 않는다.
+ *
+ * 왜 따로인가: `scrub`의 마지막 규칙은 32자 이상 `[A-Za-z0-9+/_-]` 덩어리를 `<값>`으로 지운다. `bundle-forced-state-unread-tmp-io-eperm`
+ * 같은 정상 결과 코드(39자)도 그에 걸려, 필요한 이유가 로그에서 사라졌다. 그렇다고 마스킹을 끄면 값이 샐 수 있으므로,
+ * **단계와 결과 모두 소문자 낱말을 `.`·`-`로 이은 고정 코드**일 때만 쓴다. 숫자·대문자·경로·공백이 든 값은 줄째 버린다
+ * (코드가 아닌 것을 로그에 내보내느니 줄을 잃는 편이 낫다).
+ */
+const SKILL_CODE = /^[a-z]+(?:[.-][a-z]+)*$/
+export function diagSkill(stage: string, result: string): void {
+  const path = logPath()
+  if (!path || !SKILL_CODE.test(stage) || !SKILL_CODE.test(result)) return
+  try { appendFileSync(path, `${Date.now()} skill:${stage} ${result}\n`) } catch { /* 진단이 앱 동작을 깨지 않는다 */ }
+}

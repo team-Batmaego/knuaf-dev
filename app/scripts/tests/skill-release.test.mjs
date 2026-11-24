@@ -43,6 +43,16 @@ test('composition is byte deterministic; rewritten install manifest covers final
   assert.deepEqual(install.files, fileHashes(expected))
   assert.equal(JSON.parse(first.get('skill.json')).overlay, overlayHash(f.overlay))
 })
+test('composition rejects CR bytes in overlay text before deriving signed hashes', t => {
+  const f = fixture(t)
+  writeFileSync(join(f.overlay, 'overlay.json'), jsonBytes(f.policy).toString().replace(/\n/g, '\r\n'))
+  assert.throws(f.build, /CR byte forbidden in overlay text input: overlay\.json/)
+  writeFileSync(join(f.overlay, 'overlay.json'), jsonBytes(f.policy))
+  f.policy.append = 'app-section.md'
+  writeFileSync(join(f.overlay, 'overlay.json'), jsonBytes(f.policy))
+  writeFileSync(join(f.overlay, 'app-section.md'), '## section\r\n')
+  assert.throws(f.build, /CR byte forbidden in overlay text input: app-section\.md/)
+})
 
 test('ZIP is readable independently with fixed dates, regular modes and valid CRCs', t => {
   const f = fixture(t), files = f.build(), zip = join(f.root, 'skill.zip')

@@ -1624,6 +1624,7 @@ export const SETTINGS = {
   pythonTitle: 'Python 실행기',
   appInfoTitle: '앱 정보',
   buildInfo: (date: string, commit: string) => `빌드 ${date} · 커밋 ${commit}`,
+  gateBuild: '관문 시험판 — 내부 시험 전용이에요. 배포·공유하지 않아요.',
   copyBuildInfo: '빌드 정보 복사',
   buildInfoCopied: '복사했어요',
   buildInfoCopyFailed: '복사하지 못했어요'

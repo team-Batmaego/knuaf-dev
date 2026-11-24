@@ -7,7 +7,7 @@
 //  3. `entry` 는 **실패 당시** 실제로 보낸 회사·모델·깊이다(턴 지역 값).
 //  4. 제안이 열리면 그 턴의 오류 줄 대신 제안 줄이 남는다.
 import { expect, test } from '@playwright/test'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { ChatService, type HandoffSeam } from '../src/main/chat/service'
@@ -22,8 +22,9 @@ import type { AgentConnection } from '../src/main/chat/contracts'
 import { findExecutable, skillSource } from '../src/main/agent'
 import { chatConnectionKey } from '../src/main/chat/jobs/key'
 import { laneAccountProbe } from '../src/main/lanes/accounts'
+import { AgentActivity } from '../src/main/update/activity'
 import { planFromRow } from '../src/shared/lanes'
-import { fakeCodexEnv } from './fixtures/fake-codex'
+import { fakeCodexEnv, writeCliShim } from './fixtures/fake-codex'
 import type { ChatSnapshot } from '../src/shared/chat'
 
 const appRoot = resolve(__dirname, '..')
@@ -362,6 +363,66 @@ test('handoff: 누르기 전 숨은 모델·사용량 호출 0', async () => {
   expect(spawns(rig)).toBe(1)
 })
 
+test('계정 조회는 아직 없는 앱 전용 폴더에서도 연결과 모델을 읽는다', async () => {
+  const rig = claudeRig({ W1_MODELS: JSON.stringify(MODELS) })
+  const probe = laneAccountProbe({
+    appDir: join(rig.dir, 'new-user-data', 'relay'), env: () => rig.env,
+    openExternal: async () => {}, binary: () => rig.binary
+  })
+  const account = await probe('claude')
+  expect(account?.connected).toBe(true)
+  expect(account?.account.models).toEqual(expect.arrayContaining([
+    expect.objectContaining({ model: 'opus', name: 'Opus' })
+  ]))
+
+  const bin = join(rig.dir, 'codex-bin')
+  const env = fakeCodexEnv(bin)
+  const codex = laneAccountProbe({
+    appDir: join(rig.dir, 'new-codex-data', 'relay'), env: () => ({ ...process.env, ...env }),
+    openExternal: async () => {}, binary: () => join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex')
+  })
+  const codexAccount = await codex('codex')
+  expect(codexAccount?.connected).toBe(true)
+  expect(codexAccount?.account.models).toEqual(expect.arrayContaining([
+    expect.objectContaining({ model: 'gpt-sol', name: 'Sol' })
+  ]))
+})
+
+for (const company of ['codex', 'claude'] as const) {
+  test(`종료 중 ${company} 계정 조회 자식을 회수하고 새 조회를 막는다`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kd-probe-stop-'))
+    const pidFile = join(dir, 'pid')
+    const countFile = join(dir, 'starts')
+    const script = join(dir, 'hold.cjs')
+    writeFileSync(script, `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(countFile)}, 'x'); fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)
+    const bin = join(dir, company)
+    writeCliShim(dir, company, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"`, `"${process.execPath}" "${script}" %*`)
+    const probe = laneAccountProbe({ appDir: join(dir, 'relay'), env: () => process.env, openExternal: async () => {}, binary: () => process.platform === 'win32' ? `${bin}.cmd` : bin })
+    const pending = probe(company)
+    let pid = 0
+    try {
+      await expect.poll(() => existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : 0, { timeout: 15000 }).toBeGreaterThan(0)
+      pid = Number(readFileSync(pidFile, 'utf8'))
+      const started = Date.now()
+      await probe.close()
+      expect(Date.now() - started).toBeLessThan(10000)
+      await expect.poll(() => {
+        try { process.kill(pid, 0); return false } catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH') return true
+          throw error
+        }
+      }).toBe(true)
+      expect(await pending).toBeNull()
+      const starts = readFileSync(countFile, 'utf8')
+      expect(await probe(company, { fresh: true })).toBeNull()
+      expect(readFileSync(countFile, 'utf8')).toBe(starts)
+    } finally {
+      await probe.close()
+      if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }
+    }
+  })
+}
+
 test('handoff: 동시 두 제안의 첫 계정 조회는 1회', async () => {
   // 동시에 두 제안이 열려도 실제 읽기는 하나이고, 두 제안은 **같은 값**으로 판정된다.
   // 실패는 저장하지 않는다 — 기다리던 모두에게 같은 실패가 가고 다음 제안이 다시 1회 읽는다.
@@ -485,4 +546,91 @@ test('handoff: fresh 읽기는 캐시와 진행 약속을 건너뛴다', async (
   expect(spawns(rig)).toBe(2)
   await Promise.all([probe('claude', { fresh: true }), probe('claude', { fresh: true })])
   expect(spawns(rig)).toBe(4)
+})
+
+// 인계(t37t): 확인 단계가 앱 자신이 띄운 프로세스(claude·codex·taskkill)에 걸려 실패했다.
+// 그래서 계정 조회도 다른 에이전트 진입과 **같은** 임대 장부를 쓴다 — 정지 중에는 새 프로세스를
+// 띄우지 않고, 도는 조회는 인계의 `drain()` 이 끝날 때까지 붙잡는다.
+test('handoff: 인계 중 계정 조회는 새 프로세스를 띄우지 않고 캐시 값만 쓴다', async () => {
+  const rig = claudeRig({ W1_MODELS: JSON.stringify([...MODELS, SONNET]) })
+  const activity = new AgentActivity()
+  const probe = laneAccountProbe({
+    appDir: rig.dir, env: () => rig.env, openExternal: async () => {}, binary: () => rig.binary, activity
+  })
+  try {
+    // 정지 전에 두 캐시(15초 값·실행당 1회 메모)를 모두 채운다.
+    const primed = await probe('claude')
+    expect(primed).not.toBeNull()
+    const primedOnce = await probe.once('claude', 0)
+    expect(primedOnce).not.toBeNull()
+    expect(spawns(rig)).toBe(2)
+
+    activity.suspend()
+    // 평범한 읽기는 관측해 둔 값을 그대로 준다 — 새 프로세스 0.
+    expect(await probe('claude')).toEqual(primed)
+    // `fresh` 는 "지금 관측"이 계약이라 묵은 값을 주지 않는다(권한을 바꾸는 자리가 옛 계정으로 통과하면 안 된다).
+    // `null`(모름)이면 호출부가 '계정이 바뀜'으로 읽어 카드·제안을 닫으므로 정지 사실을 그대로 알린다.
+    await expect(probe('claude', { fresh: true })).rejects.toMatchObject({ code: 'update_suspended' })
+    // 상한 조회도 같은 세대면 메모 값을, 세대가 다르면 거절한다(옛 세대 답은 새 세대의 답이 아니다).
+    expect(await probe.once('claude', 0)).toEqual(primedOnce)
+    await expect(probe.once('claude', 9)).rejects.toMatchObject({ code: 'update_suspended' })
+    expect(spawns(rig)).toBe(2)
+
+    // 재개하면 다시 띄운다 — 정지가 조회를 영구히 죽이지 않는다.
+    activity.resume()
+    expect(await probe('claude', { fresh: true })).not.toBeNull()
+    expect(spawns(rig)).toBe(3)
+  } finally { await probe.close() }
+})
+
+test('handoff: 정지해도 도는 계정 조회를 끊지 않는다 — drain 은 조회가 끝날 때까지 안 풀린다', async () => {
+  // 정지가 도는 조회의 자식을 끊으면, 그 자식이 첫 프로세스 목록을 뜨기 전에 부모가 죽어
+  // 손자만 남고 '무관'으로 적힌 채 인계가 통과한다(2회째 검토 차단). 그래서 조회는 끝까지 가고,
+  // 인계의 `drain()` 은 그 조회가 임대를 놓을 때까지 풀리지 않아야 한다 — 자식이 죽은 **뒤**에 풀린다.
+  const dir = mkdtempSync(join(tmpdir(), 'kd-probe-drain-'))
+  const pidFile = join(dir, 'pid')
+  const countFile = join(dir, 'starts')
+  const script = join(dir, 'hold.cjs')
+  writeFileSync(script, `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(countFile)}, 'x'); fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)
+  const bin = join(dir, 'claude')
+  writeCliShim(dir, 'claude', `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"`, `"${process.execPath}" "${script}" %*`)
+  const activity = new AgentActivity()
+  const probe = laneAccountProbe({
+    appDir: join(dir, 'relay'), env: () => process.env, openExternal: async () => {},
+    binary: () => process.platform === 'win32' ? `${bin}.cmd` : bin, activity
+  })
+  const alive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH') return false
+      throw error
+    }
+  }
+  const pending = probe('claude')
+  let pid = 0
+  try {
+    await expect.poll(() => existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : 0, { timeout: 15000 }).toBeGreaterThan(0)
+    pid = Number(readFileSync(pidFile, 'utf8'))
+    activity.suspend()
+    const draining = activity.drain()
+    // 매크로태스크 한 번(타이머 0) 뒤에도 drain 은 pending 이어야 한다 — 조회는 아직 도는 중이다.
+    const tick = Promise.withResolvers<string>()
+    setTimeout(() => tick.resolve('pending'), 0)
+    expect(await Promise.race([draining.then(() => 'drained', () => 'drained'), tick.promise])).toBe('pending')
+    // 정지가 조회의 자식을 끊지 않았다 — 인계는 이 자식이 죽을 때까지 기다린다.
+    expect(alive(pid)).toBe(true)
+    // 조회를 끝내는 쪽은 인계의 정지가 아니라 조회 자신의 종료(`close`)다.
+    // 종료를 **유도만** 하고 다른 종료 약속(`pending`)을 기다리기 전에 drain 과 자식 생존을 본다 —
+    // `await pending` 뒤에 보면 drain 이 조회보다 먼저 풀려도 이 시험이 통과해 버린다.
+    const closing = probe.close()
+    await draining
+    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다(다른 await 없이 바로 확인).
+    expect(alive(pid)).toBe(false)
+    await closing
+    expect(await pending).toBeNull()
+    // 정지·drain 이 조회를 하나 더 띄우지 않았다 — 임대는 조회 하나에만 붙는다.
+    expect(readFileSync(countFile, 'utf8')).toBe('x')
+  } finally {
+    await probe.close()
+    if (pid) { try { process.kill(pid, 'SIGKILL') } catch { /* already stopped */ } }
+  }
 })

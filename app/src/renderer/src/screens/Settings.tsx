@@ -20,16 +20,14 @@ import type { NewsState } from '../../../shared/types'
 type NewsSection = SettingsSection | 'news'
 import { requestArchive } from './Chat'
 import { useLanes } from '../store/lanes'
-import { LANE_ARCHIVE, LANES_SETTINGS, providerName, stampKo } from '../copy-lanes'
+import { LANE_ARCHIVE, providerName, stampKo } from '../copy-lanes'
 import type { ArchivedChatSummary } from '../../../shared/lanes-ipc'
-import { LanesSettings } from './LanesSettings'
 
 /** 폴더가 다르거나 아직 안 왔을 때 — 참조가 고정돼야 셀렉터가 매번 새 배열을 만들지 않는다. */
 const NO_ARCHIVES: ArchivedChatSummary[] = []
 
 const SETTINGS_SECTIONS: { id: NewsSection; label: string }[] = [
   { id: 'helper', label: '도우미 연결' },
-  { id: 'lanes', label: LANES_SETTINGS.title },
   { id: 'folder', label: '폴더' },
   { id: 'trouble', label: '문제 해결' },
   { id: 'tools', label: '고급 도구' },
@@ -115,10 +113,6 @@ export function SettingsScreen() {
             background: section === id ? 'var(--panel)' : 'transparent', fontWeight: section === id ? 600 : 400 }}>{label}</button>)}
       </nav>
       <div ref={body} style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '0 16px', containerType: 'inline-size' }}>
-      <section className="card" hidden={section !== 'lanes'}>
-        <div className="card-head"><h2>{LANES_SETTINGS.title}</h2></div>
-        <LanesSettings root={root} />
-      </section>
       <section className="card" hidden={section !== 'folder'}>
         <div className="card-head"><h2>{SETTINGS.folderTitle}</h2></div>
         {root && <div className="row"><strong>{base(root)}</strong><span className="caption">{root}</span></div>}
@@ -235,6 +229,7 @@ export function SettingsScreen() {
       <section className="card" hidden={section !== 'info'}>
         <div className="card-head"><h2>{SETTINGS.appInfoTitle}</h2>{info && <Badge label={`버전 ${info.version}`} />}</div>
         <UpdateSettings />
+        {typeof __KNUAF_GATE_BUILD__ !== 'undefined' && __KNUAF_GATE_BUILD__ && <p role="note" className="caption"><strong>{SETTINGS.gateBuild}</strong></p>}
         <div className="caption">{APP_NAME} · 초기 베타{info ? ` · Electron ${info.electron} · ${info.packaged ? '설치판' : '개발 모드'}` : ''}</div>
         <p className="caption">{CREDIT.line2}<br />{CREDIT.gui}</p>
         {info && <div className="row app-build-info" style={{ marginTop: 'var(--sp-2)' }}>

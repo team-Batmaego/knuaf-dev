@@ -27,7 +27,7 @@ export function providerName(company: Provider): string {
 const MODEL_DISPLAY: Record<string, string> = {
   sol: 'Sol', terra: 'Terra', astra: 'Astra', luna: 'Luna',
   deepseek: 'DeepSeek', glm: 'GLM',
-  opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku'
+  opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable'
 }
 
 export function modelName(model: string | null | undefined): string {
@@ -107,7 +107,7 @@ const DIGIT: Record<string, boolean> = {
   '9': false
 }
 
-/** 제품에 나오는 영문 이름의 한국어 읽기 받침 — 솔·소넷·챗만 있고 나머지는 없다. */
+/** 제품에 나오는 영문 이름의 한국어 읽기 받침 — 솔·소넷·페이블·챗만 있고 나머지는 없다. */
 const LATIN: Record<string, boolean> = {
   chatgpt: false,
   claude: false,
@@ -120,6 +120,7 @@ const LATIN: Record<string, boolean> = {
   luna: false,
   opus: false,
   haiku: false,
+  fable: true,
   data: false,
   chat: true
 }
@@ -474,60 +475,6 @@ export const LANE_ARCHIVE = {
   back: '지금 대화로 돌아가기',
   others: '다른 멈춘 대화 ▾',
   notices: (count: number) => `지금 대화에 안내 ${count}건`
-} as const
-
-// =====================================================================================
-// §5 설정 "작업 분담"
-// =====================================================================================
-
-export const LANES_SETTINGS = {
-  title: '작업 분담',
-  tableTitle: '이 논문의 기본 배치',
-  caption: '이 논문에서 역할별로 맡기는 모델이에요. 검토는 늘 새 대화에서 해요.',
-  colLane: '역할',
-  colModel: '회사 · 모델',
-  colDepth: '깊이',
-  colWhere: '어디서',
-  whereNew: '새 대화',
-  whereMain: '본대화',
-  designCell: (recommended: string | null) => `아래 칩에서 골라요${recommended ? ` (추천 ${recommended})` : ''}`,
-  source: {
-    recommended: (label: string) => `추천 — ${label}`,
-    mine: (iso: string) => `내가 정함 · ${dayKo(iso)}`,
-    changed: '추천이 바뀌었어요 — 되돌리기로 새 추천을 쓸 수 있어요',
-    none: '아직 정하지 않았어요'
-  },
-  pendingHead: '아직 승인하지 않은 추천 배치예요 — 처음 맡길 때 이 배치로 물어봐요',
-  temporary: (text: string) => `지금 이번 차례만: ${text} (끝나면 위 배치로 돌아가요)`,
-  nextDesign: (company: string) => `다음 메시지부터: 설계 ${company}`,
-  hint: '바꾸려면 대화에 “자료는 Sonnet으로”처럼 말하세요.',
-  revert: '추천으로 되돌리기',
-  turnOff: '나눠 맡기기 끄기',
-  turnOn: '나눠 맡기기 켜기',
-  offBody: '나눠 맡기지 않아요 — 도우미가 혼자 하고 독립 검토는 하지 않아요',
-  consentTitle: '요금 안내 동의',
-  consentNote: '계정마다 · 모든 논문에 적용',
-  consentAgreed: (day: string) => `동의함${day ? ` · ${day}` : ''}`,
-  consentNone: '아직 안 함 — 처음 맡길 때 물어봐요',
-  consentWithdrawn: (day: string) => `거둠${day ? ` · ${day}` : ''}`,
-  consentAgree: '안내 보고 동의하기',
-  consentAgain: '안내 보고 다시 동의하기',
-  /** 확인 창의 최종 단추(설계 §5 "…를 확인 창에 보이고 [동의] [취소]"). */
-  consentYes: '동의',
-  consentWithdraw: '동의 거두기',
-  consentOnly: '구독 로그인일 때만 작업 분담을 써요.',
-  noFolder: '논문을 열면 그 논문의 배치가 보여요',
-  notSubscribed: '구독 로그인이 아니라 이 회사는 쓰지 않아요',
-  mainTakeover: (model: string) => `도우미가 직접 맡아요 — 추천 모델(${model})이 이 계정에 없어요`,
-  reviewUnavailable: '검토 안 함',
-  reviewPick: '검토 모델 고르기',
-  offConfirmTitle: '나눠 맡기지 않을까요?',
-  offConfirmBody: '진행 중인 담당은 멈춰요, 결과는 넘기지 않아요. 앱이 맡긴 담당만이에요.',
-  withdrawConfirmTitle: '요금 안내 동의를 거둘까요?',
-  withdrawConfirmBody: (company: string, account: string) =>
-    `${company} 계정(${account})에서 앱이 나눠 맡기지 않아요. 앱이 맡긴 ${company} 담당은 멈춰요 — 이미 쓴 사용량은 되돌릴 수 없어요.`,
-  consentConfirmTitle: (company: string) => `${company} 요금 안내에 동의할까요?`,
-  spent: '이미 쓴 사용량은 되돌릴 수 없어요'
 } as const
 
 /** 진행 줄이 있을 때 입력칸 ■의 이름(설계 §2-1 [r2 W25]). */

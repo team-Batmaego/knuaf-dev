@@ -280,7 +280,6 @@ export function Chat() {
   const setPaneTab = useProject((s) => s.setPaneTab)
   const revision = useProject((s) => s.status?.revision ?? s.peek?.revision ?? null)
   const openSettings = useProject((s) => s.openSettings)
-  const requestLanesCard = useProject((s) => s.requestLanesCard)
   /** 작업 분담 — preload 이 아직 `lanes` 를 안 내보내면(배선 C1 몫) 조용히 꺼진 채로 둔다. */
   const lanesSnapshot = useLanes((s) => s.snapshot)
   const lanesUnavailable = useLanes((s) => s.unavailable)
@@ -583,8 +582,12 @@ export function Chat() {
       case 'report': void requestReport(lineView(line, Date.now()).title)
         break
       case 'show-card': if (line.kind === 'card-pending') showCard(line.cardId); break
-      case 'review-models': openSettings('lanes:review'); break
-      case 'enable-lanes': openSettings('lanes:enable'); requestLanesCard('enable'); break
+      case 'review-models':
+      case 'enable-lanes': {
+        const button = document.querySelector<HTMLButtonElement>('.chat-composer .composer-model-host > button.model')
+        if (button?.getAttribute('aria-expanded') !== 'true') button?.click()
+        break
+      }
       case 'new-chat': {
         // 그 회사 새 대화를 연다 — 기존 회사 바꾸기(AccountChooser)와 같은 길.
         const next: Provider = line.kind === 'main-limit-offer' ? line.to.company : provider

@@ -12,7 +12,7 @@ import { expect, test } from '@playwright/test'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { launch, openProject, synthProject } from './helpers'
+import { expectConnected, launch, openProject, synthProject } from './helpers'
 import { fakeCodexEnv, replyFile, scratch, userDataWith, writeCliShim } from './fixtures/fake-codex'
 
 /**
@@ -71,7 +71,7 @@ test('메인 턴 엔진에 그림 환경 둘이 실리고, 종료에 통로가 �
   electronApp.process().stdout?.on('data', (d: Buffer) => chunks.push(d.toString()))
   try {
     await openProject(page, root)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨')
+    await expectConnected(page, 'codex')
 
     // 앱이 뜨면 저장소 자리와 하트비트가 실제로 생긴다 — 열지 못했으면 이 파일이 없다.
     expect(existsSync(figureHome), `그림 저장소가 없다: ${figureHome}`).toBe(true)
@@ -123,7 +123,7 @@ test('통로를 못 열어도 앱은 뜨고 대화는 그대로 간다 — 그�
   const { electronApp, page } = await launch({ env, userData })
   try {
     await openProject(page, root)
-    await expect(page.getByTitle('이 논문의 도우미')).toContainText('연결됨')
+    await expectConnected(page, 'codex')
     await page.getByRole('textbox', { name: '답변을 입력하세요' }).fill('그림 없이 질문')
     await page.getByRole('button', { name: '보내기', exact: true }).click()
     // 대화는 지금까지와 같다 — 학생 화면에 그림 오류·알림이 없다.

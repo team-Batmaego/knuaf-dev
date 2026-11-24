@@ -7,6 +7,16 @@ import { sha256, jsonBytes, readTree, fileHashes, zipBytes, validVersion, MAX_BY
 
 export const RELEASE_PREFIX = 'https://github.com/team-Batmaego/knuaf-dev/releases/download/'
 
+// The lowest app release that can read this skill contract, declared once and only here.
+// Older apps ignore a skill release whose minApp is above their own version (main/update/manifest.ts),
+// which is how a contract change stays away from releases that cannot render it. The floor now
+// follows the bundled-rulebook defect fixed in #193: an app that cannot read the skill state file
+// used to discard the release it was given and fall back to its own copy, so the v0.6.1 rulebook
+// must not reach anything below the first release that carries that fix (v0.7.3).
+// There is deliberately no CLI override and the workflow must not pass one: a second place for this
+// number is how a stale `0.6.0` kept signing new contracts. check-skill-workflow.mjs locks all three.
+export const SKILL_MIN_APP = '0.7.3'
+
 export function signManifest(manifestBytes, privateKey) {
   let key
   try { key = createPrivateKey(privateKey) } catch { throw new Error('Invalid signing key (expected Ed25519 PKCS8 PEM)') }
@@ -15,7 +25,10 @@ export function signManifest(manifestBytes, privateKey) {
 }
 
 // expectedFiles must be independently recomposed from trusted job inputs, not artifact checksums.
-export function releaseManifest({ directory, archive, minApp, expectedFiles }) {
+// `minApp` defaults to the declared floor and the CLI offers no way to override it, so every
+// published manifest carries SKILL_MIN_APP. It stays a parameter only so the signer's own tests can
+// drive an explicit value through the same checks.
+export function releaseManifest({ directory, archive, minApp = SKILL_MIN_APP, expectedFiles }) {
   if (!validVersion(minApp)) throw new Error('minApp must be safe-integer X.Y.Z')
   if (!(expectedFiles instanceof Map)) throw new Error('Independent composition is required')
   const files = readTree(directory)
@@ -44,7 +57,7 @@ export function signedChannel(channel, manifestBytes, privateKey) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const { values } = parseArgs({ options: {
-      directory: { type: 'string' }, zip: { type: 'string' }, 'min-app': { type: 'string', default: '0.6.0' },
+      directory: { type: 'string' }, zip: { type: 'string' },
       upstream: { type: 'string' }, source: { type: 'string' }, version: { type: 'string' },
       overlay: { type: 'string', default: resolve(import.meta.dirname, '../skill-overlay') },
       'expected-overlay': { type: 'string' },
@@ -62,7 +75,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const key = process.env.SKILL_SIGNING_PRIVATE_KEY
     if (!key) throw new Error('SKILL_SIGNING_PRIVATE_KEY is required')
     const bytes = jsonBytes(releaseManifest({
-      directory: values.directory, archive: values.zip, minApp: values['min-app'], expectedFiles
+      directory: values.directory, archive: values.zip, expectedFiles
     }))
     const channel = signedChannel(JSON.parse(readFileSync(values.channel, 'utf8')), bytes, key)
     mkdirSync(values.output, { recursive: true })
@@ -73,7 +86,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     writeTree(expectedFiles, resolve(values.output, 'bundle'))
     const version = JSON.parse(expectedFiles.get('skill.json')).version
     writeFileSync(resolve(values.output, `knuaf-dev-skill-${version}.zip`), zipBytes(expectedFiles))
-    console.log('Signed skill manifest; channel proposal written (not published)')
+    console.log(`Signed skill manifest (minApp ${SKILL_MIN_APP}); channel proposal written (not published)`)
   } catch (error) {
     console.error(error.message)
     process.exitCode = 1

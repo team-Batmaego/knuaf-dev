@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { agentApi, probeVersion, setTreeAccess } from '../src/main/agent'
 import { ChatService } from '../src/main/chat/service'
 import type { AgentConnection } from '../src/main/chat/contracts'
-import { agentActivity } from '../src/main/update/activity'
+import { AgentActivity, agentActivity } from '../src/main/update/activity'
 import { AppHandoff } from '../src/main/update/handoff'
 import { AppUpdates } from '../src/main/update/appService'
 import { MAX_INSTALLER_BYTES, releasePage, verifyApp } from '../src/main/update/appManifest'
@@ -347,6 +347,175 @@ test('owned tree confirmation retains orphan helpers and uses process creation i
   const watch = new OwnedProcessWatch({ processes: before, appPid: 1, appExecutable: app })
   expect(watch.busy([proc(3, 'C:\\App\\resources\\rg.exe', 'rg.exe', 2)])).toBe(true)
   expect(watch.busy([outside, proc(3, 'C:\\Other.exe', 'Other.exe', 9, new Date(5000).toISOString())])).toBe(false)
+})
+
+test('inspect explains every blocking row with the same verdict as busy, and never leaks a raw PID', () => {
+  const app = 'C:\\App\\knuaf-dev.exe', at = (ms: number): string => new Date(ms).toISOString()
+  // 다른 계정 프로세스: 일반 권한으로는 생성 시각·경로를 읽지 못한다(created '', path null).
+  const service = proc(700, null, 'svchost.exe', 5, ''), other = proc(9, 'C:\\Other\\parent.exe', 'parent.exe', 0, at(500))
+  const sidecar = proc(20, 'C:\\App\\resources\\python\\python.exe', 'python.exe', 1, at(2000))
+  const before = [proc(1, app, 'knuaf-dev.exe', 0, at(1000)), proc(4, app, 'knuaf-dev.exe', 1, at(1500)), sidecar, service, other]
+  const fresh = (): OwnedProcessWatch => new OwnedProcessWatch({ processes: before, appPid: 1, appExecutable: app }, 5000)
+  const view = (rows: ProcessInfo[]) => { const a = fresh().busy(rows), b = fresh().inspect(rows, true), off = fresh().inspect(rows); expect(b.busy).toBe(a); expect(off).toMatchObject({ busy: a, blocked: b.blocked, counts: b.counts }); expect(off.rows()).toEqual([]); return { ...b, rows: b.rows() } }
+  const only = (rows: ProcessInfo[]) => view(rows).rows.filter(r => r.role === 'block')
+
+  // 판독 불가 부모 아래 새 프로세스는 **부모가 처음 목록에서 무관이었어도** 막는다 — 생성 시각
+  // 없이는 PID·부모·이름·경로가 같아도 같은 세대라는 보장이 없다(추측으로 '무관'을 만들지 않는다).
+  const foreign = view([service, proc(800, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 700, at(9000))])
+  expect(foreign).toMatchObject({ busy: true, blocked: 1, counts: { unknown: 1, unrelated: 1 } })
+  expect(foreign.rows.map(r => [r.role, r.kind, r.ownership, r.why])).toEqual([['block', 'pythonw', 'u', 'parent-time-unreadable'], ['ancestor', 'svchost', 'x', 'history']])
+  // 실기기 모양: 부모의 생성 시각이 **읽히는** 다른 계정 프로세스(첫 목록에 무관으로 있음) 아래
+  // 새 자식은 `parent-live` 로 무관이 된다 — 판정 규칙이 그대로 돌아 F1 없이도 막지 않는다.
+  const readable = view([other, proc(900, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 9, at(9000))])
+  expect(readable).toMatchObject({ busy: false, blocked: 0, counts: { unknown: 0, unrelated: 2 } })
+  expect(readable.rows).toEqual([])
+  // 같은 PID 라도 이름·부모 PID 가 다르면 다른 세대다 → 무관으로 넘기지 않고 그대로 unknown, 막는다.
+  const stranger = view([proc(801, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 700, at(9000)), proc(700, null, 'dllhost.exe', 6, '')])
+  expect(stranger.busy).toBe(true); expect(stranger.counts).toMatchObject({ unknown: 2, unrelated: 0 })
+  expect(stranger.rows.map(r => [r.role, r.kind, r.ownership, r.why])).toEqual([['block', 'pythonw', 'u', 'parent-time-unreadable'], ['ancestor', 'dllhost', 'u', 'parent-missing']])
+  // 첫 목록에 없던 판독 불가 부모 아래 새 행 — 계보를 댈 수 없으니 unknown, 막는다.
+  const scheduled = view([proc(800, 'C:\\Tools\\pythonw3.12.exe', 'pythonw3.12.exe', 600, at(9000)), proc(600, null, 'wmiprvse.exe', 5, '')])
+  expect(scheduled.busy).toBe(true); expect(scheduled.counts).toMatchObject({ unknown: 2 })
+  expect(scheduled.rows.map(r => [r.role, r.kind, r.ownership, r.why])).toEqual([['block', 'pythonw', 'u', 'parent-time-unreadable'], ['ancestor', 'wmiprvse', 'u', 'parent-missing']])
+  expect(scheduled.rows[0].parentId).toBe(scheduled.rows[1].id); expect(scheduled.rows[1].parentId).toBe('gone')
+  // 같은 판독 불가 부모라도 예외 둘이 먼저다: 부모가 앱이면 owned, 이력의 owned 세대가 먼저 태어났으면 owned.
+  expect(only([proc(30, null, 'taskkill.exe', 1, '')])[0]).toMatchObject({ kind: 'taskkill', ownership: 'o', why: 'parent-app', parentId: 'app', pathRead: false, bornMs: null })
+  expect(only([proc(21, 'C:\\Tools\\pip.exe', 'pip.exe', 20, at(3000))])[0]).toMatchObject({ kind: 'other', ownership: 'o', why: 'parent-history' })
+  // 부모가 이미 죽었고 이력에도 없다 / 부모 PID 가 나중에 태어난 다른 프로세스다.
+  expect(only([proc(40, 'C:\\x\\cmd.exe', 'cmd.exe', 555, at(9000))])[0]).toMatchObject({ kind: 'cmd', ownership: 'u', why: 'parent-missing', parentId: 'gone' })
+  expect(only([other, proc(41, 'C:\\x\\node.exe', 'node.exe', 9, at(100))])[0]).toMatchObject({ ownership: 'u', why: 'parent-reused', parentId: 'gone' })
+  // 이력의 owned 부모가 죽고 같은 PID 를 늦게 태어난 다른 프로세스가 쓴다 — 부모 번호는 판정에 쓴 옛 세대를 가리킨다.
+  const reused = view([proc(20, 'C:\\Other\\late.exe', 'late.exe', 555, at(8000)), proc(21, 'C:\\Tools\\pip.exe', 'pip.exe', 20, at(3000))]).rows
+  const pip = reused.find(r => r.why === 'parent-history')!, late = reused.find(r => r.why === 'parent-missing')!, old = reused.find(r => r.kind === 'python')!
+  expect(old).toMatchObject({ role: 'ancestor', ownership: 'o', parentId: 'app' }); expect(pip.parentId).toBe(old.id); expect(late.id).not.toBe(old.id)
+  // 앱 자손인데 경로를 못 읽으면 도우미 제외를 못 받는다. 경로가 읽히면 제외된다.
+  expect(only([proc(4, null, 'knuaf-dev.exe', 1, at(1500))])[0]).toMatchObject({ ownership: 'o', why: 'history', pathRead: false })
+  expect(view([proc(4, app, 'knuaf-dev.exe', 1, at(1500))])).toMatchObject({ busy: false, blocked: 0, counts: { helper: 1 } })
+  // 임시 번호만 쓴다: 어느 행에도 PID 원값이 번호로 나오지 않고, 가리키는 부모는 같은 표본에 실려 있다.
+  const pids = new Set([700, 800, 30, 21, 40, 41])
+  for (const row of scheduled.rows) { expect(pids.has(row.id)).toBe(false); if (typeof row.parentId === 'number') expect(scheduled.rows.some(r => r.id === row.parentId)).toBe(true) }
+  // 깊은 계보는 6칸에서 끊고 마지막 행의 부모를 cut 으로 적는다 — 로그에 없는 번호를 내지 않는다.
+  const chain = Array.from({ length: 10 }, (_, i) => proc(100 + i, `C:\\x\\n${i}.exe`, 'node.exe', i ? 99 + i : 555, at(9000 + i)))
+  const deep = view([...chain].reverse()).rows
+  expect(deep.some(r => r.parentId === 'cut')).toBe(true)
+  expect(deep.every(r => typeof r.parentId !== 'number' || deep.some(x => x.id === r.parentId))).toBe(true)
+  expect(deep.some(r => r.parentId === 'gone')).toBe(true)
+})
+
+test('confirm and handoff diagnostics are silent without KNUAF_APP_LOG and name the blocking row with it', async () => {
+  const root = temporary(), file = join(root, 'diag.log'), saved = process.env.KNUAF_APP_LOG
+  // 무관한 행 하나 + 첫 목록에 없던 판독 불가 부모 아래 새 프로세스(막는 행, 부모도 조상으로 실린다).
+  const clean = proc(9, 'C:\\Other\\parent.exe', 'parent.exe', 0)
+  const rows = [clean, proc(800, 'C:\\Tools\\secret-tool.exe', 'secret-tool.exe', 700), proc(700, null, 'svchost.exe', 4, '')]
+  const runtime = new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, async () => JSON.stringify({ resources: 'C:\\App\\resources', appExecutable: 'C:\\App\\app.exe', processes: rows }))
+  const snapshot = { ...emptySnapshot(), processes: [clean] }
+  const handoff = (fail: boolean): AppHandoff => new AppHandoff({
+    chat: { hasPendingLogin: () => false, flushDrafts: () => {}, closeForUpdate: async confirm => { await confirm() } },
+    sidecar: { stop: async () => {}, restart: async () => {} }, activity: new AgentActivity(), lock: new SkillSwitch(),
+    windows: { captureOwned: async () => snapshot, confirmStopped: before => runtime.confirmStopped(before, 0), assertResourcesIdle: async () => { if (fail) throw new Error('busy') } }
+  })
+  // 파일이 없다는 것만으로는 진단 일을 안 했다는 뜻이 아니다 — 근거 조립을 실제로 불렀는지 센다.
+  const inspect = OwnedProcessWatch.prototype.inspect, asked: boolean[] = []; let assembled = 0
+  OwnedProcessWatch.prototype.inspect = function (processes, detail) {
+    asked.push(!!detail); const view = inspect.call(this, processes, detail)
+    return { ...view, rows: () => { assembled++; return view.rows() } }
+  }
+  // 진단은 인계 확인이 끝난 다음 차례에 쓴다 — 읽기 전에 한 차례 넘긴다.
+  const settle = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+  try {
+    delete process.env.KNUAF_APP_LOG
+    await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
+    // MIN_SAMPLES=3: 마감(timeout 0)이 지나도 표본 3번을 채운 뒤에 판정한다 — 진단이 꺼져 있어도 같다.
+    await settle(); expect(existsSync(file)).toBe(false); expect(asked).toEqual([false, false, false]); expect(assembled).toBe(0)
+    process.env.KNUAF_APP_LOG = file
+    await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/)
+    // 판정 경로는 꺼짐과 같은 호출(근거 없음) 세 번뿐이고, 돌아온 시점에는 아직 아무것도 쓰지 않았다.
+    expect(asked).toEqual([false, false, false, false, false, false]); expect(assembled).toBe(0); expect(existsSync(file)).toBe(false)
+    // settle 뒤 재생은 표본마다 한 번씩 — 표본 3개면 재생 3번, 근거 조립 3번.
+    await settle(); expect(asked).toEqual([false, false, false, false, false, false, true, true, true]); expect(assembled).toBe(3)
+    // 바쁜 표본 뒤에도 조회가 이어지고, 조회 도중에는 파일이 비어 있다.
+    writeFileSync(file, ''); let calls = 0, during = ''
+    const slow = new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, async () => { if (calls++) during += readFileSync(file, 'utf8'); return JSON.stringify({ resources: 'C:\\App\\resources', appExecutable: 'C:\\App\\app.exe', processes: calls > 2 ? [rows[0]] : rows }) })
+    await slow.confirmStopped(snapshot, 5_000)
+    expect(during).toBe(''); expect(readFileSync(file, 'utf8')).toBe(''); await settle(); expect(readFileSync(file, 'utf8')).toMatch(/confirm:sample n=1 [^\n]*busy=1[\s\S]*confirm:sample n=3 [^\n]*busy=0[\s\S]*confirm:end result=ok samples=3/)
+    writeFileSync(file, ''); await expect(runtime.confirmStopped(snapshot, 0)).rejects.toThrow(/종료/); await settle()
+    // 조회가 던지면 붙잡은 표본 없이 끝 줄만 남는다.
+    const broken = new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, async () => { throw new Error('shell') })
+    await expect(broken.confirmStopped(snapshot, 0)).rejects.toThrow('shell'); await settle()
+    expect(readFileSync(file, 'utf8')).toMatch(/confirm:end result=error samples=0 elapsed=-/)
+    const log = readFileSync(file, 'utf8')
+    expect(log).toMatch(/confirm:sample n=1 at=\d+ms inventoryMs=\d+ rows=3 busy=1 owned=0 unknown=2 unrelated=1 helper=0/)
+    expect(log).toMatch(/confirm:block n=1 role=block id=\d+ parent=\d+ kind=other own=u why=parent-time-unreadable path=1 born=/)
+    expect(log).toMatch(/confirm:block n=1 role=ancestor id=\d+ parent=gone kind=svchost own=u why=parent-missing path=0 born=-/)
+    // 마감(timeout 0)이 지나도 MIN_SAMPLES=3 을 채운 뒤에 실패한다.
+    expect(log).toMatch(/confirm:end result=deadline samples=3 elapsed=\d+ms/)
+    expect(log).not.toMatch(/secret-tool|Tools|id=(?:800|700)\b|parent=(?:800|700)\b/)
+    rows.length = 1; writeFileSync(file, '')
+    await handoff(false).run(async () => {}); await settle()
+    const ok = readFileSync(file, 'utf8')
+    expect(ok).toMatch(/confirm:end result=ok samples=1/)
+    expect([...ok.matchAll(/handoff:step name=(\w+) ms=\d+ ok=1/g)].map(m => m[1])).toEqual(['drain', 'capture', 'sidecar', 'chat', 'resources', 'transfer'])
+    writeFileSync(file, '')
+    await expect(handoff(true).run(async () => {})).rejects.toThrow(/busy/)
+    expect(readFileSync(file, 'utf8')).toMatch(/handoff:step name=resources ms=\d+ ok=0 error=Error/)
+    // 하위 작업이 던진 임의의 code 문자열(실행 파일 이름일 수도 있다)은 그대로 싣지 않는다.
+    writeFileSync(file, '')
+    await expect(handoff(false).run(async () => { throw Object.assign(new Error('x'), { code: 'tool.exe' }) })).rejects.toThrow('x')
+    const failed = readFileSync(file, 'utf8')
+    expect(failed).toMatch(/handoff:step name=transfer ms=\d+ ok=0 error=other/); expect(failed).not.toMatch(/tool\.exe/)
+  } finally {
+    OwnedProcessWatch.prototype.inspect = inspect
+    if (saved === undefined) delete process.env.KNUAF_APP_LOG
+    else process.env.KNUAF_APP_LOG = saved
+  }
+})
+
+test('confirmStopped starts the deadline at the first sample and never stops before MIN_SAMPLES', async () => {
+  const root = temporary()
+  const reply = (processes: ProcessInfo[]) => JSON.stringify({ resources: 'C:\\App\\resources', appExecutable: 'C:\\App\\app.exe', processes })
+  // 첫 목록에 없는 부모를 가진 행 — 표본마다 늘 막는 행(unknown).
+  const blocked = proc(800, 'C:\\Tools\\secret-tool.exe', 'secret-tool.exe', 700)
+  const wait = (ms: number): Promise<void> => { const { promise, resolve } = Promise.withResolvers<void>(); setTimeout(resolve, ms); return promise }
+  // 조회마다 지연을 주고, 호출이 **돌아온** 시각을 적는다.
+  const fake = (delay: number | ((n: number) => number), answer: (n: number) => ProcessInfo[]) => {
+    const returned: number[] = []
+    const shell = async (): Promise<string> => { const n = returned.length + 1; await wait(typeof delay === 'function' ? delay(n) : delay); returned.push(Date.now()); return reply(answer(n)) }
+    return { runtime: new WindowsUpdateRuntime(root, 'C:\\App\\app.exe', 1, shell), returned }
+  }
+  // ① 마감은 첫 조회가 돌아온 **뒤**부터 센다: 첫 조회가 마감(100ms)보다 느리면(300ms) 다음 표본까지
+  //    마감만큼(≈100ms) 기다린다. 첫 조회 전에 마감을 잡으면 이미 지나 있어 간격이 0 이 된다.
+  const late = fake(n => n === 1 ? 300 : 0, () => [blocked])
+  await expect(late.runtime.confirmStopped(emptySnapshot(), 100)).rejects.toThrow(/종료/)
+  expect(late.returned.length).toBe(3)
+  expect(late.returned[1] - late.returned[0]).toBeGreaterThanOrEqual(50)
+  // ② 마감이 지나도 최소 표본 수(3)는 채운다 — 조회 하나가 마감보다 느린 경우에도 표본이 깎이지 않는다.
+  const slow = fake(40, () => [blocked])
+  await expect(slow.runtime.confirmStopped(emptySnapshot(), 25)).rejects.toThrow(/종료/)
+  expect(slow.returned.length).toBe(3)
+  // ③ 둘째 표본에서 풀리면 최소 표본 수를 채우지 않고 바로 성공한다.
+  const settles = fake(20, n => n === 1 ? [blocked] : [])
+  await settles.runtime.confirmStopped(emptySnapshot(), 500)
+  expect(settles.returned.length).toBe(2)
+  // ④ 계속 바쁘면 표본 3번을 채운 뒤 같은 문구로 실패한다 — 조회 하나의 상한이 있어 끝없이 늘지 않는다.
+  const stuck = fake(120, () => [blocked])
+  await expect(stuck.runtime.confirmStopped(emptySnapshot(), 50)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+  expect(stuck.returned.length).toBe(3)
+  // ⑤ 느린 조회가 최소 표본을 채우기 전에 상한(50ms)을 넘기면 첫 표본에서 바로 막는다 — 상한은
+  //    마감(`end`)과 따로 보므로, 마감(10초)이 아직 멀어도 새 조회를 예약하지 않는다.
+  const capped = fake(80, () => [blocked])
+  await expect(capped.runtime.confirmStopped(emptySnapshot(), 10_000, 50)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+  expect(capped.returned.length).toBe(1)
+  // ⑥ 상한 **직전**에 돌아온 표본 뒤의 대기(최대 100ms) 사이에 상한이 지나면 둘째 조회를 시작하지
+  //    않는다 — 표본이 돌아온 시점의 검사만 있으면 100ms 대기 뒤 조회가 한 건 더 붙는다.
+  //    지연 0(첫 표본 ≈0ms < 상한 90ms) → 대기 100ms → 100ms ≥ 90ms 이므로 조회는 한 번뿐이다.
+  //    상한은 대기(100ms)보다 작아야 갈래가 갈린다 — 부하 걸린 맥에서 첫 표본이 50ms를 넘겨도
+  //    흔들리지 않게 90ms로 잡는다.
+  const before = Date.now()
+  const justBefore = fake(0, () => [blocked])
+  await expect(justBefore.runtime.confirmStopped(emptySnapshot(), 10_000, 90)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+  // 첫 표본이 정말 상한 전에 돌아왔는지 함께 잠근다 — 아니면 위 단언은 ⑤ 갈래로 통과해 버린다.
+  expect(justBefore.returned.length).toBe(1)
+  expect(justBefore.returned[0] - before).toBeLessThan(90)
 })
 
 test('native inventory consumes expanded 8.3 paths; tree and resources checks fail closed on missing helpers', async () => {
