@@ -224,25 +224,46 @@ describe('fetchLimited', () => {
     assert.equal(seen.length, 0)
   })
 
-  it('홉마다 남은 시간으로 DNS 상한을 다시 잡는다', async () => {
+  it('홉마다 남은 시간으로 DNS 상한을 다시 잡는다', async (t) => {
     reset()
+    // 첫 DNS 15ms + 둘째 DNS 25ms = 호출 전체 40ms. 실제 스케줄링 시간은 쓰지 않는다.
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 })
+    const firstDns = Promise.withResolvers<readonly dnsTypes.AddressRecord[]>()
+    const secondEntered = Promise.withResolvers<void>()
     let calls = 0
-    const result = await fetchMod.fetchLimited('https://www.rda.go.kr/home/1', {
-      validate: allowAll,
-      maxBytes: 1024,
-      timeoutMs: 40,
-      deps: {
-        // 첫 홉은 빨리 끝나고, 둘째 홉 DNS가 매달린다 — 남은 시간만 기다린다.
-        lookupAll: () => {
-          calls += 1
-          if (calls === 1) return Promise.resolve([{ address: '203.241.1.1', family: 4 }])
-          return new Promise<readonly dnsTypes.AddressRecord[]>(() => {})
-        },
-        transport: transportFor(() => respond(302, { location: '/home/2' }, Buffer.from('')))
-      }
-    })
-    assert.deepEqual(result, { ok: false, reason: 'timeout' })
-    assert.equal(calls, 2)
+    let transports = 0
+    try {
+      const pending = fetchMod.fetchLimited('https://www.rda.go.kr/home/1', {
+        validate: allowAll,
+        maxBytes: 1024,
+        timeoutMs: 40,
+        deps: {
+          lookupAll: () => {
+            calls += 1
+            if (calls === 1) return firstDns.promise
+            secondEntered.resolve()
+            return new Promise<readonly dnsTypes.AddressRecord[]>(() => {})
+          },
+          transport: (_options, onResponse) => {
+            transports += 1
+            const emitter = new EventEmitter()
+            onResponse({ statusCode: 302, headers: { location: '/home/2' },
+              on: emitter.on.bind(emitter) as TransportResponse['on'], destroy() {} })
+            return { on() {}, destroy() {}, end() { emitter.emit('end') } } as unknown as ClientRequest
+          }
+        }
+      })
+      assert.equal(calls, 1)
+      t.mock.timers.tick(15)
+      firstDns.resolve([{ address: '203.241.1.1', family: 4 }])
+      await secondEntered.promise
+      assert.equal(calls, 2)
+      assert.equal(transports, 1)
+      assert.equal(Date.now(), 15)
+      t.mock.timers.tick(25)
+      assert.deepEqual(await pending, { ok: false, reason: 'timeout' })
+      assert.equal(Date.now(), 40)
+    } finally { t.mock.timers.reset() }
   })
 
   it('전송이 던지면 network', async () => {

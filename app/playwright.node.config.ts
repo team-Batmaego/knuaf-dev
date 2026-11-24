@@ -36,6 +36,7 @@ export default defineConfig({
     'guard-codex-thread-lock.spec.ts',
     'guard-codex-connection.spec.ts',
     'guard-claude-skill-host.spec.ts',
+    'figure-wiring.spec.ts',
     'notice-bubble.spec.ts',
     'diag-limits.spec.ts',
     'lanes-lines.spec.ts',

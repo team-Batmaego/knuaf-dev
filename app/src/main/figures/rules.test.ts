@@ -5,9 +5,12 @@
  * 없이 승인되는 경로가 생긴다.
  */
 
+import type * as rulesTypes from './rules'
+import type * as urlTypes from './url-rules'
+
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -23,7 +26,16 @@ registerHooks({
   }
 })
 
-const rulesMod = (await import(new URL('./rules.ts', import.meta.url).href)) as typeof import('./rules')
+// 등록한 확장자 해석 훅이 먼저 적용되어야 하므로 로컬 모듈은 훅 등록 뒤 읽는다.
+const rulesMod = (await import(new URL('./rules.ts', import.meta.url).href)) as typeof rulesTypes
+const urlMod = (await import(new URL('./url-rules.ts', import.meta.url).href)) as typeof urlTypes
+const vectors = JSON.parse((await readFile(new URL('./fixtures/pagequery-vectors.json', import.meta.url), 'utf8'))
+  .replace(/\{\{(.)\*(\d+)\}\}/g, (_match, char: string, count: string) => char.repeat(Number(count)))) as {
+  loadBase: Record<string, unknown>
+  load: [Record<string, unknown>, boolean, string][]
+  loadFile: [unknown, string[], string][]
+  loadText: [string, string[], [string, string | null][], string][]
+}
 
 let root = ''
 before(async () => {
@@ -124,5 +136,134 @@ describe('parseRules', () => {
     const rules = rulesMod.parseRules(doc([bare]))
     assert.equal(rules.length, 1)
     assert.equal(rules[0]?.evidence, undefined)
+  })
+})
+
+describe('pageQuery — 공용 로더 벡터', () => {
+  for (const [overrides, survives, memo] of vectors.load) {
+    it(`load: ${memo}`, () => {
+      const item = { ...vectors.loadBase, ...overrides }
+      for (const key of Object.keys(overrides)) if (overrides[key] === null) delete item[key]
+      assert.deepEqual(rulesMod.parseRules(doc([item])).map((rule) => rule.id), survives ? ['a'] : [])
+    })
+  }
+  for (const [file, expected, memo] of vectors.loadFile) {
+    it(`loadFile: ${memo}`, () => {
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected)
+    })
+  }
+  for (const [text, expected, pages, memo] of vectors.loadText) {
+    it(`loadText: ${memo}`, () => {
+      const rules = rulesMod.parseRules(text)
+      assert.deepEqual(rules.map((rule) => rule.id), expected)
+      for (const [page, id] of pages) assert.equal(urlMod.selectPageRule(page, rules)?.id ?? null, id)
+    })
+  }
+
+  it('줄바꿈이 허용 문자 뒤에 붙어도 호스트·이름·literal을 넓히지 않는다', () => {
+    const cases = [
+      { ...vectors.loadBase, host: 'h.example.kr\n' },
+      { ...vectors.loadBase, pageQuery: { 'k\n': { literal: 'v' } } },
+      { ...vectors.loadBase, pageQuery: { k: { literal: 'v\n' } } }
+    ]
+    for (const item of cases) assert.deepEqual(rulesMod.parseRules(doc([item])), [])
+  })
+
+  it('비표준 JSON 상수(NaN·Infinity·-Infinity)가 있으면 파일째 거절한다 — 파이썬과 같은 G1(PQI-01)', () => {
+    const good = JSON.stringify({ v: 1, rules: [vectors.loadBase] })
+    assert.equal(rulesMod.parseRules(good).length, 1)
+    for (const constant of ['NaN', 'Infinity', '-Infinity']) {
+      assert.deepEqual(rulesMod.parseRules(good.slice(0, -1) + ',"extra":' + constant + '}'), [], constant)
+    }
+  })
+
+  it('동봉 실제 규칙 파일을 읽어 기대 항목을 확인한다', async (context) => {
+    const file = new URL('../../../resources/skill/references/figure-sources.json', import.meta.url)
+    let text: string
+    try {
+      text = await readFile(file, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      context.skip('stage:skill 동봉 산출물 없음 — 실제 규칙 파일 검증 미실행')
+      return
+    }
+    // 규칙집 판(v0.5.1 nongsaro-curation → v0.5.8 rda-* → v0.6.x …)이 바뀌어도 변하지 않는 조건만 본다:
+    // 파일에 적힌 규칙이 하나도 버려지지 않고(전부 이 앱 검사를 통과) 1개 이상이며 id 가 겹치지 않는다.
+    const raw = (JSON.parse(text) as { rules: { id: string }[] }).rules.map((rule) => rule.id)
+    const loaded = rulesMod.parseRules(text).map((rule) => rule.id)
+    assert.ok(raw.length > 0, '동봉 규칙 파일에 규칙이 없다')
+    assert.deepEqual(loaded, raw)
+    assert.equal(new Set(loaded).size, loaded.length)
+  })
+})
+
+const orgVectors = JSON.parse((await readFile(new URL('./fixtures/org-vectors.json', import.meta.url), 'utf8'))
+  .replace(/\{\{(.)\*(\d+)\}\}/g, (_all, char: string, count: string) => char.repeat(Number(count)))) as {
+  loadBase: Record<string, unknown> & { rules: Record<string, unknown>[] }
+  load: [Record<string, unknown>, Record<string, unknown>, string[], string][]
+  loadFile: [unknown, string[], string][]
+}
+describe('RDA — shared loader vectors', () => {
+  for (const [top, item, expected, memo] of orgVectors.load) {
+    it(memo, () => {
+      const file = { ...orgVectors.loadBase, ...top }
+      for (const key of Object.keys(top)) if (top[key] === null) delete file[key]
+      const entry = { ...orgVectors.loadBase.rules[0], ...item }
+      for (const key of Object.keys(item)) if (item[key] === null) delete entry[key]
+      file.rules = [entry]
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected)
+    })
+  }
+  for (const [file, expected, memo] of orgVectors.loadFile) {
+    it(memo, () => assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected))
+  }
+  it('aliases are longest first and equal lengths retain source order', () => {
+    assert.deepEqual(rulesMod.sortOrgAliases(['기관', '다른기관', '다른곳', '새기관']), ['다른기관', '다른곳', '새기관', '기관'])
+  })
+  it('RDA-X1 permits single-character orgTerms only in U+3200 through U+33FF', () => {
+    for (const [term, survives] of [['㈜', true], ['㈔', true], ['\u3200', true], ['\u33ff', true],
+      ['\u31ff', false], ['\u3400', false], ['가', false], ['A', false], ['！', false], ['😀', false],
+      ['가나', true], ['가'.repeat(40), true], ['가'.repeat(41), false]] as const) {
+      const file = { ...orgVectors.loadBase, orgTerms: [term] }
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), survives ? ['a'] : [], term)
+    }
+    for (const key of ['creditWords', 'latinOk']) {
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify({ ...orgVectors.loadBase, [key]: ['㈜'] })), [])
+    }
+    const file = { ...orgVectors.loadBase, orgTerms: ['㈜', '㈜'] }
+    assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)), [])
+  })
+  it('list cardinality limits and ASCII marker length boundaries reject only third-kind entries', () => {
+    const base = orgVectors.loadBase
+    const entry = base.rules[0]!
+    for (const [key, count, expected] of [['orgTerms', 300, true], ['orgTerms', 301, false],
+      ['creditWords', 40, true], ['creditWords', 41, false], ['latinOk', 300, true], ['latinOk', 301, false]] as const) {
+      const values = Array.from({ length: count }, (_, index) => key === 'latinOk'
+        ? `A${String.fromCharCode(65 + Math.floor(index / 26), 65 + index % 26)}`
+        : `가${String.fromCharCode(0xac00 + index)}`)
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify({ ...base, [key]: values })).map((rule) => rule.id), expected ? ['a'] : [])
+    }
+    for (const [length, expected] of [[7, false], [8, true], [200, true], [201, false]] as const) {
+      const file = { ...base, rules: [{ ...entry, bodyStart: 's'.repeat(length), bodyEnd: 'e'.repeat(8) }] }
+      assert.deepEqual(rulesMod.parseRules(JSON.stringify(file)).map((rule) => rule.id), expected ? ['a'] : [])
+    }
+    for (const kind of ['page_kogl_applies_to_body_images', 'page_query_kogl_applies_to_body_images']) {
+      for (const key of ['orgAliases', 'bodyStart', 'bodyEnd']) {
+        const old: Record<string, unknown> = { ...entry, rule: kind }
+        delete old.orgAliases; delete old.bodyStart; delete old.bodyEnd
+        if (kind === 'page_kogl_applies_to_body_images') delete old.pageQuery
+        old[key] = null
+        assert.deepEqual(rulesMod.parseRules(JSON.stringify({ v: 1, rules: [old] })), [])
+      }
+    }
+  })
+  it('actual RDA rule aliases are fixed', { skip: 'RDA rule data and bundled skill pin belong to the lead; enable after registration' }, async () => {
+    const text = await readFile(new URL('../../../resources/skill/references/figure-sources.json', import.meta.url), 'utf8')
+    const raw = JSON.parse(text) as { rules: { id: string; orgAliases: string[] }[] }
+    const rda = raw.rules.filter((rule) => ['rda-infograp', 'rda-cardnews'].includes(rule.id))
+    assert.deepEqual(rda.map((rule) => rule.id), ['rda-infograp', 'rda-cardnews'])
+    for (const rule of rda) assert.deepEqual(rule.orgAliases, ['농촌진흥청', '농진청'])
+    assert.deepEqual(rulesMod.parseRules(text).filter((rule) => rda.some((entry) => entry.id === rule.id)).map((rule) => rule.id),
+      ['rda-infograp', 'rda-cardnews'])
   })
 })

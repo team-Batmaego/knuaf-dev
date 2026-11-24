@@ -9,6 +9,7 @@
 
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { describe, it } from 'node:test'
 
 registerHooks({
@@ -35,6 +36,7 @@ const pageHtml = (marks: string, extra = ''): string =>
 const approved = {
   rule: { ok: true as const, ruleId: 'nongsaro-curation', org: '농촌진흥청 국립원예특작과학원' },
   present: true,
+  thirdPartyOrg: 'skip' as const,
   thirdPartyCredit: 'none' as const,
   finalUrlAllowed: true
 }
@@ -243,9 +245,33 @@ describe('decide', () => {
       rule: { ok: false, reason: 'host' },
       present: false,
       thirdPartyCredit: 'credit',
+      thirdPartyOrg: 'skip',
       finalUrlAllowed: false,
       kogl: verdict.readKogl('')
     })
     assert.equal(result.reason, 'host')
+  })
+})
+
+describe('RDA — same resource vectors and verdict precedence', async () => {
+  const vectors = JSON.parse(await readFile(new URL('./fixtures/org-vectors.json', import.meta.url), 'utf8')) as {
+    same: [string, string, boolean, string][]
+  }
+  for (const [left, right, expected, memo] of vectors.same) {
+    it(memo, () => assert.equal(verdict.sameResource(left, right), expected))
+  }
+  for (const thirdPartyOrg of ['skip', 'none', 'hit', 'unknown'] as const) {
+    it(`org branch: ${thirdPartyOrg}`, () => {
+      const result = verdict.decide({ ...approved, thirdPartyOrg, kogl: verdict.readKogl('제1유형') })
+      assert.equal(result.verdict, thirdPartyOrg === 'hit' || thirdPartyOrg === 'unknown' ? 'ambiguous' : 'approved')
+      assert.equal(result.reason, thirdPartyOrg === 'hit' ? 'third_party_org' : thirdPartyOrg === 'unknown' ? 'third_party_unknown' : 'kogl_type_1')
+    })
+  }
+  it('old credit precedes org; org precedes KOGL; existence and final URL remain mandatory', () => {
+    const input = { ...approved, thirdPartyOrg: 'hit' as const, kogl: verdict.readKogl('제4유형') }
+    assert.equal(verdict.decide(input).reason, 'third_party_org')
+    assert.equal(verdict.decide({ ...input, thirdPartyCredit: 'credit' }).reason, 'third_party_credit')
+    assert.equal(verdict.decide({ ...input, present: false }).reason, 'not_on_page')
+    assert.equal(verdict.decide({ ...input, finalUrlAllowed: false }).reason, 'final_url_outside_rules')
   })
 })

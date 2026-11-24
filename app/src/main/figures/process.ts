@@ -14,6 +14,8 @@
 
 import { readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
+import { extractCandidates } from './candidates'
+import { orgReading } from './org-check'
 import {
   figureToken,
   type FigureReceipt,
@@ -23,7 +25,16 @@ import {
 } from './contract'
 import { checkTurn, readTurn, type TurnRecord } from './turn'
 import type { RulesLoad } from './rules'
-import { isAllowedImage, matchImage, matchPage, parseHttpsUrl, type FigureRule } from './url-rules'
+import {
+  imageAllowedByRule,
+  isAllowedImage,
+  pageHopAllowed,
+  parseHttpsUrl,
+  isQueryRule,
+  RULE_PAGE_QUERY_ORG,
+  selectPageRule,
+  type FigureRule
+} from './url-rules'
 import { fetchLimited } from './fetch'
 import { sniffImage } from './image-header'
 import {
@@ -32,6 +43,7 @@ import {
   decide,
   findImageOccurrences,
   readKogl,
+  hasCreditMark,
   type ImageOccurrence,
   type KoglReading,
   type KoglType
@@ -73,6 +85,10 @@ export interface TurnLease {
    * 돌려주는 함수를 `finally`에서 부르면 `endTurn`이 그 구간이 끝난 것을 본다.
    */
   open(): (() => void) | null
+  /** 첫 페이지 GET 직전 동기 예약. 실패해도 돌려주지 않는다(P1.1). */
+  reserve(): boolean
+  /** 거절 결과 파일 예약. 세대당 최대 24개(P1.1). */
+  noteReject(): boolean
   /** 지금도 이 요청의 턴인가(동기). 쓰기 없이 중간 점검만 할 때. */
   live(): boolean
 }
@@ -121,14 +137,13 @@ export interface ProcessInput {
 interface ImageJob {
   n: number
   raw: string
-  pageUrl: URL
   pageHtml: string
   pageSha: string
   pageUrlHref: string
   /** 페이지 HTML 안 그림 태그 전부(자리 포함) — 실재 대조와 제3자 표기 기준점. */
   occurrences: readonly ImageOccurrence[]
   rules: readonly FigureRule[]
-  pageRuleId: string
+  pageRule: FigureRule
   fetch: FetchFn
   deps: ProcessDeps
   deadline: number
@@ -152,6 +167,7 @@ export async function processRequest(input: ProcessInput, deps: ProcessDeps): Pr
   const { request } = input
   // 세대값은 **동기로** 여기서 잡는다 — 아래 첫 await 뒤에 잡으면 그 사이 `endTurn`을 놓친다(R-6).
   const lease = deps.gate?.begin()
+  const listing = request.images.length === 0
   const write = deps.write ?? defaultWrite
   /**
    * 쓰기 구간 하나. 게이트가 있으면 진입을 같은 틱에 확인하고, 끝나면 `endTurn`에 알린다.
@@ -171,55 +187,96 @@ export async function processRequest(input: ProcessInput, deps: ProcessDeps): Pr
       release()
     }
   }
-  const hash = folderHash(await realpath(input.folder).catch(() => input.folder))
+  const rejected = (reason: string): FigureRes => ({
+    v: 1, id: request.id, status: 'rejected', reason,
+    slot: request.slot, needsChoice: false, images: []
+  })
+  const quietCancelled = (): FigureRes => rejected('cancelled')
+  // 모든 목록 await 뒤와 settle 진입에서 같은 취소 우선순위를 적용한다.
+  const listDead = (): boolean => listing && !!lease && !lease.live()
+  // 목록의 성공·거절 모두 한 출구. open()이 생존 확인과 쓰기 등록을 같은 틱에 한다(I-06).
+  const settle = async (res: FigureRes): Promise<FigureRes> => {
+    if (listDead()) return quietCancelled()
+    let result = res
+    const wrote = await guarded(async () => {
+      if (res.status === 'rejected' && lease && !lease.noteReject()) return
+      const path = join(deps.paths.res, `${request.id}.res.json`)
+      const created = await write.jsonNew(path, res)
+      if (!created) result = (await readJson<FigureRes>(path)) ?? res
+    })
+    if (listDead()) return quietCancelled()
+    return wrote ? result : quietCancelled()
+  }
+  const inputFolder = await realpath(input.folder).catch(() => input.folder)
+  if (listDead()) return settle(quietCancelled())
+  const hash = folderHash(inputFolder)
   // 거절도 결과 파일로 남긴다 — 안 남기면 도우미가 60초를 다 기다린 뒤 실패한다.
   // 단 중복은 기존 기록을 덮어쓰지 않는다(같은 id의 첫 결과가 정본이다). 거절 결과도 **배타 생성**이다:
   // 재시작 뒤 턴 없이 다시 집은 옛 요청이 지난 실행의 `done`을 `cancelled`로 덮으면 학생은 결과를 잃는다(I-1).
   const reject = async (reason: string): Promise<FigureRes> => {
-    const res: FigureRes = {
-      v: 1,
-      id: request.id,
-      status: 'rejected',
-      reason,
-      slot: request.slot,
-      needsChoice: false,
-      images: []
+    const res = rejected(reason)
+    if (listing) return settle(res)
+    if (reason !== 'duplicate' && (!lease || lease.noteReject())) {
+      await write.jsonNew(join(deps.paths.res, `${request.id}.res.json`), res)
     }
-    if (reason !== 'duplicate') await write.jsonNew(join(deps.paths.res, `${request.id}.res.json`), res)
     return res
   }
 
   const turn = await readTurn(deps.paths.turn)
+  if (listDead()) return settle(quietCancelled())
   const turnCheck = checkTurn(turn, request.turnId)
   if (!turnCheck.ok) return reject(turnCheck.reason)
   const turnFolder = await realpath((turn as TurnRecord).folder).catch(() => (turn as TurnRecord).folder)
-  if (turnFolder !== (await realpath(input.folder).catch(() => input.folder))) return reject('stale')
+  if (listDead()) return settle(quietCancelled())
+  if (turnFolder !== inputFolder) return reject('stale')
+  if (listing && !lease) return reject('no_channel')
   // 턴이 아직 이 요청의 것인가 — 받기·굽기 도중 `endTurn`이 지나갔으면 결과를 저장하지 않는다(R-6).
   // 게이트가 있으면 세대값을 메모리에서 동기로 본다(디스크를 다시 읽지 않는다).
   const live = async (): Promise<boolean> =>
     lease ? lease.live() : checkTurn(await readTurn(deps.paths.turn), request.turnId).ok
-  if (await seenRequestId(deps.paths, request.id)) return reject('duplicate')
+  const seen = await seenRequestId(deps.paths, request.id)
+  if (listDead()) return settle(quietCancelled())
+  if (seen) return reject('duplicate')
 
   const rules = await deps.loadRules()
+  if (listDead()) return settle(quietCancelled())
   if (!rules.ok) return reject('no_channel')
-  const pageParsed = parseHttpsUrl(request.page)
-  if (!pageParsed.ok) return reject('invalid')
-  const pageMatch = matchPage(pageParsed.url, rules.rules)
-  if (!pageMatch) return reject('rule_missing')
+  const pageRule = selectPageRule(request.page, rules.rules)
+  if (!pageRule) return reject('rule_missing')
+  if (listDead()) return settle(quietCancelled())
+  if (lease && !lease.reserve()) return reject('limit_turn')
 
   const fetchOne = deps.fetchFn ?? fetchLimited
   const deadline = now() + REQUEST_TIMEOUT_MS
   const page = await fetchOne(request.page, {
-    validate: (url) => validateForHop(url, rules.rules, 'page', pageMatch.rule.id),
+    validate: (url) => {
+      if (isQueryRule(pageRule.rule)) {
+        return url.href === request.page ? { ok: true } : { ok: false, reason: 'outside_rules' }
+      }
+      const parsed = parseHttpsUrl(url.href)
+      if (!parsed.ok) return { ok: false, reason: parsed.reason }
+      return pageHopAllowed(pageRule, parsed.url) ? { ok: true } : { ok: false, reason: 'outside_rules' }
+    },
+    ...(isQueryRule(pageRule.rule) ? { maxRedirects: 0 } : {}),
     maxBytes: PAGE_MAX_BYTES,
     timeoutMs: Math.min(FILE_TIMEOUT_MS, Math.max(1, deadline - now())),
     headers: { accept: 'text/html,application/xhtml+xml' }
   })
+  if (listDead()) return settle(quietCancelled())
   if (!page.ok) return reject(page.reason === 'limit' || page.reason === 'timeout' ? page.reason : 'page_fetch')
 
   const html = decodeBody(page.body, page.contentType)
-  const pageSha = sha256Hex(page.body)
+  // 목록은 페이지 해시·계수·그림별 판정 및 저장 경로를 건너뛴다.
   const kogl = readKogl(html)
+  if (listing) {
+    const found = extractCandidates(html, page.finalUrl, pageRule)
+    return settle({
+      v: 1, id: request.id, status: 'done', slot: request.slot,
+      needsChoice: false, images: [], kogl: kogl.type, org: pageRule.org,
+      ...found
+    })
+  }
+  const pageSha = sha256Hex(page.body)
   const occurrences = findImageOccurrences(html, page.finalUrl)
   let counters = await loadCounters(deps.paths.counters, now())
 
@@ -230,13 +287,12 @@ export async function processRequest(input: ProcessInput, deps: ProcessDeps): Pr
     const job: ImageJob = {
       n: index + 1,
       raw,
-      pageUrl: page.finalUrl,
       pageHtml: html,
       pageSha,
       pageUrlHref: page.finalUrl.href,
       occurrences,
       rules: rules.rules,
-      pageRuleId: pageMatch.rule.id,
+      pageRule,
       fetch: fetchOne,
       deps,
       deadline,
@@ -346,10 +402,9 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
     counters: job.counters
   })
 
-  // 승인 후보 판정: 페이지·그림이 **같은 규칙 항목**에 걸려야 한다(R4-4).
-  const allowed = isAllowedImage(job.raw, job.pageUrl, job.rules)
+  // 처음 페이지에서 고른 객체의 imagePath만 쓴다. 규칙집의 첫 그림 일치로 다시 고르지 않는다(PQ-8).
+  const allowed = isAllowedImage(job.raw, job.pageRule, job.rules)
   if (!allowed.ok) return refuse(allowed.reason)
-  if (allowed.rule.id !== job.pageRuleId) return refuse('rule_mismatch')
 
   const remaining = job.deadline - job.now()
   if (remaining <= 0) return refuse('timeout')
@@ -357,8 +412,12 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
   if (budget <= 0) return refuse('limit')
 
   const fetched = await job.fetch(job.raw, {
-    // 홉마다 **페이지와 같은 규칙 id**의 imagePath를 요구한다(B-3). 다른 기관 규칙으로 넘어가면 거절.
-    validate: (url) => validateForHop(url, job.rules, 'image', job.pageRuleId),
+    // 처음·중간·마지막 홉 모두 처음 고른 항목 하나만 허용한다(PQ-9).
+    validate: (url) => {
+      const parsed = parseHttpsUrl(url.href)
+      if (!parsed.ok) return { ok: false, reason: parsed.reason }
+      return imageAllowedByRule(job.pageRule, parsed.url) ? { ok: true } : { ok: false, reason: 'outside_rules' }
+    },
     maxBytes: budget,
     timeoutMs: Math.min(FILE_TIMEOUT_MS, remaining),
     headers: { accept: 'image/jpeg,image/png,image/gif' }
@@ -368,8 +427,7 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
   const finalUrl = fetched.finalUrl.href
   // 받기 홉 검사와 **따로** 최종 URL을 규칙에 다시 물린다 — 판정 입력을 상수로 두지 않는다(B-3).
   const finalParsed = parseHttpsUrl(finalUrl)
-  const finalMatch = finalParsed.ok ? matchImage(finalParsed.url, job.rules) : null
-  const finalAllowed = finalMatch !== null && finalMatch.rule.id === job.pageRuleId
+  const finalAllowed = finalParsed.ok && imageAllowedByRule(job.pageRule, finalParsed.url)
 
   const shippedType = (fetched.contentType ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
   // Content-Type은 참고만 한다 — 판정은 매직 바이트로 한다(헤더 주장은 위조 가능).
@@ -383,11 +441,18 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
 
   // 설계 §5-1: 페이지에 실재해야 하는 것은 **최종 URL**이다. 리다이렉트 전 URL은 인정하지 않는다(B-3).
   const present = appearsOnPage(job.occurrences, [finalUrl])
-  const credit = creditFor(job.pageHtml, job.occurrences, [finalUrl])
+  let credit = creditFor(job.pageHtml, job.occurrences, [finalUrl])
+  const org = job.pageRule.rule === RULE_PAGE_QUERY_ORG
+    ? orgReading(job.pageHtml, finalUrl, new URL(job.pageUrlHref), job.pageRule)
+    : { reading: 'skip' as const, text: null }
+  // 설계 §3-3 순서: 근처 권리 표기 → 구역 unknown → 구역 전체 권리 표기.
+  // 구역을 못 정했으면(unknown) 그 구역 글의 표기는 순서상 뒤라 여기서 합치지 않는다.
+  if (org.reading !== 'unknown' && org.text !== null && hasCreditMark(org.text)) credit = 'credit'
   const verdict = decide({
     rule: { ok: true, ruleId: allowed.rule.id, org: allowed.org },
     present,
     thirdPartyCredit: credit,
+    thirdPartyOrg: org.reading,
     kogl,
     finalUrlAllowed: finalAllowed
   })
@@ -500,26 +565,6 @@ export function decodeBody(body: Uint8Array, contentType: string | null): string
 /** charset 이름을 읽기 위한 1바이트 해석 — 본문 앞부분만 본다. */
 function decodeAscii(bytes: Uint8Array): string {
   return new TextDecoder('latin1').decode(bytes)
-}
-
-/**
- * 받기 홉마다 규칙을 다시 본다 — 리다이렉트가 규칙 밖 호스트·경로로 나가면 거절.
- *
- * 이미 페이지가 걸린 규칙(`ruleId`)의 **같은 항목**만 허용한다. 다른 기관 규칙의 그림 경로로
- * 넘어가면 그 기관 그림에 이 페이지의 공공누리를 붙이게 되므로, 홉 단계에서 끊는다(B-3).
- */
-function validateForHop(
-  url: URL,
-  rules: readonly FigureRule[],
-  kind: 'page' | 'image',
-  ruleId: string
-): { ok: true } | { ok: false; reason: string } {
-  const parsed = parseHttpsUrl(url.href)
-  if (!parsed.ok) return { ok: false, reason: parsed.reason }
-  const match = kind === 'page' ? matchPage(parsed.url, rules) : matchImage(parsed.url, rules)
-  if (!match) return { ok: false, reason: 'outside_rules' }
-  if (match.rule.id !== ruleId) return { ok: false, reason: 'outside_rules' }
-  return { ok: true }
 }
 
 /** 이미 처리한 id인가 — 결과 파일 또는 증명 줄. 계약 §3: 같은 id 재사용 거절. */
