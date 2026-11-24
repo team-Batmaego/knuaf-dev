@@ -795,6 +795,8 @@ export function registerIpc(sidecar: Sidecar, win: () => BrowserWindow | null, o
     runner: chat.lanesRunner(),
     account: company => chat.laneAccount(company),
     // [C1-06] 적용 직전 대조는 캐시를 건너뛴 관측 — 15초 전 값이면 계정이 바뀐 걸 못 본다.
+    // 배치 저장도 대화 넘기기와 같은 사용량 관문 — Claude 는 턴 밖 사용량을 못 읽어 늘 unknown 이다.
+    gateInTurn: company => company === 'claude',
     freshAccount: company => chat.laneAccount(company, { fresh: true }),
     // [C1-08] 화면이 보낸 폴더가 아니라 **main 이 열어 둔 폴더**만 통과시킨다.
     allowed: folder => {
