@@ -47,9 +47,13 @@ export class Sidecar extends EventEmitter {
     return result
   }
 
-  configure(projectRoot: string | null, override: string | null): Promise<SidecarInfo> {
+  configure(projectRoot: string | null, override: string | null, permitted?: () => boolean): Promise<SidecarInfo> {
     const version = this.stopVersion
-    return agentActivity.run(() => skillSwitch.run(() => this.enqueue(() => this.configureNow(projectRoot, override, version))))
+    return agentActivity.run(() => skillSwitch.run(() => this.enqueue(() => {
+      // Recheck ownership after earlier folder switches finish, before touching the running process.
+      if (permitted && !permitted()) return Promise.resolve(this.status())
+      return this.configureNow(projectRoot, override, version)
+    })))
   }
 
   restart(): Promise<SidecarInfo> {

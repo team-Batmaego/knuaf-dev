@@ -120,6 +120,27 @@ function harness(platform = 'darwin') {
   }
 }
 
+test('R1-01 runtime permission is checked when queued configure starts', async () => {
+  const h = harness()
+  try {
+    await h.sidecar.configure('/A', 'python-A')
+    h.manualReady()
+    const opening = h.sidecar.configure('/B', 'python-B')
+    await flush()
+    let permitted = true
+    const refresh = h.sidecar.configure('/A', 'python-A', () => permitted)
+    void refresh.catch(() => {}) // A red assertion still shuts the pending startup down in finally.
+    permitted = false
+    h.children[1].ready()
+    await opening; await flush()
+    // A forbidden refresh must neither spawn python-A nor interrupt a B RPC.
+    expect(h.children).toHaveLength(2)
+    await refresh
+    expect(h.sidecar.status().python).toBe('python-B')
+    expect(await h.sidecar.call('project.status')).toEqual({ pid: h.children[1].pid })
+  } finally { await h.sidecar.stopForExit() }
+})
+
 test('동시 configure는 옛 close까지 기다리고 새 실행기를 하나만 소유한다 (C-PY)', async () => {
   const h = harness()
   await h.sidecar.configure(null, 'base')

@@ -1,7 +1,8 @@
 // Node-only registered IPC/ChatService regressions. No Electron or account process is launched.
 import { test, expect } from '@playwright/test'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { PassThrough, Writable } from 'node:stream'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -12,6 +13,8 @@ import { consumePendingDesign } from '../src/main/lanes/cards'
 import type { AgentConnection } from '../src/main/chat/contracts'
 import type * as IpcModule from '../src/main/ipc'
 import type { DependencyReport, Envelope, SidecarInfo } from '../src/shared/types'
+import { canonical } from '../src/main/chat/jobs/isolation'
+import type { Sidecar } from '../src/main/sidecar'
 
 const appRoot = resolve(__dirname, '..')
 const source = process.env.KNUAF_TEST_SCRIPTS_DIR ? resolve(process.env.KNUAF_TEST_SCRIPTS_DIR, '..') : join(appRoot, 'resources/skill')
@@ -33,12 +36,18 @@ class ControlledSidecar extends EventEmitter {
   calls: { method: string; params: Record<string, unknown> }[] = []
   cancelled: string[] = []
   ready = false
+  stopped = 0
   diagnose: () => Promise<Envelope> = async () => env(this.ready)
   install: () => Promise<Envelope> = async () => { this.ready = true; return env(true) }
   status(): SidecarInfo { return { python: '/bundled/python', kind: 'bundled', scriptsDir: join(source, 'scripts'), running: true } }
-  async configure(root: string) { this.configured.push(root); return this.status() }
+  async configure(root: string, _override?: string | null, permitted: () => boolean = () => true) {
+    if (permitted()) this.configured.push(root)
+    return this.status()
+  }
   isWrite(method: string) { return method === 'deps.ensure' }
   cancel(id: string) { this.cancelled.push(id) }
+  ownedPids() { return this.stopped ? [] : [12345] }
+  async stopForExit() { ++this.stopped }
   async call(method: string, params: Record<string, unknown>, _onEvent: unknown, onId?: (id: string) => void) {
     this.calls.push({ method, params }); onId?.(`m${this.calls.length}`)
     if (method === 'deps.doctor') return this.diagnose()
@@ -46,7 +55,7 @@ class ControlledSidecar extends EventEmitter {
     throw new Error('Unexpected method ' + method)
   }
 }
-function harness(sidecar = new ControlledSidecar()) {
+function harness(sidecar = new ControlledSidecar(), worker = sidecar, resolveRoot = canonical) {
   const dir = mkdtempSync(join(tmpdir(), 'knuaf-main-prep-')), root = join(dir, '합성 논문 A'), other = join(dir, '합성 논문 B')
   mkdirSync(root); mkdirSync(other)
   const handlers = new Map<string, (...args: unknown[]) => unknown>(), sent: string[] = []
@@ -57,6 +66,7 @@ function harness(sidecar = new ControlledSidecar()) {
     login: async () => { throw new Error('Login is forbidden in this test') },
     run: async body => { sent.push(body) }, respond: () => {}, stop: async () => {} }
   const dependencies: Record<string, unknown> = {
+    './chat/jobs/isolation': { ...realRequire('./chat/jobs/isolation'), canonical: resolveRoot },
     electron: { app: { isPackaged: false, getPath: () => dir, getVersion: () => '0.6.0' },
       ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler) },
       net: { fetch: async () => { throw new Error('Network forbidden') } }, shell: { openExternal: async () => {} } },
@@ -70,8 +80,9 @@ function harness(sidecar = new ControlledSidecar()) {
   }
   const module: Partial<typeof IpcModule> = {}
   factory(name => Object.hasOwn(dependencies,name) ? dependencies[name] : realRequire(name), module)
-  const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null)
-  return { root, other, sidecar, settings, sent, chat: services.chat,
+  const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null, () => {},
+    () => worker as unknown as Parameters<typeof IpcModule.registerIpc>[0])
+  return { root, other, sidecar, settings, sent, chat: services.chat, dependencies: services.dependencies,
     invoke: async (name: string, ...args: unknown[]): Promise<unknown> => handlers.get(name)!(null, ...args),
     cleanup: async () => { await services.chat.close(); rmSync(dir, { recursive: true, force: true }) }
   }
@@ -98,20 +109,213 @@ test('main coalesces automatic/manual installation and holds chat through reconf
   } finally { await h.cleanup() }
 })
 
-test('old A completion cannot reconfigure B or a new A visit', async () => {
-  const h = harness(), install = Promise.withResolvers<Envelope>()
-  h.sidecar.install = async () => install.promise
+for (const returnToA of [false, true]) {
+  test(`A preparation survives a folder switch; return to A: ${returnToA}`, async () => {
+    const main = new ControlledSidecar(), worker = new ControlledSidecar()
+    const h = harness(main, worker), install = Promise.withResolvers<Envelope>()
+    worker.install = async () => { await install.promise; worker.ready = true; return env(true) }
+    try {
+      await h.invoke('project:open', h.root)
+      const old = h.invoke('deps:ensure', h.root, 'old-A'); await flush()
+      await h.invoke('project:open', h.other)
+      if (returnToA) await h.invoke('project:open', h.root)
+      const configurations = [...main.configured]
+      const joined = returnToA ? h.invoke('deps:ensure', h.root, 'new-A') : null
+      install.resolve(env(true))
+      expect(await old).toMatchObject({ result: { ok: true } })
+      if (joined) expect(await joined).toMatchObject({ result: { ok: true } })
+      expect(worker.calls.filter(call => call.method === 'deps.ensure')).toHaveLength(1)
+      expect(worker.calls.filter(call => call.method === 'deps.doctor')).toHaveLength(2)
+      expect(main.calls).toEqual([])
+      expect(main.configured).toEqual(returnToA ? [...configurations, h.root] : configurations)
+      if (!returnToA) await h.invoke('project:open', h.root)
+      expect(await h.invoke('deps:ensure', h.root, 'revisit')).toMatchObject({ result: { ok: true } })
+      expect(worker.calls.filter(call => call.method === 'deps.ensure')).toHaveLength(1)
+      await h.chat.send(h.root, 'codex', 'verified after return', 'resumed'); await flush()
+      expect(h.sent).toEqual(['verified after return'])
+    } finally { install.resolve(env(true)); await h.cleanup() }
+  })
+}
+
+test('R1-01 pending B open keeps B runtime when A verification finishes first', async () => {
+  const main = new ControlledSidecar(), worker = new ControlledSidecar(), h = harness(main, worker)
+  const install = Promise.withResolvers<Envelope>(), opening = Promise.withResolvers<void>()
+  let lifecycle = Promise.resolve(), selected = ''
+  main.configure = (root, _override, permitted = () => true) => {
+    const result = lifecycle.then(async () => {
+      if (!permitted()) return main.status()
+      if (root === h.other) await opening.promise
+      selected = root
+      main.configured.push(root)
+      return main.status()
+    })
+    lifecycle = result.then(() => undefined)
+    return result
+  }
+  worker.install = async () => { await install.promise; worker.ready = true; return env(true) }
   try {
-    await h.invoke('project:open',h.root)
-    const old = h.invoke('deps:ensure',h.root,'old-A'); await flush()
-    await h.invoke('project:open',h.other); await h.invoke('project:open',h.root)
-    const configurations = [...h.sidecar.configured]
+    await h.invoke('project:open', h.root)
+    const preparation = h.invoke('deps:ensure', h.root, 'A'); await flush()
+    const b = h.invoke('project:open', h.other); await flush()
+    install.resolve(env(true)); await flush()
+    opening.resolve(); await b; await preparation
+    expect(selected).toBe(h.other)
+    expect(main.configured).toEqual([h.root, h.other])
+    await h.invoke('rpc', 'deps.doctor', { root: h.other }, 'B-read')
+    expect(selected).toBe(h.other)
+  } finally { opening.resolve(); install.resolve(env(true)); await h.cleanup() }
+})
+
+for (const aliasKind of ['dot', 'symlink']) {
+  test(`R1-02 physical folder alias joins one installation: ${aliasKind}`, async () => {
+    const main = new ControlledSidecar(), worker = new ControlledSidecar(), h = harness(main, worker)
+    const install = Promise.withResolvers<Envelope>()
+    let installations = 0
+    worker.install = async () => { ++installations; await install.promise; worker.ready = true; return env(true) }
+    const alias = aliasKind === 'dot' ? h.root + '/.' : h.root + '-alias'
+    if (aliasKind === 'symlink') symlinkSync(h.root, alias, 'dir')
+    try {
+      await h.invoke('project:open', h.root)
+      const original = h.invoke('deps:ensure', h.root, 'original'); await flush()
+      await h.invoke('project:open', alias)
+      const joined = h.invoke('deps:ensure', alias, 'alias'); await flush()
+      const simultaneous = installations
+      install.resolve(env(true)); await original; await joined
+      expect(simultaneous).toBe(1)
+      expect(installations).toBe(1)
+    } finally { install.resolve(env(true)); await h.cleanup() }
+  })
+}
+
+test('R273-01 failed B startup cannot publish a skipped A refresh as ready', async () => {
+  const children: { ready: () => void; fail: () => void; requests: string[] }[] = []
+  const exported: { Sidecar?: new () => Sidecar } = {}
+  const sidecarFile = join(appRoot, 'src/main/sidecar.ts')
+  const sidecarFactory = new Script(`(function(require,exports){${transpileModule(readFileSync(sidecarFile, 'utf8'), {
+    compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+  }).outputText}\n})`).runInThisContext()
+  sidecarFactory((name: string) => {
+    if (name === './python') return { choosePython: (root: string) => ({ python: root, kind: 'env' }), scriptsDir: () => '/scripts', sidecarDir: () => '/sidecar' }
+    if (name === './diagLog') return { diag: () => {} }
+    if (name === 'node:child_process') return { spawn: () => {
+      const child = new EventEmitter() as EventEmitter & Record<string, unknown>
+      const stdout = new PassThrough(), stderr = new PassThrough(), requests: string[] = []
+      const line = (value: object) => stdout.write(JSON.stringify(value) + '\n')
+      const close = () => { child.emit('exit', 0, null); stdout.end(); stderr.end(); child.emit('close', 0, null) }
+      const pid = 1000 + children.length
+      Object.assign(child, { pid, stdout, stderr, kill: () => { close(); return true }, stdin: new Writable({ write: (chunk, _encoding, callback) => {
+        const request = JSON.parse(String(chunk)); requests.push(request.method)
+        if (request.method === 'shutdown') close()
+        else line({ id: request.id, result: request.method === 'methods.list' ? [] : { pid } })
+        callback()
+      } }) })
+      children.push({ ready: () => { line({ event: 'ready' }) }, fail: () => { child.emit('error', new Error('injected B startup failure')); close() }, requests })
+      if (children.length !== 2) queueMicrotask(() => { line({ event: 'ready' }) })
+      return child
+    } }
+    return realRequire(name)
+  }, exported)
+  const main = new exported.Sidecar!(), worker = new ControlledSidecar()
+  const h = harness(main as unknown as ControlledSidecar, worker)
+  const install = Promise.withResolvers<Envelope>()
+  worker.install = async () => { await install.promise; worker.ready = true; return env(true) }
+  try {
+    await h.invoke('project:open', h.root)
+    const preparation = h.invoke('deps:ensure', h.root, 'A'); await flush()
+    const opening = h.invoke('project:open', h.other); await flush()
+    expect(children).toHaveLength(2)
+    install.resolve(env(true)); await flush()
+    children[1].fail()
+    expect(await opening).toMatchObject({ error: { code: 'spawn_failed' } })
+    await preparation
+    h.chat.setDraft(h.root, '보존할 첫 문장')
+    const blocked = await h.chat.send(h.root, 'codex', '보존할 첫 문장', 'after-B-failed').then(() => false, () => true)
+    await flush()
+    // Either recover A and permit its RPC, or keep the gate closed until recovery.
+    if (!blocked) {
+      expect(main.status().running).toBe(true)
+      expect(main.status().python).toBe(h.root)
+      expect(await h.invoke('rpc', 'project.status', { root: h.root }, 'A-rpc')).toMatchObject({ result: { pid: 1000 + children.length - 1 } })
+    } else {
+      expect(h.sent).toEqual([])
+      expect(h.chat.draft(h.root)).toBe('보존할 첫 문장')
+      expect(await h.invoke('rpc', 'project.status', { root: h.root }, 'A-rpc')).toMatchObject({ error: { code: 'sidecar_down' } })
+      expect(await h.invoke('deps:ensure', h.root, 'A-recover')).toMatchObject({ result: { ok: true } })
+      expect(main.status().running).toBe(true)
+      expect(main.status().python).toBe(h.root)
+      expect(await h.invoke('rpc', 'project.status', { root: h.root }, 'A-recovered-rpc')).toMatchObject({ result: { pid: 1000 + children.length - 1 } })
+      await h.chat.send(h.root, 'codex', '보존할 첫 문장', 'after-A-recovered'); await flush()
+      expect(h.sent).toEqual(['보존할 첫 문장'])
+    }
+  } finally { install.resolve(env(true)); await main.stopForExit(); await h.cleanup() }
+})
+
+for (const change of ['EACCES', 'retarget'] as const) {
+  test(`R273-02 preparation settles and cleans up after canonical ${change}`, async () => {
+    let denied = false
+    const worker = new ControlledSidecar(), main = new ControlledSidecar()
+    const h = harness(main, worker, path => {
+      if (denied) throw Object.assign(new Error('injected path access denied'), { code: 'EACCES' })
+      return canonical(path)
+    })
+    const alias = h.root + '-alias'
+    symlinkSync(h.root, alias, 'dir')
+    const install = Promise.withResolvers<Envelope>()
+    worker.install = async () => { await install.promise; worker.ready = true; return env(true) }
+    try {
+      await h.invoke('project:open', alias)
+      const preparation = h.invoke('deps:ensure', alias, 'path-change'); await flush()
+      if (change === 'EACCES') denied = true
+      else { unlinkSync(alias); symlinkSync(h.other, alias, 'dir') }
+      install.resolve(env(true))
+      const deadline = Promise.withResolvers<string>()
+      const timer = setTimeout(() => deadline.resolve('pending'), 150)
+      const result = await Promise.race([preparation, deadline.promise])
+      clearTimeout(timer)
+      expect(result).not.toBe('pending')
+      expect(result).toHaveProperty('error')
+      expect(worker.stopped).toBe(1)
+      expect(h.dependencies.ownedPids()).toEqual([])
+      expect(main.configured).toEqual([alias])
+      denied = false
+      await h.invoke('project:open', h.root)
+      expect(await h.invoke('deps:ensure', h.root, 'retry')).toMatchObject({ result: { ok: true } })
+    } finally { denied = false; install.resolve(env(true)); await h.cleanup() }
+  })
+}
+
+test('cancelling preparation targets its worker, not the newly selected folder process', async () => {
+  const main = new ControlledSidecar(), worker = new ControlledSidecar(), install = Promise.withResolvers<Envelope>()
+  const h = harness(main, worker)
+  worker.install = async () => install.promise
+  try {
+    await h.invoke('project:open', h.root)
+    const pending = h.invoke('deps:ensure', h.root, 'owner'); await flush()
+    await h.invoke('project:open', h.other)
+    expect(await h.invoke('rpc:cancel', 'owner')).toBe(true)
     install.resolve(env(true))
-    expect(await old).toMatchObject({ error: { code: 'project_changed' } })
-    expect(h.sidecar.configured).toEqual(configurations)
-    await expect(h.chat.send(h.root,'codex','not verified','stale')).rejects.toThrow()
-    expect(h.sent).toEqual([])
-  } finally { await h.cleanup() }
+    expect(await pending).toMatchObject({ error: { code: 'cancelled' } })
+    expect(worker.cancelled).toHaveLength(1)
+    expect(main.cancelled).toEqual([])
+    expect(worker.stopped).toBe(1)
+    expect(h.dependencies.ownedPids()).toEqual([])
+  } finally { install.resolve(env(true)); await h.cleanup() }
+})
+
+test('exit owns a preparation worker while its installation is pending', async () => {
+  const main = new ControlledSidecar(), worker = new ControlledSidecar(), install = Promise.withResolvers<Envelope>()
+  const h = harness(main, worker)
+  worker.install = async () => install.promise
+  try {
+    await h.invoke('project:open', h.root)
+    const pending = h.invoke('deps:ensure', h.root, 'owner'); await flush()
+    expect(h.dependencies.ownedPids()).toEqual([12345])
+    await h.dependencies.stopForExit()
+    expect(worker.stopped).toBe(1)
+    expect(main.stopped).toBe(0)
+    install.resolve(env(true)); await pending
+    expect(h.dependencies.ownedPids()).toEqual([])
+  } finally { install.resolve(env(true)); await h.cleanup() }
 })
 
 test('cancellation between offline failure and fallback never starts online pip', async () => {
@@ -179,9 +383,9 @@ for (const phase of ['checking', 'installing']) {
         await flush()
         if (failure === 'configure') {
           const configure = h.sidecar.configure.bind(h.sidecar)
-          h.sidecar.configure = async root => {
+          h.sidecar.configure = async (root, override, permitted) => {
             if (root === h.other) throw { code: 'sidecar_down', message: 'injected configure failure' }
-            return configure(root)
+            return configure(root, override, permitted)
           }
         }
         if (failure === 'permission') delete h.settings.first_project_permission_asked_at
