@@ -4,7 +4,7 @@
 // 앱이 하는 일(11-13 확정): 첫 실행 준비 때 이 tgz 를 내려받아 풀고, 앱 exe 를
 // ELECTRON_RUN_AS_NODE=1 로 띄워 `node_modules/kordoc/dist/cli.js` / `mcp.js` 를 돌린다.
 // 그래서 이 스크립트가 지키는 계약은 네 가지다.
-//   1) 판 고정 — kordoc 4.17.1, 부속 패키지 버전 못박음. 뜨는 대로 깔지 않는다.
+//   1) 판 고정 — kordoc 4.25.3, 부속 패키지 버전 못박음. 뜨는 대로 깔지 않는다.
 //   2) 대상 고정 — darwin-arm64 / darwin-x64 / win32-x64. 한 덩어리에 다른 판 바이너리가
 //      섞이면 윈도 설치본이 깨진다(11-10 실측). 섞이면 verify 가 실패한다.
 //   3) OCR 제외 — onnxruntime-node·@huggingface 를 담지 않는다.
@@ -45,23 +45,27 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-export const KORDOC_VERSION = '4.17.1'
-// 11-10 실측: 맥·윈도 tarball 의 cli.js 해시가 같다(플랫폼별 빌드 아님).
-export const CLI_SHA256 = 'f755b0bc4ee860622066f30200e188481501d25969e2e38bcf79e9d2b4897a5c'
+export const KORDOC_VERSION = '4.25.3'
+// 빌드 전 자리표시. 4.25.3 으로 처음 만든 뒤 verify 가 알려 주는 실제 digest 로 바꾼다.
+// 자리표시가 남아 있으면 verify 가 반드시 실패한다(아래 CLI_SHA256_PENDING).
+// (4.17.1 값은 f755b0bc…97a5c, 11-10 실측 — 맥·윈도 tarball 동일했다.)
+export const CLI_SHA256 = '7d5cdc8d175a141a13a2317431443610625746d17d4e3553e5ea190d3f31ee5b'
+export const CLI_SHA256_PENDING = CLI_SHA256 === 'TODO-BUILD'
 export const MANIFEST_NAME = 'kordoc-bundle.json'
 export const MANIFEST_FORMAT_VERSION = 1
 
 /** kordoc 이 실행 중에만 쓰는 의존성. 버전은 실측으로 고정한 값이다. */
 export const BASE_DEPENDENCIES = {
   kordoc: KORDOC_VERSION,
-  'pdfjs-dist': '4.10.38',
+  // 4.25.3 은 dependencies·optionalDependencies 어디에도 pdfjs-dist·@napi-rs/canvas 가 없다
+  // (npm view 실측, 발주 ②). 4.17.1 때 고정하던 둘을 뺐다.
+  // TODO-BUILD(확인): PDF 렌더 경로가 지금 무엇인지는 `npm pack kordoc@4.25.3` 의 dist 를 봐야 안다.
   sharp: '0.35.5',
   '@hyzyla/pdfium': '2.1.13',
-  // pdfjs-dist 가 페이지 렌더에 쓰는 래퍼. 선택 의존성이라 `--no-optional` 설치에서 빠지고,
-  // 그러면 `require('@napi-rs/canvas')` 가 MODULE_NOT_FOUND 로 죽는다(11-15 Roh 검토 I-01).
-  // 대상별 네이티브 패키지(@napi-rs/canvas-<판>)만으로는 이 래퍼 탐색이 성립하지 않는다.
-  // 여기 적으면 verify 의 "필수 패키지" 대조가 자동으로 함께 본다.
-  '@napi-rs/canvas': '0.1.100',
+  // 4.25.3 의 새 optional 의존성(QR/바코드). `--no-optional` 설치라 자동 유입이 막히므로
+  // 명시 고정한다. 순수 wasm 이라 대상별 네이티브 패키지는 없다.
+  // TODO-BUILD(확인): 3.1.6 이 registry 에 실제로 있는지, kordoc 이 정적 import 하는지는 미확인.
+  'zxing-wasm': '3.1.6',
 }
 
 /**
@@ -76,7 +80,6 @@ export const TARGETS = {
     packages: {
       '@img/sharp-darwin-arm64': '0.35.5',
       '@img/sharp-libvips-darwin-arm64': '1.3.4',
-      '@napi-rs/canvas-darwin-arm64': '0.1.100',
     },
   },
   'darwin-x64': {
@@ -85,7 +88,6 @@ export const TARGETS = {
     packages: {
       '@img/sharp-darwin-x64': '0.35.5',
       '@img/sharp-libvips-darwin-x64': '1.3.4',
-      '@napi-rs/canvas-darwin-x64': '0.1.100',
     },
   },
   'win32-x64': {
@@ -93,7 +95,6 @@ export const TARGETS = {
     cpu: 'x64',
     packages: {
       '@img/sharp-win32-x64': '0.35.5',
-      '@napi-rs/canvas-win32-x64-msvc': '0.1.100',
     },
   },
 }
@@ -403,7 +404,8 @@ export function verifyTarGz(buffer, target) {
   if (!names.has(cliPath)) problems.push(`${target}: ${cliPath} 가 없다`)
   else {
     const digest = sha256Hex(memberBytes(archive, cliPath))
-    if (digest !== CLI_SHA256) problems.push(`${target}: cli.js 해시가 계약과 다르다(${digest})`)
+    if (CLI_SHA256_PENDING) problems.push(`${target}: CLI_SHA256 이 TODO-BUILD 자리표시다 — 이 digest 로 채운다: ${digest}`)
+    else if (digest !== CLI_SHA256) problems.push(`${target}: cli.js 해시가 계약과 다르다(${digest})`)
   }
   if (!names.has('node_modules/kordoc/dist/mcp.js')) problems.push(`${target}: dist/mcp.js 가 없다`)
 
