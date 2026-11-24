@@ -20,7 +20,7 @@ import type {
   ModelRef, ReviewModelGroup, PlacementEntries, PlacementOrigin, PlacementDecision, LaneModelsResult
 } from '../../shared/lanes-ipc'
 import type { JobRunner } from '../chat/jobs'
-import type { ExecutionAccount } from '../chat/jobs/types'
+import { usageGateAllowed, type ExecutionAccount } from '../chat/jobs/types'
 import { canonical } from '../chat/jobs/isolation'
 import type { JobStore, StoredCard } from '../chat/jobs/store'
 import { maskAccount, publicCard, type LaneAccountView } from './snapshot'
@@ -87,6 +87,11 @@ export interface CardDeps {
    * 없으면 검사를 하지 않는다(단위 시험·이음매 없는 호출자).
    */
   ensureActive?: () => void
+  /**
+   * 사용량을 모르는(`unknown`) 계정을 첫 턴 안 확인으로 넘길 수 있는 회사 — 대화 넘기기와 같은 선언(`usageGateAllowed`).
+   * 없으면 `unknown` 은 막힌다(단위 시험·이음매 없는 호출자).
+   */
+  gateInTurn?: (company: Provider) => boolean
 }
 
 // ---------------------------------------------------------------- §3 카드 짓기
@@ -232,7 +237,7 @@ export async function setPlacement(
         company: wanted.company, model: wanted.model ?? undefined, effort: wanted.effort
       } } }, snapshots)
       const accepted = checked.accepted[0]
-      if (!accepted?.company || !accepted.model) throw new LaneFailure('unavailable', '추천 주 모델을 쓸 수 없어요.')
+      if (!accepted?.company || !accepted.model) return { outcome: 'invalid', reason: 'main-unusable' }
       const supported = snapshots.find(account => account.company === accepted.company)?.models
         ?.find(model => model.model === accepted.model)?.efforts ?? []
       const choice = deps.designChoice?.()
@@ -266,7 +271,7 @@ export async function setPlacement(
       const current = await fresh(company)
       if (!before || !current?.connected || current.accountId !== before.accountId
         || JSON.stringify(current.account) !== JSON.stringify(before.account)) return { outcome: 'invalid', reason: 'account-changed' }
-      if (!judgePlan(current.account).usable || current.usage !== 'allowed') throw new LaneFailure('unavailable', '지금은 작업을 나눠 맡길 수 없어요.')
+      if (!judgePlan(current.account).usable || !usageGateAllowed(current, deps.gateInTurn)) return { outcome: 'invalid', reason: 'usage-unavailable' }
     }
     // 같은 까닭으로 쓰기 직전에 한 번 더 본다 — 계정 조회를 기다리는 사이 정지되면 승인 배치가
     // 인계 중에 저장된다(검토 중요 3과 같은 창).

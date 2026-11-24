@@ -502,3 +502,30 @@ export const LANES_TEST_SEAM_EVENT = 'knuaf:lanes-seam-test'
 
 /** 폴더가 없거나 이음매가 없을 때 화면이 쓰는 빈 값 대신 — 계산하지 않는다는 원칙상 store 가 `null` 로 둔다. */
 export type LaneModelRef = ModelRef
+
+/** Team 배치 저장·끄기 실패 — 까닭마다 학생이 할 일을 한 줄로. 코드 값은 `PlacementDecision` 과 같다. */
+export const PLACEMENT_COPY = {
+  needFolder: 'Team은 논문 폴더를 연 뒤 켤 수 있어요.',
+  noRecommendation: '추천 배치를 확인하지 못했어요.',
+  baseVersion: '화면을 새로 불러왔어요. 한 번 더 눌러 주세요.',
+  accountChanged: '로그인 상태가 바뀌었어요. 계정을 확인한 뒤 한 번 더 눌러 주세요.',
+  mainUnusable: '추천 주 모델을 지금은 쓸 수 없어요. 다른 추천 배치를 골라 주세요.',
+  usageUnavailable: '지금은 작업을 나눠 맡길 수 없어요. 계정 로그인과 사용량을 확인해 주세요.',
+  rejected: '고른 모델 조합을 쓸 수 없어요. 다른 모델을 골라 주세요.',
+  failed: '배치를 저장하지 못했어요. 잠시 뒤 다시 눌러 주세요.',
+  disableFailed: 'Team을 끄지 못했어요. 잠시 뒤 다시 눌러 주세요.'
+} as const
+
+/** 저장 결과 → 학생 문구. 적용됐으면 `null`. */
+export function placementMessage(result: { error: unknown } | { value: import('../../shared/lanes-ipc').PlacementDecision }): string | null {
+  if ('error' in result) return PLACEMENT_COPY.failed
+  const decision = result.value
+  if (decision.outcome === 'applied') return null
+  if (decision.outcome === 'rejected') return PLACEMENT_COPY.rejected
+  switch (decision.reason) {
+    case 'base-version': return PLACEMENT_COPY.baseVersion
+    case 'account-changed': return PLACEMENT_COPY.accountChanged
+    case 'main-unusable': return PLACEMENT_COPY.mainUnusable
+    case 'usage-unavailable': return PLACEMENT_COPY.usageUnavailable
+  }
+}
