@@ -16,6 +16,7 @@ import { defaultWindowSize } from '../shared/window'
 import type { FigureChannel } from './figures'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
+import { startMainWatchdog } from './mainWatchdog'
 import { createStartupDiag, STARTUP_WINDOW_MS } from './diagLimits'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
@@ -69,6 +70,9 @@ if (diagEnabled()) {
   }, 5_000)
   beat.unref?.()
   trace('boot', `pid=${process.pid} electron=${process.versions.electron} node=${process.versions.node}`)
+  // 메인 JS 스레드가 멈추면 별도 worker 가 그 사실·CPU 사용·스레드 대기 사유를 적는다(진단 전용·기록만).
+  // 이 블록 안이고 함수도 `KNUAF_APP_LOG` 가 없으면 null 을 돌려주므로, 학생 배포본에서는 worker 가 만들어지지 않는다.
+  startMainWatchdog()
   app.on('will-quit', () => trace('will-quit', `listeners=${app.listenerCount('will-quit')}`))
   process.on('exit', (code) => trace('process-exit', `code=${code}`))
 }
