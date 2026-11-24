@@ -38,13 +38,22 @@ import { cdbCandidates, cdbStackArgs, threadProbe } from './psProbe'
 export const STACK_HELPERS_SOURCE = String.raw`
 const squash = (t, n) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim().slice(0, n)
 const MAX_LINE = 400
+const STRICT_WORD = /^(?:watchdog|main-stalled|main-recovered|cdb-stack|worker-up|cdb|none|failed|<)$/
+const STRICT_PROBE = /^probe#[0-9]+$/
+const STRICT_NUM = /^(?:[A-Za-z][A-Za-z0-9_#]*[=:])?[0-9][0-9A-Za-z.:;%+/_-]*$/
+const strictTokens = (s) => s.split(' ').map((w) => (STRICT_WORD.test(w) || STRICT_PROBE.test(w) || STRICT_NUM.test(w) ? w : '<x>')).join(' ')
 const safeLine = (t) => {
-  const out = squash(t, 4000)
+  let s = squash(t, 4000)
+  // 비ASCII(한글 문서 이름 등)가 든 줄은 사람이 쓴 자유 텍스트가 섞인 줄이다 — 주변 ASCII 낱말·확장자도 조각이므로
+  // 고정 낱말·숫자(키=숫자)만 통과시키고 나머지 낱말은 통째로 가린다(허용 목록).
+  if (/[^\x20-\x7e]/.test(s)) s = strictTokens(s)
+  const out = s
     .replace(/[^\x20-\x7e]/g, '?')
     .replace(/(?:[A-Za-z]:[\\/]|\\\\).*$/, '<path>')
     .replace(/(?<![\w.])\/(?:Users|home|tmp|var|private|root|mnt|opt|Volumes)\/.*$/, '<path>')
     .replace(/\S*\\\S*/g, '<path>')
     .replace(/(?<![\w./])\/[^\s"',;]+/g, '<path>')
+    .replace(/(?<![\w.-])[A-Za-z_][\w-]*\.(?!(?:exe|dll|sys|so|dylib)(?!\w))[A-Za-z0-9]{1,5}(?!\w)/g, '<name>')
     .replace(/\b(authorization|bearer|token|password|passwd|secret|api[-_]?key|cookie|session[-_]?id)\b\s*[:=]?\s*[^\s,;]*/gi, '$1=<value>')
     .replace(/[A-Za-z0-9+/_-]{32,}={0,2}/g, '<value>')
   return out.length > MAX_LINE ? out.slice(0, MAX_LINE) + '...(cut)' : out
@@ -118,7 +127,7 @@ const startCdb = (stallSince) => {
       try { fs.writeFileSync(stackFile, '# cdb -pv ~*k pid=' + pid + ' stalledMsAtStart=' + (cs - stallSince) + ' tookMs=' + (Date.now() - cs) + ' threads=' + sum.threads + '\n' + sum.keep.join('\n') + '\n'); saved = 'yes' } catch {}
     }
     const base = 'watchdog cdb-stack took=' + (Date.now() - cs) + 'ms exit=' + (err ? (err.code || err.name || 'error') : 0) + ' threads=' + sum.threads + ' frames=' + sum.frames + ' iocpFrames=' + sum.iocp + ' saved=' + saved
-    write(sum.threads > 0 ? base + ' tops=' + sum.top + ' thread0=' + sum.thread0 : base + ' (no-threads out=' + squash(stdout, 160) + ' err=' + squash(stderr, 160) + ')')
+    write(sum.threads > 0 ? base + ' tops=' + sum.top + ' thread0=' + sum.thread0 : base + ' (no-threads outLen=' + String(stdout || '').length + ' errLen=' + String(stderr || '').length + ')')
   })
 }
 const probe = () => {
