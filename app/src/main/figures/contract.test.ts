@@ -78,8 +78,14 @@ describe('parseFigureRequest', () => {
     assert.equal(contract.parseFigureRequest(body({ slot: 'sec-1.a_b' })).ok, true)
   })
 
-  it('그림은 1~3장', () => {
-    assert.deepEqual(contract.parseFigureRequest(body({ images: [] })), { ok: false, reason: 'images' })
+  it('그림은 0~3장, 빈 배열은 목록 요청', () => {
+    const listed = contract.parseFigureRequest(body({ images: [] }))
+    assert.equal(listed.ok, true)
+    if (listed.ok) assert.deepEqual(listed.request.images, [])
+    assert.equal(contract.parseFigureRequest(body({ images: null })).ok, false)
+    const missing = JSON.parse(body()) as Record<string, unknown>
+    delete missing.images
+    assert.deepEqual(contract.parseFigureRequest(JSON.stringify(missing)), { ok: false, reason: 'shape' })
     assert.deepEqual(
       contract.parseFigureRequest(body({ images: ['https://a.example/1.jpg', 'https://a.example/2.jpg', 'https://a.example/3.jpg', 'https://a.example/4.jpg'] })),
       { ok: false, reason: 'images' }
