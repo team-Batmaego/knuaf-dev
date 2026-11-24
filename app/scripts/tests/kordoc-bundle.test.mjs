@@ -10,8 +10,7 @@
 // (네트워크가 필요해서 이 시험에 넣지 않는다).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -234,7 +233,8 @@ test('verify 는 가짜 덩어리에서 cli 해시만 걸린다(나머지 계약
   const problems = verifyTarGz(fakeBundle('ok'), 'darwin-arm64')
   assert.equal(problems.length, 1, problems.join('\n'))
   assert.match(problems[0], /cli\.js 해시가 계약과 다르다/)
-  assert.match(CLI_SHA256, /^[0-9a-f]{64}$/)
+  // TODO-BUILD: 4.25.3 첫 빌드 뒤 bundle.mjs 의 CLI_SHA256 을 채우기 전까지 이 줄은 실패한다(의도된 가드).
+  assert.match(CLI_SHA256, /^[0-9a-f]{64}$/, 'CLI_SHA256 이 아직 TODO-BUILD 자리표시다')
 })
 
 test('verify 는 OCR 패키지가 섞이면 실패한다', () => {
@@ -428,9 +428,9 @@ test('셔뱅 없는 텍스트 셔틀은 sh 로 감싼다(실측 ENOEXEC 회귀)'
   // `~/.npm-global/bin/pnpm` 은 `#!` 없이 시작하는 sh 스크립트다 — 그대로 spawn 하면 ENOEXEC.
   const dir = tempDir('shim-sh')
   const shim = makeExecutable(dir, 'pnpm', '# pnpm shim\n# no shebang on purpose\n')
-  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.17.1'], { env: { PATH: dir }, platform: 'darwin' })
+  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.25.3'], { env: { PATH: dir }, platform: 'darwin' })
   assert.equal(plan.file, '/bin/sh')
-  assert.deepEqual(plan.args, [shim, 'add', 'kordoc@4.17.1'])
+  assert.deepEqual(plan.args, [shim, 'add', 'kordoc@4.25.3'])
 })
 
 test('진짜 실행 파일은 감싸지 않는다', () => {
@@ -469,13 +469,13 @@ test('공백 있는 pnpm.cmd 경로는 안쪽에서 따옴표로 감싼다', () 
   mkdirSync(dir, { recursive: true })
   const cmd = join(dir, 'pnpm.cmd')
   writeFileSync(cmd, '@ECHO off\r\n')
-  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.17.1'], {
+  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.25.3'], {
     env: { PATH: dir, ComSpec: 'cmd.exe' },
     platform: 'win32',
   })
   const line = plan.args[4]
   assert.match(line, /^".*"$/)
-  assert.equal(line.slice(1, -1), `"${cmd}" add kordoc@4.17.1`)
+  assert.equal(line.slice(1, -1), `"${cmd}" add kordoc@4.25.3`)
 })
 
 test('quoteCmdArg 는 공백·특수문자가 없으면 그대로 둔다', () => {
@@ -521,7 +521,7 @@ test('윈도 명령줄은 /v:off 로 띄우고 전체를 한 번 더 감싼다',
   const dir = tempDir('cmdshell')
   const cmd = join(dir, 'pnpm.cmd')
   writeFileSync(cmd, '@ECHO off\r\n')
-  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.17.1'], {
+  const plan = pnpmSpawnPlan('pnpm', ['add', 'kordoc@4.25.3'], {
     env: { PATH: dir, ComSpec: 'cmd.exe' },
     platform: 'win32',
   })
@@ -571,12 +571,24 @@ test('설치 인자에 pnpm 10·11 이 거절하는 --no-frozen-lockfile 이 없
   assert.match(seen, /--os=darwin/)
 })
 
-test('@napi-rs/canvas 래퍼가 계획에 있고 빠지면 verify 가 잡는다', () => {
-  // pdfjs-dist 는 렌더할 때 require('@napi-rs/canvas') 를 한다. --no-optional 설치라
-  // 선택 의존성으로는 들어오지 않는다 → 계획에 직접 넣고, 없으면 실패해야 한다(I-01).
+test('4.25.3 고정 목록: pdfjs-dist·@napi-rs/canvas 는 없고 zxing-wasm 은 있다', () => {
+  // 4.25.3 은 의존성에서 pdfjs-dist·@napi-rs/canvas 를 뺐다(발주 ② npm view). 깔리기만 하고
+  // 쓰이지 않는 패키지를 계획에 두지 않는다. zxing-wasm 은 새 optional 이라 --no-optional
+  // 설치에선 명시 고정으로만 들어온다(TODO-BUILD: 필수 여부는 npm pack 확인 뒤 재판단).
   for (const target of Object.keys(TARGETS)) {
-    assert.equal(planTarget(target).dependencies['@napi-rs/canvas'], '0.1.100')
+    const { dependencies } = planTarget(target)
+    assert.equal(dependencies['pdfjs-dist'], undefined)
+    assert.equal(dependencies['@napi-rs/canvas'], undefined)
+    assert.equal(
+      Object.keys(dependencies).some((name) => name.startsWith('@napi-rs/canvas-')),
+      false,
+    )
+    assert.equal(dependencies['zxing-wasm'], '3.1.6')
+    assert.equal(dependencies.kordoc, '4.25.3')
   }
+})
+
+test('zxing-wasm 이 빠지면 verify 가 필수 패키지로 잡는다', () => {
   const plan = planTarget('darwin-arm64')
   const files = {
     'package.json': JSON.stringify({ name: 'kordoc-bundle', private: true }),
@@ -584,43 +596,15 @@ test('@napi-rs/canvas 래퍼가 계획에 있고 빠지면 verify 가 잡는다'
     'node_modules/kordoc/dist/cli.js': 'fake-cli',
     'node_modules/kordoc/dist/mcp.js': 'fake-mcp',
   }
-  // 래퍼를 뺀 채 나머지 필수 패키지는 다 넣는다 → 문제는 래퍼 하나뿐이어야 한다.
   for (const [name, version] of Object.entries(plan.dependencies)) {
-    if (name === 'kordoc' || name === '@napi-rs/canvas') continue
+    if (name === 'kordoc' || name === 'zxing-wasm') continue
     files[`node_modules/${name}/package.json`] = JSON.stringify({ name, version })
   }
-  const problems = verifyTarGz(packTreeGzip(makeTree('no-canvas-wrapper', files)), 'darwin-arm64')
-  assert.equal(problems.filter((p) => p.includes('@napi-rs/canvas')).length, 1, problems.join('\n'))
+  const problems = verifyTarGz(packTreeGzip(makeTree('no-zxing', files)), 'darwin-arm64')
   assert.ok(
-    problems.some((p) => p.includes('필수 패키지가 없다 — @napi-rs/canvas')),
+    problems.some((p) => p.includes('필수 패키지가 없다 — zxing-wasm')),
     problems.join('\n'),
   )
-})
-
-test('풀어 놓은 트리에서 @napi-rs/canvas 가 해석된다(전역 모듈 없이)', () => {
-  // 검사가 "package.json 이 있다"만 보는 게 아니라 실제 탐색이 성립하는지 잠근다.
-  const root = makeTree('canvas-resolve', {
-    'package.json': '{"name":"kordoc-bundle"}\n',
-    'node_modules/@napi-rs/canvas/package.json': JSON.stringify({
-      name: '@napi-rs/canvas',
-      version: '0.1.100',
-      main: 'index.js',
-    }),
-    'node_modules/@napi-rs/canvas/index.js': 'module.exports = require("@napi-rs/canvas-darwin-arm64")\n',
-    'node_modules/@napi-rs/canvas-darwin-arm64/package.json': JSON.stringify({
-      name: '@napi-rs/canvas-darwin-arm64',
-      version: '0.1.100',
-      main: 'index.js',
-    }),
-    'node_modules/@napi-rs/canvas-darwin-arm64/index.js': 'module.exports = { createCanvas() {} }\n',
-  })
-  const require = createRequire(join(root, 'package.json'))
-  // 맥 /var 는 /private/var 심볼릭 링크다 → 양쪽을 realpath 로 맞춘 뒤 비교한다(11-15 실측 실패).
-  assert.equal(
-    realpathSync(require.resolve('@napi-rs/canvas')),
-    realpathSync(join(root, 'node_modules', '@napi-rs', 'canvas', 'index.js')),
-  )
-  assert.equal(typeof require('@napi-rs/canvas').createCanvas, 'function')
 })
 
 test('명세는 대상마다 그 대상을 만든 도구 판을 적는다', () => {

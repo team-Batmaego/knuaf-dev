@@ -57,8 +57,8 @@ const sha = (text: string): string => createHash('sha256').update(text).digest('
 /** 명세 JSON 초안 — 값 검사(`parseKordocSpec`)를 통과하는 모양. */
 function rawSpec(over: Record<string, unknown> = {}, targetOver: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    release: 'kordoc-bundle-1',
-    version: '4.17.1',
+    release: 'kordoc-bundle-2',
+    version: '4.25.3',
     cli: CLI,
     cliSha256: sha(CLI_BODY),
     mcpSha256: sha(MCP_BODY),
@@ -160,7 +160,7 @@ function installDeps(
     target: targetOf(spec),
     execPath: '/fake/electron',
     ledger,
-    url: 'https://example.invalid/kordoc-bundle-1/kordoc-darwin-arm64.tgz',
+    url: 'https://example.invalid/kordoc-bundle-2/kordoc-darwin-arm64.tgz',
     now: () => over.now ?? NOW,
     platform: process.platform,
     pidAlive: over.pidAlive ?? (() => false),
@@ -218,7 +218,7 @@ test('명세: 정상·대상 없음·오류를 서로 다른 갈래로 가른다
 
 test('명세 값 꼴: 경로·해시·크기가 어긋나면 오류다', () => {
   const bad: Array<Record<string, unknown>> = [
-    { release: '../kordoc-bundle-1' },
+    { release: '../kordoc-bundle-2' },
     { release: 'kordoc/bundle' },
     { version: '4.17' },
     { cli: '/node_modules/kordoc/dist/cli.js' },
@@ -243,7 +243,7 @@ test('withManagedKordoc: 쓸 수 있으면 값 / 아직 없으면 legacy 안 부
   let legacyCalls = 0
   let installs = 0
   const invalidReasons: string[] = []
-  const managed = { node: '/app', nodeArgs: ['-r', 'shim'], cliJs: '/app/cli.js', version: '4.17.1' }
+  const managed = { node: '/app', nodeArgs: ['-r', 'shim'], cliJs: '/app/cli.js', version: '4.25.3' }
 
   const build = (state: ReturnType<typeof readSpecState>, resolved: typeof managed | null) =>
     makeKordocSelector(
@@ -928,7 +928,7 @@ test('호스트 안내 파일: R1 명령/파일·exe 지문을 쓰고 소유자 
   const executableStat = statSync(process.execPath)
   expect(data.schema).toBe(1)
   expect(data.owner).toBe('knuaf-dev.app')
-  expect(data.kordoc_version).toBe('4.17.1')
+  expect(data.kordoc_version).toBe('4.25.3')
   expect(data.command).toEqual([process.execPath, '-r', join(install, SHIM_NAME), join(install, CLI)])
   expect(data.files).toEqual(data.command.filter((arg: string) => isAbsolute(arg)))
   expect(data.files[0]).toBe(data.command[0])
