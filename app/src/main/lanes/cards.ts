@@ -81,6 +81,12 @@ export interface CardDeps {
    * 없으면 `account` 로 떨어진다(단위 시험·이음매 없는 호출자).
    */
   freshAccount?: (company: Provider) => Promise<ExecutionAccount | null>
+  /**
+   * 인계(정지) 검사 — 문 앞(`handlers`)에서 한 번 통과한 요청도 폴더 대기열에서 기다리는 사이
+   * 정지될 수 있다. 상태를 저장하기 **직전**, 같은 동기 구간에서 한 번 더 본다(검토 중요 3).
+   * 없으면 검사를 하지 않는다(단위 시험·이음매 없는 호출자).
+   */
+  ensureActive?: () => void
 }
 
 // ---------------------------------------------------------------- §3 카드 짓기
@@ -262,9 +268,14 @@ export async function setPlacement(
         || JSON.stringify(current.account) !== JSON.stringify(before.account)) return { outcome: 'invalid', reason: 'account-changed' }
       if (!judgePlan(current.account).usable || current.usage !== 'allowed') throw new LaneFailure('unavailable', '지금은 작업을 나눠 맡길 수 없어요.')
     }
+    // 같은 까닭으로 쓰기 직전에 한 번 더 본다 — 계정 조회를 기다리는 사이 정지되면 승인 배치가
+    // 인계 중에 저장된다(검토 중요 3과 같은 창).
+    deps.ensureActive?.()
     if (deps.store.versionOf(folder) !== baseVersion) return { outcome: 'invalid', reason: 'base-version' }
     if (nextDesign) await selectDesignLocked(deps, folder, nextDesign)
     if (nextDesign?.company === deps.mainCompany) proposal.next.design = nextDesign
+    // 여기서는 다시 보지 않는다 — 설계 적용(`applyDesign`)이 이미 첫 쓰기라, 그 뒤에 던지면
+    // 주 모델만 바뀌고 승인 배치·판 번호는 그대로 남는다. 시작한 변경은 끝까지 함께 쓴다.
     deps.store.approve(folder, proposal.next, origin)
     deps.store.bumpVersion(folder)
     return { outcome: 'applied', version: deps.store.versionOf(folder) }
@@ -303,6 +314,8 @@ export async function selectDesign(deps: CardDeps, root: string, entry: LaneEntr
     } } }, account?.connected ? [account.account] : [])
     const accepted = check.accepted[0]
     if (!accepted?.company || !accepted.model) throw new LaneFailure('unavailable', '이 모델을 고를 수 없어요.')
+    // 계정 조회를 기다리는 사이 정지될 수 있다 — 저장 직전에 한 번 더 본다.
+    deps.ensureActive?.()
     await selectDesignLocked(deps, folder, { company: accepted.company, model: accepted.model, effort: accepted.effort, how: 'main' })
   })
 }
@@ -398,6 +411,10 @@ async function decideCardLocked(
   // 건드리지 않으므로 카드는 열린 채로 남고 학생은 [계속]을 다시 누를 수 있다.
   if (action === 'once') throw new LaneFailure('unavailable', ONCE_DEFERRED)
 
+  // [검토 중요 3] 문 앞(`handlers`) 검사를 통과한 요청도 폴더 대기열에서 기다리는 사이 정지될
+  // 수 있다. 소비(`beginCard`)는 **저장**이므로 그 직전, 같은 동기 구간에서 한 번 더 본다 —
+  // 여기서 던지면 카드는 `open` 그대로라 재개 뒤 같은 카드를 다시 누를 수 있다.
+  deps.ensureActive?.()
   const claim = deps.store.beginCard(cardId, baseVersion)
   if (!claim.ok) {
     if (claim.reason === 'not-found') throw new LaneFailure('not-found', '카드를 찾지 못했어요.')

@@ -619,11 +619,14 @@ test('handoff: 정지해도 도는 계정 조회를 끊지 않는다 — drain �
     // 정지가 조회의 자식을 끊지 않았다 — 인계는 이 자식이 죽을 때까지 기다린다.
     expect(alive(pid)).toBe(true)
     // 조회를 끝내는 쪽은 인계의 정지가 아니라 조회 자신의 종료(`close`)다.
-    await probe.close()
-    expect(await pending).toBeNull()
-    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다(다른 await 없이 바로 확인).
+    // 종료를 **유도만** 하고 다른 종료 약속(`pending`)을 기다리기 전에 drain 과 자식 생존을 본다 —
+    // `await pending` 뒤에 보면 drain 이 조회보다 먼저 풀려도 이 시험이 통과해 버린다.
+    const closing = probe.close()
     await draining
+    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다(다른 await 없이 바로 확인).
     expect(alive(pid)).toBe(false)
+    await closing
+    expect(await pending).toBeNull()
     // 정지·drain 이 조회를 하나 더 띄우지 않았다 — 임대는 조회 하나에만 붙는다.
     expect(readFileSync(countFile, 'utf8')).toBe('x')
   } finally {

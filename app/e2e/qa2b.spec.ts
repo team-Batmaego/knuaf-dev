@@ -198,7 +198,7 @@ test('비교 기준은 종이를 닫았다 열어도 남는다 (QA2B-R1-03)', as
     const sheet = page.locator('.paperpane .sheet')
     await expect(sheet).toContainText('600평', { timeout: 30_000 })
 
-    rewriteSection(root, { body: BODY_800, expected: 1 })
+    rewriteSection(root, { body: BODY_800, expected: 2 })
     await expect(sheet).toContainText('800평', { timeout: 30_000 })
     await expect(page.locator('.review-toggle')).toBeVisible()
 
@@ -224,14 +224,14 @@ test('비교 모드에서도 표 구조가 유지된다 (QA2B-R1-04)', async () 
   const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
   const root = synthProject()
   // 기준이 표가 되게 먼저 표로 바꿔 두고 연다(처음 읽는 본문 = 표 600평).
-  setBody(root, TABLE('600'), 'qa2b:table:1', 1)
+  setBody(root, TABLE('600'), 'qa2b:table:1', 2)
   const { electronApp, page } = await launch({ env })
   try {
     await openProject(page, root)
     const sheet = page.locator('.paperpane .sheet')
     await expect(sheet.locator('table')).toHaveCount(1, { timeout: 30_000 })
 
-    setBody(root, TABLE('800'), 'qa2b:table:2', 2)
+    setBody(root, TABLE('800'), 'qa2b:table:2', 3)
     await expect(sheet).toContainText('800평', { timeout: 30_000 })
 
     await page.locator('.review-toggle').click()
@@ -253,14 +253,14 @@ test('문단을 통째로 지워도 빨강과 취소선이 함께 보인다 (QA2
   const env = fakeCodexEnv(join(dir, 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
   const root = synthProject()
   // 기준 = 두 문단. 그 뒤 한 문단을 통째로 지운다 → del 블록(짝 없음).
-  setBody(root, '남는 문단이다.\n\n삭제할 문단이다.', 'qa2b:del:1', 1)
+  setBody(root, '남는 문단이다.\n\n삭제할 문단이다.', 'qa2b:del:1', 2)
   const { electronApp, page } = await launch({ env })
   try {
     await openProject(page, root)
     const sheet = page.locator('.paperpane .sheet')
     await expect(sheet).toContainText('삭제할 문단이다', { timeout: 30_000 })
 
-    setBody(root, '남는 문단이다.', 'qa2b:del:2', 2)
+    setBody(root, '남는 문단이다.', 'qa2b:del:2', 3)
     await expect(sheet).not.toContainText('삭제할 문단이다', { timeout: 30_000 })
     await page.locator('.review-toggle').click()
 

@@ -84,7 +84,7 @@ test('종이를 닫으면 다시 저절로 열리지 않는다', async () => {
   await expect(page.getByRole('button', { name: '내 논문 펴기' })).toBeVisible()
 
   // 기록이 올라도 닫아 둔 것은 닫힌 채다(설계 §4-2).
-  addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 농장 소개', body: '새벽빛 농원은 해 뜨기 전에 딴다.', expected: 1 })
+  addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 농장 소개', body: '새벽빛 농원은 해 뜨기 전에 딴다.', expected: 2 })
   await page.waitForTimeout(4_000)
   await expect(page.locator('.paperpane')).toHaveCount(0)
 
@@ -289,7 +289,7 @@ test('대화 이벤트의 "종이에서 보기"는 닫아 둔 종이를 실제�
     await expect(page.locator('.paperpane')).toHaveCount(0)
 
     // 절 본문이 바뀌면 대화에 이벤트 줄이 뜬다 — 그 "종이에서 보기"는 학생이 누른 명시적 이동이다.
-    rewriteSection(root, { body: '고친 본문이다.', expected: 1 })
+    rewriteSection(root, { body: '고친 본문이다.', expected: 2 })
     const ev = page.locator('.chat-event')
     await expect(ev, '이벤트 줄이 없다').toBeVisible({ timeout: 30_000 })
     await ev.getByRole('button', { name: /고친 부분 보기|종이에서 보기/ }).click()
