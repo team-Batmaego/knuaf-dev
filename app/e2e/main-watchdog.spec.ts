@@ -2,32 +2,38 @@
  * 메인 무응답 감시자(`src/main/mainWatchdog.ts`) 계약 시험. Node 단위 — Electron 창·실제 worker 없이.
  *
  * 고정하는 계약:
- *  - **기본 꺼짐**: `KNUAF_APP_LOG` 가 없는 환경(학생 배포본)에서는 worker 를 만들지도 않는다. `KNUAF_MAIN_WATCHDOG=0` 도 끈다.
- *    켜질 때는 worker 를 정확히 한 번 만들고 스택 파일을 app-log 옆(CI 가 올리는 폴더)에 둔다.
- *  - **기록만**: worker 소스·cdb 인자에 깨움(메시지 전송)·덤프·종료 명령이 없다. cdb 는 비침투 `-pv` + `~*k;q` 텍스트뿐이다.
- *  - **가림**: worker 가 쓰는 모든 줄(`safeLine`)과 cdb 스택 요약(`summarize`)에서 경로·토큰·한글(문서 이름)이 지워지고,
- *    숫자·스레드 상태 이름·`모듈!함수+오프셋` 은 남는다. 시험은 shipped 소스 문자열을 그대로 실행한다.
+ *  - **기본 꺼짐(검토 I-01)**: 패키징된 앱이거나(`isPackaged` 가 `false` 로 명시되지 않음), e2e 전용 환경값
+ *    `KNUAF_E2E_MAIN_WATCHDOG=1` 이 없거나, `KNUAF_APP_LOG` 가 없으면 worker 를 만들지 않는다. 셋 다 맞을 때만 시작한다.
+ *  - **종료(검토 I-02)**: `stop()` 이 worker 를 종료하고, `index.ts` 가 종료 경로(`will-quit`)에서 `stop()` 을 부른다.
+ *  - **자식 프로세스 없음(검토 C-02)**: worker 소스에 자식 프로세스·PowerShell·cdb·`Responding` 이 없다.
+ *  - **고정 서식(검토 C-01)**: worker 가 쓸 수 있는 줄은 **허용 목록 정규식**에만 맞는다. 줄에는 문자열 인자가 하나도 없고
+ *    숫자만 들어가므로, 드라이브 상대 경로(`D:Jane Doe\plan.hwpx`)·`1SPRINGBUDGET`·`Private Draft.exe`·`PrivateDraft.docx!…`
+ *    같은 외부 문자열이 들어갈 **자리가 서식에 없다**. 지우기 함수에 의존하지 않는다.
  *  - 시험은 가짜 표식만 쓴다 — 실제 경로·비밀값은 넣지 않는다.
  */
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import {
-  STACK_HELPERS_SOURCE,
   startMainWatchdog,
+  WATCHDOG_LINES_SOURCE,
   watchdogWorkerSource,
   type WatchdogWorkerData,
   type WatchdogWorkerLike
 } from '../src/main/mainWatchdog'
-import { cdbStackArgs } from '../src/main/psProbe'
 
-interface Helpers {
-  safeLine(text: unknown): string
-  siteOf(text: unknown): string
-  summarize(text: unknown): { keep: string[]; threads: number; frames: number; iocp: number; top: string; thread0: string }
+interface Lines {
+  LINE_OK: RegExp
+  lineUp(): string
+  lineStalled(idleMs: unknown, cpuMs: unknown, busy: unknown): string
+  lineRecovered(stalledMs: unknown, cpuMs: unknown): string
 }
 // worker 가 실제로 받는 문자열 그대로 실행한다(복사본을 시험하지 않는다).
-const helpers = new Function(`${STACK_HELPERS_SOURCE}\nreturn { safeLine, siteOf, summarize }`)() as Helpers
+const lines = new Function(`${WATCHDOG_LINES_SOURCE}\nreturn { LINE_OK, lineUp, lineStalled, lineRecovered }`)() as Lines
+
+/** 시험이 독립적으로 쥔 허용 목록 — 접두 타임스탬프(`<숫자> `) + 고정 낱말 + 숫자뿐. 메인 쪽 줄(`diag`)도 같은 목록이다. */
+const ALLOWED =
+  /^\d+ watchdog (?:started|start-failed|worker-error|worker-up|main-stalled idleMs=\d+ cpuMs=\d+ busy=\d+%|main-recovered stalledMs=\d+ cpuMs=\d+)$/
 
 function spyWorker() {
   const calls: { source: string; options: { eval: true; workerData: WatchdogWorkerData } }[] = []
@@ -43,138 +49,145 @@ function spyWorker() {
   return { calls, events, create }
 }
 
-test('기본 꺼짐 — KNUAF_APP_LOG 가 없는 환경(학생 배포본)에서는 worker 를 만들지 않는다', () => {
-  for (const env of [{}, { KNUAF_APP_LOG: '' }, { KNUAF_MAIN_WATCHDOG: '1' }] as NodeJS.ProcessEnv[]) {
+const LOG = join('artifacts', 'run-1', 'app-log.txt')
+const ON = { KNUAF_APP_LOG: LOG, KNUAF_E2E_MAIN_WATCHDOG: '1' } as NodeJS.ProcessEnv
+
+test('기본 꺼짐 — 환경값이 없는 학생 배포본 모양에서는 worker 를 만들지 않는다', () => {
+  const cases: NodeJS.ProcessEnv[] = [
+    {},
+    { KNUAF_APP_LOG: '' },
+    { KNUAF_APP_LOG: LOG }, // 앱 로그만 — 학생 배포본에 로그 값만 주어도 켜지면 안 된다
+    { KNUAF_E2E_MAIN_WATCHDOG: '1' }, // e2e 값만 — 기록 파일이 없다
+    { KNUAF_APP_LOG: LOG, KNUAF_E2E_MAIN_WATCHDOG: '0' },
+    { KNUAF_APP_LOG: LOG, KNUAF_E2E_MAIN_WATCHDOG: 'true' }
+  ]
+  for (const env of cases) {
     const spy = spyWorker()
-    expect(startMainWatchdog({ env, createWorker: spy.create })).toBeNull()
+    expect(startMainWatchdog({ env, isPackaged: false, createWorker: spy.create })).toBeNull()
     expect(spy.calls).toHaveLength(0)
     expect(spy.events).toEqual([])
   }
 })
 
-test('끄는 스위치 — KNUAF_MAIN_WATCHDOG=0 이면 로그가 켜져 있어도 worker 를 만들지 않는다', () => {
-  const spy = spyWorker()
-  const env = { KNUAF_APP_LOG: join('artifacts', 'app-log.txt'), KNUAF_MAIN_WATCHDOG: '0' } as NodeJS.ProcessEnv
-  expect(startMainWatchdog({ env, createWorker: spy.create })).toBeNull()
-  expect(spy.calls).toHaveLength(0)
+test('패키징된 앱은 환경값을 다 줘도 꺼짐 — isPackaged 가 true 이거나 안 주어져도 null', () => {
+  for (const isPackaged of [true, undefined]) {
+    const spy = spyWorker()
+    expect(startMainWatchdog({ env: ON, isPackaged, createWorker: spy.create })).toBeNull()
+    expect(spy.calls).toHaveLength(0)
+    expect(spy.events).toEqual([])
+  }
 })
 
-test('켜짐 — 로그가 있을 때만 worker 를 한 번 만들고, 스택 파일은 app-log 옆에 둔다', () => {
+test('켜짐 — 패키징 안 됨 + e2e 값 + 앱 로그가 모두 맞을 때만 worker 를 한 번 만든다', () => {
   const spy = spyWorker()
-  const file = join('artifacts', 'run-1', 'app-log.txt')
-  const handle = startMainWatchdog({ env: { KNUAF_APP_LOG: file } as NodeJS.ProcessEnv, createWorker: spy.create })
+  const handle = startMainWatchdog({ env: ON, isPackaged: false, createWorker: spy.create })
   try {
     expect(handle).not.toBeNull()
     expect(spy.calls).toHaveLength(1)
     const { source, options } = spy.calls[0]
     expect(options.eval).toBe(true)
     expect(source).toBe(watchdogWorkerSource())
-    expect(options.workerData.file).toBe(file)
-    expect(options.workerData.pid).toBe(process.pid)
-    // CI 가 이미 올리는 폴더(app-log 와 같은 곳)이며 파일 이름이 업로드 패턴 `stall-stacks-*.txt` 와 맞는다.
-    expect(options.workerData.stackFile).toBe(join(dirname(file), `stall-stacks-${process.pid}.txt`))
-    expect(options.workerData.cdbArgs).toEqual(cdbStackArgs(process.pid))
+    // worker 에 넘기는 것은 공유 카운터와 기록 파일 경로뿐이다(자식 프로세스 인자·명령 없음).
+    expect(Object.keys(options.workerData).sort()).toEqual(['buf', 'file'])
+    expect(options.workerData.file).toBe(LOG)
     expect(spy.events).toEqual(['on:error', 'unref'])
   } finally {
     handle?.stop()
   }
+})
+
+test('종료 — stop() 은 worker 를 terminate 한다', () => {
+  const spy = spyWorker()
+  const handle = startMainWatchdog({ env: ON, isPackaged: false, createWorker: spy.create })
+  expect(handle).not.toBeNull()
+  expect(spy.events).not.toContain('terminate')
+  handle?.stop()
   expect(spy.events).toContain('terminate')
 })
 
-test('index.ts 는 진단 블록(diagEnabled) 안에서만 감시자를 부른다', () => {
+test('index.ts — 진단 블록 안에서 isPackaged 를 넘겨 시작하고, will-quit 에서 stop() 한다', () => {
   const text = readFileSync(join(__dirname, '../src/main/index.ts'), 'utf8')
   const open = text.indexOf('\nif (diagEnabled()) {\n')
   expect(open).toBeGreaterThan(-1)
   const close = text.indexOf('\n}\n', open)
   const block = text.slice(open, close)
-  expect(block).toContain('startMainWatchdog()')
+  expect(block).toContain('startMainWatchdog({ isPackaged: app.isPackaged })')
+  const quit = block.slice(block.indexOf("app.on('will-quit'"))
+  expect(quit).toContain('mainWatchdog?.stop()')
   // import 한 줄 + 부르는 한 줄 — 다른 곳에서 부르지 않는다.
   expect(text.match(/startMainWatchdog/g)).toHaveLength(2)
+  // e2e launch 도우미만 켜는 값을 넣는다.
+  const helpers = readFileSync(join(__dirname, 'helpers.ts'), 'utf8')
+  expect(helpers).toContain("env.KNUAF_E2E_MAIN_WATCHDOG = '1'")
 })
 
-test('기록만 한다 — worker 소스·cdb 인자에 깨움·덤프·종료 명령이 없다', () => {
+test('자식 프로세스 없음 — worker 소스에 자식·PowerShell·cdb·Responding·깨움이 없다', () => {
   const source = watchdogWorkerSource()
   // 구문 검사만(실행하지 않는다) — Function 생성자는 본문을 파싱만 한다.
   expect(() => new Function(source)).not.toThrow()
-  for (const word of [/PostMessage/i, /PostThreadMessage/i, /WM_NULL/i, /wake/i, /\.dump/i, /MiniDump/i, /\.kill/i, /\.detach/i, /process\.kill/i]) {
+  for (const word of [
+    /child_process/i, /\bspawn/i, /\bexec/i, /fork\(/i, /powershell/i, /\bcdb\b/i, /Responding/i,
+    /PostMessage/i, /PostThreadMessage/i, /WM_NULL/i, /wake/i, /\.dump/i, /\.kill/i, /process\.kill/i
+  ]) {
     expect(source).not.toMatch(word)
   }
-  const args = cdbStackArgs(4242)
-  expect(args).toEqual(['-pv', '-p', '4242', '-c', '~*k;q'])
-  for (const arg of args) expect(arg).not.toMatch(/dump|^-ma$|^-g$|^-o$|kill|detach/i)
-  // 시도 횟수가 한정돼 있다 — probe 5번·cdb 1번.
-  expect(source).toContain('const MAX_PROBES = 5')
-  expect(source.match(/startCdb\(/g)).toHaveLength(1) // 호출 한 곳뿐이고, `!cdbStarted` 문이 프로세스당 1회로 막는다
-  expect(source).toContain('if (!cdbStarted && idle >= CDB_AFTER_MS) startCdb(lastChange)')
+  // require 는 worker_threads(공유 카운터 전달)와 fs(기록) 둘뿐이다.
+  expect([...source.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]).sort()).toEqual(['node:fs', 'node:worker_threads'])
+  const main = readFileSync(join(__dirname, '../src/main/mainWatchdog.ts'), 'utf8')
+  expect(main).not.toMatch(/child_process|psProbe/)
 })
 
-test('CI 는 스택 텍스트를 이미 올리는 산출물 목록에 싣는다 — 줄은 한 줄', () => {
-  const ci = readFileSync(join(__dirname, '../../.github/workflows/ci.yml'), 'utf8')
-  expect(ci.match(/app\/test-results\/e2e-artifacts\/\*\*\/stall-stacks-\*\.txt/g)).toHaveLength(1)
+test('고정 서식 — worker 가 쓰는 자리는 줄 만드는 함수 셋뿐이고, 모든 줄이 허용 목록에만 맞는다', () => {
+  const source = watchdogWorkerSource()
+  const writes = [...source.matchAll(/\bwrite\(([A-Za-z]*)\(/g)].map((m) => m[1])
+  // `write(` 호출은 전부 `write(lineXxx(` 꼴이다 — 변수·문자열을 그대로 넘기는 호출이 없다.
+  expect(source.match(/\bwrite\(/g)).toHaveLength(writes.length)
+  expect(new Set(writes)).toEqual(new Set(['lineRecovered', 'lineStalled', 'lineUp']))
+  // 쓰기 자리(`appendFileSync`)는 하나이고 그 앞에서 `LINE_OK` 로 한 번 더 거른다.
+  expect(source.match(/appendFileSync/g)).toHaveLength(1)
+  expect(source).toContain('if (!LINE_OK.test(line)) return')
+
+  const stamp = (line: string) => `1700000000000 ${line}`
+  expect(stamp(lines.lineUp())).toMatch(ALLOWED)
+  expect(stamp(lines.lineStalled(5500, 12, 0))).toMatch(ALLOWED)
+  expect(stamp(lines.lineRecovered(135000, 40))).toBe('1700000000000 watchdog main-recovered stalledMs=135000 cpuMs=40')
+  expect(stamp(lines.lineStalled(5500, 12, 0))).toBe('1700000000000 watchdog main-stalled idleMs=5500 cpuMs=12 busy=0%')
 })
 
-test('가림(cdb) — 스택 요약에는 모듈!함수+오프셋만 남고 경로·토큰·문서 이름·스레드 이름이 없다', () => {
-  const tick = '\x60'
-  const addr = (a: string, b: string) => `${a}${tick}${b}`
-  const sample = [
-    'Microsoft (R) Windows Debugger Version 10.0.26100.1 AMD64',
-    'Symbol search path is: srv*C:\\Users\\Jane Doe\\AppData\\Local\\Symbols MARKER-user-papers-7fd3',
-    `.  0  Id: 1c4.2b8 Suspend: 0 Teb: ${addr('000000a1', '2b8d4000')} Unfrozen`,
-    'Child-SP          RetAddr           Call Site',
-    `${addr('000000a1', '2b8ff3a8')} ${addr('00007ff8', '1a2b3c4d')} ntdll!NtWaitForSingleObject+0x14`,
-    `${addr('000000a1', '2b8ff3b0')} ${addr('00007ff8', '1a2b3c4e')} KERNELBASE!WaitForSingleObjectEx+0x9c`,
-    `${addr('000000a1', '2b8ff450')} ${addr('00007ff6', '00001234')} C:\\Users\\Jane Doe\\논문\\thesis.docx+0x10`,
-    `${addr('000000a1', '2b8ff460')} ${addr('00007ff6', '00005678')} secret=MARKERTOKEN0123456789012345678901234+0x1`,
-    `   1  Id: 1c4.2c0 Suspend: 0 Teb: ${addr('000000a1', '2b8d6000')} Unfrozen "MARKER-user-papers-7fd3 내 창업논문"`,
-    `${addr('000000a1', '2b9ff3a8')} ${addr('00007ff8', '1a2b3c4d')} ntdll!RtlUserThreadStart+0x21 [C:\\Users\\Jane Doe\\src.c @ 55]`
-  ].join('\n')
-  const sum = helpers.summarize(sample)
-  const written = [sum.keep.join('\n'), sum.top, sum.thread0].join('\n')
-  for (const leak of ['Jane', 'Doe', 'thesis', '논문', '창업', 'MARKER', 'secret', 'C:', 'Users', 'AppData', 'src.c']) {
-    expect(written).not.toContain(leak)
-  }
-  expect(written).not.toMatch(/[^\x20-\x7e\n]/)
-  // 쓸모 있는 것은 남는다.
-  expect(sum.threads).toBe(2)
-  expect(sum.frames).toBe(5)
-  expect(sum.keep[0]).toBe('thread 0 id=1c4.2b8')
-  expect(sum.keep).toContain('  ntdll!NtWaitForSingleObject+0x14')
-  expect(sum.keep).toContain('  KERNELBASE!WaitForSingleObjectEx+0x9c')
-  expect(sum.keep).toContain('  <unknown>')
-  expect(sum.top).toContain('ntdll!NtWaitForSingleObject')
-  expect(sum.thread0.startsWith('ntdll!NtWaitForSingleObject+0x14 < KERNELBASE!WaitForSingleObjectEx+0x9c')).toBe(true)
-  expect(helpers.siteOf('foo.dll!Bar<int>+0x2f [C:\\x.c @ 1]')).toBe('foo.dll!Bar<int>+0x2f')
-  expect(helpers.siteOf('C:\\Users\\Jane\\x.exe+0x1')).toBe('<unknown>')
-})
-
-test('가림(줄) — worker 가 쓰는 모든 줄에서 경로·명령줄·토큰·한글이 지워진다', () => {
-  const leaks = ['Jane', 'Doe', 'thesis', '논문', '창업', 'MARKER', 'hunter2', 'nara', 'Users']
-  const dirty = [
-    'probe#1 took=120ms threads=40 children=powershell.exe x1 C:\\Users\\Jane Doe\\Documents\\논문 최종 thesis.docx --token=MARKERARG',
-    'watchdog cdb-stack took=900ms exit=0 threads=0 (no-threads out=/Users/nara/work/thesis.docx MARKER err=',
-    'probe#2 failed exec D:\\papers\\Jane Doe\\x.exe Authorization: Bearer MARKERHEADER000000000000000000000000',
-    // 비밀 꼴 문자열이 소스에 통째로 없도록 실행 중에 조립한다(스캐너가 가짜 값을 진짜로 오인하지 않게).
-    'x ' + 'pass' + 'word=' + 'hunter2' + 'MARKER' + ' coo' + 'kie: ' + 'MARKER' + 'COOKIE',
-    '내 창업논문.docx 열림 thesis',
-    `blob ${'A1b2'.repeat(12)} end`
+test('가림 — 외부 문자열(경로·이름·명령줄)이 들어갈 자리가 서식에 없다: 어떤 인자를 줘도 줄은 허용 목록에만 맞는다', () => {
+  // 검토에서 나온 반례를 포함한 적대적 인자. 줄 만드는 함수는 이것들을 숫자(0)로 바꿀 뿐 문자열을 싣지 못한다.
+  const hostile: unknown[] = [
+    'D:Jane Doe\\plan.hwpx',
+    '1SPRINGBUDGET',
+    '1SPRINGBUDGET 논문',
+    'Private Draft.exe',
+    'PrivateDraft.docx!SampleText+0x10',
+    'SpringBudget.exe!SampleText+0x1',
+    'C:\\Users\\Jane Doe\\Documents\\thesis.docx',
+    '/Users/jane/work/thesis.docx',
+    '\\\\server\\share\\x.docx',
+    'pass' + 'word=' + 'hunter2' + 'MARKER',
+    '12abc',
+    { toString: () => 'PrivateDraft.docx' },
+    ['Private Draft.exe'],
+    null, undefined, NaN, -5, Infinity, 1e30, 1.9
   ]
-  for (const line of dirty) {
-    const out = helpers.safeLine(line)
-    for (const leak of leaks) expect(out, `${leak} 가 남았다: ${out}`).not.toContain(leak)
-    expect(out).not.toMatch(/[^\x20-\x7e]/)
-    expect(out).not.toMatch(/[A-Za-z]:\\/)
+  const stamp = (line: string) => `1700000000000 ${line}`
+  const forbidden = /Jane|Doe|plan|hwpx|SPRING|Spring|Private|Draft|docx|exe|SampleText|thesis|server|hunter2|MARKER|논문|[A-Za-z]:|\\|\//
+  for (const value of hostile) {
+    for (const line of [lines.lineStalled(value, value, value), lines.lineRecovered(value, value), lines.lineUp()]) {
+      expect(stamp(line), `허용 목록 밖: ${stamp(line)}`).toMatch(ALLOWED)
+      expect(line).not.toMatch(forbidden)
+      expect(lines.LINE_OK.test(line)).toBe(true)
+    }
   }
-  expect(helpers.safeLine('blob ' + 'A1b2'.repeat(12) + ' end')).toBe('blob <value> end')
-  // 길이 상한.
-  expect(helpers.safeLine('a '.repeat(1000)).length).toBeLessThanOrEqual(408)
-})
-
-test('가림(줄)은 과하지 않다 — 숫자·상태 이름·대기 사유는 그대로 남는다', () => {
-  const clean =
-    'probe#1 took=120ms threads=40 cpuMs=1234 handles=300 responding=True states=Wait/UserRequestx38;Running/Executivex2 ' +
-    'oldest3=1:Wait/UserRequest/12ms;7:Running/Executive/3ms hot3=1:Wait/UserRequest/12ms children=node.exe x1'
-  expect(helpers.safeLine(clean)).toBe(clean)
-  const stalled = 'watchdog main-stalled idleMs=5500 cpuMs=12 busy=0%'
-  expect(helpers.safeLine(stalled)).toBe(stalled)
-  expect(helpers.safeLine('watchdog main-recovered stalledMs=135000 cpuMs=40')).toBe('watchdog main-recovered stalledMs=135000 cpuMs=40')
+  // 어떤 줄도 아닌 원문(외부 문자열)은 쓰기 직전 거름망 `LINE_OK` 가 버린다.
+  for (const value of hostile) {
+    if (typeof value !== 'string') continue
+    expect(lines.LINE_OK.test(value), value).toBe(false)
+    expect(lines.LINE_OK.test(`watchdog worker-up ${value}`), value).toBe(false)
+    expect(lines.LINE_OK.test(`watchdog main-stalled idleMs=5 cpuMs=5 busy=5% ${value}`), value).toBe(false)
+  }
+  // 숫자는 그대로 남는다(과하게 지우지 않음).
+  expect(lines.lineStalled('5500', 12.9, 0)).toBe('watchdog main-stalled idleMs=5500 cpuMs=12 busy=0%')
 })

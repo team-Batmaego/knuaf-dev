@@ -169,6 +169,8 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   const appLog = test.info().outputPath('app-log.txt')
   mkdirSync(join(appLog, '..'), { recursive: true })
   env.KNUAF_APP_LOG = appLog
+  // 메인 무응답 감시자(`src/main/mainWatchdog.ts`)는 이 e2e 전용 값이 있고 앱이 패키징되지 않았을 때만 켜진다.
+  env.KNUAF_E2E_MAIN_WATCHDOG = '1'
   delete env.ELECTRON_RUN_AS_NODE
   // e2e 창은 화면에 뜨지 않는다 — 맥에서 다른 작업을 가로채지 않게(main 의 KNUAF_E2E_HIDDEN).
   // 눈으로 봐야 할 때만 KNUAF_E2E_VISIBLE=1 로 끈다(window-shots.spec.ts 처럼 창을 찍는 spec).

@@ -375,7 +375,6 @@ jobs:
           path: |
             app/test-results/e2e-artifacts/**/doctor-*.jsonl
             app/test-results/e2e-artifacts/**/app-log.txt
-            app/test-results/e2e-artifacts/**/stall-stacks-*.txt
           if-no-files-found: warn
           retention-days: 7
       # 종료 진단 로그 — `electronApp.close()` 가 안 돌아오면 시험이 실패하고 아티팩트도 사라져
