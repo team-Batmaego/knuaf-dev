@@ -22,6 +22,9 @@ import {
   type WatchdogWorkerLike
 } from '../src/main/mainWatchdog'
 
+/** 소스 파일을 글로 읽는다 — 윈도 체크아웃의 CRLF(`\r\n`)를 `\n`으로 맞춰 줄끝에 기대는 검사가 OS 따라 갈리지 않게 한다. */
+const readSource = (path: string): string => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+
 interface Lines {
   LINE_OK: RegExp
   lineUp(): string
@@ -106,7 +109,7 @@ test('종료 — stop() 은 worker 를 terminate 한다', () => {
 })
 
 test('index.ts — 진단 블록 안에서 isPackaged 를 넘겨 시작하고, will-quit 에서 stop() 한다', () => {
-  const text = readFileSync(join(__dirname, '../src/main/index.ts'), 'utf8')
+  const text = readSource(join(__dirname, '../src/main/index.ts'))
   const open = text.indexOf('\nif (diagEnabled()) {\n')
   expect(open).toBeGreaterThan(-1)
   const close = text.indexOf('\n}\n', open)
@@ -117,7 +120,7 @@ test('index.ts — 진단 블록 안에서 isPackaged 를 넘겨 시작하고, w
   // import 한 줄 + 부르는 한 줄 — 다른 곳에서 부르지 않는다.
   expect(text.match(/startMainWatchdog/g)).toHaveLength(2)
   // e2e launch 도우미만 켜는 값을 넣는다.
-  const helpers = readFileSync(join(__dirname, 'helpers.ts'), 'utf8')
+  const helpers = readSource(join(__dirname, 'helpers.ts'))
   expect(helpers).toContain("env.KNUAF_E2E_MAIN_WATCHDOG = '1'")
 })
 
@@ -133,7 +136,7 @@ test('자식 프로세스 없음 — worker 소스에 자식·PowerShell·cdb·R
   }
   // require 는 worker_threads(공유 카운터 전달)와 fs(기록) 둘뿐이다.
   expect([...source.matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]).sort()).toEqual(['node:fs', 'node:worker_threads'])
-  const main = readFileSync(join(__dirname, '../src/main/mainWatchdog.ts'), 'utf8')
+  const main = readSource(join(__dirname, '../src/main/mainWatchdog.ts'))
   expect(main).not.toMatch(/child_process|psProbe/)
 })
 
