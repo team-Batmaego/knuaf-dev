@@ -27,20 +27,20 @@ test('도우미가 저장하면 점검 화면이 새로고침 없이 따라온�
     const openRecord = async (): Promise<void> => { await record.evaluate((d) => { (d as HTMLDetailsElement).open = true }) }
     await openRecord()
     const head = page.locator('[data-screen="checkup"] .checkup-head')
-    await expect(head).toContainText('지금 논문 · 1번째 기록', { timeout: 20_000 })
+    await expect(head).toContainText('지금 논문 · 2번째 기록', { timeout: 20_000 })
 
-    // 도우미가 한 것과 같은 일 — 절을 하나 더 등록해 정본을 2번째 기록으로 올린다.
+    // 도우미가 한 것과 같은 일 — 절을 하나 더 등록해 정본을 3번째 기록으로 올린다.
     writeFileSync(join(root, 'sections', '02.md'), '# Ⅱ. 농장 현황\n\n<!-- gg:draft:start -->\n농장A는 정읍에 있다.\n<!-- gg:draft:end -->\n', 'utf-8')
     const change = join(root, 'change2.json')
     writeFileSync(change, JSON.stringify({ request_id: 'e2e:2', ops: [
       { collection: 'sections', value: { id: 'sec-02', title: 'Ⅱ. 농장 현황', order: 2, path: 'sections/02.md', status: 'drafting' } }
     ] }), 'utf-8')
-    const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '1'], { encoding: 'utf-8' })
+    const a = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '2'], { encoding: 'utf-8' })
     expect(a.status, a.stdout + a.stderr).toBe(0)
 
     // 새로고침을 누르지 않는다.
     await openRecord()
-    await expect(head, '정본이 올랐는데 점검 화면이 옛 기록에 머물렀다').toContainText('지금 논문 · 2번째 기록', { timeout: 30_000 })
+    await expect(head, '정본이 올랐는데 점검 화면이 옛 기록에 머물렀다').toContainText('지금 논문 · 3번째 기록', { timeout: 30_000 })
     // 사이드바가 하던 단언은 종이 칸으로 옮긴다 — 새로 등록한 절 제목이 저절로 나타나야 한다.
     await navTo(page, '내 논문')
     await expect(page.locator('.paperpane .sheet'), '정본이 올랐는데 종이가 따라오지 않았다')

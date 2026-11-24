@@ -130,7 +130,7 @@ test('답변 머리글을 되뇌지 않는다 — 대화 이벤트 줄은 절 �
     await expect(page.locator('.activity'), '지운 카드가 아직 그려진다').toHaveCount(0)
 
     // 도우미가 절 본문을 저장하면(본문 지문이 바뀐다) 앱이 한 줄을 그린다.
-    rewriteSection(root, { body: '농장A의 재배 면적은 600평이다. 고친 문장이다.', expected: 1 })
+    rewriteSection(root, { body: '농장A의 재배 면적은 600평이다. 고친 문장이다.', expected: 2 })
     const ev = page.locator('.chat-event')
     await expect(ev, '절을 저장했는데 이벤트 줄이 없다').toBeVisible({ timeout: 30_000 })
     await expect(ev).toContainText('Ⅰ. 머리말')
