@@ -215,7 +215,7 @@ test('본문이 바뀌면 묵은 행동 막대가 남지 않는다', async () =>
     await expect(page.locator('.selbar')).toBeVisible()
 
     // 도우미가 그 절을 다시 저장한다 → 종이가 다시 그려진다.
-    rewriteSection(root, { body: BODY_800, expected: 1 })
+    rewriteSection(root, { body: BODY_800, expected: 2 })
     await expect(sheet).toContainText('800평', { timeout: 30_000 })
     await expect(page.locator('.selbar'), '본문이 바뀌었는데 묵은 막대가 남아 있다').toHaveCount(0)
   } finally {
@@ -238,7 +238,7 @@ test('비교 모드를 끄면 화면에서 사라진 옛 문장은 막대·인�
     await expect(page.locator(COMPOSER)).toBeVisible({ timeout: 30_000 })
 
     // 800평으로 저장하고 비교를 켠다 — 지운 600평 문장이 화면에 있다.
-    rewriteSection(root, { body: BODY_800, expected: 1 })
+    rewriteSection(root, { body: BODY_800, expected: 2 })
     await expect(sheet).toContainText('800평', { timeout: 30_000 })
     const toggle = page.locator('.review-toggle')
     await expect(toggle).toBeVisible()
@@ -294,7 +294,7 @@ test('절 제목만 바뀌어도 인용 출처는 지금 제목을 쓴다 (MACR2
     await expect(page.locator('.selbar')).toBeVisible()
 
     // 절 **제목만** 바꾼다 — 본문 해시가 같아 선택 무효화(본문 변경)는 서지 않는 경로.
-    retitleSection(root, 'Ⅱ. 농장 현황', 1)
+    retitleSection(root, 'Ⅱ. 농장 현황', 2)
     await expect(sheet.locator('h2').first(), '종이 제목이 따라오지 않았다').toContainText('Ⅱ. 농장 현황', { timeout: 30_000 })
 
     // 제목 변경 후 작업이 끝나도 선택 막대는 남고, 인용에는 최신 절 제목을 쓴다.
@@ -325,8 +325,8 @@ test('고친 부분 보기 — 600평→800평 저장 뒤 지움 1·새것 1, �
     // 아직 바뀐 절이 없다 — 토글이 보이지 않는다.
     await expect(page.locator('.review-toggle')).toHaveCount(0)
 
-    // 도우미가 800평으로 다시 저장한다(기록 1→2). 앱은 감시로 곧 따라온다.
-    rewriteSection(root, { body: BODY_800, expected: 1 })
+    // 도우미가 800평으로 다시 저장한다(기록 2→3). 앱은 감시로 곧 따라온다.
+    rewriteSection(root, { body: BODY_800, expected: 2 })
     await expect(sheet).toContainText('800평', { timeout: 30_000 })
 
     const toggle = page.locator('.review-toggle')

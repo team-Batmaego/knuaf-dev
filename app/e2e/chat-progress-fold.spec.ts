@@ -297,7 +297,7 @@ test('종이 사건이 사이에 낀 중간말은 사건 앞뒤로 갈라 접힌
     await openProject(page, root, splitReady)
     await expect(page.locator('.progress-fold'), '묶음이 서지 않았다').toHaveCount(1, { timeout: 30_000 })
     // 도우미가 절 본문을 저장하면 앱이 사건 줄을 하나 그린다 — 그 시각이 a1 과 a2 사이에 떨어진다.
-    rewriteSection(root, { body: '농장A의 재배 면적은 600평이다. 고친 문장이다.', expected: 1 })
+    rewriteSection(root, { body: '농장A의 재배 면적은 600평이다. 고친 문장이다.', expected: 2 })
     await expect(page.locator('.chat-event'), '사건 줄이 없다').toHaveCount(1, { timeout: 30_000 })
     const rows = await page.locator('.chat-thread > .progress-fold, .chat-thread > .chat-event, .chat-thread > .chat-msg').evaluateAll((els) =>
       els.map((e) => ({

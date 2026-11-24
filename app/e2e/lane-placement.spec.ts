@@ -5,9 +5,10 @@ import { join } from 'node:path'
 import { JobStore } from '../src/main/chat/jobs/store'
 import { laneModels, setPlacement, selectDesign, consumePendingDesign, disable, type CardDeps } from '../src/main/lanes/cards'
 import { laneInput } from '../src/main/lanes/source'
-import type { ExecutionAccount } from '../src/main/chat/jobs/types'
+import { usageGateAllowed, type ExecutionAccount } from '../src/main/chat/jobs/types'
 import type { PlacementEntries } from '../src/shared/lanes-ipc'
 import { LANE_TABLE, FREE_DS_MODEL, fitEffort } from '../src/shared/lanes'
+import { PLACEMENT_COPY, placementMessage } from '../src/renderer/src/copy-lanes'
 
 function fixture() {
   const base = mkdtempSync(join(tmpdir(), 'placement-'))
@@ -77,8 +78,57 @@ test('fresh account changes and A usage gate block placement without approval', 
   f.deps.freshAccount = async () => ({ ...f.account, accountId: 'other-student' })
   expect(await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'mine' })).toEqual({ outcome: 'invalid', reason: 'account-changed' })
   f.deps.freshAccount = async () => ({ ...f.account, usage: 'unknown' })
-  await expect(setPlacement(f.deps, f.root, 0, f.entries, { kind: 'mine' })).rejects.toThrow('나눠 맡길 수')
+  // Codex 는 첫 턴 안 확인 선언이 없다 — gateInTurn 이 claude 만 넘겨도 unknown 은 막힌다.
+  f.deps.gateInTurn = company => company === 'claude'
+  expect(await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'mine' })).toEqual({ outcome: 'invalid', reason: 'usage-unavailable' })
+  f.deps.freshAccount = async () => ({ ...f.account, usage: 'limit' })
+  expect(await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'mine' })).toEqual({ outcome: 'invalid', reason: 'usage-unavailable' })
   expect(f.store.approvedPlan(f.root)).toBeNull()
+})
+
+// 형님 실제 구성: Claude 사용량은 늘 unknown(턴 밖에서 못 읽음). 고치기 전 코드는 :269 에서 던져 이 시험이 실패한다.
+function claudeUnknown(f: ReturnType<typeof fixture>, usage: 'unknown' | 'limit' = 'unknown') {
+  const original = f.deps.account
+  const claude = (): ExecutionAccount => ({
+    accountId: 'claude-student', connected: true, consented: false, usage,
+    account: { company: 'claude', apiKeySource: 'none', subscriptionType: 'max', models: [
+      { model: 'opus', name: 'Opus', efforts: ['high'] }, { model: 'sonnet', name: 'Sonnet', efforts: ['high'] }
+    ] }
+  })
+  f.deps.account = async company => company === 'claude' ? claude() : original(company)
+  f.deps.freshAccount = async company => company === 'claude' ? claude() : original(company)
+}
+
+test('Claude usage unknown: recommended placement saves when gateInTurn declares claude (same rule as handoff)', async () => {
+  const f = fixture()
+  claudeUnknown(f)
+  f.deps.gateInTurn = company => company === 'claude'
+  expect((await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'recommended', rowId: 'both-high' })).outcome).toBe('applied')
+  expect(f.store.placementOrigin(f.root)).toEqual({ kind: 'recommended', rowId: 'both-high' })
+})
+
+test('Claude usage unknown without the first-turn declaration, or limit, still blocks with a reason', async () => {
+  const f = fixture()
+  claudeUnknown(f)
+  expect(await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'recommended', rowId: 'both-high' })).toEqual({ outcome: 'invalid', reason: 'usage-unavailable' })
+  f.deps.gateInTurn = company => company === 'claude'
+  claudeUnknown(f, 'limit')
+  expect(await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'recommended', rowId: 'both-high' })).toEqual({ outcome: 'invalid', reason: 'usage-unavailable' })
+  expect(f.store.approvedPlan(f.root)).toBeNull()
+})
+
+test('usageGateAllowed is the single rule shared with conversation handoff', () => {
+  const mk = (company: 'claude' | 'codex', usage: ExecutionAccount['usage']): ExecutionAccount => ({
+    accountId: 'x', connected: true, consented: false, usage,
+    account: company === 'claude' ? { company, apiKeySource: 'none', models: [] } : { company, accountType: 'chatgpt', models: [] }
+  })
+  const gate = (company: string) => company === 'claude'
+  expect(usageGateAllowed(mk('claude', 'allowed'))).toBe(true)
+  expect(usageGateAllowed(mk('claude', 'unknown'))).toBe(false)
+  expect(usageGateAllowed(mk('claude', 'unknown'), gate)).toBe(true)
+  expect(usageGateAllowed(mk('codex', 'unknown'), gate)).toBe(false)
+  expect(usageGateAllowed(mk('claude', 'limit'), gate)).toBe(false)
+  expect(usageGateAllowed(null, gate)).toBe(false)
 })
 
 test('catalog exposes only observed per-model efforts and refuses API accounts', async () => {
@@ -221,4 +271,20 @@ for (const [current, supported, expected] of [
   expect((await setPlacement(f.deps, f.root, 0, f.entries, { kind: 'recommended', rowId: 'codex-high' })).outcome).toBe('applied')
   expect(applied).toEqual([{ company: 'codex', model: 'gpt-6.1-sol', effort: expected, how: 'main' }])
   expect(f.store.approvedPlan(f.root)?.design?.effort).toBe(expected)
+})
+
+test('placement failure reasons map to distinct student messages; applied has none', () => {
+  const invalid = (reason: 'base-version' | 'account-changed' | 'main-unusable' | 'usage-unavailable') =>
+    placementMessage({ value: { outcome: 'invalid', reason } })
+  expect(placementMessage({ value: { outcome: 'applied', version: 1 } })).toBeNull()
+  expect(invalid('base-version')).toBe(PLACEMENT_COPY.baseVersion)
+  expect(invalid('base-version')).toBe('화면을 새로 불러왔어요. 한 번 더 눌러 주세요.')
+  expect(invalid('account-changed')).toBe(PLACEMENT_COPY.accountChanged)
+  expect(invalid('main-unusable')).toBe(PLACEMENT_COPY.mainUnusable)
+  expect(invalid('usage-unavailable')).toBe(PLACEMENT_COPY.usageUnavailable)
+  expect(placementMessage({ value: { outcome: 'rejected', rejected: [] } })).toBe(PLACEMENT_COPY.rejected)
+  expect(placementMessage({ error: { code: 'internal', message: 'x' } })).toBe(PLACEMENT_COPY.failed)
+  expect(new Set([invalid('base-version'), invalid('account-changed'), invalid('main-unusable'), invalid('usage-unavailable'),
+    PLACEMENT_COPY.rejected, PLACEMENT_COPY.failed]).size).toBe(6)
+  expect(PLACEMENT_COPY.needFolder).toBe('Team은 논문 폴더를 연 뒤 켤 수 있어요.')
 })

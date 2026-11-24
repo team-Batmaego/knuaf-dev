@@ -6,7 +6,7 @@ import { continueAfterLimit, type LaneEntry, type LanePlan } from '../../../shar
 import type { ArchivedChat, ArchivedChatSummary, ModelRef } from '../../../shared/lanes-ipc'
 import { readRecoverable, writeFileAtomic } from '../../safeWrite'
 import { sha256 } from './isolation'
-import type { ConversationOwner, ExecutionAccount, UsageState } from './types'
+import { usageGateAllowed, type ConversationOwner, type ExecutionAccount, type UsageState } from './types'
 import type { OwnerTransition } from './transition'
 
 /**
@@ -223,8 +223,7 @@ export class ConversationHandoff {
    * `unknown`+첫 턴 확인으로 띄운 단추가 누르면 거절됐다(REVIEW-C4 I-02).
    */
   private gateAllowed(other: ExecutionAccount | null): boolean {
-    return other?.usage === 'allowed' ||
-      (other?.usage === 'unknown' && other.account.company === 'claude' && this.options.gateInTurn?.('claude') === true)
+    return usageGateAllowed(other, this.options.gateInTurn)
   }
   /**
    * `known` 은 **이미 읽은 계정**이다 — 클릭이 지문 불일치로 제안을 다시 열 때 쓴다. 그 자리에서

@@ -454,9 +454,11 @@ export interface ReviewModelGroup {
 /** 설계는 기존 채팅 칩이 정본이다. 나머지 네 역할은 전체 값을 보낸다. */
 export type PlacementEntries = Record<JobLane, LaneEntry | null>
 export type PlacementOrigin = { kind: 'recommended'; rowId: LaneRowId } | { kind: 'mine' }
+/** base-version 판이 바뀜 · account-changed 계정이 바뀜 · main-unusable 추천 주 모델을 못 씀 · usage-unavailable 사용량 관문(대화 넘기기와 같은 판정)을 못 넘음. */
+export type PlacementInvalidReason = 'base-version' | 'account-changed' | 'main-unusable' | 'usage-unavailable'
 export type PlacementDecision =
   | { outcome: 'applied'; version: number }
-  | { outcome: 'invalid'; reason: 'base-version' | 'account-changed' }
+  | { outcome: 'invalid'; reason: PlacementInvalidReason }
   | { outcome: 'rejected'; rejected: { lane: JobLane; reason: LaneRejectReason }[] }
 export interface LaneModelGroup {
   company: Provider
