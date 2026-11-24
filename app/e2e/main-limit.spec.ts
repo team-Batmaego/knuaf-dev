@@ -230,7 +230,9 @@ test('main-limit: Codex 코드만', async () => {
       }
     })
     // 루프마다 서비스가 가짜 codex app-server 자식(codex.cmd → node)을 띄운다 —
-    // 시험이 끝나도 남지 않게 단언이 실패해도 서비스(=본대화 연결)를 닫는다.
+    // 시험이 끝나도 남지 않게 서비스(=본대화 연결)를 닫는다. 정상 경로는 미회수(pending)를
+    // 시험 실패로 드러내고, 본문이 던진 경우의 정리는 먼저 난 단언 실패를 가리지 않는다.
+    let closed = false
     try {
       await f.svc.send(f.root, 'codex', '질문', 'req-1')
       await settled(f.svc, f.root, 'codex')
@@ -240,8 +242,10 @@ test('main-limit: Codex 코드만', async () => {
         expect(f.sources[0].entry.company).toBe('codex')
         expect(f.sources[0].entry.how).toBe('main')
       }
+      closed = true
+      expect(await f.svc.close()).toEqual({ outcome: 'done' })
     } finally {
-      await f.svc.close()
+      if (!closed) await f.svc.close().catch(() => {})
     }
   }
 })
