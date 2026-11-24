@@ -111,7 +111,7 @@ for (const scheme of ['light', 'dark'] as const) {
     writeFileSync(join(mroot, 'sources', longName), '# 원자료\n', 'utf-8')
     const chg = join(mroot, 'change-long.json')
     writeFileSync(chg, JSON.stringify({ request_id: 'e2e:long', ops: [{ collection: 'sources', value: { id: 'src-long', path: `sources/${longName}`, claims: {} } }] }), 'utf-8')
-    spawnSync(python, [join(scripts, 'gg.py'), 'apply', mroot, '--change', chg, '--expected-revision', '1'], { encoding: 'utf-8' })
+    spawnSync(python, [join(scripts, 'gg.py'), 'apply', mroot, '--change', chg, '--expected-revision', '2'], { encoding: 'utf-8' })
     const mats = await launch({ colorScheme: scheme, env })
     try {
       await mats.page.setViewportSize({ width: 1280, height: 800 })

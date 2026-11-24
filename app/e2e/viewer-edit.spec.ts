@@ -285,7 +285,7 @@ test('고친 부분 보기를 켜면 직접 수정이 흐려지고 이유를 말
     await openProject(page, root)
     await paperReady(page, '600평')
     // 도우미가 본문을 다시 저장하면 비교 모드가 켜진다(바뀐 절이 있다).
-    rewriteSection(root, { body: '농장A의 재배 면적은 800평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 1 })
+    rewriteSection(root, { body: '농장A의 재배 면적은 800평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 2 })
     // 비교 모드가 켜지면 종이는 지운/새 문장으로 다시 그려진다 — 800평이 화면에 있어야 고를 수 있다.
     const toggle = page.locator('.review-toggle')
     await expect(toggle).toBeVisible({ timeout: 30_000 })
@@ -406,7 +406,7 @@ test('같은 낱말이 다른 곳에 있으면 한 줄이 뜨고 같이 고치�
     // 둘째 장에 같은 낱말(`재배`)을 심는다. 첫 장에서 그 낱말을 바꾸면 '사라진 낱말'이 된다.
     // 앱을 열기 **전에** 쓴다 — 열린 뒤에 쓰면 앱이 이미 읽은 개정 번호와 디스크가 어긋나
     // 저장이 `stale_view` 로 거절될 수 있다(윈도 CI 43204858056).
-    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 2 })
     await openProject(page, root)
     await paperReady(page, '600평')
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
@@ -449,7 +449,7 @@ test('본문이 바뀌면 같은 낱말 제안은 접힌다 — 체크가 다른
     // 둘째 장은 앱을 열기 전에 써 둔다 — 열린 뒤에 쓰면 앱이 읽은 개정 번호와 디스크가
     // 어긋나 저장이 `stale_view` 로 거절될 수 있다(윈도 CI 43204858056). 이 시험이 재는
     // '열린 뒤의 바깥 변경'은 아래 `rewriteSection` 쪽이다.
-    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 2 })
     await openProject(page, root)
     await paperReady(page, '600평')
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
@@ -496,7 +496,7 @@ test('편집 중에 건너뛴 본문 갱신은 취소하면 따라잡는다 (Roh
     await expect(page.locator('.edit-slot-input')).toBeVisible({ timeout: 15_000 })
 
     // 편집칸을 열어 둔 채 다른 경로가 원고를 고친다 — 그동안의 재조회는 건너뛴다.
-    rewriteSection(root, { body: '농장A의 재배 면적은 900평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 1 })
+    rewriteSection(root, { body: '농장A의 재배 면적은 900평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 2 })
     await page.waitForTimeout(2500)
     // 취소하면 한 번 다시 읽는다 — 종이에 새 본문이 보인다.
     await page.locator('.edit-slot-input').press('Escape')
@@ -515,7 +515,7 @@ test('그대로를 누르면 그 낱말 제안만 닫힌다 (Roh 08)', async () 
     // 둘째 장은 앱을 열기 전에 써 둔다 — 열린 뒤에 쓰면 앱이 읽은 개정 번호와 디스크가
     // 어긋나 저장이 `stale_view` 로 거절될 수 있다(윈도 CI 43204858056). 이 시험이 재는 것은
     // `그대로` 단추의 동작이지 바깥 변경이 아니다.
-    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 2 })
     await openProject(page, root)
     await paperReady(page, '600평')
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 관리도', { timeout: 30_000 })
@@ -599,8 +599,8 @@ test('체크를 뺀 자리는 확정 뒤에도 원고 그대로다 (Roh 03)', as
   try {
     // 같은 낱말이 다른 장에도 있게 해서 목록에 자리가 둘 이상 뜨게 한다.
     // 앱을 열기 전에 써 둔다 — 열린 뒤에 연달아 쓰면 앱이 읽은 개정 번호와 디스크가 어긋난다.
-    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
-    addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 2 })
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 2 })
+    addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 3 })
     await openProject(page, root)
     await paperReady(page, '600평')
     await expect(page.locator('.paperpane .sheet')).toContainText('재배 기록은 따로', { timeout: 30_000 })
@@ -653,7 +653,7 @@ test('앞 문단이 지워져도 제외한 자리가 되살아나지 않는다 (
     await openProject(page, root)
     await paperReady(page, '600평')
     // 세 문단 — 가운데·끝에 같은 낱말이 있고, 앞 문단을 지우면 뒤 자리의 block_index 가 밀린다.
-    rewriteSection(root, { body: '지울 재배 문장.\n\n남길 재배 문장.\n\n꼬리 재배 문장.', expected: 1 })
+    rewriteSection(root, { body: '지울 재배 문장.\n\n남길 재배 문장.\n\n꼬리 재배 문장.', expected: 2 })
     await expect(page.locator('.paperpane .sheet')).toContainText('꼬리 재배 문장.', { timeout: 30_000 })
 
     // 앞 문단의 낱말을 바꾼다 → 사라진 `재배` 제안이 뜨고, 남은 자리는 둘(가운데·끝).
@@ -708,8 +708,8 @@ test('같이 고치기 목록에 장 제목이 보인다 (Roh 03)', async () => 
   try {
     // 두 장을 앱을 열기 전에 써 둔다 — 열린 뒤에 연달아 쓰면 두 번째 쓰기 뒤에 앱이 읽은
     // 개정 번호가 디스크와 어긋나, 저장이 `stale_view` 로 거절된다(윈도 CI 43204858056).
-    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 1 })
-    addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 2 })
+    addSectionBody(root, { id: 'sec-02', title: 'Ⅱ. 본문', body: '재배 관리도 함께 적는다.', expected: 2 })
+    addSectionBody(root, { id: 'sec-03', title: 'Ⅲ. 결론', body: '재배 기록은 따로 남긴다.', expected: 3 })
     await openProject(page, root)
     await paperReady(page, '600평')
     await expect(page.locator('.paperpane .sheet')).toContainText('Ⅲ. 결론', { timeout: 30_000 })

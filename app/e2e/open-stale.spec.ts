@@ -196,7 +196,7 @@ test('A→B→A: 첫 A 방문의 늦은 절 목록이 지금 A 방문의 최신 
     await expect.poll(() => held(electronApp)).toBe(true)
     await pickRecent(page, b)
     await splitReady(page)
-    addSectionBody(a, { title: 'Ⅰ. 새 방문의 제목', body: '새 방문 본문', expected: 1 })   // 디스크의 A 를 개정 2로
+    addSectionBody(a, { title: 'Ⅰ. 새 방문의 제목', body: '새 방문 본문', expected: 2 })   // 디스크의 A 를 개정 3으로
     await pickRecent(page, a)
     await splitReady(page)
     const h2 = page.locator('#sec-sec-01 h2')
