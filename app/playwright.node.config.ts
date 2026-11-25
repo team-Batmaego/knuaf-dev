@@ -39,6 +39,7 @@ export default defineConfig({
     'figure-wiring.spec.ts',
     'notice-bubble.spec.ts',
     'diag-limits.spec.ts',
+    'main-watchdog.spec.ts',
     'lanes-lines.spec.ts',
     'lanes-store.spec.ts',
     'lanes-settings-card.spec.ts',
