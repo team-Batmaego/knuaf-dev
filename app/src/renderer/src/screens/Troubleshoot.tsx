@@ -10,7 +10,8 @@ import { Badge, StatusBadge } from '../components/Badge'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
-import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
+import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, describeRecovery, type DescribedError } from '../copy'
+import { canRecoverMoved, recoveryOutcome } from '../../../shared/lock-recovery'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -30,7 +31,9 @@ export function TroubleshootSections() {
   const [lockBusy, setLockBusy] = useState(false)
   const [err, setErr] = useState<DescribedError | null>(null)
   const [msg, setMsg] = useState<{ title: string; body?: string } | null>(null)
-  const [confirm, setConfirm] = useState<{ kind: 'unlock' | 'restore' | 'init'; rev?: number } | null>(null)
+  const [confirm, setConfirm] = useState<{ kind: 'unlock' | 'restore' | 'init' | 'moved'; rev?: number; resume?: string } | null>(null)
+  const [movedChecked, setMovedChecked] = useState(false)
+  const [moved, setMoved] = useState<{ root: string; view: ReturnType<typeof describeRecovery>; raw: string } | null>(null)
   const deps = useRunner()
   const kordoc = useRunner()
   const load = useCallback(async () => {
@@ -55,7 +58,7 @@ export function TroubleshootSections() {
     await Promise.all([inspected, checked, diagnosed])
   }, [root])
   useEffect(() => {
-    setErr(null); setMsg(null); setConfirm(null)
+    setErr(null); setMsg(null); setConfirm(null); setMoved(null)
     void load(); void refreshSidecar()
     return () => { ++requestSeq.current; ++lockRequestSeq.current }
   }, [load, status?.revision])
@@ -65,7 +68,7 @@ export function TroubleshootSections() {
   const depsInfo = preparation?.report
   const act = async () => {
     if (!confirm) return
-    const c = confirm; setConfirm(null); setErr(null); setMsg(null); setLockBusy(true)
+    const c = confirm; setConfirm(null); setErr(null); setMsg(null); setMoved(null); setLockBusy(true)
     const seq = requestSeq.current
     const visit = preparation?.visit
     const mine = (): boolean => seq === requestSeq.current && useProject.getState().root === root && usePrep.getState().dependencies[root]?.visit === visit
@@ -73,6 +76,11 @@ export function TroubleshootSections() {
       if (c.kind === 'unlock') {
         const r = await rpc.unlock(root)
         if (mine()) setMsg({ title: r.owner_cleaned ? LOCK_COPY.cleaned : LOCK_COPY.nothingCleaned })
+      }
+      // 확인 창의 확인 칸을 채워야만 여기 온다(취소하면 RPC 를 부르지 않는다) — 그래서 true 를 넘긴다.
+      if (c.kind === 'moved') {
+        const r = await rpc.upgradeOffline(root, true, c.resume)
+        if (mine()) setMoved({ root, view: describeRecovery(recoveryOutcome(r)), raw: JSON.stringify(r, null, 2) })
       }
       if (c.kind === 'restore' && c.rev != null && status) {
         const r = await rpc.restore(root, c.rev, status.revision)
@@ -112,6 +120,9 @@ export function TroubleshootSections() {
     finally { if (seq === lockRequestSeq.current) setLockBusy(false) }
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
+  const canMove = canRecoverMoved(lock)
+  const movedView = moved?.root === root ? moved : null
+  const askMoved = (resume?: string): void => { setMovedChecked(false); setConfirm({ kind: 'moved', resume }) }
   const orphans: string[] = doc?.gg?.orphan_files ?? []
   return (
     <div>
@@ -147,13 +158,19 @@ export function TroubleshootSections() {
         </div>
         {lockBusy && !lock && <div className="caption" role="status" aria-busy="true"><span className="spin" /> {LOCK_COPY.probing}</div>}
         {lockErr && <Feedback kind={lockErr.kind} title={lockErr.title} body={lockErr.action} details={<code>{lockErr.raw}</code>} />}
+        {movedView && <Feedback kind={movedView.view.kind} title={movedView.view.title} body={movedView.view.body}
+          actions={movedView.view.resumeId ? <button disabled={lockBusy} onClick={() => askMoved(movedView.view.resumeId)}>{LOCK_COPY.moveResume}</button> : undefined}
+          details={movedView.view.kind === 'completion' ? undefined : <pre>{movedView.raw}</pre>} />}
         {lock && (
           <div>
             <StatusBadge status={lock.lock_state === 'free' ? 'pass' : lock.lock_state === 'busy' ? 'blocked' : 'pending'} label={LOCK_COPY.state[lock.lock_state] ?? lock.lock_state} />
             <p className="caption">{LOCK_COPY.observation}</p>
             <div className="caption">{LOCK_COPY.observedAt}: <time>{lock.observed_at}</time></div>
             {lock.owner && <p><strong>{LOCK_COPY.owner}</strong><br />{LOCK_COPY.ownerBody}</p>}
-            {lock.structure !== 'ready' && <Feedback kind="warning" title={LOCK_COPY.structure[lock.structure] ?? LOCK_COPY.unavailable} body={LOCK_COPY.recovery} />}
+            {canMove
+              ? <Feedback kind="warning" title={LOCK_COPY.moved} body={LOCK_COPY.movedBody}
+                  actions={<button className="primary" disabled={lockBusy} onClick={() => askMoved()}>{LOCK_COPY.moveRecover}</button>} />
+              : lock.structure !== 'ready' && <Feedback kind="warning" title={LOCK_COPY.structure[lock.structure] ?? LOCK_COPY.unavailable} body={LOCK_COPY.recovery} />}
             <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
               <button disabled={lockBusy || lock.structure !== 'ready'} onClick={probe}>{lockBusy ? LOCK_COPY.probing : LOCK_COPY.probe}</button>
               <button className="danger" disabled={lockBusy || !canCleanup} onClick={() => setConfirm({ kind: 'unlock' })}>{LOCK_COPY.cleanup}</button>
@@ -196,6 +213,12 @@ export function TroubleshootSections() {
       </Disclosure>
 
       <Confirm open={confirm?.kind === 'unlock'} title={LOCK_COPY.cleanup} body={<p>{LOCK_COPY.cleanupBody}</p>} confirmLabel={LOCK_COPY.cleanup} danger onConfirm={act} onCancel={() => setConfirm(null)} />
+      <Confirm open={confirm?.kind === 'moved'} title={LOCK_COPY.moveConfirmTitle} danger confirmLabel={confirm?.resume ? LOCK_COPY.moveResume : LOCK_COPY.moveRecover}
+        confirmDisabled={!movedChecked} onConfirm={act} onCancel={() => setConfirm(null)}
+        body={<>
+          <p>{LOCK_COPY.moveConfirmBody}</p>
+          <label className="row"><input type="checkbox" checked={movedChecked} onChange={(e) => setMovedChecked(e.target.checked)} /> {LOCK_COPY.moveConfirmCheck}</label>
+        </>} />
       <Confirm open={confirm?.kind === 'restore'} title={`${confirm?.rev}번째 기록으로 복원`} body={<p><b>현재 상태를 먼저 저장해요.</b> 그다음 정본만 {confirm?.rev}번째 기록 시점으로 되돌리고 새 기록 번호를 붙여요. 장 파일과 발행물은 그대로예요.</p>} confirmLabel="복원" danger onConfirm={act} onCancel={() => setConfirm(null)} />
       <Confirm open={confirm?.kind === 'init'} title="빈 정본 만들기" body={<p>이 폴더에 새 정본을 만들어요. 기존 정본이 있으면 만들지 않아요.</p>} onConfirm={act} onCancel={() => setConfirm(null)} />
     </div>
