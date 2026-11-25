@@ -16,6 +16,7 @@ import { defaultWindowSize } from '../shared/window'
 import type { FigureChannel } from './figures'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
+import { startMainWatchdog } from './mainWatchdog'
 import { createStartupDiag, STARTUP_WINDOW_MS } from './diagLimits'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
@@ -69,7 +70,13 @@ if (diagEnabled()) {
   }, 5_000)
   beat.unref?.()
   trace('boot', `pid=${process.pid} electron=${process.versions.electron} node=${process.versions.node}`)
-  app.on('will-quit', () => trace('will-quit', `listeners=${app.listenerCount('will-quit')}`))
+  // 메인 JS 스레드가 멈추면 별도 worker 가 정지 시간·CPU 사용·바쁨 비율(숫자뿐)을 적는다(진단 전용·기록만, 자식 프로세스 없음).
+  // 패키징된 앱이거나 e2e 전용 환경값(KNUAF_E2E_MAIN_WATCHDOG=1)이 없으면 null — 학생 배포본에서는 worker 가 만들어지지 않는다.
+  const mainWatchdog = startMainWatchdog({ isPackaged: app.isPackaged })
+  app.on('will-quit', () => {
+    trace('will-quit', `listeners=${app.listenerCount('will-quit')}`)
+    mainWatchdog?.stop() // 종료 경로에서 worker 를 끝낸다 — 감시자가 만든 것은 worker 뿐이다.
+  })
   process.on('exit', (code) => trace('process-exit', `code=${code}`))
 }
 const isMac = process.platform === 'darwin'
