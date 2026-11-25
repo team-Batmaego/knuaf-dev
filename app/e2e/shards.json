@@ -205,7 +205,8 @@
       "kordoc-mcp-codex",
       "kordoc-mcp-wiring",
       "kordoc-runtime",
-      "skill-unknown-read"
+      "skill-unknown-read",
+      "main-watchdog"
     ]
   ],
   "macos": [
@@ -307,7 +308,8 @@
       "kordoc-mcp-registry",
       "support-sidebar",
       "app-update-recheck",
-      "outline-note"
+      "outline-note",
+      "main-watchdog"
     ],
     [
       "agent-busy",
