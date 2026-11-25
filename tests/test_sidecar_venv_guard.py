@@ -27,12 +27,12 @@ sys.path.insert(0, str(REPO / "app/sidecar"))
 from knuaf_sidecar import methods_core, methods_scripts  # noqa: E402
 from knuaf_sidecar.rpc import Context, RpcError  # noqa: E402
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform == "win32", reason="가짜 실행기는 posix 셸 스크립트로만 만든다"),
-    # 고치기 전 빨강 기록: evidence/red-sidecar-venv-guard-r3.txt. 구현이 초록으로 만들면 strict XPASS 가
-    # 실패하므로 이 표시를 지우는 것이 구현 완료 조건이다.
-    pytest.mark.xfail(strict=True, reason="S-01 미수정 — 설계 3판 구현 전"),
-]
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="가짜 실행기는 posix 셸 스크립트로만 만든다")
+
+# 고치기 전 빨강 기록: evidence/red-sidecar-venv-guard-r3.txt(10 failed, 973b3dd). 앱 쪽 구현(3단계)으로 키 누락 3·
+# 폴더 안 1·문서 생성 1이 초록이 됐다. 아래 표시가 남은 5건은 스킬 gg_deps 계약(D-U: KNUAF_DEPS_VENV 를 따르고
+# -m/-c 자식은 -I) 이 들어와야 초록이 된다 — strict 라 들어오면 XPASS 실패로 표시 제거를 강제한다.
+D_U = pytest.mark.xfail(strict=True, reason="TODO(D-U): 고정 스킬 gg_deps 가 KNUAF_DEPS_VENV·-I 계약을 아직 모름")
 
 DEPS_ENV = "KNUAF_DEPS_VENV"
 WITNESS_ENV = "KNUAF_TEST_WITNESS"
@@ -97,6 +97,7 @@ def _params(scene, **extra):
 # --- 정상 계약: 유효한 deps_venv → 실제 자식이 앱 환경에서 돌고 성공한다 ----------------------------
 
 
+@D_U
 def test_doctor_child_runs_in_app_env_and_is_ready(scene):
     result = methods_scripts.deps_doctor(_ctx(), _params(scene))
     assert result["ok"], result
@@ -106,6 +107,7 @@ def test_doctor_child_runs_in_app_env_and_is_ready(scene):
     assert _fired(scene) == []
 
 
+@D_U
 def test_ensure_child_installs_in_app_env(scene):
     wheels = scene["tmp"] / "empty-wheels"
     wheels.mkdir()
@@ -118,6 +120,7 @@ def test_ensure_child_installs_in_app_env(scene):
     assert not any(p.name.startswith(".venv-broken-") for p in scene["root"].iterdir())
 
 
+@D_U
 def test_doctor_all_in_process_uses_app_env(scene, monkeypatch):
     monkeypatch.setenv(DEPS_ENV, str(scene["app_env"]))  # main 이 사이드카 기동 env 로 싣는 값
     monkeypatch.chdir(scene["root"])  # 사이드카 작업 디렉터리가 어디든 폴더 모듈이 돌면 안 된다
@@ -179,6 +182,7 @@ def _python_flag_lists(path: Path):
                 yield node.lineno, consts
 
 
+@D_U
 def test_skill_python_children_with_m_or_c_are_isolated():
     """스크립트 경로 실행(`python 스크립트.py`)은 sys.path[0]=스킬 폴더라 안전하다. `-m`·`-c`는 작업
     디렉터리를 검색 경로에 넣으므로 `-I`가 있어야 한다. 새 스킬 판이 이런 자리를 더하면 여기서 잡힌다."""
@@ -187,6 +191,7 @@ def test_skill_python_children_with_m_or_c_are_isolated():
     assert offenders == []
 
 
+@D_U
 def test_contract_constant_is_declared():
     import gg_deps
 

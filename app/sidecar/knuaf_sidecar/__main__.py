@@ -30,6 +30,9 @@ def main(argv=None) -> int:
     if sys.version_info < (3, 10):
         sys.stdout.write('{"id": null, "error": {"code": "python_too_old", "message": "Python 3.10 이상 필요"}}\n')
         return 2
+    # S-01 §3.3-1: 같은 프로세스 doctor.all 이 쓰는 의존성 환경. main 이 기동 env 로 싣는다 — 빠졌으면
+    # 빈 값(신뢰 환경 없음)으로 고정해 폴더 .venv 로 떨어지지 않게 한다. 실행 중에는 바꾸지 않는다.
+    os.environ.setdefault("KNUAF_DEPS_VENV", "")
     scripts = Path(a.scripts_dir) if a.scripts_dir else default_scripts_dir()
     if not (scripts / "gg_core.py").is_file():
         sys.stdout.write('{"id": null, "error": {"code": "scripts_missing", "message": "%s"}}\n' % scripts)

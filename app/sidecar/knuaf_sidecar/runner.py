@@ -7,7 +7,6 @@ import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 from .envelope import normalize
 from .rpc import RpcError
@@ -127,12 +126,3 @@ def _group_has_live_processes(pgid):
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         raise RpcError("process_stop_failed", "script group exit could not be inspected") from error
     return False
-
-
-def project_python(project: Path):
-    """Interpreter for dependency-needing scripts: the project venv, else None."""
-    try:
-        import gg_deps  # noqa: WPS433 - scripts dir is on sys.path
-    except ImportError:
-        return None
-    return gg_deps.venv_python(project)

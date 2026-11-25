@@ -5,9 +5,39 @@ import sys
 from pathlib import Path
 
 from .rpc import RpcError
-from .runner import project_python, run_script
+from .runner import run_script
 
 TIMEOUTS = {"office": 120, "deps": 600, "kordoc": 240, "default": 120}
+
+# S-01 설계 3판 §3.3: 의존성 환경은 main 이 정한 앱 데이터 경로(`deps_venv`)만 쓴다. 논문 폴더의
+# `.venv` 는 찾지 않는다. gg_deps.py 자식의 작업 디렉터리는 이 사이드카 폴더(앱 자원) — 폴더는 인자로만.
+SIDECAR_DIR = Path(__file__).resolve().parent
+DEPS_ENV = "KNUAF_DEPS_VENV"
+_ENV_INTERPRETERS = (("bin", "python3"), ("bin", "python"), ("Scripts", "python.exe"))
+
+
+def _env_python(env_dir: str):
+    if not env_dir:
+        return None
+    for rel in _ENV_INTERPRETERS:
+        cand = Path(env_dir).joinpath(*rel)
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _deps_venv(params, root: Path) -> str:
+    """main 의 판정값. 키가 없으면 폴더를 뒤지지 않고 실행 전에 닫는다(빈 값 = 신뢰 환경 없음)."""
+    if "deps_venv" not in params:
+        raise RpcError("deps_contract_missing", "의존성 환경 판정(deps_venv)이 없음 — 앱이 정해 넘겨야 함")
+    value = params.get("deps_venv") or ""
+    if not isinstance(value, str):
+        raise RpcError("invalid_params", "deps_venv 는 문자열이어야 함")
+    if value:
+        env, base = Path(value).resolve(), root.resolve()
+        if env == base or base in env.parents:
+            raise RpcError("deps_venv_untrusted", "의존성 환경이 논문 폴더 안에 있음", {"deps_venv": value})
+    return value
 
 
 def _scripts_dir() -> Path:
@@ -76,21 +106,21 @@ def _flags(params, names, positional=()):
     return argv
 
 
-def _python_for(root: Path, needs_deps: bool):
+def _python_for(root: Path, needs_deps: bool, params=None):
     if not needs_deps:
         return sys.executable
-    venv = project_python(root)
+    venv = _env_python(_deps_venv(params or {}, root))
     if venv is None:
-        raise RpcError("deps_not_ready", "프로젝트 .venv가 없음: deps.ensure 먼저", {"root": str(root)})
+        raise RpcError("deps_not_ready", "의존성 환경이 아직 준비되지 않음: deps.ensure 먼저", {"root": str(root)})
     return venv
 
 
-def _run(ctx, params, script, argv, needs_deps=False, timeout_key="default", python=None):
+def _run(ctx, params, script, argv, needs_deps=False, timeout_key="default", python=None, cwd=None, env_extra=None):
     root = _root(params)
     _confine(root, params)
-    py = python or _python_for(root, needs_deps)
+    py = python or _python_for(root, needs_deps, params)
     timeout = float(params.get("timeout") or TIMEOUTS[timeout_key])
-    return run_script(ctx, py, _scripts_dir() / script, argv, cwd=root, timeout=timeout)
+    return run_script(ctx, py, _scripts_dir() / script, argv, cwd=cwd or root, timeout=timeout, env_extra=env_extra)
 
 
 
@@ -236,13 +266,21 @@ def office_clean(ctx, params):
 # --- deps / kordoc -----------------------------------------------------------
 
 
+# TODO(D-U): 고정 스킬 v0.6.5 의 gg_deps 는 아직 KNUAF_DEPS_VENV 를 모른다 — 스킬 계약(§3.1: 변수가 있으면
+# <폴더>/.venv 를 보지 않음, -m/-c 자식은 -I -X utf8 + cwd=환경)과 고정판 올림 전까지 doctor·ensure 는
+# 폴더 .venv 를 여전히 볼 수 있다. 계약 상수(gg_deps.DEPS_VENV_ENV) 확인도 그때 넣는다.
 def deps_ensure(ctx, params):
     root = _root(params)
+    target = _deps_venv(params, root)
+    if not target:
+        raise RpcError("deps_contract_missing", "준비할 의존성 환경 경로(deps_venv)가 비어 있음")
     base = params.get("base_python") or sys.executable
     argv = ["ensure", str(root)] + _flags(params, ("find_links", "no_index"))
-    result = _run(ctx, params, "gg_deps.py", argv, timeout_key="deps", python=base)
+    result = _run(ctx, params, "gg_deps.py", argv, timeout_key="deps", python=base,
+                  cwd=SIDECAR_DIR, env_extra={DEPS_ENV: target})
     if result["ok"]:
-        result["venv_python"] = project_python(root)
+        vpy = _env_python(target)
+        result["venv_python"] = str(vpy) if vpy else None
         ctx.emit("restart_required", {"venv_python": result["venv_python"]})
     return result
 
@@ -250,7 +288,9 @@ def deps_ensure(ctx, params):
 def deps_doctor(ctx, params):
     from .methods_core import project_deps_report
 
-    result = _run(ctx, params, "gg_deps.py", ["doctor", str(_root(params))])
+    root = _root(params)
+    deps_venv = _deps_venv(params, root)
+    result = _run(ctx, params, "gg_deps.py", ["doctor", str(root)], cwd=SIDECAR_DIR, env_extra={DEPS_ENV: deps_venv})
     if result["ok"]:
         result["data"] = project_deps_report(result["data"])
     return result

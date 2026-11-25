@@ -214,7 +214,8 @@ def test_positional_value_cannot_pose_as_an_option(sidecar, project):
 
 
 def test_docx_build_without_venv_reports_deps_not_ready(sidecar, project):
-    r = sidecar.call("docx.build", root=str(project), out="build/x.docx")
+    # S-01: main 이 "신뢰 환경 없음"(빈 deps_venv)을 넘기면 폴더 .venv 를 찾지 않고 준비 안 됨으로 닫는다.
+    r = sidecar.call("docx.build", root=str(project), out="build/x.docx", deps_venv="")
     assert r["error"]["code"] == "deps_not_ready"
 
 
@@ -323,7 +324,8 @@ def test_cancel_terminates_running_script(sidecar, project, tmp_path):
     wrapper = tmp_path / "slow-python"
     wrapper.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
     os.chmod(wrapper, 0o755)
-    rid = sidecar.send("deps.ensure", root=str(project), base_python=str(wrapper))
+    deps_venv = tmp_path.parent / (tmp_path.name + "-appdeps")  # 앱 데이터 자리(폴더 밖), S-01
+    rid = sidecar.send("deps.ensure", root=str(project), base_python=str(wrapper), deps_venv=str(deps_venv))
     time.sleep(0.5)
     started = time.monotonic()
     sidecar.proc.stdin.write(json.dumps({"id": "c", "method": "cancel", "params": {"id": rid}}) + "\n")

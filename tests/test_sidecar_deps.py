@@ -100,7 +100,8 @@ def test_stopping_ensure_also_stops_its_pip_child(tmp_path, stop):
     sidecar = Sidecar()
     connection = None
     try:
-        rid = sidecar.send("deps.ensure", root=str(tmp_path), base_python=str(wrapper))
+        deps_venv = tmp_path.parent / (tmp_path.name + "-appdeps")  # 앱 데이터 자리(폴더 밖), S-01
+        rid = sidecar.send("deps.ensure", root=str(tmp_path), base_python=str(wrapper), deps_venv=str(deps_venv))
         connection, _ = listener.accept()
         connection.settimeout(5)
         assert connection.recv(20) == b"child-ready"
