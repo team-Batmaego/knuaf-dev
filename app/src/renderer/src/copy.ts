@@ -483,7 +483,10 @@ export const LOCK_COPY = {
   moveConfirmCheck: '다른 PC·다른 창에서 이 폴더를 편집하고 있지 않아요',
   moveDone: '잠금을 새로 만들었어요. 이제 대화와 문서 만들기를 할 수 있어요.',
   moveNotConfirmed: '확인하지 않아 아무것도 바꾸지 않았어요.',
-  moveNotCommitted: '잠금을 풀지 못했어요. 폴더는 그대로예요.',
+  moveNotCommitted: '잠금을 풀지 못했어요.',
+  moveRecheck: '중간까지 진행됐을 수 있어 잠금 상태를 다시 확인했어요. 위 상태를 봐 주시고, 폴더 안 파일은 지우거나 옮기지 마세요.',
+  moveResumable: '잠금 풀기가 끝나지 않았어요',
+  moveResumableBody: '지난번 잠금 풀기가 중간에 멈췄어요. "잠금 풀기 이어서 마치기"로 마무리할 수 있어요. 쓴 글과 파일은 그대로예요.',
   moveCleanupPending: '새 잠금은 만들었지만 마무리 정리가 남았어요.',
   moveCleanupPendingBody: '"잠금 풀기 이어서 마치기"를 눌러 마무리해 주세요. 쓴 글과 파일은 그대로예요.',
   moveIndeterminate: '잠금 풀기가 어디까지 됐는지 확인하지 못했어요.',
@@ -495,7 +498,7 @@ export function describeRecovery(o: RecoveryOutcome): { kind: 'completion' | 'st
   switch (o.kind) {
     case 'done': return { kind: 'completion', title: LOCK_COPY.moveDone }
     case 'not_confirmed': return { kind: 'status', title: LOCK_COPY.moveNotConfirmed }
-    case 'not_committed': return { kind: 'warning', title: LOCK_COPY.moveNotCommitted, body: o.reason ? `(${o.reason})` : undefined }
+    case 'not_committed': return { kind: 'warning', title: LOCK_COPY.moveNotCommitted, body: o.reason ? `${LOCK_COPY.moveRecheck} (${o.reason})` : LOCK_COPY.moveRecheck }
     case 'cleanup_pending': return o.resumeId
       ? { kind: 'warning', title: LOCK_COPY.moveCleanupPending, body: LOCK_COPY.moveCleanupPendingBody, resumeId: o.resumeId }
       : { kind: 'warning', title: LOCK_COPY.moveCleanupPending, body: LOCK_COPY.moveIndeterminateBody }

@@ -9,7 +9,7 @@
  *  3) RPC 이름이 쓰기 메서드 목록에 있다(동시 쓰기 막기), 규칙집 업데이트 필요 오류는 알아볼 수 있는 안내다.
  */
 import { expect, test } from '@playwright/test'
-import { canRecoverMoved, recoveryOutcome } from '../src/shared/lock-recovery'
+import { canRecoverMoved, recoveryOutcome, resumableRecovery } from '../src/shared/lock-recovery'
 import type { LockInfo, OfflineRecovery } from '../src/shared/types'
 import { LOCK_COPY, describeError, describeRecovery } from '../src/renderer/src/copy'
 import { WRITE_METHODS } from '../src/renderer/src/store/prep'
@@ -67,4 +67,30 @@ test('쓰기 메서드로 등록되고, 규칙집 업데이트 필요 오류는 
   const described = describeError({ code: 'skill_update_required', message: 'x', data: { feature: 'lock.upgrade_offline' } })
   expect(described.kind).toBe('warning')
   expect(described.title).toContain('규칙집 업데이트')
+})
+
+test('Roh I-01: "아무것도 안 바뀜"은 확인 전에 끝난 경우에만, 그 밖 미커밋은 잠금 상태를 다시 보라고 한다', () => {
+  const confirmLess = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'offline_confirmation_required' })))
+  expect(confirmLess.title).toContain('아무것도 바꾸지 않았어요')
+  for (const reason of ['recovery_active_exists', 'guard_busy', null]) {
+    const v = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason })))
+    const text = `${v.title} ${v.body ?? ''}`
+    expect(text).not.toContain('그대로')
+    expect(text).not.toContain('바꾸지 않았')
+    expect(text).toContain(LOCK_COPY.moveRecheck)
+  }
+})
+
+test('Roh I-02: 화면에 다시 들어와도 lock.info 의 활성 복구 ID 로 이어 하기를 되살린다', () => {
+  const rid = '0b8f8a0e-6c1e-4d3e-9f57-1c2d3e4f5a6b'
+  // 정리만 남은 경우: 새 잠금은 섰다(ready) — 규칙집은 reason 을 recovery_active 로 돌려준다.
+  expect(resumableRecovery(lock({ structure: 'ready', reason: 'recovery_active', recovery_id: rid }))).toBe(rid)
+  // 격리 뒤 멈춘 경우: 잠금 폴더가 없다(absent).
+  expect(resumableRecovery(lock({ structure: 'absent', reason: 'recovery_active', recovery_id: rid }))).toBe(rid)
+  expect(resumableRecovery(lock({ structure: 'damaged', recovery_id: rid }))).toBe(rid)
+  expect(resumableRecovery(lock({ recovery_id: null }))).toBeNull()
+  expect(resumableRecovery(lock({ recovery_id: '../x' }))).toBeNull()
+  expect(resumableRecovery(undefined)).toBeNull()
+  // 활성 복구가 있으면 새 복구 단추는 안 보인다(규칙집도 relocation_candidate 를 끈다).
+  expect(canRecoverMoved(lock({ relocation_candidate: true, recovery_id: rid }))).toBe(false)
 })

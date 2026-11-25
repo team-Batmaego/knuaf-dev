@@ -8,7 +8,19 @@ import type { LockInfo, OfflineRecovery } from './types'
 
 /** 풀기 단추를 보일지: 규칙집이 '옮긴 폴더로 보인다'고 한 손상일 때만(L1). 다른 손상·옛 판은 안 보인다(L3·L4). */
 export function canRecoverMoved(lock: LockInfo | undefined | null): boolean {
-  return !!lock && lock.structure === 'damaged' && lock.relocation_candidate === true
+  return !!lock && lock.structure === 'damaged' && lock.relocation_candidate === true && !lock.recovery_id
+}
+
+const RECOVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * 끝나지 않은 복구의 ID — 규칙집 `lock.info` 가 이 폴더의 활성 복구 기록에서 읽어 준다(Roh I-02).
+ * 화면 상태가 아니라 폴더에서 다시 읽으므로 앱을 다시 켜거나 폴더를 다시 열어도 이어 하기를 되살린다.
+ * 사이드카도 같은 폴더의 같은 ID 일 때만 이어 하기를 받는다.
+ */
+export function resumableRecovery(lock: LockInfo | undefined | null): string | null {
+  const id = lock?.recovery_id
+  return typeof id === 'string' && RECOVERY_ID.test(id) ? id : null
 }
 
 export type RecoveryOutcome =
@@ -16,7 +28,7 @@ export type RecoveryOutcome =
   | { kind: 'done' }
   /** 확인이 없어 아무것도 안 바꿨다. */
   | { kind: 'not_confirmed' }
-  /** 바뀐 것 없이 멈췄다 — 이유를 보여 준다. */
+  /** 커밋 전에 멈췄다 — 확인 전 거절과 달리 중간까지 진행됐을 수 있어 잠금 상태를 다시 본다(Roh I-01). */
   | { kind: 'not_committed'; reason: string | null }
   /** 새 잠금은 섰지만 마무리 정리가 남았다 — 같은 복구를 이어서 마칠 수 있다. */
   | { kind: 'cleanup_pending'; resumeId: string | null; reason: string | null }

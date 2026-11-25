@@ -11,7 +11,7 @@ import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
 import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, describeRecovery, type DescribedError } from '../copy'
-import { canRecoverMoved, recoveryOutcome } from '../../../shared/lock-recovery'
+import { canRecoverMoved, recoveryOutcome, resumableRecovery } from '../../../shared/lock-recovery'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -121,6 +121,8 @@ export function TroubleshootSections() {
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
   const canMove = canRecoverMoved(lock)
+  // 이어 하기 ID 는 폴더(lock.info)에서 다시 읽는다 — 화면을 다시 열어도 되살아난다(Roh I-02).
+  const pendingId = resumableRecovery(lock)
   const movedView = moved?.root === root ? moved : null
   const askMoved = (resume?: string): void => { setMovedChecked(false); setConfirm({ kind: 'moved', resume }) }
   const orphans: string[] = doc?.gg?.orphan_files ?? []
@@ -159,7 +161,7 @@ export function TroubleshootSections() {
         {lockBusy && !lock && <div className="caption" role="status" aria-busy="true"><span className="spin" /> {LOCK_COPY.probing}</div>}
         {lockErr && <Feedback kind={lockErr.kind} title={lockErr.title} body={lockErr.action} details={<code>{lockErr.raw}</code>} />}
         {movedView && <Feedback kind={movedView.view.kind} title={movedView.view.title} body={movedView.view.body}
-          actions={movedView.view.resumeId ? <button disabled={lockBusy} onClick={() => askMoved(movedView.view.resumeId)}>{LOCK_COPY.moveResume}</button> : undefined}
+          actions={movedView.view.resumeId && !pendingId ? <button disabled={lockBusy} onClick={() => askMoved(movedView.view.resumeId)}>{LOCK_COPY.moveResume}</button> : undefined}
           details={movedView.view.kind === 'completion' ? undefined : <pre>{movedView.raw}</pre>} />}
         {lock && (
           <div>
@@ -167,7 +169,10 @@ export function TroubleshootSections() {
             <p className="caption">{LOCK_COPY.observation}</p>
             <div className="caption">{LOCK_COPY.observedAt}: <time>{lock.observed_at}</time></div>
             {lock.owner && <p><strong>{LOCK_COPY.owner}</strong><br />{LOCK_COPY.ownerBody}</p>}
-            {canMove
+            {pendingId
+              ? <Feedback kind="warning" title={LOCK_COPY.moveResumable} body={LOCK_COPY.moveResumableBody}
+                  actions={<button className="primary" disabled={lockBusy} onClick={() => askMoved(pendingId)}>{LOCK_COPY.moveResume}</button>} />
+              : canMove
               ? <Feedback kind="warning" title={LOCK_COPY.moved} body={LOCK_COPY.movedBody}
                   actions={<button className="primary" disabled={lockBusy} onClick={() => askMoved()}>{LOCK_COPY.moveRecover}</button>} />
               : lock.structure !== 'ready' && <Feedback kind="warning" title={LOCK_COPY.structure[lock.structure] ?? LOCK_COPY.unavailable} body={LOCK_COPY.recovery} />}
