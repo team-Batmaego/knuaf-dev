@@ -66,6 +66,8 @@ function harness(platform = 'darwin') {
   const kills: { command: string; args: string[]; options: object }[] = []
   let scripts = '/scripts/S0'
   const spawnArgs: string[][] = []
+  const spawnEnvs: Record<string, string | undefined>[] = []
+  let deps = ''
   let automaticReady = true
   let failSpawn = false
   const exported: { exports: { Sidecar?: new () => Sidecar } } = { exports: {} }
@@ -83,10 +85,13 @@ function harness(platform = 'darwin') {
       if (name === './diagLog') return { diag: () => {} }
       if (name === './python') return {
         choosePython: (_root: string | null, override: string | null) => ({ python: override ?? 'base', kind: 'env' }),
-        scriptsDir: () => scripts, sidecarDir: () => '/sidecar'
+        scriptsDir: () => scripts, sidecarDir: () => '/sidecar',
+        // S-01 설계 3판 §3.3: 신뢰된 앱 데이터 의존성 환경(없으면 빈 문자열)
+        depsVenv: () => deps
       }
       if (name === 'node:child_process') return { spawn: (command: string, args: string[], options: object) => {
         spawnArgs.push(args)
+        spawnEnvs.push(((options as { env?: Record<string, string | undefined> }).env) ?? {})
         const child = new Child(1000 + children.length + killers.length)
         if (command.endsWith('taskkill.exe')) {
           killers.push(child); kills.push({ command, args, options }); return child
@@ -104,7 +109,8 @@ function harness(platform = 'darwin') {
   const sidecar = new exported.exports.Sidecar!()
   return {
     sidecar, children, killers, kills,
-    spawnArgs, setScripts: (path: string) => { scripts = path },
+    spawnArgs, spawnEnvs, setScripts: (path: string) => { scripts = path },
+    setDeps: (path: string) => { deps = path },
     manualReady: () => { automaticReady = false },
     failNextSpawn: () => { failSpawn = true },
     async advance(ms: number) {
@@ -384,5 +390,24 @@ test('skill switch drains read RPCs, rejects every new call, and restarts with a
   await h.sidecar.configure(null, 'base')
   expect(h.children[1].exitCode).toBe(0)
   expect(h.spawnArgs[2]).toContain('/scripts/S0')
+  await h.sidecar.stop()
+})
+
+// S-01 설계 3판 §3.3(검토 r2 B-01 ②): 의존성 환경 경로·키가 바뀌면 실행기·scripts 가 같아도 다시 띄운다.
+// 그러지 않으면 호출 인자를 쓰는 deps.doctor 와 기동 환경을 쓰는 doctor.all 이 서로 다른 환경을 본다.
+// 고치기 전 빨강이 정상이라 test.fail 로 둔다 — 구현이 초록으로 만들면 이 표시를 지운다.
+test('의존성 환경이 바뀌면 같은 실행기여도 사이드카를 다시 띄우고 새 환경을 싣는다 (S-01)', async () => {
+  test.fail(true, 'S-01 미수정 — sidecar.ts 생략 조건·기동 env 에 depsVenv 없음')
+  const h = harness()
+  h.setDeps('/userData/deps/aaaa')
+  await h.sidecar.configure('/project', 'base')
+  expect(h.spawnEnvs[0].KNUAF_DEPS_VENV).toBe('/userData/deps/aaaa')
+  h.setDeps('/userData/deps/bbbb')
+  await h.sidecar.configure('/project', 'base')
+  expect(h.children).toHaveLength(2)
+  expect(h.spawnEnvs[1].KNUAF_DEPS_VENV).toBe('/userData/deps/bbbb')
+  // 같은 환경이면 지금처럼 생략한다(불필요한 재시작 없음).
+  await h.sidecar.configure('/project', 'base')
+  expect(h.children).toHaveLength(2)
   await h.sidecar.stop()
 })
