@@ -1,4 +1,4 @@
-import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OfflineRecovery, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -112,6 +112,12 @@ export const rpc = {
   restore: (root: string, revision: number, expected_revision: number) => call<{ revision: number; restored_from: number; pre_restore_snapshot: string; notice: string }>('project.restore', { root, revision, expected_revision }),
   lockInfo: (root: string, probe = false) => call<LockInfo>('lock.info', { root, probe }),
   unlock: (root: string) => call<OwnerCleanup>('lock.unlock', { root }),
+  /**
+   * 옮긴·복사한 폴더의 잠금 복구. `offlineConfirmed` 는 확인 창에서 학생이 누른 값만 넘긴다 —
+   * 사이드카는 정확히 `true` 일 때만 확인으로 본다. `resume` 은 끝나지 못한 복구의 ID.
+   */
+  upgradeOffline: (root: string, offlineConfirmed: boolean, resume?: string) =>
+    call<OfflineRecovery>('lock.upgrade_offline', resume ? { root, offline_confirmed: offlineConfirmed, resume } : { root, offline_confirmed: offlineConfirmed }),
   doctor: (root: string) => call<Record<string, any>>('doctor.all', { root }),
   depsDoctor: async (root: string, clientId?: string, onEvent?: EventHandler): Promise<DependencyReport> => {
     const env = await call<Envelope>('deps.doctor', { root }, onEvent, clientId)

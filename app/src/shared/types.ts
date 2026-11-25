@@ -53,8 +53,20 @@ export interface LockInfo {
   owner: Record<string, unknown> | null
   observed_at: string
   recovery_id: string | null
+  /** 규칙집 v0.6.5+: 폴더를 옮기거나 복사해서 생긴 손상으로 보일 때만 true. 옛 판은 키가 없다. */
+  relocation_candidate?: boolean
 }
 export interface OwnerCleanup extends LockInfo { owner_cleaned: boolean }
+/** `lock.upgrade_offline` 결과 — 규칙집 `gg_lock.upgrade_offline` 의 판정 그대로. `blocked` 는 오류가 아니라 결과로 온다. */
+export interface OfflineRecovery {
+  recovery_id: string | null
+  status: 'completed' | 'already_completed' | 'blocked' | string
+  commit_state: 'committed' | 'not_committed' | 'committed_cleanup_pending' | 'indeterminate' | string
+  reason: string | null
+  receipt_path: string | null
+  preserved_paths: string[]
+  cleanup_errors: unknown[]
+}
 export interface HistoryRow { revision: number; hash: string; request_id: string | null; snapshot_path: string | null; snapshot_ok: boolean | null; current?: boolean }
 export interface SectionRow { id: string; title: string; order: number; path: string; status: string; revision: number; draft_hash: string; draft_hash_ok: boolean; draft_chars?: number; claims: number | null; error?: string }
 /**
