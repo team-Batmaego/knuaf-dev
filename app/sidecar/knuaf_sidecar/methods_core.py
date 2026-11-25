@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from itertools import chain
 from pathlib import Path
 
 from .rpc import RpcError
 from .diagnostic_trace import trace_doctor
+
+_RECOVERY_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 REVIEW_KINDS = ("content", "logic", "calculation", "docx", "xlsx", "render")
 
@@ -247,8 +250,20 @@ def lock_upgrade_offline(ctx, params):
         raise RpcError("skill_update_required", "설치된 규칙집에 옮긴 폴더 복구(upgrade_offline)가 없음",
                        {"feature": "lock.upgrade_offline"})
     resume = params.get("resume")
-    if resume is not None and (not isinstance(resume, str) or not resume):
-        raise RpcError("invalid_params", "resume은 복구 ID 문자열")
+    if resume is not None and (not isinstance(resume, str) or not _RECOVERY_ID.fullmatch(resume)):
+        raise RpcError("invalid_params", "resume은 복구 ID(UUID) 문자열")
+    # The dialog's boolean is not enough: re-read the folder here, inside the sidecar write
+    # lock (write=True), and only accept the two app paths. A new recovery is only for a
+    # folder gg_lock itself calls a relocation candidate; a resume is only for the recovery
+    # recorded as active in this same folder. gg_lock's wider offline recovery is not exposed.
+    status = gg_lock.inspect_lock(root)
+    observed = {"structure": status.get("structure"), "reason": status.get("reason"), "recovery_id": status.get("recovery_id")}
+    if resume is None:
+        if not (status.get("structure") == "damaged" and status.get("reason") == "directory_identity_mismatch"
+                and status.get("relocation_candidate") is True):
+            raise RpcError("not_relocation_candidate", "옮긴 폴더로 확인되지 않아 복구하지 않음", observed)
+    elif status.get("recovery_id") != resume:
+        raise RpcError("recovery_id_mismatch", "이 폴더에 남은 복구 ID가 아님", observed)
     try:
         return gg_lock.upgrade_offline(root, offline_confirmed=params.get("offline_confirmed") is True, resume_id=resume)
     except gg_lock.LockError as error:
