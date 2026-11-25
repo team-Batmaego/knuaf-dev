@@ -395,9 +395,8 @@ test('skill switch drains read RPCs, rejects every new call, and restarts with a
 
 // S-01 설계 3판 §3.3(검토 r2 B-01 ②): 의존성 환경 경로·키가 바뀌면 실행기·scripts 가 같아도 다시 띄운다.
 // 그러지 않으면 호출 인자를 쓰는 deps.doctor 와 기동 환경을 쓰는 doctor.all 이 서로 다른 환경을 본다.
-// 고치기 전 빨강이 정상이라 test.fail 로 둔다 — 구현이 초록으로 만들면 이 표시를 지운다.
+// 고치기 전 빨강 기록: evidence/red-sidecar-restart.txt(973b3dd). 구현으로 초록.
 test('의존성 환경이 바뀌면 같은 실행기여도 사이드카를 다시 띄우고 새 환경을 싣는다 (S-01)', async () => {
-  test.fail(true, 'S-01 미수정 — sidecar.ts 생략 조건·기동 env 에 depsVenv 없음')
   const h = harness()
   h.setDeps('/userData/deps/aaaa')
   await h.sidecar.configure('/project', 'base')

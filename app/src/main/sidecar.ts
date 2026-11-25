@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline'
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import type { RpcError, SidecarInfo } from '../shared/types'
-import { choosePython, scriptsDir, sidecarDir } from './python'
+import { choosePython, depsVenv, scriptsDir, sidecarDir } from './python'
 import { skillSwitch } from './update/switch'
 import { agentActivity } from './update/activity'
 import { diag } from './diagLog'
@@ -95,10 +95,13 @@ export class Sidecar extends EventEmitter {
     if (this.owner?.failure) throw this.stopFailure(this.owner)
     const pick = choosePython(projectRoot, override)
     const scripts = scriptsDir()
-    if (this.status().running && pick.python === this.info.python && scripts === this.info.scriptsDir) return this.status()
+    // S-01 §3.3-3: 의존성 환경이 바뀌면 실행기·scripts 가 같아도 다시 띄운다 — 기동 env(doctor.all)와
+    // 호출 인자(deps.doctor 등)가 서로 다른 환경을 보지 않게.
+    const deps = depsVenv(override)
+    if (this.status().running && pick.python === this.info.python && scripts === this.info.scriptsDir && deps === (this.info.depsVenv ?? '')) return this.status()
     await this.stopNow()
     if (version !== this.stopVersion) throw START_CANCELLED
-    this.info = { ...pick, scriptsDir: scripts, running: false }
+    this.info = { ...pick, scriptsDir: scripts, running: false, depsVenv: deps }
     const interrupted = Promise.withResolvers<never>()
     let startupError: RpcError | null = null
     const abort = (error: RpcError): void => { startupError = error; interrupted.reject(error) }
@@ -141,7 +144,8 @@ export class Sidecar extends EventEmitter {
   private startNow(): Promise<void> {
     const { promise, resolve, reject } = Promise.withResolvers<void>()
     const args = ['-m', 'knuaf_sidecar', '--scripts-dir', this.info.scriptsDir, '--interpreter-kind', this.info.kind]
-    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1' }
+    // KNUAF_DEPS_VENV: 같은 프로세스 doctor.all 이 쓰는 의존성 환경(빈 값 = 없음, 폴더는 보지 않음). S-01 §3.3-1.
+    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1', KNUAF_DEPS_VENV: this.info.depsVenv ?? '' }
     let proc: ChildProcessWithoutNullStreams
     try {
       proc = spawn(this.info.python, args, { cwd: sidecarDir(), env, windowsHide: true })

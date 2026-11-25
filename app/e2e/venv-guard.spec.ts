@@ -20,24 +20,32 @@ import type * as PythonModule from '../src/main/python'
 
 const appRoot = resolve(__dirname, '..')
 const file = join(appRoot, 'src/main/python.ts'), realRequire = createRequire(file)
-const factory = new Script(`(function(require,exports,__dirname){${transpileModule(readFileSync(file, 'utf8'), {
-  compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
-}).outputText}\n})`, { filename: file }).runInThisContext() as
-  (require: (name: string) => unknown, module: Partial<typeof PythonModule>, dirname: string) => void
+type Factory = (require: (name: string) => unknown, module: Record<string, unknown>, dirname: string) => void
+function compile(path: string): Factory {
+  return new Script(`(function(require,exports,__dirname){${transpileModule(readFileSync(path, 'utf8'), {
+    compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 }
+  }).outputText}\n})`, { filename: path }).runInThisContext() as Factory
+}
+const factory = compile(file)
+const depsEnvFactory = compile(join(appRoot, 'src/main/deps-env.ts'))
 
 function harness() {
   const dir = mkdtempSync(join(tmpdir(), 'knuaf-venv-guard-'))
   const userData = join(dir, 'userData'), managed = join(dir, 'managed', 'bin', 'python3')
   const root = join(dir, '남이 준 논문'), marker = join(dir, 'PWNED')
   mkdirSync(userData, { recursive: true }); mkdirSync(root)
+  const depsEnv: Record<string, unknown> = {}
+  depsEnvFactory(realRequire, depsEnv, join(appRoot, 'out', 'main'))
   const dependencies: Record<string, unknown> = {
-    electron: { app: { isPackaged: false, getPath: () => userData, getVersion: () => '0.7.5' } },
+    electron: { app: { isPackaged: false, getPath: () => userData, getVersion: () => '0.7.5', getName: () => 'knuaf-test' } },
     './runtime': { managedPython: () => managed },
-    './agent': { skillSource: () => join(dir, 'skill') }
+    './agent': { skillSource: () => join(dir, 'skill') },
+    './settings': { loadSettings: () => ({ python_override: null }) },
+    './deps-env': depsEnv
   }
-  const module: Partial<typeof PythonModule> = {}
+  const module: Record<string, unknown> = {}
   factory((name) => Object.hasOwn(dependencies, name) ? dependencies[name] : realRequire(name), module, join(appRoot, 'out', 'main'))
-  return { dir, root, marker, managed, python: module as typeof PythonModule,
+  return { dir, root, marker, managed, depsEnv, python: module as unknown as typeof PythonModule,
     cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
@@ -82,5 +90,34 @@ test('S1 실행: 고른 실행기를 사이드카처럼 띄워도 폴더 안 코
     // sidecar.ts startNow 와 같은 모양의 실행. 관리 실행기 가짜 경로는 없으므로 ENOENT 로 끝나는 것이 정상이다.
     spawnSync(pick.python, ['-m', 'knuaf_sidecar', '--interpreter-kind', pick.kind], { cwd: h.dir, timeout: 5000 })
     expect(existsSync(h.marker)).toBe(false)
+  } finally { h.cleanup() }
+})
+
+test('S2: 표식 있는 앱 데이터 환경만 고르고, 표식 없음·키 다름은 고르지 않는다(폴더 .venv 는 늘 무시)', () => {
+  test.skip(process.platform === 'win32', '가짜 실행 파일 경로를 posix 꼴로 만든다')
+  const h = harness()
+  try {
+    const planted = plantForeignVenv(h.root, h.marker)
+    const py = h.python as unknown as Record<string, (...a: unknown[]) => string>
+    const root = py.depsRoot(), key = py.depsEnvKey(null)
+    const env = join(root, key), envPy = join(env, 'bin', 'python3')
+    mkdirSync(join(env, 'bin'), { recursive: true })
+    writeFileSync(envPy, '')
+    // 표식 없음(만들다 만 잔해) → 신뢰 안 함
+    expect(py.depsVenv(null)).toBe('')
+    expect(h.python.choosePython(h.root, null).python).toBe(h.managed)
+    // 키가 다른 표식 → 신뢰 안 함
+    writeFileSync(join(env, 'knuaf-ready.json'), JSON.stringify({ key: 'other' }))
+    expect(py.depsVenv(null)).toBe('')
+    // main 이 준비 끝에 쓴 표식 → 신뢰. 폴더 .venv 는 여전히 고르지 않는다.
+    ;(h.depsEnv.markReady as (r: string, k: string) => string)(root, key)
+    expect(py.depsVenv(null)).toBe(env)
+    const pick = h.python.choosePython(h.root, null)
+    expect(pick).toEqual({ python: envPy, kind: 'venv' })
+    expect(pick.python).not.toBe(planted)
+    expect(h.python.venvPython(h.root)).toBe(envPy) // 에이전트·본대화·담당 PATH 입력
+    // 표식 없는 잔해 폐기는 앱 데이터 뿌리 안에서만, 표식 있는 환경은 그대로
+    expect((h.depsEnv.discardUnmarked as (r: string, k: string) => boolean)(root, key)).toBe(false)
+    expect(existsSync(envPy)).toBe(true)
   } finally { h.cleanup() }
 })
