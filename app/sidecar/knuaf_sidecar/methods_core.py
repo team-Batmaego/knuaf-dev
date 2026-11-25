@@ -233,6 +233,29 @@ def lock_unlock(ctx, params):
         raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
 
 
+def lock_upgrade_offline(ctx, params):
+    """Offline recovery of a moved/copied workspace (규칙집 v0.6.5 `gg_lock.upgrade_offline`).
+
+    `offline_confirmed` is the student's explicit confirmation from the app's dialog and is
+    passed through only when it is literally `true`. The result dict (recovery_id, status,
+    commit_state, reason, ...) is gg_lock's own verdict; `blocked` is returned, not raised.
+    """
+    import gg_lock
+
+    root = _root(params)
+    if not callable(getattr(gg_lock, "upgrade_offline", None)):
+        raise RpcError("skill_update_required", "설치된 규칙집에 옮긴 폴더 복구(upgrade_offline)가 없음",
+                       {"feature": "lock.upgrade_offline"})
+    resume = params.get("resume")
+    if resume is not None and (not isinstance(resume, str) or not resume):
+        raise RpcError("invalid_params", "resume은 복구 ID 문자열")
+    try:
+        return gg_lock.upgrade_offline(root, offline_confirmed=params.get("offline_confirmed") is True, resume_id=resume)
+    except gg_lock.LockError as error:
+        code = "lock_held" if error.status == "busy" else "lock_ambiguous"
+        raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
+
+
 def project_deps_report(report):
     """Use only the project's probed venv; current Python remains diagnostic evidence."""
     if not isinstance(report, dict) or report.get("error"):
@@ -620,6 +643,7 @@ def register(server):
     server.register("project.restore", project_restore, write=True)
     server.register("lock.info", lock_info)
     server.register("lock.unlock", lock_unlock, write=True)
+    server.register("lock.upgrade_offline", lock_upgrade_offline, write=True)
     server.register("doctor.all", doctor_all)
     server.register("fs.build_tree", fs_build_tree)
     server.register("materials.list", materials_list)
