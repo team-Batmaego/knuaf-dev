@@ -99,6 +99,11 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '"다시 진단"을 눌러 잠금 상태를 다시 확인해 주세요. 잠금 파일을 직접 지우지 마세요.',
     kind: 'warning'
   },
+  target_changed: {
+    title: '확인한 뒤 이 자리의 폴더가 바뀌어 잠금을 풀지 않았어요.',
+    action: '"다시 진단"을 눌러 지금 폴더의 잠금 상태를 다시 확인한 뒤 진행해 주세요.',
+    kind: 'warning'
+  },
   recovery_id_mismatch: {
     title: '이 폴더에 남은 잠금 풀기 기록과 맞지 않아 이어서 하지 않았어요.',
     action: '"다시 진단"을 눌러 잠금 상태를 다시 확인한 뒤 보이는 단추로 진행해 주세요.',

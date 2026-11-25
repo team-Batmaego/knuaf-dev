@@ -35,6 +35,15 @@ def _rpc(method, params):
     return json.loads(out.getvalue())
 
 
+def _upgrade(params):
+    """main 과 같은 순서: 확인 창 전에 `lock.identity` 로 폴더 식별값을 잡아 `expected_identity` 로 넘긴다."""
+    if "expected_identity" not in params:
+        got = _rpc("lock.identity", {"root": params["root"]})
+        assert "result" in got, got
+        params = dict(params, expected_identity=got["result"])
+    return _rpc("lock.upgrade_offline", params)
+
+
 def _tree(root):
     """폴더 안 파일 경로·내용 지문 — '아무것도 안 바뀌었다'를 확인할 때 쓴다."""
     return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None) for p in sorted(root.rglob("*"))}
@@ -64,7 +73,7 @@ def test_missing_skill_function_is_a_recognizable_error(tmp_path, monkeypatch):
         monkeypatch.delattr(gg_lock, "upgrade_offline")
     (tmp_path / "project.json").write_text("{}", encoding="utf-8")
     before = _tree(tmp_path)
-    error = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True})["error"]
+    error = _upgrade({"root": str(tmp_path), "offline_confirmed": True})["error"]
     assert error["code"] == "skill_update_required"
     assert error["data"] == {"feature": "lock.upgrade_offline"}
     assert _tree(tmp_path) == before
@@ -85,16 +94,16 @@ def test_only_literal_true_counts_as_confirmation(tmp_path, monkeypatch):
     monkeypatch.setattr(gg_lock, "upgrade_offline", fake, raising=False)
     for value in (None, False, "true", 1, "yes"):
         params = {"root": str(tmp_path)} if value is None else {"root": str(tmp_path), "offline_confirmed": value}
-        assert "result" in _rpc("lock.upgrade_offline", params)
+        assert "result" in _upgrade(params)
     monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: dict(MOVED, recovery_id=RID))
-    _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True, "resume": RID})
+    _upgrade({"root": str(tmp_path), "offline_confirmed": True, "resume": RID})
     assert calls == [(False, None)] * 5 + [(True, RID)]
 
 
 @pytest.mark.parametrize("resume", ["", 3, ["x"], "../x", "rid-1"])
 def test_bad_resume_is_invalid_params(tmp_path, monkeypatch, resume):
     monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, **k: pytest.fail("called"), raising=False)
-    error = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True, "resume": resume})["error"]
+    error = _upgrade({"root": str(tmp_path), "offline_confirmed": True, "resume": resume})["error"]
     assert error["code"] == "invalid_params"
 
 
@@ -104,7 +113,7 @@ def test_lock_error_maps_like_unlock(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gg_lock, "upgrade_offline", busy, raising=False)
     monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: MOVED)
-    error = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True})["error"]
+    error = _upgrade({"root": str(tmp_path), "offline_confirmed": True})["error"]
     assert error["code"] == "lock_held" and error["data"] == {"status": "busy", "reason": "guard_busy"}
 
 
@@ -123,7 +132,7 @@ def test_without_confirmation_nothing_changes(moved):
     """L2: 확인 없이 부르면 blocked/offline_confirmation_required, 폴더 내용 그대로."""
     copy, _ = moved
     before = _tree(copy)
-    result = _rpc("lock.upgrade_offline", {"root": str(copy)})["result"]
+    result = _upgrade({"root": str(copy)})["result"]
     assert (result["status"], result["commit_state"], result["reason"]) == (
         "blocked", "not_committed", "offline_confirmation_required")
     assert _tree(copy) == before
@@ -133,7 +142,7 @@ def test_without_confirmation_nothing_changes(moved):
 def test_confirmed_recovery_makes_moved_folder_ready_and_free(moved):
     """L1(사이드카 몫): 확인 뒤 복구 → 잠금 준비됨·비어 있음, 새 workspace_id."""
     copy, proto = moved
-    result = _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True})["result"]
+    result = _upgrade({"root": str(copy), "offline_confirmed": True})["result"]
     assert result["status"] == "completed", result
     assert {"recovery_id", "status", "commit_state", "reason", "receipt_path", "preserved_paths", "cleanup_errors"} <= result.keys()
     info = _rpc("lock.info", {"root": str(copy), "probe": True})["result"]
@@ -176,7 +185,7 @@ def test_confirmed_new_recovery_refuses_generic_damage(tmp_path):
     (tmp_path / "project.json").write_text("{}", encoding="utf-8")
     (tmp_path / ".gg-lock" / "protocol.json").write_bytes(b"not json")
     before = _tree(tmp_path)
-    error = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True})["error"]
+    error = _upgrade({"root": str(tmp_path), "offline_confirmed": True})["error"]
     assert error["code"] == "not_relocation_candidate", error
     assert error["data"]["structure"] == "damaged"
     assert _tree(tmp_path) == before
@@ -187,7 +196,7 @@ def test_confirmed_new_recovery_refuses_ready_folder(tmp_path):
     gg_lock.install_new(tmp_path)
     (tmp_path / "project.json").write_text("{}", encoding="utf-8")
     before = _tree(tmp_path)
-    error = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True})["error"]
+    error = _upgrade({"root": str(tmp_path), "offline_confirmed": True})["error"]
     assert error["code"] == "not_relocation_candidate", error
     assert _tree(tmp_path) == before
 
@@ -198,7 +207,7 @@ def test_resume_only_the_active_recovery_of_this_folder(moved):
     copy, _ = moved
     gg_lock._FAULT = lambda name: (_ for _ in ()).throw(RuntimeError("fault")) if name == "after_active" else None
     try:
-        crashed = _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True})
+        crashed = _upgrade({"root": str(copy), "offline_confirmed": True})
     finally:
         gg_lock._FAULT = None
         _kill_recovery_caps()
@@ -207,12 +216,12 @@ def test_resume_only_the_active_recovery_of_this_folder(moved):
     rid = info["recovery_id"]
     assert isinstance(rid, str) and info["relocation_candidate"] is False, info
     # 새 복구는 활성 복구가 있으면 시작하지 않는다(옮긴 폴더 판정이 꺼짐).
-    assert _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True})["error"]["code"] == "not_relocation_candidate"
+    assert _upgrade({"root": str(copy), "offline_confirmed": True})["error"]["code"] == "not_relocation_candidate"
     before = _tree(copy)
-    wrong = _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True, "resume": RID})["error"]
+    wrong = _upgrade({"root": str(copy), "offline_confirmed": True, "resume": RID})["error"]
     assert wrong["code"] == "recovery_id_mismatch", wrong
     assert _tree(copy) == before
-    done = _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True, "resume": rid})["result"]
+    done = _upgrade({"root": str(copy), "offline_confirmed": True, "resume": rid})["result"]
     assert (done["status"], done["commit_state"]) == ("completed", "committed"), done
     after = _rpc("lock.info", {"root": str(copy), "probe": True})["result"]
     assert (after["structure"], after["lock_state"], after["recovery_id"]) == ("ready", "free", None), after
@@ -224,5 +233,51 @@ def test_resume_id_from_another_folder_is_refused(moved, tmp_path):
     other = tmp_path / "other"
     other.mkdir()
     gg_lock.install_new(other)
-    error = _rpc("lock.upgrade_offline", {"root": str(other), "offline_confirmed": True, "resume": RID})["error"]
+    error = _upgrade({"root": str(other), "offline_confirmed": True, "resume": RID})["error"]
     assert error["code"] == "recovery_id_mismatch"
+
+
+def test_identity_is_the_real_directory_identity(tmp_path):
+    import gg_fs
+
+    got = _rpc("lock.identity", {"root": str(tmp_path)})["result"]
+    assert gg_fs.same_identity(got, gg_fs.identity(tmp_path, kind="directory")) and got["kind"] == "directory"
+
+
+@pytest.mark.parametrize("expected", [None, "x", {"kind": "directory"}])
+def test_missing_or_bad_identity_is_invalid_params(tmp_path, monkeypatch, expected):
+    """Roh r3 C-01: 확인 창 때 잡은 폴더 식별값 없이는 부르지 않는다."""
+    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, **k: pytest.fail("called"), raising=False)
+    params = {"root": str(tmp_path), "offline_confirmed": True}
+    if expected is not None:
+        params["expected_identity"] = expected
+    error = _rpc("lock.upgrade_offline", params)["error"]
+    assert error["code"] == "invalid_params", error
+
+
+@needs_upgrade
+def test_folder_swapped_at_same_path_after_confirmation_is_refused(moved, tmp_path):
+    """Roh r3 C-01: 확인 창이 열린 사이 같은 경로의 실제 폴더가 다른 복구 후보로 바뀌면 거절, 둘 다 그대로."""
+    copy, _ = moved
+    confirmed = _rpc("lock.identity", {"root": str(copy)})["result"]
+    # 같은 경로에 다른 옮긴 폴더를 놓는다(학생이 확인한 폴더는 옆으로 비켜 둔다).
+    aside = tmp_path / "aside"
+    copy.rename(aside)
+    shutil.copytree(tmp_path / "base", copy)
+    assert _rpc("lock.info", {"root": str(copy)})["result"]["relocation_candidate"] is True
+    before, before_aside = _tree(copy), _tree(aside)
+    error = _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True, "expected_identity": confirmed})["error"]
+    assert error["code"] == "target_changed", error
+    assert _tree(copy) == before and _tree(aside) == before_aside
+
+
+@needs_upgrade
+def test_resume_is_also_bound_to_the_confirmed_folder(moved, tmp_path):
+    copy, _ = moved
+    other = tmp_path / "other"
+    other.mkdir()
+    error = _rpc("lock.upgrade_offline", {
+        "root": str(copy), "offline_confirmed": True, "resume": RID,
+        "expected_identity": _rpc("lock.identity", {"root": str(other)})["result"],
+    })["error"]
+    assert error["code"] == "target_changed", error

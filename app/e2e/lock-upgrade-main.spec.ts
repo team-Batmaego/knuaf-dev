@@ -26,6 +26,7 @@ const factory = new Script(`(function(require,exports){${transpileModule(readFil
 }).outputText}\n})`, { filename: file }).runInThisContext() as (require: (name: string) => unknown, module: Partial<typeof IpcModule>) => void
 const source = join(appRoot, 'resources/skill')
 const RID = '0b8f8a0e-6c1e-4d3e-9f57-1c2d3e4f5a6b'
+const ID = (root: string) => ({ platform: 'test', kind: 'directory', device: 1, inode: root.length })
 
 class ControlledSidecar extends EventEmitter {
   calls: { method: string; params: Record<string, unknown> }[] = []
@@ -33,8 +34,11 @@ class ControlledSidecar extends EventEmitter {
   async configure() { return this.status() }
   isWrite(method: string) { return method === 'lock.upgrade_offline' }
   cancel() {}
+  /** 폴더 식별값 — 경로가 같아도 폴더가 바뀌면 다른 값이다. 시험이 갈아 끼운다. */
+  identity: (root: string) => unknown = (root) => ({ platform: 'test', kind: 'directory', device: 1, inode: root.length })
   async call(method: string, params: Record<string, unknown>) {
     this.calls.push({ method, params })
+    if (method === 'lock.identity') return this.identity(params.root as string)
     if (method === 'lock.upgrade_offline') return { recovery_id: RID, status: 'completed', commit_state: 'committed', reason: null }
     throw new Error('Unexpected method ' + method)
   }
@@ -125,7 +129,7 @@ test('main 확인 창에서 "잠금 풀기"를 눌러야만, main 이 아는 열
     expect(h.dialogs).toHaveLength(1)
     expect(h.dialogs[0].buttons[1]).toBe('잠금 풀기')
     expect(`${h.dialogs[0].message}\n${h.dialogs[0].detail}`).toContain('합성 논문 A')
-    expect(h.upgrades()).toEqual([{ method: 'lock.upgrade_offline', params: { root: h.root, offline_confirmed: true } }])
+    expect(h.upgrades()).toEqual([{ method: 'lock.upgrade_offline', params: { root: h.root, offline_confirmed: true, expected_identity: ID(h.root) } }])
   } finally { await h.cleanup() }
 })
 
@@ -139,7 +143,7 @@ test('이어 하기 ID 는 UUID 만, 확인 뒤 그대로 넘긴다', async () =
     }
     expect(h.dialogs).toEqual([])
     await h.invoke('lock:upgrade-offline', RID)
-    expect(h.upgrades()).toEqual([{ method: 'lock.upgrade_offline', params: { root: h.root, offline_confirmed: true, resume: RID } }])
+    expect(h.upgrades()).toEqual([{ method: 'lock.upgrade_offline', params: { root: h.root, offline_confirmed: true, resume: RID, expected_identity: ID(h.root) } }])
   } finally { await h.cleanup() }
 })
 
@@ -149,6 +153,31 @@ test('확인 창이 떠 있는 동안 폴더가 바뀌면 부르지 않는다', 
     await h.invoke('project:open', h.root)
     h.setAnswer(async () => { await h.invoke('project:open', h.other); return 1 })
     expect(await h.invoke('lock:upgrade-offline')).toMatchObject({ error: { code: 'project_mismatch' } })
+    expect(h.upgrades()).toEqual([])
+  } finally { await h.cleanup() }
+})
+
+test('Roh r3 C-01: 확인 창을 띄우기 전에 폴더 식별값을 잡아, 창 뒤 sidecar 에 그 값을 넘긴다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    // 확인 창이 떠 있는 동안 같은 경로의 폴더가 바뀐다 — main 은 창 앞에서 잡은 값을 그대로 넘긴다.
+    h.setAnswer(async () => { h.sidecar.identity = () => ({ platform: 'test', kind: 'directory', device: 1, inode: 999 }); return 1 })
+    await h.invoke('lock:upgrade-offline')
+    const order = h.sidecar.calls.map((call) => call.method)
+    expect(order).toEqual(['lock.identity', 'lock.upgrade_offline'])
+    expect(h.upgrades()[0]).toMatchObject({ params: { expected_identity: ID(h.root) } })
+  } finally { await h.cleanup() }
+})
+
+test('폴더 식별값을 못 읽으면 확인 창도 sidecar 쓰기도 없다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    h.sidecar.identity = () => { throw { code: 'lock_ambiguous', message: 'stat failed' } }
+    h.setAnswer(async () => 1)
+    expect(await h.invoke('lock:upgrade-offline')).toMatchObject({ error: { code: 'lock_ambiguous' } })
+    expect(h.dialogs).toEqual([])
     expect(h.upgrades()).toEqual([])
   } finally { await h.cleanup() }
 })

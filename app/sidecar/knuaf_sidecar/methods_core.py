@@ -236,6 +236,23 @@ def lock_unlock(ctx, params):
         raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
 
 
+def lock_identity(ctx, params):
+    """Real no-follow identity of the paper folder (gg_fs: POSIX st_dev+st_ino, Windows volume
+    serial+file ID). main captures it before showing its confirmation dialog and passes it back
+    as `expected_identity`, binding the student's confirmation to that exact directory."""
+    import gg_fs
+
+    try:
+        return gg_fs.identity(_root(params), kind="directory")
+    except gg_fs.FsError as error:
+        raise RpcError("lock_ambiguous", str(error), {"status": "unavailable", "reason": error.reason}) from error
+
+
+def _is_identity(value):
+    return (isinstance(value, dict) and value.get("kind") == "directory"
+            and all(key in value for key in ("platform", "device", "inode")))
+
+
 def lock_upgrade_offline(ctx, params):
     """Offline recovery of a moved/copied workspace (규칙집 v0.6.5 `gg_lock.upgrade_offline`).
 
@@ -252,6 +269,18 @@ def lock_upgrade_offline(ctx, params):
     resume = params.get("resume")
     if resume is not None and (not isinstance(resume, str) or not _RECOVERY_ID.fullmatch(resume)):
         raise RpcError("invalid_params", "resume은 복구 ID(UUID) 문자열")
+    expected = params.get("expected_identity")
+    if not _is_identity(expected):
+        raise RpcError("invalid_params", "expected_identity(확인 때 잡은 폴더 식별값) 필요")
+    # Same path is not the same folder: the folder must still be the one the student confirmed.
+    import gg_fs
+
+    try:
+        current = gg_fs.identity(root, kind="directory")
+    except gg_fs.FsError as error:
+        raise RpcError("target_changed", "확인한 폴더를 다시 찾지 못함", {"reason": error.reason}) from error
+    if not gg_fs.same_identity(current, expected):
+        raise RpcError("target_changed", "확인한 뒤 같은 자리의 폴더가 바뀜", {"reason": "identity_mismatch"})
     # The dialog's boolean is not enough: re-read the folder here, inside the sidecar write
     # lock (write=True), and only accept the two app paths. A new recovery is only for a
     # folder gg_lock itself calls a relocation candidate; a resume is only for the recovery
@@ -658,6 +687,7 @@ def register(server):
     server.register("project.restore", project_restore, write=True)
     server.register("lock.info", lock_info)
     server.register("lock.unlock", lock_unlock, write=True)
+    server.register("lock.identity", lock_identity)
     server.register("lock.upgrade_offline", lock_upgrade_offline, write=True)
     server.register("doctor.all", doctor_all)
     server.register("fs.build_tree", fs_build_tree)

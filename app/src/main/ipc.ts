@@ -1217,6 +1217,10 @@ export function registerIpc(
     const root = currentRoot
     if (!root) return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 없어요.' } }
     if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    // 경로가 같아도 폴더는 바뀔 수 있다(Roh r3 C-01) — 창을 띄우기 전에 실제 폴더 식별값(gg_fs: POSIX
+    // st_dev+st_ino, 윈도 볼륨 일련번호+파일 ID)을 잡아 두고, sidecar 가 쓰기 잠금 안에서 같은 폴더인지 본다.
+    let expectedIdentity: unknown
+    try { expectedIdentity = await sidecar.call('lock.identity', { root }) } catch (error) { return { error: ipcError(error) } }
     const options = {
       type: 'warning' as const,
       buttons: ['취소', '잠금 풀기'],
@@ -1234,6 +1238,7 @@ export function registerIpc(
     if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
     const params: Record<string, unknown> = { root, offline_confirmed: true }
     if (typeof resume === 'string') params.resume = resume
+    params.expected_identity = expectedIdentity
     try {
       return { result: await sidecar.call('lock.upgrade_offline', params) }
     } catch (error) {

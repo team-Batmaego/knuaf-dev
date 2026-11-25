@@ -96,7 +96,7 @@ test('Roh I-02: 화면에 다시 들어와도 lock.info 의 활성 복구 ID 로
 })
 
 test('Roh C-01: 사이드카 거절 코드도 학생 말로 안내한다', () => {
-  for (const code of ['not_relocation_candidate', 'recovery_id_mismatch']) {
+  for (const code of ['not_relocation_candidate', 'recovery_id_mismatch', 'target_changed']) {
     const d = describeError({ code, message: 'x', data: {} })
     expect(d.kind).toBe('warning')
     expect(d.title).toContain('잠금')
