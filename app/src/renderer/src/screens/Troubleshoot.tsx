@@ -11,7 +11,7 @@ import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
 import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, describeRecovery, type DescribedError } from '../copy'
-import { canRecoverMoved, recoveryOutcome, resumableRecovery } from '../../../shared/lock-recovery'
+import { canRecoverMoved, recoveryOutcome, resumableRecovery, type RecoveryOutcome } from '../../../shared/lock-recovery'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -26,13 +26,15 @@ export function TroubleshootSections() {
   const doc = diagnosis?.root === root ? diagnosis.data : null
   const requestSeq = useRef(0)
   const lockRequestSeq = useRef(0)
-  const [lockObservation, setLockObservation] = useState<{ root: string; data: LockInfo } | null>(null)
+  // `seq` — 이 관측을 낳은 조회 번호. 복구 결과 뒤 재조회가 성공했는지 가를 때 쓴다(Roh r2 I-01).
+  const [lockObservation, setLockObservation] = useState<{ root: string; data: LockInfo; seq: number } | null>(null)
   const [lockErr, setLockErr] = useState<DescribedError | null>(null)
   const [lockBusy, setLockBusy] = useState(false)
   const [err, setErr] = useState<DescribedError | null>(null)
   const [msg, setMsg] = useState<{ title: string; body?: string } | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'unlock' | 'restore' | 'init'; rev?: number } | null>(null)
-  const [moved, setMoved] = useState<{ root: string; view: ReturnType<typeof describeRecovery>; raw: string } | null>(null)
+  // 안내 문구는 그릴 때 정한다 — 결과 뒤 잠금 재조회가 성공했는지(`afterSeq` 보다 새 관측)에 따라 갈린다.
+  const [moved, setMoved] = useState<{ root: string; outcome: RecoveryOutcome; raw: string; afterSeq: number } | null>(null)
   const deps = useRunner()
   const kordoc = useRunner()
   const load = useCallback(async () => {
@@ -42,7 +44,7 @@ export function TroubleshootSections() {
     setErr(null); setDiagnosis(null); setLockObservation(null); setLockErr(null); setLockBusy(true)
     // Lock inspection must not wait for dependency imports or the aggregate folder scan.
     const inspected = rpc.lockInfo(root).then((data) => {
-      if (lockSeq === lockRequestSeq.current) setLockObservation({ root, data })
+      if (lockSeq === lockRequestSeq.current) setLockObservation({ root, data, seq: lockSeq })
     }).catch((e: unknown) => {
       if (lockSeq === lockRequestSeq.current) setLockErr(describeError(e))
     }).finally(() => {
@@ -102,12 +104,12 @@ export function TroubleshootSections() {
     try {
       const r = await rpc.upgradeOffline(root, resume)
       if (!mine()) return
-      setMoved({ root, view: describeRecovery(recoveryOutcome(r)), raw: JSON.stringify(r, null, 2) })
+      setMoved({ root, outcome: recoveryOutcome(r), raw: JSON.stringify(r, null, 2), afterSeq: lockRequestSeq.current })
       await refresh()
       if (mine()) await load()
     } catch (e) {
       if (!mine()) return
-      if (e instanceof RpcFailure && e.code === 'cancelled') setMoved({ root, view: describeRecovery({ kind: 'not_confirmed' }), raw: '' })
+      if (e instanceof RpcFailure && e.code === 'cancelled') setMoved({ root, outcome: { kind: 'not_confirmed' }, raw: '', afterSeq: lockRequestSeq.current })
       else setErr(describeError(e))
     } finally { if (mine()) setLockBusy(false) }
   }
@@ -130,7 +132,7 @@ export function TroubleshootSections() {
     setLockBusy(true); setLockErr(null); setMsg(null)
     try {
       const observed = await rpc.lockInfo(root, true)
-      if (seq === lockRequestSeq.current) setLockObservation({ root, data: observed })
+      if (seq === lockRequestSeq.current) setLockObservation({ root, data: observed, seq })
     } catch (e) { if (seq === lockRequestSeq.current) setLockErr(describeError(e)) }
     finally { if (seq === lockRequestSeq.current) setLockBusy(false) }
   }
@@ -138,7 +140,9 @@ export function TroubleshootSections() {
   const canMove = canRecoverMoved(lock)
   // 이어 하기 ID 는 폴더(lock.info)에서 다시 읽는다 — 화면을 다시 열어도 되살아난다(Roh I-02).
   const pendingId = resumableRecovery(lock)
-  const movedView = moved?.root === root ? moved : null
+  const movedView = moved?.root === root
+    ? { ...moved, view: describeRecovery(moved.outcome, { rechecked: !!lock && !!lockObservation && lockObservation.seq > moved.afterSeq }) }
+    : null
   const orphans: string[] = doc?.gg?.orphan_files ?? []
   return (
     <div>

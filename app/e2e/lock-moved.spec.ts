@@ -40,26 +40,26 @@ test('옮긴 폴더(relocation_candidate=true)에서만 풀기 단추가 보인�
 })
 
 test('복구 결과 → 안내', () => {
-  expect(describeRecovery(recoveryOutcome(result({})))).toEqual({ kind: 'completion', title: LOCK_COPY.moveDone })
-  expect(describeRecovery(recoveryOutcome(result({ status: 'already_completed' })))).toEqual({ kind: 'completion', title: LOCK_COPY.moveDone })
+  expect(describeRecovery(recoveryOutcome(result({})), { rechecked: false })).toEqual({ kind: 'completion', title: LOCK_COPY.moveDone })
+  expect(describeRecovery(recoveryOutcome(result({ status: 'already_completed' })), { rechecked: false })).toEqual({ kind: 'completion', title: LOCK_COPY.moveDone })
   // L2: 확인 없이 불린 경우 — 아무것도 안 바뀌었다.
-  expect(describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'offline_confirmation_required' }))))
+  expect(describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'offline_confirmation_required' })), { rechecked: false }))
     .toEqual({ kind: 'status', title: LOCK_COPY.moveNotConfirmed })
-  const busy = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'recovery_active_exists' })))
+  const busy = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'recovery_active_exists' })), { rechecked: false })
   expect(busy.kind).toBe('warning')
   expect(busy.title).toBe(LOCK_COPY.moveNotCommitted)
   expect(busy.body).toContain('recovery_active_exists')
   expect(busy.resumeId).toBeUndefined()
-  const pending = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'committed_cleanup_pending', reason: 'cleanup_failed' })))
+  const pending = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'committed_cleanup_pending', reason: 'cleanup_failed' })), { rechecked: false })
   expect(pending).toMatchObject({ kind: 'warning', title: LOCK_COPY.moveCleanupPending, resumeId: 'rid-1' })
-  const pendingNoId = describeRecovery(recoveryOutcome(result({ recovery_id: null, status: 'blocked', commit_state: 'committed_cleanup_pending' })))
+  const pendingNoId = describeRecovery(recoveryOutcome(result({ recovery_id: null, status: 'blocked', commit_state: 'committed_cleanup_pending' })), { rechecked: false })
   expect(pendingNoId.resumeId).toBeUndefined()
-  const unknown = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'indeterminate' })))
+  const unknown = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'indeterminate' })), { rechecked: false })
   expect(unknown).toMatchObject({ kind: 'warning', title: LOCK_COPY.moveIndeterminate })
   expect(unknown.resumeId).toBeUndefined()
   // 모르는 상태 이름도 '끝남'으로 읽지 않는다.
-  expect(describeRecovery(recoveryOutcome(result({ status: 'weird', commit_state: 'weird' }))).kind).toBe('warning')
-  expect(describeRecovery(recoveryOutcome(result({ status: 'completed', commit_state: 'indeterminate' }))).kind).toBe('warning')
+  expect(describeRecovery(recoveryOutcome(result({ status: 'weird', commit_state: 'weird' })), { rechecked: false }).kind).toBe('warning')
+  expect(describeRecovery(recoveryOutcome(result({ status: 'completed', commit_state: 'indeterminate' })), { rechecked: false }).kind).toBe('warning')
 })
 
 test('쓰기 메서드로 등록되고, 규칙집 업데이트 필요 오류는 알아볼 수 있는 안내다(L4)', () => {
@@ -70,10 +70,10 @@ test('쓰기 메서드로 등록되고, 규칙집 업데이트 필요 오류는 
 })
 
 test('Roh I-01: "아무것도 안 바뀜"은 확인 전에 끝난 경우에만, 그 밖 미커밋은 잠금 상태를 다시 보라고 한다', () => {
-  const confirmLess = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'offline_confirmation_required' })))
+  const confirmLess = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'offline_confirmation_required' })), { rechecked: false })
   expect(confirmLess.title).toContain('아무것도 바꾸지 않았어요')
   for (const reason of ['recovery_active_exists', 'guard_busy', null]) {
-    const v = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason })))
+    const v = describeRecovery(recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason })), { rechecked: true })
     const text = `${v.title} ${v.body ?? ''}`
     expect(text).not.toContain('그대로')
     expect(text).not.toContain('바꾸지 않았')
@@ -102,4 +102,15 @@ test('Roh C-01: 사이드카 거절 코드도 학생 말로 안내한다', () =>
     expect(d.title).toContain('잠금')
     expect(d.action).toContain('다시 진단')
   }
+})
+
+test('Roh r2 I-01: "다시 확인했어요"는 재조회가 성공했을 때만, 실패·진행 중이면 "다시 확인해 주세요"', () => {
+  const blocked = recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'guard_busy' }))
+  const pending = describeRecovery(blocked, { rechecked: false })
+  expect(`${pending.title} ${pending.body ?? ''}`).not.toContain('확인했어요')
+  expect(pending.body).toContain(LOCK_COPY.moveRecheckAsk)
+  const done = describeRecovery(blocked, { rechecked: true })
+  expect(done.body).toContain(LOCK_COPY.moveRecheck)
+  expect(LOCK_COPY.moveRecheck).toContain('확인했어요')
+  expect(LOCK_COPY.moveRecheckAsk).toContain('확인해 주세요')
 })

@@ -493,6 +493,7 @@ export const LOCK_COPY = {
   moveNotConfirmed: '확인하지 않아 아무것도 바꾸지 않았어요.',
   moveNotCommitted: '잠금을 풀지 못했어요.',
   moveRecheck: '중간까지 진행됐을 수 있어 잠금 상태를 다시 확인했어요. 위 상태를 봐 주시고, 폴더 안 파일은 지우거나 옮기지 마세요.',
+  moveRecheckAsk: '중간까지 진행됐을 수 있어요. "다시 진단"으로 잠금 상태를 다시 확인해 주세요. 폴더 안 파일은 지우거나 옮기지 마세요.',
   moveResumable: '잠금 풀기가 끝나지 않았어요',
   moveResumableBody: '지난번 잠금 풀기가 중간에 멈췄어요. "잠금 풀기 이어서 마치기"로 마무리할 수 있어요. 쓴 글과 파일은 그대로예요.',
   moveCleanupPending: '새 잠금은 만들었지만 마무리 정리가 남았어요.',
@@ -501,12 +502,16 @@ export const LOCK_COPY = {
   moveIndeterminateBody: '폴더 안 파일을 지우거나 옮기지 말고, 아래 기록과 함께 담당자에게 알려 주세요.'
 } as const
 
-/** `recoveryOutcome` 하나를 화면 안내 한 개로. `resumeId` 가 있으면 '이어서 마치기' 단추를 보인다. */
-export function describeRecovery(o: RecoveryOutcome): { kind: 'completion' | 'status' | 'warning'; title: string; body?: string; resumeId?: string } {
+/**
+ * `recoveryOutcome` 하나를 화면 안내 한 개로. `resumeId` 가 있으면 '이어서 마치기' 단추를 보인다.
+ * `rechecked` 는 결과 뒤 `lock.info` 재조회가 **성공했는지** — 성공 전·실패면 "다시 확인했어요"라고 말하지 않는다(Roh r2 I-01).
+ */
+export function describeRecovery(o: RecoveryOutcome, { rechecked }: { rechecked: boolean }): { kind: 'completion' | 'status' | 'warning'; title: string; body?: string; resumeId?: string } {
+  const recheck = rechecked ? LOCK_COPY.moveRecheck : LOCK_COPY.moveRecheckAsk
   switch (o.kind) {
     case 'done': return { kind: 'completion', title: LOCK_COPY.moveDone }
     case 'not_confirmed': return { kind: 'status', title: LOCK_COPY.moveNotConfirmed }
-    case 'not_committed': return { kind: 'warning', title: LOCK_COPY.moveNotCommitted, body: o.reason ? `${LOCK_COPY.moveRecheck} (${o.reason})` : LOCK_COPY.moveRecheck }
+    case 'not_committed': return { kind: 'warning', title: LOCK_COPY.moveNotCommitted, body: o.reason ? `${recheck} (${o.reason})` : recheck }
     case 'cleanup_pending': return o.resumeId
       ? { kind: 'warning', title: LOCK_COPY.moveCleanupPending, body: LOCK_COPY.moveCleanupPendingBody, resumeId: o.resumeId }
       : { kind: 'warning', title: LOCK_COPY.moveCleanupPending, body: LOCK_COPY.moveIndeterminateBody }
