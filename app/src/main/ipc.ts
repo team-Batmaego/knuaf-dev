@@ -258,6 +258,8 @@ export function registerIpc(
     // 확인(`notices.confirm`)도 정본 쓰기라 같은 좁은 문 하나뿐이다.
     if (method === 'notices.choose') return { error: { code: 'invalid_method', message: '알림 선택은 notices:choose 경로만 사용할 수 있어요.' } }
     if (method === 'notices.confirm') return { error: { code: 'invalid_method', message: '알림 확인은 notices:confirm 경로만 사용할 수 있어요.' } }
+    // offline_confirmed=true 는 학생 확인이다 — 화면이 만들 수 없게 main 의 확인 창 경로 하나만 둔다(Roh C-01).
+    if (method === 'lock.upgrade_offline') return { error: { code: 'invalid_method', message: '옮긴 폴더 잠금 풀기는 lock:upgrade-offline 경로만 사용할 수 있어요.' } }
     const w = win()
     const params = sanitiseRpcParams(rawParams)
     const root = typeof params.root === 'string' ? params.root : currentRoot
@@ -1196,6 +1198,44 @@ export function registerIpc(
     try {
       // 정본·알림 파일 다시 쓰기는 sidecar(규칙집) 몫이다. 앱은 결과 봉투만 그대로 돌려준다.
       return { result: await sidecar.call('notices.choose', { root, identity, value }) }
+    } catch (error) {
+      return { error: ipcError(error) }
+    }
+  })
+
+  /**
+   * 옮긴·복사한 폴더 잠금 풀기(`lock.upgrade_offline`, Roh C-01). 확인을 화면이 위조할 수 없게:
+   * 폴더는 인자로 받지 않고 main 이 아는 열린 폴더만 쓰며, main 이 직접 띄운 확인 창에서 학생이
+   * '잠금 풀기'를 눌렀을 때만 `offline_confirmed: true` 로 sidecar 를 부른다. 받는 인자는 이어 하기 ID 하나다.
+   * 대상이 정말 옮긴 폴더인지·그 ID 가 이 폴더의 활성 복구인지는 sidecar 가 쓰기 잠금 안에서 다시 본다.
+   */
+  const RECOVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  ipcMain.handle('lock:upgrade-offline', async (_e, resume: unknown) => {
+    if (resume !== undefined && resume !== null && (typeof resume !== 'string' || !RECOVERY_ID.test(resume))) {
+      return { error: { code: 'invalid_params', message: '이어 하기 복구 ID가 올바르지 않습니다.' } }
+    }
+    const root = currentRoot
+    if (!root) return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 없어요.' } }
+    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    const options = {
+      type: 'warning' as const,
+      buttons: ['취소', '잠금 풀기'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: '옮긴 폴더 잠금 풀기',
+      message: `"${basename(root)}" 폴더의 잠금을 새로 만들까요?`,
+      detail: `${root}\n\n다른 PC나 다른 창(앱·도우미)에서 이 폴더를 열어 두고 편집하고 있지 않을 때만 "잠금 풀기"를 눌러 주세요. 두 곳에서 동시에 쓰면 글이 덮어써질 수 있어요. 쓴 글과 파일은 지우지 않아요.`
+    }
+    const w = win()
+    const { response } = w ? await dialog.showMessageBox(w, options) : await dialog.showMessageBox(options)
+    if (response !== 1) return { error: { code: 'cancelled', message: '잠금 풀기를 취소했어요.' } }
+    if (currentRoot !== root) return { error: { code: 'project_mismatch', message: '열린 논문 폴더가 바뀌어 잠금을 풀지 않았어요.' } }
+    if (agentBusy(root)) return { error: { code: 'agent_busy', message: AGENT_BUSY_MESSAGE } }
+    const params: Record<string, unknown> = { root, offline_confirmed: true }
+    if (typeof resume === 'string') params.resume = resume
+    try {
+      return { result: await sidecar.call('lock.upgrade_offline', params) }
     } catch (error) {
       return { error: ipcError(error) }
     }

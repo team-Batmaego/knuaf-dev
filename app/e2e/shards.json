@@ -36,7 +36,8 @@
       "guard-codex-connection",
       "kordoc-mcp-lifecycle",
       "news-storage-failure",
-      "outline-note"
+      "outline-note",
+      "lock-upgrade-main"
     ],
     [
       "agent-busy",
@@ -412,7 +413,8 @@
       "news-storage-failure",
       "empty-toc",
       "figure-wiring",
-      "skill-unknown-read"
+      "skill-unknown-read",
+      "lock-upgrade-main"
     ]
   ]
 }

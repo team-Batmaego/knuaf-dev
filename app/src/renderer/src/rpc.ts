@@ -113,11 +113,18 @@ export const rpc = {
   lockInfo: (root: string, probe = false) => call<LockInfo>('lock.info', { root, probe }),
   unlock: (root: string) => call<OwnerCleanup>('lock.unlock', { root }),
   /**
-   * 옮긴·복사한 폴더의 잠금 복구. `offlineConfirmed` 는 확인 창에서 학생이 누른 값만 넘긴다 —
-   * 사이드카는 정확히 `true` 일 때만 확인으로 본다. `resume` 은 끝나지 못한 복구의 ID.
+   * 옮긴·복사한 폴더의 잠금 복구 — 전용 IPC(Roh C-01). 폴더는 main 이 아는 열린 폴더, 확인은 main 이
+   * 직접 띄운 확인 창이다(취소하면 `cancelled` 오류, sidecar 는 안 불림). `resume` 은 끝나지 못한 복구의 ID.
+   * `root` 는 쓰기 대기 표시에만 쓴다.
    */
-  upgradeOffline: (root: string, offlineConfirmed: boolean, resume?: string) =>
-    call<OfflineRecovery>('lock.upgrade_offline', resume ? { root, offline_confirmed: offlineConfirmed, resume } : { root, offline_confirmed: offlineConfirmed }),
+  upgradeOffline: async (root: string, resume?: string): Promise<OfflineRecovery> => {
+    usePrep.getState().begin(root, 'write')
+    try {
+      const r = await window.knuaf.lock.upgradeOffline(resume)
+      if (r.error) throw new RpcFailure(r.error)
+      return r.result as OfflineRecovery
+    } finally { usePrep.getState().end(root, 'write') }
+  },
   doctor: (root: string) => call<Record<string, any>>('doctor.all', { root }),
   depsDoctor: async (root: string, clientId?: string, onEvent?: EventHandler): Promise<DependencyReport> => {
     const env = await call<Envelope>('deps.doctor', { root }, onEvent, clientId)
