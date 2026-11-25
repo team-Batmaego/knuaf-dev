@@ -94,3 +94,12 @@ test('Roh I-02: 화면에 다시 들어와도 lock.info 의 활성 복구 ID 로
   // 활성 복구가 있으면 새 복구 단추는 안 보인다(규칙집도 relocation_candidate 를 끈다).
   expect(canRecoverMoved(lock({ relocation_candidate: true, recovery_id: rid }))).toBe(false)
 })
+
+test('Roh C-01: 사이드카 거절 코드도 학생 말로 안내한다', () => {
+  for (const code of ['not_relocation_candidate', 'recovery_id_mismatch']) {
+    const d = describeError({ code, message: 'x', data: {} })
+    expect(d.kind).toBe('warning')
+    expect(d.title).toContain('잠금')
+    expect(d.action).toContain('다시 진단')
+  }
+})

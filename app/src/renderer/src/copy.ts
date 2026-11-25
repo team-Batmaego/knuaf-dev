@@ -93,6 +93,17 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '"설정"에서 규칙집을 최신으로 업데이트한 뒤 다시 시도해 주세요. 폴더는 그대로예요.',
     kind: 'warning'
   },
+  // lock.upgrade_offline: 사이드카가 쓰기 잠금 안에서 폴더를 다시 보고 거절한 경우(Roh C-01)
+  not_relocation_candidate: {
+    title: '이 폴더는 지금 옮긴 폴더 잠금 풀기 대상이 아니라 아무것도 바꾸지 않았어요.',
+    action: '"다시 진단"을 눌러 잠금 상태를 다시 확인해 주세요. 잠금 파일을 직접 지우지 마세요.',
+    kind: 'warning'
+  },
+  recovery_id_mismatch: {
+    title: '이 폴더에 남은 잠금 풀기 기록과 맞지 않아 이어서 하지 않았어요.',
+    action: '"다시 진단"을 눌러 잠금 상태를 다시 확인한 뒤 보이는 단추로 진행해 주세요.',
+    kind: 'warning'
+  },
   revision_stale: {
     title: '논문이 그사이 바뀌었어요.',
     action: '"새로고침"을 누른 뒤 다시 시도해 주세요.',
