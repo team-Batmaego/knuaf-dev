@@ -50,6 +50,7 @@ function harness(sidecar = new ControlledSidecar()) {
   const dir = mkdtempSync(join(tmpdir(), 'knuaf-main-prep-')), root = join(dir, '합성 논문 A'), other = join(dir, '합성 논문 B')
   mkdirSync(root); mkdirSync(other)
   const handlers = new Map<string, (...args: unknown[]) => unknown>(), sent: string[] = []
+  const marked: string[] = [], discarded: string[] = []
   const settings: { first_project_permission_asked_at?: string; python_override: null } = {
     first_project_permission_asked_at: 'synthetic-consent', python_override: null
   }
@@ -60,7 +61,11 @@ function harness(sidecar = new ControlledSidecar()) {
     electron: { app: { isPackaged: false, getPath: () => dir, getVersion: () => '0.6.0' },
       ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler) },
       net: { fetch: async () => { throw new Error('Network forbidden') } }, shell: { openExternal: async () => {} } },
-    './python': { APP_ROOT: appRoot, basePython: () => '/bundled/python', bundledPython: () => null, venvPython: () => null, wheelhouseDir: () => '/offline/wheels' },
+    './python': { APP_ROOT: appRoot, basePython: () => '/bundled/python', bundledPython: () => null, venvPython: () => null, wheelhouseDir: () => '/offline/wheels',
+      depsRoot: () => join(dir, 'deps'), depsEnvKey: () => 'k0' },
+    // S-01 I-01: 표식 쓰기·잔해 폐기는 기록만 한다(대역 사이드카는 실제 환경을 만들지 않는다).
+    './deps-env': { markReady: (root: string, key: string) => { marked.push(join(root, key)); return join(root, key) },
+      discardUnmarked: (root: string, key: string) => { discarded.push(join(root, key)); return false } },
     './settings': { loadSettings: () => settings, rememberRecent: () => {}, saveSettings: () => {} },
     './menu': { openGuide: () => {} },
     './agent': { ...realRequire('./agent'), skillSource: () => source },
@@ -71,7 +76,7 @@ function harness(sidecar = new ControlledSidecar()) {
   const module: Partial<typeof IpcModule> = {}
   factory(name => Object.hasOwn(dependencies,name) ? dependencies[name] : realRequire(name), module)
   const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null)
-  return { root, other, sidecar, settings, sent, chat: services.chat,
+  return { root, other, sidecar, settings, sent, marked, discarded, chat: services.chat,
     invoke: async (name: string, ...args: unknown[]): Promise<unknown> => handlers.get(name)!(null, ...args),
     cleanup: async () => { await services.chat.close(); rmSync(dir, { recursive: true, force: true }) }
   }
@@ -93,6 +98,13 @@ test('main coalesces automatic/manual installation and holds chat through reconf
     expect(h.sent).toEqual([])
     verify.resolve(env(true)); expect(await a).toMatchObject({ result: { ok: true } }); await b
     expect(h.sidecar.calls.filter(call => call.method === 'deps.ensure')).toHaveLength(1)
+    // S-01 I-01: 설치·검증은 앱 데이터 대상 경로로, 표식은 검증 뒤 한 번, 그다음 재구성.
+    const target = h.marked[0]
+    expect(h.marked).toEqual([target]); expect(target.endsWith(join('deps', 'k0'))).toBe(true)
+    expect(h.sidecar.calls.find(call => call.method === 'deps.ensure')!.params.deps_venv).toBe(target)
+    expect(h.sidecar.calls.filter(call => call.method === 'deps.doctor').at(-1)!.params.deps_venv).toBe(target)
+    expect(h.discarded).toEqual([target]) // 설치 직전 표식 없는 잔해 정리 한 번(표식 있는 환경은 함수가 건드리지 않음)
+    expect(h.sidecar.configured.at(-1)).toBe(h.root)
     await h.chat.send(h.root,'codex','verified only','accepted'); await flush()
     expect(h.sent).toEqual(['verified only'])
   } finally { await h.cleanup() }
@@ -125,6 +137,8 @@ test('cancellation between offline failure and fallback never starts online pip'
     expect(await pending).toMatchObject({ error: { code: 'cancelled' } })
     expect(h.sidecar.calls.filter(call => call.method === 'deps.ensure')).toHaveLength(1)
     expect(h.sidecar.cancelled).toHaveLength(1)
+    expect(h.marked).toEqual([]) // S-01 I-01: 취소 → 신뢰 표식 없음, 만들다 만 환경은 폐기
+    expect(h.discarded.length).toBeGreaterThanOrEqual(2)
     await expect(h.chat.send(h.root,'codex','blocked','cancelled')).rejects.toThrow()
   } finally { await h.cleanup() }
 })
@@ -136,6 +150,7 @@ test('both install failures retain offline/online causes and cannot release chat
     await h.invoke('project:open',h.root)
     expect(await h.invoke('deps:ensure',h.root,'failure')).toMatchObject({ result: { ok: false,
       attempts: { offline: { stderr: 'offline wheel corruption' }, online: { stderr: 'online unavailable' } } } })
+    expect(h.marked).toEqual([]) // S-01 I-01: 실패 → 표식 없음
     await expect(h.chat.send(h.root,'codex','blocked','failed')).rejects.toThrow()
     expect(h.sent).toEqual([])
   } finally { await h.cleanup() }

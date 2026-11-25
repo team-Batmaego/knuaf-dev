@@ -205,7 +205,10 @@ export class Sidecar extends EventEmitter {
   async call<T = unknown>(method: string, params: Record<string, unknown> = {}, onEvent?: Pending['onEvent'], onId?: (id: string) => void): Promise<T> {
     return agentActivity.run(() => skillSwitch.run(async () => {
       await this.lifecycle
-      return this.sendCall<T>(method, params, onEvent, onId)
+      // S-01 §3.3-1: 의존성 환경 판정은 **지금 띄워진** 사이드카의 값 하나에서 나온다(기동 env 와 같은 출처).
+      // 렌더러 값은 ipc 의 EXECUTABLE_PARAMS 가 먼저 버린다. 준비(deps.ensure) 건만 main 이 대상 경로를 직접 싣는다.
+      const sent = Object.hasOwn(params, 'deps_venv') ? params : { ...params, deps_venv: this.info.depsVenv ?? '' }
+      return this.sendCall<T>(method, sent, onEvent, onId)
     }))
   }
 

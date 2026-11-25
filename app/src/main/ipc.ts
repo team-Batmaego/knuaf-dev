@@ -21,7 +21,8 @@ import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
 import { canonical } from './chat/jobs/isolation'
-import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
+import { APP_ROOT, basePython, bundledPython, depsEnvKey, depsRoot, venvPython, wheelhouseDir } from './python'
+import { discardUnmarked, markReady } from './deps-env'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService, type HandoffSeam } from './chat/service'
@@ -234,7 +235,8 @@ export function registerIpc(
    * is dropped rather than passed through as argv[0]. `timeout` is clamped so a
    * huge value cannot disable the sidecar's wall-clock kill.
    */
-  const EXECUTABLE_PARAMS = ['base_python', 'node', 'pnpm', 'kordoc'] as const
+  // deps_venv: 실행할 의존성 환경(S-01) — main(Sidecar.call)만 정한다.
+  const EXECUTABLE_PARAMS = ['base_python', 'node', 'pnpm', 'kordoc', 'deps_venv'] as const
   const MAX_TIMEOUT_SECONDS = 1800
   function sanitiseRpcParams(params: Record<string, unknown>): Record<string, unknown> {
     const out = { ...(params ?? {}) }
@@ -1060,7 +1062,13 @@ export function registerIpc(
       if (flight.cancelled) sidecar.cancel(id)
     }
     const operation = async (): Promise<RpcResult<Envelope>> => {
-      const params: Record<string, unknown> = { root, base_python: basePython(loadSettings().python_override) }
+      // S-01 §3.2 I-01: 의존성은 앱 데이터 deps/<키>/ 에만 설치한다. 이 경로를 실행에 쓰는 것은 이번 준비 건에
+      // 한정되고, 진단까지 통과한 뒤에야 main 이 표식을 써서 신뢰로 바꾼다. 실패·취소면 표식 없는 그 폴더를 버린다.
+      // 폴더의 옛 .venv 는 보지도 승격하지도 않는다(TODO(D1): 안내 문구). 앱이 단일 인스턴스라 다른 창과의
+      // 동시 준비는 없고, 같은 창 안에서는 dependencyFlights 가 묶는다.
+      const override = loadSettings().python_override
+      const envRoot = depsRoot(), envKey = depsEnvKey(override), target = join(envRoot, envKey)
+      const params: Record<string, unknown> = { root, base_python: basePython(override), deps_venv: target }
       const wheels = wheelhouseDir()
       if (wheels) { params.find_links = wheels; params.no_index = true }
       let phase: 'checking' | 'installing' | 'verifying' = 'checking'
@@ -1077,6 +1085,7 @@ export function registerIpc(
           return { result: before }
         }
         phase = 'installing'
+        discardUnmarked(envRoot, envKey)
         let result = await sidecar.call<Envelope>('deps.ensure', params, onEvent, onId)
         live()
         const offline = wheels ? result : undefined
@@ -1089,18 +1098,28 @@ export function registerIpc(
         if (result.ok) {
           phase = 'verifying'
           onEvent('progress', { phase: 'verifying' })
-          await sidecar.configure(root, loadSettings().python_override)
-          live()
-          const checked = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
+          const checked = await sidecar.call<Envelope>('deps.doctor', { root, deps_venv: target }, onEvent, onId)
           live()
           if (!checked.ok || (checked.data as DependencyReport | null)?.ready !== true) {
-            throw { code: 'deps_verify', message: '설치 뒤 프로젝트 .venv 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
+            throw { code: 'deps_verify', message: '설치 뒤 의존성 환경 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
           }
+          try {
+            markReady(envRoot, envKey, { app: app.getVersion() })
+          } catch (error) {
+            // 고정 스킬이 KNUAF_DEPS_VENV 를 따르지 않으면(TODO(D-U)) 앱 자리에 환경이 안 생긴다 — 신뢰하지 않고 닫는다.
+            throw { code: 'deps_env_missing', message: '의존성 환경을 앱 자리에 만들지 못했어요.', data: { installation: result, detail: String(error) } }
+          }
+          await sidecar.configure(root, override) // depsVenv 가 바뀌었으므로 사이드카를 다시 띄운다(§3.3-3)
+          live()
           if (dependencyGate && mine()) dependencyGate.phase = 'ready'
-        } else if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+        } else {
+          discardUnmarked(envRoot, envKey)
+          if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+        }
         hideAppDirs(root)
         return { result }
       } catch (error) {
+        if (phase !== 'checking') discardUnmarked(envRoot, envKey)
         if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
         const failure = ipcError(error) as NonNullable<RpcResult['error']>
         return { error: { code: failure.code ?? 'deps_ensure', message: failure.message ?? String(error),
