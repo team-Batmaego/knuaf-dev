@@ -2,6 +2,7 @@ import { MODEL_SELECTION_COPY } from '../../shared/copy'
 import { APP_NAME } from '../../shared/name'
 import { fileStateOf, isReviewExport, reviewBasisOf, type LoadLike } from '../../shared/files'
 import type { FreeRelayErrorKind } from '../../shared/chat'
+import type { RecoveryOutcome } from '../../shared/lock-recovery'
 /**
  * copy.ts — every user-facing string of the companion app in one place.
  *
@@ -84,6 +85,28 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   lock_ambiguous: {
     title: '잠금 상태를 확인할 수 없어 기록을 정리하지 않았어요.',
     action: '"설정 > 문제 해결"에서 구조와 점유 상태를 확인해 주세요. 잠금 파일을 직접 지우지 마세요.',
+    kind: 'warning'
+  },
+  // lock.upgrade_offline on a 규칙집 without gg_lock.upgrade_offline (1.0.14 이하)
+  skill_update_required: {
+    title: '이 기능은 규칙집 업데이트가 필요해요.',
+    action: '"설정"에서 규칙집을 최신으로 업데이트한 뒤 다시 시도해 주세요. 폴더는 그대로예요.',
+    kind: 'warning'
+  },
+  // lock.upgrade_offline: 사이드카가 쓰기 잠금 안에서 폴더를 다시 보고 거절한 경우(Roh C-01)
+  not_relocation_candidate: {
+    title: '이 폴더는 지금 옮긴 폴더 잠금 풀기 대상이 아니라 아무것도 바꾸지 않았어요.',
+    action: '"다시 진단"을 눌러 잠금 상태를 다시 확인해 주세요. 잠금 파일을 직접 지우지 마세요.',
+    kind: 'warning'
+  },
+  target_changed: {
+    title: '확인한 뒤 이 자리의 폴더가 바뀌어 잠금 풀기를 멈췄어요.',
+    action: '중간까지 진행됐을 수 있어요. "다시 진단"으로 지금 잠금 상태를 확인해 주세요. 폴더 안 파일은 지우거나 옮기지 마세요.',
+    kind: 'warning'
+  },
+  recovery_id_mismatch: {
+    title: '이 폴더에 남은 잠금 풀기 기록과 맞지 않아 이어서 하지 않았어요.',
+    action: '"다시 진단"을 눌러 잠금 상태를 다시 확인한 뒤 보이는 단추로 진행해 주세요.',
     kind: 'warning'
   },
   revision_stale: {
@@ -465,8 +488,44 @@ export const LOCK_COPY = {
   unavailable: '점유 상태를 확인하지 못했어요.',
   recovery: '이전 방식이거나 손상된 폴더는 별도의 오프라인 전환·복구가 필요해요. 앱과 도우미의 저장 작업을 모두 멈췄는지 확인한 뒤 담당자에게 전환을 요청해 주세요. 정본을 새로 만들거나 잠금 파일을 지우지 마세요.',
   observedAt: '관측 시각',
-  details: '잠금 진단 기록'
+  details: '잠금 진단 기록',
+  // 옮긴·복사한 폴더(규칙집 relocation_candidate) — lock.upgrade_offline
+  moved: '이 폴더는 다른 자리나 다른 PC에서 옮겨 온 것으로 보여요',
+  movedBody: '폴더를 옮기거나 복사하면 예전 자리의 잠금 기록이 맞지 않아요. 지금 이 폴더를 쓰는 곳이 여기 하나뿐이면 잠금을 새로 만들어 풀 수 있어요. 쓴 글과 파일은 그대로 남아요.',
+  moveRecover: '옮긴 폴더 잠금 풀기',
+  moveResume: '잠금 풀기 이어서 마치기',
+  moveDone: '잠금을 새로 만들었어요. 이제 대화와 문서 만들기를 할 수 있어요.',
+  moveNotConfirmed: '확인하지 않아 아무것도 바꾸지 않았어요.',
+  moveNotCommitted: '잠금을 풀지 못했어요.',
+  moveRecheck: '중간까지 진행됐을 수 있어 잠금 상태를 다시 확인했어요. 위 상태를 봐 주시고, 폴더 안 파일은 지우거나 옮기지 마세요.',
+  moveRecheckAsk: '중간까지 진행됐을 수 있어요. "다시 진단"으로 잠금 상태를 다시 확인해 주세요. 폴더 안 파일은 지우거나 옮기지 마세요.',
+  moveResumable: '잠금 풀기가 끝나지 않았어요',
+  moveResumableBody: '지난번 잠금 풀기가 중간에 멈췄어요. "잠금 풀기 이어서 마치기"로 마무리할 수 있어요. 쓴 글과 파일은 그대로예요.',
+  moveCleanupPending: '새 잠금은 만들었지만 마무리 정리가 남았어요.',
+  moveCleanupPendingBody: '"잠금 풀기 이어서 마치기"를 눌러 마무리해 주세요. 쓴 글과 파일은 그대로예요.',
+  moveIndeterminate: '잠금 풀기가 어디까지 됐는지 확인하지 못했어요.',
+  moveIndeterminateBody: '폴더 안 파일을 지우거나 옮기지 말고, 아래 기록과 함께 담당자에게 알려 주세요.',
+  // (가2) 규칙집이 확인한 폴더에 묶어 풀지 못하는 판(v0.6.5 이하)
+  moveUpdate: '이 폴더의 잠금을 풀려면 규칙집 업데이트가 필요해요',
+  moveUpdateBody: '지금 규칙집으로는 확인한 폴더에만 정확히 묶어 풀 수 없어서 잠금을 풀지 않았어요. "설정"에서 규칙집을 최신으로 업데이트한 뒤 다시 와 주세요. 쓴 글과 파일은 그대로예요.'
 } as const
+
+/**
+ * `recoveryOutcome` 하나를 화면 안내 한 개로. `resumeId` 가 있으면 '이어서 마치기' 단추를 보인다.
+ * `rechecked` 는 결과 뒤 `lock.info` 재조회가 **성공했는지** — 성공 전·실패면 "다시 확인했어요"라고 말하지 않는다(Roh r2 I-01).
+ */
+export function describeRecovery(o: RecoveryOutcome, { rechecked }: { rechecked: boolean }): { kind: 'completion' | 'status' | 'warning'; title: string; body?: string; resumeId?: string } {
+  const recheck = rechecked ? LOCK_COPY.moveRecheck : LOCK_COPY.moveRecheckAsk
+  switch (o.kind) {
+    case 'done': return { kind: 'completion', title: LOCK_COPY.moveDone }
+    case 'not_confirmed': return { kind: 'status', title: LOCK_COPY.moveNotConfirmed }
+    case 'not_committed': return { kind: 'warning', title: LOCK_COPY.moveNotCommitted, body: o.reason ? `${recheck} (${o.reason})` : recheck }
+    case 'cleanup_pending': return o.resumeId
+      ? { kind: 'warning', title: LOCK_COPY.moveCleanupPending, body: LOCK_COPY.moveCleanupPendingBody, resumeId: o.resumeId }
+      : { kind: 'warning', title: LOCK_COPY.moveCleanupPending, body: LOCK_COPY.moveIndeterminateBody }
+    case 'indeterminate': return { kind: 'warning', title: LOCK_COPY.moveIndeterminate, body: LOCK_COPY.moveIndeterminateBody }
+  }
+}
 
 export const OUTPUT_COPY = {
   majorTitle: '전공 확인이 먼저 필요해요.',

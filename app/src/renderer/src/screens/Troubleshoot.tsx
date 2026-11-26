@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import { preparationFailureTitle, usePrep } from '../store/prep'
 import { useEdits } from '../store/edits'
-import { rpc } from '../rpc'
+import { rpc, RpcFailure } from '../rpc'
 import { Disclosure } from '../components/Disclosure'
 import { Feedback } from '../components/Feedback'
 import { Confirm } from '../components/Confirm'
@@ -10,7 +10,8 @@ import { Badge, StatusBadge } from '../components/Badge'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
-import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
+import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, describeRecovery, type DescribedError } from '../copy'
+import { canRecoverMoved, needsSkillUpdate, recoveryOutcome, resumableRecovery, type RecoveryOutcome } from '../../../shared/lock-recovery'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -25,12 +26,15 @@ export function TroubleshootSections() {
   const doc = diagnosis?.root === root ? diagnosis.data : null
   const requestSeq = useRef(0)
   const lockRequestSeq = useRef(0)
-  const [lockObservation, setLockObservation] = useState<{ root: string; data: LockInfo } | null>(null)
+  // `seq` — 이 관측을 낳은 조회 번호. 복구 결과 뒤 재조회가 성공했는지 가를 때 쓴다(Roh r2 I-01).
+  const [lockObservation, setLockObservation] = useState<{ root: string; data: LockInfo; seq: number } | null>(null)
   const [lockErr, setLockErr] = useState<DescribedError | null>(null)
   const [lockBusy, setLockBusy] = useState(false)
   const [err, setErr] = useState<DescribedError | null>(null)
   const [msg, setMsg] = useState<{ title: string; body?: string } | null>(null)
   const [confirm, setConfirm] = useState<{ kind: 'unlock' | 'restore' | 'init'; rev?: number } | null>(null)
+  // 안내 문구는 그릴 때 정한다 — 결과 뒤 잠금 재조회가 성공했는지(`afterSeq` 보다 새 관측)에 따라 갈린다.
+  const [moved, setMoved] = useState<{ root: string; outcome: RecoveryOutcome; raw: string; afterSeq: number } | null>(null)
   const deps = useRunner()
   const kordoc = useRunner()
   const load = useCallback(async () => {
@@ -40,7 +44,7 @@ export function TroubleshootSections() {
     setErr(null); setDiagnosis(null); setLockObservation(null); setLockErr(null); setLockBusy(true)
     // Lock inspection must not wait for dependency imports or the aggregate folder scan.
     const inspected = rpc.lockInfo(root).then((data) => {
-      if (lockSeq === lockRequestSeq.current) setLockObservation({ root, data })
+      if (lockSeq === lockRequestSeq.current) setLockObservation({ root, data, seq: lockSeq })
     }).catch((e: unknown) => {
       if (lockSeq === lockRequestSeq.current) setLockErr(describeError(e))
     }).finally(() => {
@@ -55,7 +59,7 @@ export function TroubleshootSections() {
     await Promise.all([inspected, checked, diagnosed])
   }, [root])
   useEffect(() => {
-    setErr(null); setMsg(null); setConfirm(null)
+    setErr(null); setMsg(null); setConfirm(null); setMoved(null)
     void load(); void refreshSidecar()
     return () => { ++requestSeq.current; ++lockRequestSeq.current }
   }, [load, status?.revision])
@@ -65,7 +69,7 @@ export function TroubleshootSections() {
   const depsInfo = preparation?.report
   const act = async () => {
     if (!confirm) return
-    const c = confirm; setConfirm(null); setErr(null); setMsg(null); setLockBusy(true)
+    const c = confirm; setConfirm(null); setErr(null); setMsg(null); setMoved(null); setLockBusy(true)
     const seq = requestSeq.current
     const visit = preparation?.visit
     const mine = (): boolean => seq === requestSeq.current && useProject.getState().root === root && usePrep.getState().dependencies[root]?.visit === visit
@@ -88,6 +92,27 @@ export function TroubleshootSections() {
     } catch (e) { if (mine()) setErr(describeError(e)) }
     finally { if (mine()) setLockBusy(false) }
   }
+  /**
+   * 옮긴 폴더 잠금 풀기 — 확인 창은 main 이 직접 띄운다(Roh C-01). 화면은 확인 값·폴더를 넘기지 않는다.
+   * 취소하면 main 이 sidecar 를 부르지 않고 `cancelled` 로 답한다(L2).
+   */
+  const runMoved = async (resume?: string) => {
+    setErr(null); setMsg(null); setMoved(null); setLockBusy(true)
+    const seq = requestSeq.current
+    const visit = preparation?.visit
+    const mine = (): boolean => seq === requestSeq.current && useProject.getState().root === root && usePrep.getState().dependencies[root]?.visit === visit
+    try {
+      const r = await rpc.upgradeOffline(root, resume)
+      if (!mine()) return
+      setMoved({ root, outcome: recoveryOutcome(r), raw: JSON.stringify(r, null, 2), afterSeq: lockRequestSeq.current })
+      await refresh()
+      if (mine()) await load()
+    } catch (e) {
+      if (!mine()) return
+      if (e instanceof RpcFailure && e.code === 'cancelled') setMoved({ root, outcome: { kind: 'not_confirmed' }, raw: '', afterSeq: lockRequestSeq.current })
+      else setErr(describeError(e))
+    } finally { if (mine()) setLockBusy(false) }
+  }
   const ensureDeps = async () => {
     const seq = requestSeq.current
     const visit = preparation?.visit
@@ -107,11 +132,18 @@ export function TroubleshootSections() {
     setLockBusy(true); setLockErr(null); setMsg(null)
     try {
       const observed = await rpc.lockInfo(root, true)
-      if (seq === lockRequestSeq.current) setLockObservation({ root, data: observed })
+      if (seq === lockRequestSeq.current) setLockObservation({ root, data: observed, seq })
     } catch (e) { if (seq === lockRequestSeq.current) setLockErr(describeError(e)) }
     finally { if (seq === lockRequestSeq.current) setLockBusy(false) }
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
+  const canMove = canRecoverMoved(lock)
+  const updateFirst = needsSkillUpdate(lock)
+  // 이어 하기 ID 는 폴더(lock.info)에서 다시 읽는다 — 화면을 다시 열어도 되살아난다(Roh I-02).
+  const pendingId = resumableRecovery(lock)
+  const movedView = moved?.root === root
+    ? { ...moved, view: describeRecovery(moved.outcome, { rechecked: !!lock && !!lockObservation && lockObservation.seq > moved.afterSeq }) }
+    : null
   const orphans: string[] = doc?.gg?.orphan_files ?? []
   return (
     <div>
@@ -147,13 +179,24 @@ export function TroubleshootSections() {
         </div>
         {lockBusy && !lock && <div className="caption" role="status" aria-busy="true"><span className="spin" /> {LOCK_COPY.probing}</div>}
         {lockErr && <Feedback kind={lockErr.kind} title={lockErr.title} body={lockErr.action} details={<code>{lockErr.raw}</code>} />}
+        {movedView && <Feedback kind={movedView.view.kind} title={movedView.view.title} body={movedView.view.body}
+          actions={movedView.view.resumeId && !pendingId ? <button disabled={lockBusy} onClick={() => runMoved(movedView.view.resumeId)}>{LOCK_COPY.moveResume}</button> : undefined}
+          details={movedView.view.kind === 'completion' || !movedView.raw ? undefined : <pre>{movedView.raw}</pre>} />}
         {lock && (
           <div>
             <StatusBadge status={lock.lock_state === 'free' ? 'pass' : lock.lock_state === 'busy' ? 'blocked' : 'pending'} label={LOCK_COPY.state[lock.lock_state] ?? lock.lock_state} />
             <p className="caption">{LOCK_COPY.observation}</p>
             <div className="caption">{LOCK_COPY.observedAt}: <time>{lock.observed_at}</time></div>
             {lock.owner && <p><strong>{LOCK_COPY.owner}</strong><br />{LOCK_COPY.ownerBody}</p>}
-            {lock.structure !== 'ready' && <Feedback kind="warning" title={LOCK_COPY.structure[lock.structure] ?? LOCK_COPY.unavailable} body={LOCK_COPY.recovery} />}
+            {pendingId
+              ? <Feedback kind="warning" title={LOCK_COPY.moveResumable} body={LOCK_COPY.moveResumableBody}
+                  actions={<button className="primary" disabled={lockBusy} onClick={() => runMoved(pendingId)}>{LOCK_COPY.moveResume}</button>} />
+              : updateFirst
+              ? <Feedback kind="warning" title={LOCK_COPY.moveUpdate} body={LOCK_COPY.moveUpdateBody} />
+              : canMove
+              ? <Feedback kind="warning" title={LOCK_COPY.moved} body={LOCK_COPY.movedBody}
+                  actions={<button className="primary" disabled={lockBusy} onClick={() => runMoved()}>{LOCK_COPY.moveRecover}</button>} />
+              : lock.structure !== 'ready' && <Feedback kind="warning" title={LOCK_COPY.structure[lock.structure] ?? LOCK_COPY.unavailable} body={LOCK_COPY.recovery} />}
             <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
               <button disabled={lockBusy || lock.structure !== 'ready'} onClick={probe}>{lockBusy ? LOCK_COPY.probing : LOCK_COPY.probe}</button>
               <button className="danger" disabled={lockBusy || !canCleanup} onClick={() => setConfirm({ kind: 'unlock' })}>{LOCK_COPY.cleanup}</button>
