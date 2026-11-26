@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
-import { closeApp, launch, openProject, synthProject } from './helpers'
+import { launch, openProject, synthProject } from './helpers'
+import { closeApp } from './electron-lifecycle'
 import { captureAppLog } from './diag'
 import { fakeCodexEnv, replyFile, scratch, userDataWith } from './fixtures/fake-codex'
 
