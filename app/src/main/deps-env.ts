@@ -8,7 +8,7 @@
  *
  * Electron 을 모른다: 뿌리 경로는 호출자(`python.ts`)가 넘긴다. 그래서 노드 시험이 그대로 부를 수 있다.
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join, relative, isAbsolute } from 'node:path'
@@ -150,44 +150,90 @@ export function revokeTrust(root: string, key: string): boolean {
   return true
 }
 
-// ---- 공유 환경 전환 잠금(설계 §3.2 `deps/.lock`, 검토 r1 I-01) ----------------------------------------------
+// ---- 공유 환경 전환 잠금(설계 §3.2 `deps/.lock`, 검토 r1 I-01 · r2 I-01) --------------------------------------
 export const LOCK_FILE = '.lock'
 const heldHere = new Set<string>()
+const STALE_MS = 10 * 60_000 // 소유자를 알 수 없는(깨진·쓰는 중) 잠금이 이만큼 낡으면 잔해
+const GUARD_STALE_MS = 10_000 // 회수 보호 파일은 밀리초만 쥔다 — 이보다 오래면 그 프로세스가 죽은 것
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 
-function staleLock(path: string): boolean {
-  try {
-    const held = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: unknown }
-    if (typeof held.pid !== 'number') return statAge(path) > 10 * 60_000
-    return held.pid === process.pid ? !heldHere.has(path) : !pidAlive(held.pid)
-  } catch { return statAge(path) > 10 * 60_000 } // 쓰는 중이거나 깨진 파일 — 한참 지난 것만 잔해로 본다
-}
 function statAge(path: string): number {
   try { return Date.now() - statSync(path).mtimeMs } catch { return Infinity }
+}
+
+function readRaw(path: string): string | null {
+  try { return readFileSync(path, 'utf-8') } catch { return null }
+}
+
+/** 잠금 원문이 낡은 것(소유 프로세스가 없음)인가. 같은 프로세스의 것은 이 모듈이 쥐고 있지 않을 때만 낡은 것. */
+function staleBody(path: string, raw: string): boolean {
+  try {
+    const held = JSON.parse(raw) as { pid?: unknown }
+    if (typeof held.pid !== 'number') return statAge(path) > STALE_MS
+    return held.pid === process.pid ? !heldHere.has(path) : !pidAlive(held.pid)
+  } catch { return statAge(path) > STALE_MS }
+}
+
+/**
+ * 낡은 잠금 회수. 판단(`seen`)과 삭제 사이에 다른 프로세스가 회수하고 **새 잠금**을 쥘 수 있으므로, 회수끼리는 보호 파일
+ * (`.lock.reclaim`, wx)로 한 번에 하나만 하고, 보호를 쥔 채 **다시 읽어 판단한 그 잠금과 같을 때만** 지운다.
+ * 잠금 경로가 있는 동안에는 아무도 wx 로 만들 수 없고(회수는 직렬, 해제는 자기 토큰만), 그러므로 같은 원문이면
+ * 그 사이 바뀌지 않았다. 보호 파일 자체가 낡았으면(회수 중 죽음) 치우고 다음 바퀴에 다시 한다.
+ */
+function reclaimStale(path: string, seen: string): boolean {
+  const guard = path + '.reclaim', mine = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex') })
+  try {
+    writeFileSync(guard, mine, { flag: 'wx' })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    const other = readRaw(guard)
+    let dead = statAge(guard) > GUARD_STALE_MS
+    try { const pid = (JSON.parse(other ?? '') as { pid?: unknown }).pid; if (typeof pid === 'number' && pid !== process.pid) dead = dead || !pidAlive(pid) } catch { /* 깨진 보호 파일은 나이로만 */ }
+    if (dead && readRaw(guard) === other) rmSync(guard, { force: true })
+    return false
+  }
+  try {
+    if (readRaw(path) !== seen) return false // 그사이 다른 작업이 바꿨다 — 지우지 않는다
+    rmSync(path, { force: true })
+    return true
+  } finally {
+    if (readRaw(guard) === mine) rmSync(guard, { force: true })
+  }
 }
 
 /**
  * 공유 환경(`deps/<키>`)을 건드리는 준비 한 건이 쥐는 잠금. 폴더(root)별 flight 는 합쳐도 설치 대상은 PC 하나라서,
  * 잔해 정리~설치~검증~표식~재시작~실패 정리가 끝날 때까지 다른 준비가 같은 환경을 지우거나 덮지 못하게 한다.
- * 같은 프로세스(폴더 전환)와 다른 프로세스(앱 둘) 모두 `wx` 파일로 막고, 쥔 프로세스가 죽은 잠금은 잔해로 치운다.
+ * 같은 프로세스(폴더 전환)와 다른 프로세스(앱 둘) 모두 `wx` 파일로 막는다. 잠금 원문에는 소유 토큰이 있고,
+ * 해제는 **원문이 내 토큰일 때만** 지운다(회수당한 뒤의 해제가 상대의 현재 잠금을 지우지 않는다).
  * 기다리는 동안 `isCancelled()` 가 참이면 null — 호출자가 취소·방문 변경으로 닫는다. 반환 함수가 잠금을 돌려준다.
+ * `onStaleJudged` 는 "낡았다고 판단한 직후" 순서를 제어하는 시험용 고리다.
  */
-export async function acquireEnvLock(root: string, opts: { isCancelled?: () => boolean; pollMs?: number } = {}): Promise<(() => void) | null> {
+export async function acquireEnvLock(root: string, opts: { isCancelled?: () => boolean; pollMs?: number; onStaleJudged?: () => void | Promise<void> } = {}): Promise<(() => void) | null> {
   mkdirSync(root, { recursive: true })
   const path = join(root, LOCK_FILE), poll = opts.pollMs ?? 100
+  const body = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex'), at: new Date().toISOString() })
   for (;;) {
     if (opts.isCancelled?.()) return null
     if (!heldHere.has(path)) {
       try {
-        writeFileSync(path, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' })
+        writeFileSync(path, body, { flag: 'wx' })
         heldHere.add(path)
-        return () => { heldHere.delete(path); rmSync(path, { force: true }) }
+        return () => {
+          heldHere.delete(path)
+          if (readRaw(path) === body) rmSync(path, { force: true })
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-        if (staleLock(path)) { rmSync(path, { force: true }); continue }
+        const seen = readRaw(path)
+        if (seen === null) continue // 그사이 풀렸다
+        if (staleBody(path, seen)) {
+          await opts.onStaleJudged?.()
+          if (reclaimStale(path, seen)) continue
+        }
       }
     }
     await new Promise((resolve) => setTimeout(resolve, poll))

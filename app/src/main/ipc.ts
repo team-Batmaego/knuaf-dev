@@ -1133,8 +1133,14 @@ export function registerIpc(
             // 고정 스킬이 KNUAF_DEPS_VENV 를 따르지 않으면(TODO(D-U)) 앱 자리에 환경이 안 생긴다 — 신뢰하지 않고 닫는다.
             throw { code: 'deps_env_missing', message: '의존성 환경을 앱 자리에 만들지 못했어요.', data: { installation: result, detail: String(error) } }
           }
-          await sidecar.configure(root, override) // depsVenv 가 바뀌었으므로 사이드카를 다시 띄운다(§3.3-3)
+          const switched = await sidecar.configure(root, override) // depsVenv 가 바뀌었으므로 사이드카를 다시 띄운다(§3.3-3)
           live()
+          // 검토 r2 I-04: 새 환경으로 뜨지 못하면 configure 가 신뢰를 철회하고 기본 실행기로 복구해 **정상 반환**한다.
+          // 그 복구는 "목표 환경으로 전환 완료"가 아니다 — 실제로 쓰는 환경이 목표인지 확인하고, 아니면 실패·정리 경로로 간다.
+          if (switched.depsVenv !== target) {
+            throw { code: 'deps_activate_failed', message: '준비한 환경으로 앱을 다시 시작하지 못했어요. 기본 실행기로 돌아갔어요.',
+              data: { installation: result, active: switched.depsVenv ?? '', target } }
+          }
           if (dependencyGate && mine()) dependencyGate.phase = 'ready'
         } else {
           discardUnmarked(envRoot, envKey)

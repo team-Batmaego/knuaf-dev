@@ -146,6 +146,12 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 주세요. 한 번만 하면 이 컴퓨터의 모든 논문 폴더에서 써요.',
     kind: 'warning'
   },
+  /** 검토 r2 I-04: 설치는 끝났지만 그 환경으로 앱(사이드카)을 다시 띄우지 못해 기본 실행기로 돌아갔다. */
+  deps_activate_failed: {
+    title: '준비한 패키지로 앱을 다시 시작하지 못했어요',
+    action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 한 번 더 눌러 주세요. 계속되면 앱을 다시 켜 주세요.',
+    kind: 'warning'
+  },
   deps_contract_unsupported: {
     title: '이 앱 판의 규칙집으로는 패키지를 준비할 수 없어요',
     action: '앱을 최신 판으로 업데이트해 주세요. 쓴 글은 그대로 있어요.',

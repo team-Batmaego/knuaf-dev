@@ -34,10 +34,13 @@ class ControlledSidecar extends EventEmitter {
   cancelled: string[] = []
   ready = false
   up = true
+  /** 사이드카가 지금 쓰는 앱 의존성 환경(빈 문자열 = 기본 실행기). configure 가 `configureTo()` 로 정한다. */
+  activeDeps = ''
+  configureTo: () => string = () => ''
   diagnose: () => Promise<Envelope> = async () => env(this.ready)
   install: () => Promise<Envelope> = async () => { this.ready = true; return env(true) }
-  status(): SidecarInfo { return { python: '/bundled/python', kind: 'bundled', scriptsDir: join(source, 'scripts'), running: this.up } }
-  async configure(root: string) { this.configured.push(root); this.up = true; return this.status() }
+  status(): SidecarInfo { return { python: '/bundled/python', kind: 'bundled', scriptsDir: join(source, 'scripts'), running: this.up, depsVenv: this.activeDeps } }
+  async configure(root: string) { this.configured.push(root); this.up = true; this.activeDeps = this.configureTo(); return this.status() }
   isWrite(method: string) { return method === 'deps.ensure' }
   cancel(id: string) { this.cancelled.push(id) }
   async call(method: string, params: Record<string, unknown>, _onEvent: unknown, onId?: (id: string) => void) {
@@ -88,6 +91,7 @@ function harness(sidecar = new ControlledSidecar()) {
   }
   const module: Partial<typeof IpcModule> = {}
   factory(name => Object.hasOwn(dependencies,name) ? dependencies[name] : realRequire(name), module)
+  sidecar.configureTo = () => marked.at(-1) ?? '' // 표식을 쓴 뒤의 재시작은 목표 환경으로 뜬다(정상)
   const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null)
   return { root, other, sidecar, settings, sent, marked, discarded, restored, events,
     setPrior: (v: string | null) => { prior = v }, setTrusted: (v: string) => { trusted = v }, chat: services.chat,
@@ -519,5 +523,21 @@ test('S-01 I-04: 사이드카가 내려가 있으면 준비가 먼저 다시 띄
     expect(result).toMatchObject({ result: { ok: true } })
     expect(h.sidecar.configured.length).toBeGreaterThan(opened)
     expect(h.sidecar.calls[0].method).toBe('deps.doctor')
+  } finally { await h.cleanup() }
+})
+
+
+// 검토 r2 I-04: 새 환경으로 재시작이 실패해 기본 실행기로 복구되면(configure 는 정상 반환) 준비는 성공이 아니다.
+test('S-01 I-04 r2: 목표 환경으로 전환하지 못하고 기본 실행기로 복구되면 준비는 실패로 닫고 표식·환경을 정리한다', async () => {
+  const h = harness()
+  h.sidecar.configureTo = () => '' // 새 환경 기동 실패 → 신뢰 철회 → 기본 실행기(depsVenv 비어 있음)
+  try {
+    await h.invoke('project:open', h.root)
+    const result = await h.invoke('deps:ensure', h.root, 'owner')
+    expect(result).toMatchObject({ error: { code: 'deps_activate_failed' } })
+    expect(h.restored).toEqual([null]) // 이번 작업의 표식 회수(처음이었으니 제거) + 잔해 폐기
+    expect(h.events.slice(h.events.indexOf('restore'))).toEqual(['restore', 'discard', 'unlock'])
+    await expect(h.chat.send(h.root, 'codex', 'not ready', 'blocked')).rejects.toThrow() // main 은 ready 가 아니다
+    expect(h.sent).toEqual([])
   } finally { await h.cleanup() }
 })

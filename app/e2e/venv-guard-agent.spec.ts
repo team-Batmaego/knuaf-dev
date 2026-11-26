@@ -116,3 +116,10 @@ test('D1 문구: 옛 폴더 .venv 는 지워도 되고, 이 컴퓨터에서 한 
     expect(text).not.toMatch(/폴더 안.*\.venv|프로젝트 \.venv/)
   }
 })
+
+test('I-04 r2: 목표 환경 전환 실패(deps_activate_failed)는 기본 오류 문구가 아니라 다시 누르는 안내를 가진다', async () => {
+  const { errorCopy } = await import('../src/renderer/src/copy')
+  const copy = errorCopy('deps_activate_failed')
+  expect(copy).not.toEqual(errorCopy('default'))
+  expect(copy.action).toContain('"패키지 준비"')
+})
