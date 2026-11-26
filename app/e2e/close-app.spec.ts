@@ -21,8 +21,12 @@ test('close timeout invokes bounded recovery and finishes the close log', async 
   expect(log.stages).toEqual(['close:start', 'close:force pid=4242', 'close:end'])
 })
 
-test('close success with observed exit does not force-kill', async () => {
-  const proc = Object.assign(new ChildProcess(), { exitCode: 0 })
+test('close succeeds without killing an already empty owned process group', async () => {
+  const marker = `--knuaf-e2e-launch-id=${randomUUID()}`
+  const tracked = trackLaunch(marker)
+  const proc = spawn(process.execPath, ['-e', '', '--', marker], { detached: process.platform !== 'win32' })
+  try { await once(proc, 'close') }
+  finally { tracked.stop() }
   const log = recorder()
   await closeApp({ close: async () => {}, process: () => proc }, log)
   expect(log.stages).toEqual(['close:start', 'close:end'])
@@ -69,5 +73,36 @@ test('a dead launcher cannot hide a descendant that still holds its output', asy
       try { process.kill(pid, 'SIGKILL') }
       catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error }
     }
+  }
+})
+
+test('closed pipes do not prove that a silent descendant exited', async ({}, info) => {
+  const pidFile = info.outputPath('silent.pid')
+  const marker = `--knuaf-e2e-launch-id=${randomUUID()}`
+  const script = `
+    const {spawn} = require('node:child_process');
+    const {writeFileSync} = require('node:fs');
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 12000)'], {stdio: 'ignore'});
+    child.once('spawn', () => { writeFileSync(process.argv[1], String(child.pid)); process.exit(0); });
+  `
+  const tracked = trackLaunch(marker)
+  const proc = spawn(process.execPath, ['-e', script, pidFile, marker], { detached: process.platform !== 'win32' })
+  try {
+    const [code] = await once(proc, 'close')
+    expect(code).toBe(0)
+  } finally { tracked.stop() }
+  const pid = Number(readFileSync(pidFile, 'utf8'))
+  expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
+  try {
+    const close = closeApp({ close: async () => {}, process: () => proc }, recorder())
+    if (process.platform === 'win32') {
+      await expect(close).rejects.toThrow('tree recovery unverified (4)')
+    } else {
+      await close
+      expect(() => process.kill(pid, 0), 'silent child survived a successful close').toThrow(expect.objectContaining({ code: 'ESRCH' }))
+    }
+  } finally {
+    try { process.kill(pid, 'SIGKILL') }
+    catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error }
   }
 })

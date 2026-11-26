@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { closeApp, launchBudget, reclaimLaunch, trackLaunch, within } from './electron-lifecycle'
+import { closeApp, launchBudget, reclaimFailedLaunch, trackLaunch, within } from './electron-lifecycle'
 import { DEFAULT_WINDOW } from '../src/shared/window'
 
 export const app = resolve(__dirname, '..')
@@ -191,6 +191,7 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
   const marker = `--knuaf-e2e-launch-id=${randomUUID()}`
   const tracked = trackLaunch(marker)
   let electronApp: ElectronApplication | undefined
+  let launchSettled: Promise<void> | undefined
   try {
     markStartup('electron-launch:start')
     /**
@@ -198,20 +199,25 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
      * 없음" 창을 띄워 시험을 세운다 — 가짜 키체인 저장소를 써서 실제 키체인을 건드리지 않게 한다.
      * 맥 전용 플래그라 다른 OS 에는 넘기지 않는다.
      */
-    electronApp = await within(budget.startup, 'debug connection', timeout => electron.launch({
-      args: [
-        join(app, 'out', 'main', 'index.js'),
-        `--user-data-dir=${userData}`,
-        marker,
-        ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])
-      ],
-      env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
-      colorScheme: opts.colorScheme,
-      // The harness owns the earlier deadline and reclaims immediately. The Playwright fallback
-      // is still bounded if its handshake never observes the end of the process.
-      timeout: timeout + 1_000
-    }))
+    electronApp = await within(budget.startup, 'debug connection', timeout => {
+      const launching = electron.launch({
+        args: [
+          join(app, 'out', 'main', 'index.js'),
+          `--user-data-dir=${userData}`,
+          marker,
+          ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : [])
+        ],
+        env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+        colorScheme: opts.colorScheme,
+        // The outer deadline reserves time to recover a child even before the handshake.
+        // Unlike the outer race, Playwright also bounds its own native launch.
+        timeout: timeout + 1_000
+      })
+      launchSettled = launching.then(() => {}, () => {})
+      return launching
+    })
     markStartup('electron-launch:done')
+    tracked.stop()
     const launched = electronApp
     const page = await within(budget.startup, 'first window', timeout => launched.firstWindow({ timeout }))
     markStartup('first-window:done')
@@ -253,17 +259,13 @@ export async function launch(opts: { userData?: string; colorScheme?: 'light' | 
     const log = { mark: markStartup }
     try {
       if (electronApp) await closeApp(electronApp, log, { deadline: budget.cleanup })
-      else {
-        const child = tracked.process()
-        if (child) await reclaimLaunch(child, log, budget.cleanup)
-      }
+      else if (launchSettled) await reclaimFailedLaunch(tracked, launchSettled, { log, deadline: budget.cleanup })
+      else tracked.stop()
     } catch {
       // Cleanup diagnostics are written by the lifecycle owner. Preserve the startup error.
       markStartup('launch:cleanup-failed')
     }
     throw error
-  } finally {
-    tracked.stop()
   }
 }
 

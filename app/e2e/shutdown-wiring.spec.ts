@@ -296,3 +296,26 @@ test('a stalled debug handshake is reclaimed before the active test expires', as
     child?.kill('SIGKILL')
   }
 })
+
+test('a child spawned after the debug deadline is reclaimed before reporting the original deadline', async ({}, info) => {
+  info.setTimeout(13_000)
+  let child: ChildProcess | undefined
+  const launcher = mock.method(_electron, 'launch', async (options: Parameters<typeof _electron.launch>[0]) => {
+    const file = info.outputPath('app-log.txt')
+    await expect.poll(() => readFileSync(file, 'utf8').includes('launch:failed'), { timeout: 5_000 }).toBe(true)
+    const spawned = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 12000)', '--', ...(options?.args ?? [])], {
+      detached: process.platform !== 'win32', stdio: 'ignore'
+    })
+    child = spawned
+    await once(spawned, 'spawn')
+    throw new Error('late handshake failure')
+  })
+  try {
+    await expect(launch({ env: fakeCodexEnv(join(scratch(), 'bin')) })).rejects.toThrow(/deadline exceeded: debug connection/)
+    await expect.poll(() => typeof child?.pid === 'number', { timeout: 2_000 }).toBe(true)
+    expect(alive(Number(child?.pid)), 'late-owned child survived startup cleanup').toBe(false)
+  } finally {
+    launcher.mock.restore()
+    child?.kill('SIGKILL')
+  }
+})

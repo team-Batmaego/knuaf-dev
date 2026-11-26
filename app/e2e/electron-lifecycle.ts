@@ -2,7 +2,7 @@ import { ChildProcess, execFile } from 'node:child_process'
 import { channel } from 'node:diagnostics_channel'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
+import { setImmediate as nextTurn, setTimeout as delay } from 'node:timers/promises'
 import type { ElectronApplication, TestInfo } from '@playwright/test'
 import { taskkillPath } from '../src/main/win'
 
@@ -13,7 +13,7 @@ const GRACE_MS = 20_000
 const startChannel = channel('child_process') // Node 22: emitted before the ChildProcess `spawn` event.
 const playwrightRequire = createRequire(require.resolve('playwright/package.json'))
 const clock: { monotonicTime(): number } = playwrightRequire('playwright-core/lib/coreBundle').iso
-const launchIds = new WeakMap<ChildProcess, string>()
+const launchIds = new WeakMap<ChildProcess, { readonly marker: string; readonly startedAt: number }>()
 
 class ElectronDeadlineError extends Error {
   readonly name = 'ElectronDeadlineError'
@@ -56,8 +56,14 @@ export async function within<T>(deadline: Deadline, stage: string, run: (ms: num
   finally { abort.abort() }
 }
 
-export function trackLaunch(marker: string) {
-  let child: ChildProcess | undefined
+interface LaunchObservation {
+  readonly spawned: Promise<ChildProcess>
+  stop(): void
+}
+
+export function trackLaunch(marker: string): LaunchObservation {
+  const observed = Promise.withResolvers<ChildProcess>()
+  const startedAt = Date.now()
   const pending = new Map<ChildProcess, () => void>()
   const subscribe = (message: unknown): void => {
     if (!message || typeof message !== 'object' || !('process' in message) || !(message.process instanceof ChildProcess)) return
@@ -66,8 +72,8 @@ export function trackLaunch(marker: string) {
       pending.delete(candidate)
       // On Windows Playwright passes a single shell command; marker is an ASCII random token.
       if (candidate.spawnargs.some(arg => arg === marker || arg.includes(`"${marker}"`))) {
-        child = candidate
-        launchIds.set(candidate, marker)
+        launchIds.set(candidate, { marker, startedAt })
+        observed.resolve(candidate)
       }
     }
     pending.set(candidate, spawned)
@@ -75,7 +81,7 @@ export function trackLaunch(marker: string) {
   }
   startChannel.subscribe(subscribe)
   return {
-    process: () => child,
+    spawned: observed.promise,
     stop: () => {
       startChannel.unsubscribe(subscribe)
       for (const [candidate, listener] of pending) candidate.off('spawn', listener)
@@ -99,13 +105,14 @@ function groupAlive(pid: number): boolean {
   }
 }
 
-// Inspect only in forced recovery. Creation times distinguish reused PIDs. The command line
-// is used only to match our marker; no process-table data is copied to the test log.
+// PID creation times prevent reuse from supplying false ancestry. An orphan born since
+// launch could be ours; report uncertainty rather than killing it or claiming an empty tree.
 const windowsTree = String.raw`
 $ErrorActionPreference = 'Stop'
 $root = [uint32]ROOT_PID
 $worker = [uint32]WORKER_PID
 $marker = 'LAUNCH_MARKER'
+$since = [DateTimeOffset]::FromUnixTimeMilliseconds(LAUNCH_STARTED).LocalDateTime
 $known = @{}
 $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate,CommandLine)
 $rootProcess = $all | Where-Object ProcessId -eq $root
@@ -131,19 +138,42 @@ while ($parents.Count -gt 0) {
   }
   $parents = $next
 }
-if ($seeds.Count -eq 0) { exit 4 }
-foreach ($seed in $seeds) {
-  $current = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($seed.ProcessId)"
-  if ($current -and $current.CreationDate -eq $seed.CreationDate) {
-    & 'TASKKILL_PATH' /PID $seed.ProcessId /T /F | Out-Null
+if (FORCE_TREE) {
+  foreach ($seed in $seeds) {
+    $current = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($seed.ProcessId)"
+    if ($current -and $current.CreationDate -eq $seed.CreationDate) {
+      & 'TASKKILL_PATH' /PID $seed.ProcessId /T /F | Out-Null
+    }
   }
+  $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate,CommandLine)
 }
-$remaining = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Where-Object {
-  ($known.ContainsKey($_.ProcessId) -and $known[$_.ProcessId] -eq $_.CreationDate) -or
-  ($known.ContainsKey($_.ParentProcessId) -and $_.CreationDate -ge $known[$_.ParentProcessId])
-})
-if ($remaining.Count -gt 0) { exit 5 }
+$parentsByPid = @{}
+foreach ($p in $all) { $parentsByPid[$p.ProcessId] = $p.CreationDate }
+foreach ($p in $all) {
+  $parentBorn = $parentsByPid[$p.ParentProcessId]
+  if (($known.ContainsKey($p.ProcessId) -and $known[$p.ProcessId] -eq $p.CreationDate) -or
+      ($known.ContainsKey($p.ParentProcessId) -and $p.CreationDate -ge $known[$p.ParentProcessId]) -or
+      ($p.CommandLine -and $p.CommandLine.Contains($marker))) { exit 5 }
+  if ($p.CreationDate -ge $since -and $p.ParentProcessId -ne 0 -and
+      (!$parentBorn -or $parentBorn -gt $p.CreationDate)) { exit 4 }
+}
 `
+
+async function verifyWindowsTree(proc: ChildProcess, deadline: Deadline, forceTree: boolean): Promise<void> {
+  const identity = launchIds.get(proc)
+  const ms = timeLeft(deadline)
+  if (!identity || !proc.pid || ms <= 0) throw new ElectronReclaimError('tree recovery unverified (missing identity or budget)')
+  const executable = taskkillPath()
+  const powershell = join(executable, '..', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const script = windowsTree.replace('ROOT_PID', String(proc.pid)).replace('WORKER_PID', String(process.pid))
+    .replace('ROOT_EXITED', ended(proc) ? '$true' : '$false').replace('LAUNCH_MARKER', identity.marker)
+    .replace('LAUNCH_STARTED', String(identity.startedAt)).replace('FORCE_TREE', forceTree ? '$true' : '$false')
+    .replace('TASKKILL_PATH', () => executable.replaceAll("'", "''"))
+  const { promise, resolve, reject } = Promise.withResolvers<void>()
+  execFile(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { windowsHide: true, timeout: ms, killSignal: 'SIGKILL' }, error => error ? reject(error) : resolve())
+  await promise
+}
 
 const reclaim: ForceKiller = async (proc, deadline) => {
   const pid = proc.pid
@@ -152,17 +182,7 @@ const reclaim: ForceKiller = async (proc, deadline) => {
   if (ms <= 0) return { ok: false, detail: 'no recovery budget' }
   try {
     if (process.platform === 'win32') {
-      const marker = launchIds.get(proc)
-      if (!marker) return { ok: false, detail: 'missing Windows launch identity' }
-      const executable = taskkillPath()
-      const powershell = join(executable, '..', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-      const script = windowsTree.replace('ROOT_PID', String(pid)).replace('WORKER_PID', String(process.pid))
-        .replace('ROOT_EXITED', ended(proc) ? '$true' : '$false').replace('LAUNCH_MARKER', marker)
-        .replace('TASKKILL_PATH', () => executable.replaceAll("'", "''"))
-      const { promise, resolve, reject } = Promise.withResolvers<void>()
-      execFile(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-        { windowsHide: true, timeout: ms, killSignal: 'SIGKILL' }, error => error ? reject(error) : resolve())
-      await promise
+      await verifyWindowsTree(proc, deadline, true)
     } else if (groupAlive(pid)) {
       try { process.kill(-pid, 'SIGKILL') }
       catch (error) { if (groupAlive(pid)) throw error }
@@ -189,11 +209,40 @@ async function force(proc: ChildProcess, log: Log, deadline: Deadline, forceKill
   }
 }
 
-export function reclaimLaunch(proc: ChildProcess, log: Log, deadline: Deadline): Promise<void> {
-  return force(proc, log, { at: Math.min(deadline.at, after(FORCE_MS).at) }, reclaim)
+export async function reclaimFailedLaunch(
+  tracked: LaunchObservation,
+  settled: Promise<void>,
+  recovery: { readonly log: Log; readonly deadline: Deadline }
+): Promise<void> {
+  const { log, deadline } = recovery
+  // Give Node's queued spawn event a turn even if the launch rejects synchronously after spawn.
+  const claimed = Promise.race([tracked.spawned, settled.then(async () => { await nextTurn(); return undefined })])
+  try {
+    const child = await within({ at: deadline.at - FORCE_MS }, 'observe late spawn', () => claimed)
+    if (child) await force(child, log, { at: Math.min(deadline.at, after(FORCE_MS).at) }, reclaim)
+    tracked.stop()
+  } catch (error) {
+    if (!(error instanceof ElectronDeadlineError && error.stage === 'observe late spawn')) {
+      // The native launch may still reject asynchronously after a failed force attempt.
+      void settled.then(() => tracked.stop())
+      throw error
+    }
+    // Keep ownership alive without holding the failed test open. A late spawn still has one
+    // bounded recovery attempt; a launch that settles without spawning releases the listener.
+    log.mark('launch:cleanup-unverified pending native launch')
+    void claimed.then(async child => {
+      try {
+        if (child) await force(child, log, after(FORCE_MS), reclaim)
+        tracked.stop()
+      } catch {
+        log.mark('launch:late-cleanup-unverified')
+        void settled.then(() => tracked.stop())
+      }
+    })
+  }
 }
 
-/** Playwright's successful close waits for its launch pipes; rejection alone proves nothing. */
+/** A settled Playwright close is only the direct-child and pipe boundary. */
 export async function closeApp(
   app: Pick<ElectronApplication, 'close' | 'process'>,
   log: Log,
@@ -207,9 +256,19 @@ export async function closeApp(
   try {
     try {
       await within(graceful, 'graceful close', () => app.close())
-      if (ended(proc) && !pipesOpen(proc)) return
     } catch (error) {
       if (!(error instanceof ElectronDeadlineError)) log.mark('close:rejected')
+    }
+    if (ended(proc) && !pipesOpen(proc) && proc.pid) {
+      try {
+        if (process.platform === 'win32') {
+          await verifyWindowsTree(proc, { at: Math.min(graceful.at, after(FORCE_MS).at) }, false)
+          return
+        }
+        if (!groupAlive(proc.pid)) return
+      } catch {
+        log.mark('close:tree-unverified')
+      }
     }
     await force(proc, log, { at: Math.min(deadline.at, after(FORCE_MS).at) }, opts.forceKill ?? reclaim)
   } finally { log.mark('close:end') }
