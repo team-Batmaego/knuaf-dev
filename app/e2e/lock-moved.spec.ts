@@ -104,6 +104,15 @@ test('Roh C-01: 사이드카 거절 코드도 학생 말로 안내한다', () =>
   }
 })
 
+test('Roh r5: target_changed 는 "아무것도 안 바뀜"이라 말하지 않고, 중간까지 진행됐을 수 있으니 다시 진단하라고 한다', () => {
+  // 규칙집이 첫 복구 폴더를 만든 뒤 중단했을 수 있어 not_committed 여도 단정하지 않는다.
+  const d = describeError({ code: 'target_changed', message: 'x', data: { commit_state: 'not_committed' } })
+  const text = `${d.title} ${d.action}`
+  expect(text).not.toMatch(/그대로|안 바뀜|바꾸지 않|아무것도|풀지 않/)
+  expect(text).toContain('중간까지 진행됐을 수')
+  expect(d.action).toContain('다시 진단')
+})
+
 test('Roh r2 I-01: "다시 확인했어요"는 재조회가 성공했을 때만, 실패·진행 중이면 "다시 확인해 주세요"', () => {
   const blocked = recoveryOutcome(result({ status: 'blocked', commit_state: 'not_committed', reason: 'guard_busy' }))
   const pending = describeRecovery(blocked, { rechecked: false })

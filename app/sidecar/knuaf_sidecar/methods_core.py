@@ -320,7 +320,7 @@ def lock_upgrade_offline(ctx, params):
         raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
     if (isinstance(result, dict) and result.get("status") == "blocked"
             and result.get("reason") == "target_changed" and result.get("commit_state") == "not_committed"):
-        raise RpcError("target_changed", "규칙집이 확인한 폴더와 지금 폴더가 다르다고 거절함(아무것도 안 바꿈)",
+        raise RpcError("target_changed", "규칙집이 확인한 폴더와 지금 폴더가 다르다며 멈춤(첫 복구 폴더를 만든 뒤였을 수 있어 상태를 다시 확인해야 함)",
                        {"reason": "target_changed", "commit_state": "not_committed", "recovery_id": result.get("recovery_id")})
     return result
 

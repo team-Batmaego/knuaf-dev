@@ -100,8 +100,8 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     kind: 'warning'
   },
   target_changed: {
-    title: '확인한 뒤 이 자리의 폴더가 바뀌어 잠금을 풀지 않았어요.',
-    action: '"다시 진단"을 눌러 지금 폴더의 잠금 상태를 다시 확인한 뒤 진행해 주세요.',
+    title: '확인한 뒤 이 자리의 폴더가 바뀌어 잠금 풀기를 멈췄어요.',
+    action: '중간까지 진행됐을 수 있어요. "다시 진단"으로 지금 잠금 상태를 확인해 주세요. 폴더 안 파일은 지우거나 옮기지 마세요.',
     kind: 'warning'
   },
   recovery_id_mismatch: {

@@ -371,6 +371,8 @@ def test_skill_target_changed_maps_to_target_changed(tmp_path, monkeypatch, resu
     error = _upgrade(params)["error"]
     assert error["code"] == "target_changed", error
     assert error["data"]["reason"] == "target_changed" and error["data"]["commit_state"] == "not_committed"
+    # Roh r5: 규칙집이 첫 복구 폴더를 만든 뒤 멈췄을 수 있다 — "아무것도 안 바꿈"이라 단정하지 않는다.
+    assert not any(w in error["message"] for w in ("아무것도", "안 바꿈", "그대로")), error["message"]
 
 
 @needs_upgrade
