@@ -229,8 +229,9 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
         ipcMain.removeHandler('rpc:cancel')
         ipcMain.handle('rpc:cancel', (...args: unknown[]) => {
           const id = args[1]
-          if (typeof id !== 'string' || probe.clientId !== id) return cancel(...args)
+          if (typeof id !== 'string') return cancel(...args)
           probe.cancelled.push(id)
+          if (probe.clientId !== id) return cancel(...args)
           probe.finish()
           return true
         })
@@ -258,14 +259,10 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
       await leave()
       if (surface === '설정 닫기') await navTo(page, '설정')
       await openPreset(page, 'fix:kordoc')
-      await expect.soft(tool.getByRole('status').filter({ hasText: '실행 중' })).toContainText('문서 읽기 도구 확인 중', { timeout: 1500 })
-      if (await stop.isVisible()) {
-        await stop.click()
-        await expect.poll(async () => (await readProbe()).cancelled).toEqual([first])
-      } else {
-        // The failing baseline lost its cancel control; release only the test-held response.
-        await electronApp.evaluate(() => (globalThis as ToolPreparationHost).__toolPreparation.finish())
-      }
+      await expect(tool.getByRole('status').filter({ hasText: '실행 중' })).toContainText('문서 읽기 도구 확인 중')
+      await expect(stop).toBeVisible()
+      await stop.click()
+      await expect.poll(async () => (await readProbe()).cancelled).toEqual([first])
       const waiting = page.locator('.chat-zone .zline.wait')
       await expect(waiting).toHaveCount(0)
 
