@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createServer } from 'vite'
-import { app, closeSheet, launch, navTo, openPreset, openProject, plantStaleLock, python, scripts, synthProject } from './helpers'
+import { app, closeSheet, launch, navTo, openPreset, openProject, plantStaleLock, python, scripts, seedDependencies, synthProject } from './helpers'
 import type { Envelope, LockInfo } from '../src/shared/types'
 import type { useProject as ProjectStore } from '../src/renderer/src/store/project'
 import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
@@ -20,6 +20,7 @@ type ProjectProbe = { readonly root: string; readonly revision: number }
 test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', async () => {
   const root = synthProject()
   const other = synthProject()
+  seedDependencies(root)
   const env = fakeCodexEnv(join(scratch(), 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
   const { electronApp, page } = await launch({ env })
   try {
@@ -82,9 +83,13 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
       await waitRevision(revision)
     }
 
-    // Don't use projectPrepared here: it explicitly opens Troubleshoot.
+    // projectPrepared opens Troubleshoot. Wait in the workspace instead so neither cold
+    // installation nor the initial import check races the first real aggregate diagnosis.
     await openProject(page, root, undefined, { preparation: 'pending' })
     await waitRevision(2)
+    const chatZone = page.locator('.chat-zone')
+    await expect(chatZone.locator('.zline.wait')).toHaveCount(0, { timeout: 30_000 })
+    await expect(chatZone.getByRole('button', { name: '다시 준비', exact: true })).toHaveCount(0)
     const settings = page.locator('dialog[data-screen="settings"]')
     await expect(settings).not.toBeVisible()
     expect(await calls(), '폴더를 연 뒤 숨은 진단이 시작됐다').toEqual({ lock: [], doctor: [] })
