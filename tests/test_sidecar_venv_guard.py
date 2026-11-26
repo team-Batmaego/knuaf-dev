@@ -1,7 +1,7 @@
 """S-01 재현·계약 시험(v0.7.5 설계 3판): 사이드카의 실제 의존성 호출이 논문 폴더 코드를 실행하면 안 되고,
 신뢰된 앱 데이터 환경으로는 정상 동작해야 한다.
 
-검토 r1 B-01·B-03, r2 B-01 ①·B-03 대응. 고치기 전 빨강이 정상이다(strict xfail — 아래 pytestmark).
+검토 r1 B-01·B-03, r2 B-01 ①·B-03 대응. 동봉 스킬은 D-U 의존성 격리 계약을 지켜야 한다.
 
 장면
 - 폴더 쪽(공격자가 쓸 수 있음): 그 인터프리터가 뜨기만 하면 `.pth` 가 표시 파일을 남기는 **실제** `.venv`
@@ -33,11 +33,6 @@ from conftest import REPO, SCRIPTS, bind_test_major
 sys.path.insert(0, str(REPO / "app/sidecar"))
 from knuaf_sidecar import methods_core, methods_scripts  # noqa: E402
 from knuaf_sidecar.rpc import Context, RpcError  # noqa: E402
-
-# 고치기 전 빨강 기록: evidence/red-sidecar-venv-guard-r3.txt(10 failed, 973b3dd). 앱 쪽 구현(3단계)으로 키 누락 3·
-# 폴더 안 1·문서 생성 1이 초록이 됐다. 아래 표시가 남은 5건은 스킬 gg_deps 계약(D-U: KNUAF_DEPS_VENV 를 따르고
-# -m/-c 자식은 -I) 이 들어와야 초록이 된다 — strict 라 들어오면 XPASS 실패로 표시 제거를 강제한다.
-D_U = pytest.mark.xfail(strict=True, reason="TODO(D-U): 고정 스킬 gg_deps 가 KNUAF_DEPS_VENV·-I 계약을 아직 모름")
 
 DEPS_ENV = "KNUAF_DEPS_VENV"
 WITNESS_ENV = "KNUAF_TEST_WITNESS"
@@ -180,7 +175,6 @@ def _params(scene, **extra):
 # --- 정상 계약: 유효한 deps_venv → 실제 자식이 앱 환경에서 돌고 성공한다 ----------------------------
 
 
-@D_U
 def test_doctor_child_runs_in_app_env_and_is_ready(scene):
     result = methods_scripts.deps_doctor(_ctx(), _params(scene))
     assert result["ok"], result
@@ -190,7 +184,6 @@ def test_doctor_child_runs_in_app_env_and_is_ready(scene):
     assert _fired(scene) == []
 
 
-@D_U
 def test_ensure_child_installs_in_app_env(scene):
     wheels = scene["tmp"] / "empty-wheels"
     wheels.mkdir()
@@ -203,7 +196,6 @@ def test_ensure_child_installs_in_app_env(scene):
     assert not any(p.name.startswith(".venv-broken-") for p in scene["root"].iterdir())
 
 
-@D_U
 def test_doctor_all_in_process_uses_app_env(scene, monkeypatch):
     import gg_deps
 
@@ -327,7 +319,6 @@ def _live_decoys(scene, monkeypatch):
     return decoys, userbase
 
 
-@D_U
 def test_real_m_and_c_children_run_in_target_prefix_without_user_site_or_decoys(scene, monkeypatch):
     # gg_deps 부모(스크립트 직접 실행)는 PYTHONPATH·사용자 site 를 따를 수 있다. 계약은 -m/-c 자식에 적용한다.
     decoys, userbase = _live_decoys(scene, monkeypatch)
@@ -382,7 +373,6 @@ def _python_flag_lists(path: Path):
                 yield node.lineno, consts
 
 
-@D_U
 def test_skill_python_children_with_m_or_c_are_isolated():
     """스크립트 경로 실행(`python 스크립트.py`)은 sys.path[0]=스킬 폴더라 안전하다. `-m`·`-c`는 작업
     디렉터리를 검색 경로에 넣으므로 `-I`가 있어야 한다. 새 스킬 판이 이런 자리를 더하면 여기서 잡힌다."""
@@ -391,7 +381,6 @@ def test_skill_python_children_with_m_or_c_are_isolated():
     assert offenders == []
 
 
-@D_U
 def test_contract_constant_is_declared():
     import gg_deps
 
@@ -520,7 +509,7 @@ def test_contract_declaration_is_read_statically(tmp_path, source, expected):
 
 def test_stage_skill_gate_runs_this_contract_suite():
     """stage:skill 호환 게이트(run-skill-compat CONSUMER_TESTS)가 이 파일을 돌린다 — 새 스킬 판이 계약을 빼면
-    표시 없는 정상 계약 시험이 빨강이 돼 동봉이 거부된다(@D_U 표시는 D-U 판 올림 때 걷는다)."""
+    정상 계약 시험이 빨강이 돼 동봉이 거부된다."""
     gate = REPO / "app/scripts/tests/run-skill-compat.mjs"
     if not gate.exists():
         pytest.skip("호환 게이트의 소비자 사본 안에서 돌고 있다 — 이 파일이 실행된다는 것 자체가 포함 증거")

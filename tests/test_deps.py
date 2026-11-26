@@ -51,13 +51,14 @@ def test_pip_requirement_files_are_ascii():
 
 
 def test_ensure_hands_pip_utf8_env(empty_folder, monkeypatch):
-    """pip 자식에게 PYTHONUTF8=1 을 넘겨 -r 파일을 로케일과 무관하게 읽게 한다.
+    """pip 자식에 격리·UTF-8 플래그, 환경 폴더 cwd, 명시적 UTF-8 해독을 적용한다.
 
     실제 pip 은 돌리지 않는다 — subprocess.run 만 대역으로 바꿔 넘긴 환경을 본다.
     """
     import gg_deps
 
-    vpy = empty_folder / (".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python3")
+    env_dir = empty_folder / ".venv"
+    vpy = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
     vpy.parent.mkdir(parents=True)
     vpy.write_text("")  # venv_python 은 존재만 보므로 venv 를 만들지 않고 이 파일로 대신한다
 
@@ -77,7 +78,8 @@ def test_ensure_hands_pip_utf8_env(empty_folder, monkeypatch):
     result, _ = gg_deps.ensure(empty_folder, no_index=True, find_links=empty_folder)
 
     pip_cmd, pip_kw = calls[0]  # 첫 호출이 pip 설치다
-    assert pip_cmd[:3] == [str(vpy), "-m", "pip"]
+    assert pip_cmd[:6] == [os.path.abspath(vpy), "-I", "-X", "utf8", "-m", "pip"]
+    assert pip_kw["cwd"] == os.path.abspath(env_dir)
     assert "--requirement" in pip_cmd and str(gg_deps.REQUIREMENTS) in pip_cmd
     assert pip_kw["env"]["PYTHONUTF8"] == "1"
     assert pip_kw["env"]["PYTHONIOENCODING"] == "utf-8"  # 자식은 UTF-8 로 말한다
@@ -123,6 +125,7 @@ def test_ensure_survives_non_utf8_parent_decoding(tmp_path, monkeypatch):
     root = tmp_path / "홍길동 논문"
     wheels = root / "휠 모음"
     wheels.mkdir(parents=True)
+    (root / ".venv").mkdir()  # 실제 pip 자식이 시작할 작업 폴더
     req = root / "requirements-empty.txt"
     req.write_text("# empty offline probe\n", encoding="ascii")
 

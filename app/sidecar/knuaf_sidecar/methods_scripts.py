@@ -278,8 +278,7 @@ def office_clean(ctx, params):
 
 
 # 스킬 계약(§3.1: KNUAF_DEPS_VENV 가 있으면 <폴더>/.venv 를 보지 않음, -m/-c 자식은 -I -X utf8 + cwd=환경)을
-# 선언하지 않은 판이면 gg_deps 를 띄우지 않는다(deps_contract.require → deps_contract_unsupported). 고정 v0.6.5 는
-# 선언이 없으므로 이 판에서는 준비·점검이 이 오류로 닫히는 것이 정상이다 — 판 올림(D-U) 뒤 열린다.
+# 선언하지 않은 판이면 준비·점검에서 gg_deps 를 띄우지 않는다(deps_contract_unsupported).
 def deps_ensure(ctx, params):
     root = _root(params)
     target = _deps_venv(params, root)
