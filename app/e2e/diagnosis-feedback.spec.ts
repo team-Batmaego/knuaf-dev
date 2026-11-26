@@ -112,9 +112,9 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
     await troubleTab.click()
     await expectCalls([root, root])
     await expect(lockHead).toContainText('잠금 구조 확인됨')
+    await expectDoctorReplies([root, root])
     await openPreset(page, 'fix:orphans')
     await expect(settings.locator('details[data-preset="fix:orphans"]')).toContainText(orphan)
-    await expectDoctorReplies([root, root])
     await settleDiagnosis()
     expect(await calls()).toEqual({ lock: [root, root], doctor: [root, root] })
 
