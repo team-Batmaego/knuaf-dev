@@ -4,7 +4,7 @@
 //   KNUAF_DEPS_VENV_READONLY = 1(도우미는 공유 환경에 설치하지 않는다 — 준비는 앱의 '준비하기'만)
 // 값이 안 넘어와도(옛 호출자) 빈 값·READONLY 로 닫혀야 한다 — 폴더 .venv 로 떨어지는 기본값이 없어야 한다.
 import { expect, test } from '@playwright/test'
-import { buildLaunchScript } from '../src/main/agent'
+import { buildLaunchScript, workFolderInstructions } from '../src/main/agent'
 import { DEPS_READONLY_ENV, DEPS_VENV_ENV, subscriptionEnv } from '../src/main/chat/contracts'
 
 const base = { root: '/tmp/논문', agent: 'claude' as const, agentPath: '/opt/claude', venvBin: null, bundledBin: null, firstPrompt: '시작하기' }
@@ -53,4 +53,12 @@ test('본대화·담당 env: subscriptionEnv 가 같은 두 값을 싣고, 사�
       if (v === undefined) delete process.env[k]; else process.env[k] = v
     }
   }
+})
+
+test('도우미 지시문: 규칙집 거부 코드 둘 다 앱의 준비 단추로 보낸다', () => {
+  const text = workFolderInstructions('/tmp/논문')
+  expect(text).toContain('deps_venv_readonly')
+  expect(text).toContain('deps_venv_empty')
+  expect(text).toContain('"패키지 준비"')
+  expect(text).not.toContain('(.venv,')
 })

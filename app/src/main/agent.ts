@@ -759,7 +759,7 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
  * code `deps_venv_readonly`(0 아닌 종료 코드)로 끝난다 — 그때 도우미가 우회 설치하지 않고 학생을 앱의 준비 단추로 보낸다.
  * 폴더의 `.venv` 는 v0.7.5부터 쓰지 않는다(D1) — 만들지도, 실행하지도 않게 한다.
  */
-export const DEPS_INSTRUCTIONS = 'Python 패키지는 앱이 이 컴퓨터에 준비한 환경(환경변수 KNUAF_DEPS_VENV)만 씁니다. pip 등으로 직접 설치하거나 논문 폴더에 .venv 를 만들지 마세요. gg_deps.py 가 deps_venv_readonly 로 설치를 거부하거나 패키지가 없다고 하면, 학생에게 앱의 "설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 달라고 안내하세요.'
+export const DEPS_INSTRUCTIONS = 'Python 패키지는 앱이 이 컴퓨터에 준비한 환경(환경변수 KNUAF_DEPS_VENV)만 씁니다. pip 등으로 직접 설치하거나 논문 폴더에 .venv 를 만들지 마세요. gg_deps.py 가 deps_venv_readonly·deps_venv_empty 로 설치를 거부하거나 패키지가 없다고 하면, 학생에게 앱의 "설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 달라고 안내하세요.'
 
 export function workFolderInstructions(root: string): string {
   return `작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 논문 작업 파일은 여기서 바로 다루세요. 논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요. 스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(sources/extracts 등)는 그대로 두어도 됩니다.\n${DEPS_INSTRUCTIONS}`

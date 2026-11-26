@@ -135,11 +135,21 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '다시 만들거나 파일을 지우지 말고, 정본과 수령증을 도우미와 먼저 확인해 주세요.',
     kind: 'warning'
   },
-  /** S-01 D-A: 도우미 쪽 설치 거부(스킬 code). 앱의 준비는 이 값을 물려받지 않으므로 여기 오면 도우미 경로다. */
+  /** S-01 규칙집 거부 코드(store/prep.ts SKILL_REFUSAL_TITLES 와 같은 제목). 준비는 앱의 단추로만 한다. */
   deps_venv_readonly: {
-    title: '도우미는 패키지를 직접 설치하지 않아요.',
+    title: '도우미는 패키지를 직접 설치하지 않아요',
     action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 주세요.',
     kind: 'warning'
+  },
+  deps_venv_empty: {
+    title: '이 컴퓨터에서 아직 패키지를 준비하지 않았어요',
+    action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 주세요. 한 번만 하면 이 컴퓨터의 모든 논문 폴더에서 써요.',
+    kind: 'warning'
+  },
+  deps_contract_unsupported: {
+    title: '이 앱 판의 규칙집으로는 패키지를 준비할 수 없어요',
+    action: '앱을 최신 판으로 업데이트해 주세요. 쓴 글은 그대로 있어요.',
+    kind: 'error'
   },
   deps_not_ready: {
     title: '작업 준비가 아직 끝나지 않았어요.',
