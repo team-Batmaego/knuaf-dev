@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useProject } from '../store/project'
 import { preparationFailureTitle, usePrep } from '../store/prep'
 import { useEdits } from '../store/edits'
@@ -11,17 +11,17 @@ import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
 import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
-import type { HistoryRow, LockInfo } from '../../../shared/types'
+import type { LockInfo, TroubleshootFacts } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
 /**
  * The five troubleshooting 펼침들, embedded in 설정 > 문제 해결 (03-화면/08).
  * Failure feedback deep-links land on `data-preset="fix:<id>"`.
  */
-export function TroubleshootSections() {
+export function TroubleshootSections({ active }: { readonly active: boolean }) {
   const { root, hasProject, status, refresh, refreshSidecar, sidecar } = useProject(useShallow((s) => ({ root: s.root, hasProject: s.hasProject, status: s.status, refresh: s.refresh, refreshSidecar: s.refreshSidecar, sidecar: s.sidecar })))
   const preparation = usePrep(s => root ? s.dependencies[root] : undefined)
-  const [diagnosis, setDiagnosis] = useState<{ root: string; data: Record<string, any> } | null>(null)
+  const [diagnosis, setDiagnosis] = useState<{ root: string; data: TroubleshootFacts } | null>(null)
   const doc = diagnosis?.root === root ? diagnosis.data : null
   const requestSeq = useRef(0)
   const lockRequestSeq = useRef(0)
@@ -33,8 +33,14 @@ export function TroubleshootSections() {
   const [confirm, setConfirm] = useState<{ kind: 'unlock' | 'restore' | 'init'; rev?: number } | null>(null)
   const deps = useRunner()
   const kordoc = useRunner()
-  const load = useCallback(async () => {
-    if (!root) return
+  // Completion handlers can outlive the render that started them.
+  const activeRef = useRef(false)
+  useLayoutEffect(() => {
+    activeRef.current = active
+    return () => { activeRef.current = false }
+  }, [active])
+  const load = useCallback(async (checkDeps = false) => {
+    if (!activeRef.current || !root || useProject.getState().root !== root) return
     const seq = ++requestSeq.current
     const lockSeq = ++lockRequestSeq.current
     setErr(null); setDiagnosis(null); setLockObservation(null); setLockErr(null); setLockBusy(true)
@@ -46,8 +52,9 @@ export function TroubleshootSections() {
     }).finally(() => {
       if (lockSeq === lockRequestSeq.current) setLockBusy(false)
     })
-    const checked = useProject.getState().prepareDeps(root, { install: false })
-    const diagnosed = rpc.doctor(root).then((data) => {
+    // Opening a folder owns preparation. Only an explicit recheck invalidates its result.
+    const checked = checkDeps ? useProject.getState().prepareDeps(root, { install: false }) : undefined
+    const diagnosed = rpc.troubleshoot(root).then((data) => {
       if (seq === requestSeq.current) setDiagnosis({ root, data })
     }).catch((e: unknown) => {
       if (seq === requestSeq.current) setErr(describeError(e))
@@ -56,12 +63,13 @@ export function TroubleshootSections() {
   }, [root])
   useEffect(() => {
     setErr(null); setMsg(null); setConfirm(null)
+    if (!active) return
     void load(); void refreshSidecar()
     return () => { ++requestSeq.current; ++lockRequestSeq.current }
-  }, [load, status?.revision])
+  }, [active, load, status?.revision])
   if (!root) return <div className="caption">먼저 "내 논문"에서 폴더를 여세요.</div>
   const lock = lockObservation?.root === root ? lockObservation.data : undefined
-  const hist: HistoryRow[] = Array.isArray(doc?.snapshots) ? doc!.snapshots : []
+  const hist = doc?.snapshots ?? []
   const depsInfo = preparation?.report
   const act = async () => {
     if (!confirm) return
@@ -99,6 +107,7 @@ export function TroubleshootSections() {
   const prepareKordoc = async () => {
     setErr(null); setMsg(null)
     const env = await kordoc.run('kordoc.ensure', { root })
+    if (!activeRef.current || useProject.getState().root !== root) return
     if (env?.ok) { setMsg({ title: COMPLETION.kordoc_ready }); await load() }
     else if (env) setErr(describeError({ code: 'business_rule', message: env.block_reason ?? env.stderr.slice(-300) }))
   }
@@ -112,11 +121,14 @@ export function TroubleshootSections() {
     finally { if (seq === lockRequestSeq.current) setLockBusy(false) }
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
-  const orphans: string[] = doc?.gg?.orphan_files ?? []
+  const orphans = doc?.orphan_files ?? []
+  const tool = doc?.kordoc
+  const toolUnavailable = tool && 'status' in tool
+  const detectedTool = toolUnavailable ? undefined : tool
   return (
     <div>
       <div className="row" style={{ marginBottom: 'var(--sp-3)' }}>
-        <button className="quiet" disabled={lockBusy} onClick={load}><Icon name="refresh" size={16} /> 다시 진단</button>
+        <button className="quiet" disabled={lockBusy} onClick={() => void load(true)}><Icon name="refresh" size={16} /> 다시 진단</button>
       </div>
       {err && <Feedback kind={err.kind} title={err.title} body={err.action} details={<code>{err.raw}</code>} />}
       {msg && <Feedback kind="completion" title={msg.title} body={msg.body} />}
@@ -186,18 +198,20 @@ export function TroubleshootSections() {
       </Disclosure>
 
       <Disclosure label="문서 읽기 도구" preset="fix:kordoc">
-        <div className="card-head"><h2>문서 읽기 도구</h2>{doc?.kordoc && !doc.kordoc.error && <StatusBadge status={doc.kordoc.capability_verified ? 'pass' : 'pending'} label={doc.kordoc.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
-        {doc?.kordoc && !doc.kordoc.error && <div className="caption">{doc.kordoc.cli_path ? <code>{doc.kordoc.cli_path}</code> : '아직 없어요.'} · 캐시 {doc.kordoc.candidates?.some((c: { installed: boolean }) => c.installed) ? '있음' : '없음'}</div>}
+        <div className="card-head"><h2>문서 읽기 도구</h2>{toolUnavailable
+          ? <StatusBadge status="blocked" label={STATUS_LABEL.blocked} />
+          : detectedTool && <StatusBadge status={detectedTool.capability_verified ? 'pass' : 'pending'} label={detectedTool.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
+        {detectedTool && <div className="caption">{detectedTool.cli_path ? <code>{detectedTool.cli_path}</code> : '아직 없어요.'} · 캐시 {detectedTool.candidates.some(c => c.installed) ? '있음' : '없음'}</div>}
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
-          <button disabled={kordoc.busy || !!doc?.kordoc?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
+          <button disabled={kordoc.busy || !!detectedTool?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
           <span className="caption">{KORDOC_SENTENCE}</span>
         </div>
         <ProgressPanel busy={kordoc.busy} phase={kordoc.phase} elapsedMs={kordoc.elapsedMs} lines={kordoc.lines} onCancel={kordoc.cancel} />
       </Disclosure>
 
-      <Confirm open={confirm?.kind === 'unlock'} title={LOCK_COPY.cleanup} body={<p>{LOCK_COPY.cleanupBody}</p>} confirmLabel={LOCK_COPY.cleanup} danger onConfirm={act} onCancel={() => setConfirm(null)} />
-      <Confirm open={confirm?.kind === 'restore'} title={`${confirm?.rev}번째 기록으로 복원`} body={<p><b>현재 상태를 먼저 저장해요.</b> 그다음 정본만 {confirm?.rev}번째 기록 시점으로 되돌리고 새 기록 번호를 붙여요. 장 파일과 발행물은 그대로예요.</p>} confirmLabel="복원" danger onConfirm={act} onCancel={() => setConfirm(null)} />
-      <Confirm open={confirm?.kind === 'init'} title="빈 정본 만들기" body={<p>이 폴더에 새 정본을 만들어요. 기존 정본이 있으면 만들지 않아요.</p>} onConfirm={act} onCancel={() => setConfirm(null)} />
+      <Confirm open={active && confirm?.kind === 'unlock'} title={LOCK_COPY.cleanup} body={<p>{LOCK_COPY.cleanupBody}</p>} confirmLabel={LOCK_COPY.cleanup} danger onConfirm={act} onCancel={() => setConfirm(null)} />
+      <Confirm open={active && confirm?.kind === 'restore'} title={`${confirm?.rev}번째 기록으로 복원`} body={<p><b>현재 상태를 먼저 저장해요.</b> 그다음 정본만 {confirm?.rev}번째 기록 시점으로 되돌리고 새 기록 번호를 붙여요. 장 파일과 발행물은 그대로예요.</p>} confirmLabel="복원" danger onConfirm={act} onCancel={() => setConfirm(null)} />
+      <Confirm open={active && confirm?.kind === 'init'} title="빈 정본 만들기" body={<p>이 폴더에 새 정본을 만들어요. 기존 정본이 있으면 만들지 않아요.</p>} onConfirm={act} onCancel={() => setConfirm(null)} />
     </div>
   )
 }

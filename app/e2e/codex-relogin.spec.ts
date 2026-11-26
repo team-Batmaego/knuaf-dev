@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { closeApp, launch, openProject, stubExternal, synthProject } from './helpers'
+import { launch, openProject, stubExternal, synthProject } from './helpers'
+import { closeApp } from './electron-lifecycle'
 import { captureAppLog } from './diag'
 import { fakeCodexEnv, replyFile, scratch, seedChat, userDataWith, writeFakeClaude } from './fixtures/fake-codex'
 
