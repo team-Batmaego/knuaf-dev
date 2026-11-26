@@ -380,3 +380,22 @@ def test_none_path_means_not_ready_for_dependent_scripts(scene):
     assert caught.value.code == "deps_not_ready"
     assert not none.exists()
     assert _fired(scene) == []
+
+
+# --- R-01: doctor.all 도 deps_venv 공통 검사를 거친다(전역 os.environ 을 바꾸지 않고) ----------------------------
+
+
+def test_doctor_all_requires_deps_venv_key_and_refuses_folder_inside_path(scene, monkeypatch):
+    import gg_core as core
+
+    core.init(scene["root"])
+    monkeypatch.setitem(sys.modules, "gg_deps", _fake_gg_deps(False, []))
+    before = dict(os.environ)
+    with pytest.raises(RpcError) as missing:
+        methods_core.doctor_all(_ctx(), {"root": str(scene["root"])})
+    assert missing.value.code == "deps_contract_missing"
+    with pytest.raises(RpcError) as inside:
+        methods_core.doctor_all(_ctx(), {"root": str(scene["root"]), "deps_venv": str(scene["root"] / ".venv")})
+    assert inside.value.code == "deps_venv_untrusted"
+    assert _fired(scene) == []
+    assert dict(os.environ) == before  # 검사가 프로세스 환경을 건드리지 않는다

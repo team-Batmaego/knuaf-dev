@@ -189,7 +189,7 @@ def test_owner_cleanup_cannot_break_a_live_guard(sidecar, publication_project):
 
 
 def test_doctor_all_shape(sidecar, publication_project):
-    d = sidecar.ok("doctor.all", root=str(publication_project))["result"]
+    d = sidecar.ok("doctor.all", root=str(publication_project), deps_venv=str(publication_project.parent / "appdeps"))["result"]
     assert {"gg", "lock", "deps", "kordoc", "snapshots", "python"} <= set(d)
     assert "ready" in d["deps"]
     assert d["kordoc"]["capability_verified"] is False

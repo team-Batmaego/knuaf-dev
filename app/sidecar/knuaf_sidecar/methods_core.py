@@ -278,6 +278,11 @@ def project_deps_report(report):
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
+    # R-01: 다른 의존성 메서드와 같은 공통 검사(키 누락 → deps_contract_missing, 폴더 안 경로 → deps_venv_untrusted).
+    # 기동 env 가 실제 환경이므로 값은 쓰지 않는다 — 전역 os.environ 을 바꾸지 않는다.
+    from .methods_scripts import _deps_venv
+
+    _deps_venv(params, root)
     # S-01: 계약을 모르는 gg_deps 는 같은 프로세스에서도 부르지 않는다(폴더 .venv 탐색). 사이드카 기동 때 이미
     # 막았어도 다시 확인한다 — 시험·재import 에서도 같은 선.
     contract = deps_contract.fence_in_process()
