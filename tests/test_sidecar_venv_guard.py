@@ -282,6 +282,15 @@ def _run(python, code: str, **env) -> None:
                    env={**os.environ, **env})
 
 
+def _marker_recorder(path: Path) -> str:
+    """Single-line module or .pth payload; distinguish the script parent from its interpreter children."""
+    return (
+        "import json,sys; print(json.dumps({"
+        "'argv': sys.orig_argv, 'executable': sys.executable, 'prefix': sys.prefix}), "
+        f"file=open({str(path)!r}, 'a', encoding='utf-8'))\n"
+    )
+
+
 def _live_decoys(scene, monkeypatch):
     """미끼 세 갈래를 만들고, 격리하지 않으면 실제로 돈다는 것을 먼저 확인한 뒤 표시를 지운다(양성 대조)."""
     # 폴더 .venv
@@ -293,12 +302,12 @@ def _live_decoys(scene, monkeypatch):
     decoys = scene["tmp"] / "pythonpath-decoys"
     decoys.mkdir()
     path_mark = scene["tmp"] / "PWNED-pythonpath"
-    (decoys / "knuaf_path_decoy.py").write_text(_marker_writer(path_mark), encoding="utf-8")
     for name in ("docx", "pip", "openpyxl", "pypdf"):
-        (decoys / (name + ".py")).write_text("", encoding="utf-8")
+        (decoys / (name + ".py")).write_text(_marker_recorder(path_mark), encoding="utf-8")
     python = scene["app_env"] / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
-    _run(python, "import knuaf_path_decoy", PYTHONPATH=str(decoys))
+    _run(python, "import docx", PYTHONPATH=str(decoys))
     assert path_mark.exists()
+    path_mark.unlink()
     # 사용자 site 의 .pth (venv 는 사용자 site 를 끄므로 기반 python 으로 대조한다)
     base = getattr(sys, "_base_executable", sys.executable)
     userbase = scene["tmp"] / "userbase"
@@ -308,10 +317,10 @@ def _live_decoys(scene, monkeypatch):
     assert _under(str(user_site), userbase), user_site
     user_site.mkdir(parents=True)
     user_mark = scene["tmp"] / "PWNED-usersite"
-    (user_site / "zz_user_decoy.pth").write_text(
-        "import pathlib; pathlib.Path(%r).write_text('ran')\n" % str(user_mark), encoding="utf-8")
+    (user_site / "zz_user_decoy.pth").write_text(_marker_recorder(user_mark), encoding="utf-8")
     _run(base, "pass", PYTHONUSERBASE=str(userbase))
     assert user_mark.exists()
+    user_mark.unlink()
     scene["witness"].unlink(missing_ok=True)  # 대조 실행의 기록은 버린다
     monkeypatch.setenv("PYTHONPATH", str(decoys))
     monkeypatch.setenv("PYTHONUSERBASE", str(userbase))
@@ -320,9 +329,10 @@ def _live_decoys(scene, monkeypatch):
 
 @D_U
 def test_real_m_and_c_children_run_in_target_prefix_without_user_site_or_decoys(scene, monkeypatch):
-    # 부모(`gg_deps.py` 의 current 열 검사)는 호출자 환경변수를 따르는 별도 신뢰 입력이라(계약 밖) 부모 쪽 미끼 실행은
-    # 단언하지 않는다 — 단언 대상은 대상 환경에서 뜬 `-m`·`-c` 자식 전부다.
+    # gg_deps 부모(스크립트 직접 실행)는 PYTHONPATH·사용자 site 를 따를 수 있다. 계약은 -m/-c 자식에 적용한다.
     decoys, userbase = _live_decoys(scene, monkeypatch)
+    for name in ("pythonpath", "usersite"):
+        assert not (scene["tmp"] / ("PWNED-" + name)).exists(), name
     wheels = scene["tmp"] / "empty-wheels"
     wheels.mkdir()
     ensured = methods_scripts.deps_ensure(_ctx(), _params(scene, base_python=sys.executable,
@@ -346,6 +356,10 @@ def test_real_m_and_c_children_run_in_target_prefix_without_user_site_or_decoys(
         for banned in (scene["root"], decoys, userbase):
             assert not [e for e in record["path"] if _under(e, banned)], record
     assert _fired(scene) == []
+    for name in ("pythonpath", "usersite"):
+        marker = scene["tmp"] / ("PWNED-" + name)
+        records = [json.loads(line) for line in marker.read_text(encoding="utf-8").splitlines()] if marker.exists() else []
+        assert all(Path(r["argv"][1]).name == "gg_deps.py" for r in records), records
 
 
 def _runs_module(argv: list, module: str) -> bool:

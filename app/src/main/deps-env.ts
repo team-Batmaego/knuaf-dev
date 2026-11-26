@@ -12,7 +12,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, parse, sep } from 'node:path'
 
 export const READY_FILE = 'knuaf-ready.json'
 
@@ -66,9 +66,14 @@ function resolveReal(path: string): string | null {
   let current = path
   for (;;) {
     try { lstatSync(current) } catch (error) {
-      const name = basename(current)
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(current) === current || name === '.' || name === '..') return null
-      tail.unshift(name); current = dirname(current); continue
+      const name = basename(current), parent = dirname(current)
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT' || parent === current || name === '.' || name === '..') return null
+      // A trailing separator asks the OS for a directory target, so ENOENT can hide a dangling link.
+      const bare = sep === '\\' ? current.replace(/[\\/]+$/, '') : current.replace(/\/+$/, '')
+      if (bare !== current && bare.length >= parse(current).root.length) {
+        try { if (lstatSync(bare, { throwIfNoEntry: false })) return null } catch { return null }
+      }
+      tail.unshift(name); current = parent; continue
     }
     try { return join(realpathSync.native(current), ...tail) } catch { return null }
   }
@@ -114,7 +119,7 @@ export function envPlacement(root: string, key: string, projectRoot: string | nu
 export const NONE_NAME = '_none'
 
 /**
- * 앱 데이터 의존성 환경이 아직 없거나 호출자가 값을 못 넘겼을 때 쓰는 **일반 사용자가 만들 수 없는 고정 경로**(B-01).
+ * 앱 데이터 의존성 환경을 가리킬 수 없을 때 쓰는 시스템 위치(B-01). 현재 플랫폼에서 미생성·보호된 자리라고 가정한다.
  * 빈 값은 쓰지 않는다 — 윈도 cmd 의 `set "K="` 는 변수를 지워 규칙집이 폴더 `.venv` 로 돌아간다.
  */
 export function noDepsEnvFallback(platform: NodeJS.Platform = process.platform): string {
@@ -122,19 +127,22 @@ export function noDepsEnvFallback(platform: NodeJS.Platform = process.platform):
 }
 
 /**
- * 프로세스에 실을 "없음" 경로(venv4 I-02): `<root>/_none` 은 그것이 앱 데이터 안(링크 없이 풀림)에 있고, 아직 아무것도
- * 없으며, 논문 폴더가 그 자리를 품지 않을 때만 "없음"이다. 아니면 누가 거기에 실행기를 둘 수 있으므로 고정 경로를 쓴다.
+ * 앱 데이터의 실제 경로에서 `deps` 가 일반 폴더(또는 미생성), `_none` 이 미생성이고 논문 폴더가 그 자리를
+ * 품지 않을 때만 `_none` 을 넘긴다. 앱 데이터에 이르는 원래 별칭은 프로세스에 넘기지 않는다.
  */
 export function noneEnvDir(root: string, projectRoot: string | null = null): string {
-  const dir = join(root, NONE_NAME)
-  const base = resolveReal(dirname(root)), deps = resolveReal(root)
-  if (!base || !deps || !strictlyInside(base, deps)) return noDepsEnvFallback()
-  try { lstatSync(dir); return noDepsEnvFallback() } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return noDepsEnvFallback()
+  const base = resolveReal(dirname(root))
+  if (!base) return noDepsEnvFallback()
+  const deps = join(base, basename(root)), dir = join(deps, NONE_NAME)
+  try {
+    const parent = lstatSync(deps, { throwIfNoEntry: false })
+    if ((parent && !parent.isDirectory()) || lstatSync(dir, { throwIfNoEntry: false })) return noDepsEnvFallback()
+  } catch {
+    return noDepsEnvFallback()
   }
   if (projectRoot) {
     const project = resolveReal(projectRoot)
-    if (!project || contains(project, join(deps, NONE_NAME))) return noDepsEnvFallback()
+    if (!project || contains(project, dir) || contains(dir, project)) return noDepsEnvFallback()
   }
   return dir
 }

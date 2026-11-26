@@ -79,7 +79,7 @@ export function venvPython(projectRoot: string | null): string | null {
 }
 
 /**
- * 도우미(터미널·본대화·담당) env 의 `KNUAF_DEPS_VENV` 값 — 지금 설정의 신뢰된 앱 데이터 환경, 없으면 빈 값
+ * 도우미(터미널·본대화·담당) env 의 `KNUAF_DEPS_VENV` 값 — 신뢰된 앱 데이터 환경, 없으면 "없음" 경로.
  * (설계 §3.4). READONLY(D-A)는 `agentDepsEnv` 가 늘 함께 싣는다.
  */
 export function agentDepsVenv(projectRoot: string | null): string {
@@ -89,7 +89,7 @@ export function agentDepsVenv(projectRoot: string | null): string {
 /**
  * "환경 없음"을 나타내는 값(B-01) — 보통은 앱 데이터 `deps/_none`(**만들지 않는다**: 규칙집은 그 폴더의 실행 파일만
  * 보므로 없으면 환경 없음이고, 폴더 `.venv` 로 돌아가지 않는다). 그 자리를 누가 채울 수 있으면(링크로 앱 데이터를
- * 벗어남·논문 폴더가 품음·이미 있음) 일반 사용자가 만들 수 없는 고정 경로로 바꾼다(venv4 I-02, `noneEnvDir`).
+ * 벗어남·deps 자체가 링크·논문 폴더와 겹침·이미 있음) 시스템 위치로 바꾼다(`noneEnvDir`).
  * 빈 값은 윈도 cmd 에서 변수 삭제가 되므로 쓰지 않는다.
  * `_none` 은 키(16자리 16진수)가 아니라서 표식·정리·준비 대상이 될 수 없다(deps-env 가 키 모양만 받는다).
  */

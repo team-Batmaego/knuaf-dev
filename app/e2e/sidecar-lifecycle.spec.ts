@@ -23,7 +23,7 @@ class Child extends EventEmitter {
   shutdown = true
   killMode: 'close' | 'exit' | 'ignore' | 'fail' = 'close'
   kills: string[] = []
-  requests: { id: string; method: string }[] = []
+  requests: { id: string; method: string; params?: { deps_venv?: string } }[] = []
   introspect = true
   stdin = new Writable({ write: (chunk, _encoding, callback) => {
     const request = JSON.parse(String(chunk))
@@ -70,7 +70,8 @@ function harness(platform = 'darwin') {
   let deps = ''
   const depsProjects: (string | null)[] = []
   const pickedWith: (string | undefined)[] = []
-  const noneProjects: unknown[] = []
+  let noneDir = '/app-data/deps/_none'
+  const noneByProject = new Map<string, string>()
   let automaticReady = true
   let failSpawn = false
   const exitQueue: number[] = []
@@ -101,7 +102,7 @@ function harness(platform = 'darwin') {
         // S-01 설계 3판 §3.3: 신뢰된 앱 데이터 의존성 환경(없으면 빈 문자열)
         depsVenv: (_override: string | null, project: string | null) => { depsProjects.push(project); return deps },
         // B-01: 환경이 없을 때 쓰는 "없음" 경로(존재하지 않는 앱 데이터 안 고정 경로)
-        depsNoneDir: (project?: string | null) => { noneProjects.push(project); return '/app-data/deps/_none' }
+        depsNoneDir: (project: string | null) => (project && noneByProject.get(project)) || noneDir
       }
       if (name === 'node:child_process') return { spawn: (command: string, args: string[], options: object) => {
         spawnArgs.push(args)
@@ -128,7 +129,8 @@ function harness(platform = 'darwin') {
   return {
     sidecar, children, killers, kills,
     spawnArgs, spawnEnvs, setScripts: (path: string) => { scripts = path },
-    setDeps: (path: string) => { deps = path }, depsProjects, pickedWith, noneProjects,
+    setDeps: (path: string) => { deps = path }, depsProjects, pickedWith,
+    setNone: (path: string) => { noneDir = path }, noneByProject,
     manualReady: () => { automaticReady = false },
     failNextSpawn: () => { failSpawn = true },
     exitNextSpawn: (...codes: number[]) => { exitQueue.push(...codes) },
@@ -510,11 +512,29 @@ test('S-01 13단계 I-01: 중지를 기다리는 동안 환경 판정이 바뀌�
   await h.sidecar.stop()
 })
 
-test('S-01 13단계 I-02: "없음" 경로는 지금 논문 폴더를 알려 주고 받는다(기동 env·호출 인자)', async () => {
-  const h = harness()
-  await h.sidecar.configure('/paper', null)
-  await h.sidecar.call('project.status')
-  expect(h.noneProjects.length).toBeGreaterThanOrEqual(2)
-  expect(new Set(h.noneProjects)).toEqual(new Set(['/paper']))
-  await h.sidecar.stop()
-})
+for (const change of ['project', 'placement'] as const) {
+  test(`14단계 I-04: 환경이 없어도 전달 경로가 바뀌면 사이드카를 다시 띄운다 (${change})`, async () => {
+    const h = harness()
+    const before = '/app-data/deps/_none', after = '/system/knuaf-deps-none'
+    await h.sidecar.configure('/paper/A', null)
+    const next = change === 'project' ? '/paper/B' : '/paper/A'
+    if (change === 'project') h.noneByProject.set(next, after)
+    else h.setNone(after)
+    try {
+      // 재구성 없이 새 경로를 인자에만 실으면 기존 프로세스의 기동 환경과 어긋난다.
+      expect(h.spawnEnvs[0].KNUAF_DEPS_VENV).toBe(before)
+      const configured = await h.sidecar.configure(next, null)
+      expect(configured.depsVenv).toBe('')
+      expect(h.children).toHaveLength(2)
+      expect(h.children[0].exitCode).toBe(0)
+      expect(h.spawnEnvs[1].KNUAF_DEPS_VENV).toBe(after)
+      h.setNone('/unconfigured/knuaf-deps-none')
+      h.noneByProject.delete(next)
+      await h.sidecar.call('project.status')
+      await h.sidecar.call('deps.ensure', { deps_venv: '/app-data/deps/0123456789abcdef' })
+      const requests = h.children[1].requests
+      expect(requests.find(r => r.method === 'project.status')?.params?.deps_venv).toBe(after)
+      expect(requests.find(r => r.method === 'deps.ensure')?.params?.deps_venv).toBe('/app-data/deps/0123456789abcdef')
+    } finally { await h.sidecar.stop() }
+  })
+}

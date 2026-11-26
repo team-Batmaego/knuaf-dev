@@ -11,6 +11,7 @@ import { diag } from './diagLog'
 type Pending = { resolve: (v: unknown) => void; reject: (e: RpcError) => void; onEvent?: (event: string, data: unknown) => void }
 type OwnedProcess = {
   child: ChildProcessWithoutNullStreams
+  readonly processDeps: string
   exited: boolean
   closed: boolean
   stopping: boolean
@@ -98,16 +99,17 @@ export class Sidecar extends EventEmitter {
     if (this.owner?.failure) throw this.stopFailure(this.owner)
     // S-01 §3.3-3: 의존성 환경이 바뀌면 실행기·scripts 가 같아도 다시 띄운다 — 기동 env(doctor.all)와
     // 호출 인자(deps.doctor 등)가 서로 다른 환경을 보지 않게. 환경 판정은 한 번 하고 실행기도 그 판정으로 고른다.
-    const judge = (): { deps: string; pick: ReturnType<typeof choosePython>; scripts: string } => {
+    const judge = () => {
       const deps = depsVenv(override, projectRoot)
-      return { deps, pick: choosePython(projectRoot, override, deps), scripts: scriptsDir() }
+      return { deps, processDeps: deps || depsNoneDir(projectRoot), pick: choosePython(projectRoot, override, deps), scripts: scriptsDir() }
     }
     const now = judge()
-    if (this.status().running && now.pick.python === this.info.python && now.scripts === this.info.scriptsDir && now.deps === (this.info.depsVenv ?? '')) return this.status()
+    if (this.status().running && now.pick.python === this.info.python && now.scripts === this.info.scriptsDir &&
+        now.deps === this.info.depsVenv && now.processDeps === this.owner?.processDeps) return this.status()
     await this.stopNow()
     if (version !== this.stopVersion) throw START_CANCELLED
     // 중지를 기다리는 동안 자리(논문 쪽 링크 등)가 바뀔 수 있다 — 시작 직전에 다시 판정한다(venv4 I-01).
-    const { deps, pick, scripts } = judge()
+    const { deps, processDeps, pick, scripts } = judge()
     this.info = { ...pick, scriptsDir: scripts, running: false, depsVenv: deps }
     const interrupted = Promise.withResolvers<never>()
     let startupError: RpcError | null = null
@@ -116,7 +118,7 @@ export class Sidecar extends EventEmitter {
     // One deadline covers both ready and methods.list; neither phase may pin the queue.
     const timer = setTimeout(() => abort({ code: 'sidecar_start_timeout', message: 'sidecar ready/methods.list timed out after 10000ms' }), 10000)
     try {
-      await Promise.race([this.startNow(), interrupted.promise])
+      await Promise.race([this.startNow(processDeps), interrupted.promise])
       try {
         // Internal calls must not wait for the lifecycle operation they belong to.
         const list = await Promise.race([this.sendCall<{ name: string; write: boolean }[]>('methods.list'), interrupted.promise])
@@ -156,11 +158,11 @@ export class Sidecar extends EventEmitter {
     this.info.running = false
   }
 
-  private startNow(): Promise<void> {
+  private startNow(processDeps: string): Promise<void> {
     const { promise, resolve, reject } = Promise.withResolvers<void>()
     const args = ['-m', 'knuaf_sidecar', '--scripts-dir', this.info.scriptsDir, '--interpreter-kind', this.info.kind]
     // KNUAF_DEPS_VENV: 같은 프로세스 doctor.all 이 쓰는 의존성 환경. 없으면 빈 값이 아니라 "없음" 경로(B-01: 윈도에서 빈 값은 변수 삭제). S-01 §3.3-1.
-    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1', KNUAF_DEPS_VENV: this.info.depsVenv || depsNoneDir(this.projectRoot) }
+    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1', KNUAF_DEPS_VENV: processDeps }
     let proc: ChildProcessWithoutNullStreams
     try {
       proc = spawn(this.info.python, args, { cwd: sidecarDir(), env, windowsHide: true })
@@ -168,7 +170,7 @@ export class Sidecar extends EventEmitter {
       reject({ code: 'spawn_failed', message: String(error) })
       return promise
     }
-    const owner: OwnedProcess = { child: proc, exited: false, closed: false, stopping: false, tree: 'normal', failure: null }
+    const owner: OwnedProcess = { child: proc, processDeps, exited: false, closed: false, stopping: false, tree: 'normal', failure: null }
     this.owner = owner
     let settled = false
     const rl = createInterface({ input: proc.stdout })
@@ -222,7 +224,8 @@ export class Sidecar extends EventEmitter {
       await this.lifecycle
       // S-01 §3.3-1: 의존성 환경 판정은 **지금 띄워진** 사이드카의 값 하나에서 나온다(기동 env 와 같은 출처).
       // 렌더러 값은 ipc 의 EXECUTABLE_PARAMS 가 먼저 버린다. 준비(deps.ensure) 건만 main 이 대상 경로를 직접 싣는다.
-      const sent = Object.hasOwn(params, 'deps_venv') ? params : { ...params, deps_venv: this.info.depsVenv || depsNoneDir(this.projectRoot) }
+      const owner = this.owner
+      const sent = !owner || Object.hasOwn(params, 'deps_venv') ? params : { ...params, deps_venv: owner.processDeps }
       return this.sendCall<T>(method, sent, onEvent, onId)
     }))
   }

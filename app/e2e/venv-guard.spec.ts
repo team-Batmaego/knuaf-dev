@@ -512,6 +512,31 @@ test('13단계 I-01: 링크 뒤의 `..` 는 접기 전에 파일 시스템으로
   } finally { h.cleanup() }
 })
 
+test('14단계 I-01: 끊긴 논문 폴더 링크는 끝 구분자나 미생성 하위 경로가 있어도 거부한다', () => {
+  const h = harness()
+  try {
+    const { env } = trustedFixture(h)
+    const path = join(h.root, 'project-link')
+    symlinkSync(join(h.dir, 'missing-project'), path, 'junction')
+    const sep = process.platform === 'win32' ? '\\' : '/'
+    // 미생성인 보통 경로는 판정 가능하다. 같은 이름의 끊긴 링크는 다르다.
+    expect(h.python.depsVenv(null, join(h.root, 'uncreated') + sep)).toBe(env)
+    for (const project of [path, path + sep + 'uncreated', path + sep, path + sep + sep]) {
+      expect(h.python.depsVenv(null, project), project).toBe('')
+    }
+  } finally { h.cleanup() }
+})
+
+test('14단계 I-01: 끝 구분자는 기존 파일을 폴더로 바꾸지 않는다', () => {
+  test.skip(process.platform === 'win32', 'POSIX 의 끝 구분자 의미를 확인한다')
+  const h = harness()
+  try {
+    trustedFixture(h)
+    const file = join(h.root, 'file'); writeFileSync(file, '')
+    expect(h.python.depsVenv(null, file + '/')).toBe('')
+  } finally { h.cleanup() }
+})
+
 /** 거부된 장면에서 앱이 도우미·사이드카에 싣는 값 — 미끼가 있는 자리를 가리키면 안 되고, 그 자리에 실행기가 없어야 한다. */
 function expectSafeNone(h: ReturnType<typeof harness>, project: string | null, bait: string): void {
   const py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
@@ -536,6 +561,28 @@ for (const where of ['논문 폴더 안', '앱 데이터 밖'] as const) {
     } finally { h.cleanup() }
   })
 }
+
+test('14단계 I-02: 앱 데이터 안으로 풀리더라도 deps 링크는 _none 의 부모로 쓰지 않는다', () => {
+  const h = harness()
+  try {
+    const root = h.python.depsRoot(), clean = join(h.dir, 'userData', 'clean')
+    mkdirSync(clean)
+    symlinkSync(clean, root, 'junction')
+    const sent = h.python.agentDepsVenv(h.root)
+    expect(sent).not.toBe(join(root, '_none'))
+    expect(sent).not.toBe(join(clean, '_none'))
+  } finally { h.cleanup() }
+})
+
+test('14단계 I-02: 앱 데이터 별칭 대신 확인한 실제 경로를 넘긴다', () => {
+  const h = harness()
+  try {
+    const base = join(h.dir, 'userData'), alias = join(h.dir, 'data-alias')
+    symlinkSync(base, alias, 'junction')
+    const de = h.depsEnv as unknown as Api
+    expect(de.noneEnvDir(join(alias, 'deps'), h.root)).toBe(join(realpathSync.native(base), 'deps', '_none'))
+  } finally { h.cleanup() }
+})
 
 test('13단계 I-02: _none 이 아직 없어도, 논문 폴더가 그 자리를 품으면(누가 만들 수 있으면) 쓰지 않는다', () => {
   const h = harness()
