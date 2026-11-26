@@ -391,7 +391,8 @@ export function eventView(event: LaneEvent): LaneEventView | null {
         id: event.id,
         at,
         warn: true,
-        text: LANE_EVENT.handoffDone(providerName(event.from.company), modelLabel(event.to)),
+        text: LANE_EVENT.handoffDone(providerName(event.from.company), modelLabel(event.to)) +
+          (event.imageCount ? ` 앞 대화의 그림 ${event.imageCount}장은 새 도우미에게 넘어가지 않았어요. 필요하면 다시 붙여 주세요.` : ''),
         archiveId: event.archiveId
       }
     default:

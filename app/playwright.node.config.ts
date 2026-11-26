@@ -35,6 +35,7 @@ export default defineConfig({
     'guard-codex-tool-lock.spec.ts',
     'guard-codex-thread-lock.spec.ts',
     'guard-codex-connection.spec.ts',
+    'chat-images.spec.ts',
     'guard-claude-skill-host.spec.ts',
     'figure-wiring.spec.ts',
     'notice-bubble.spec.ts',
@@ -51,6 +52,7 @@ export default defineConfig({
     'lanes.spec.ts',
     'jobs.spec.ts',
     'job-control.spec.ts',
+    'job-handoff.spec.ts',
     'skill-unknown-read.spec.ts'
   ],
   timeout: 30_000,

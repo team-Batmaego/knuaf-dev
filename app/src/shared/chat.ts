@@ -1,3 +1,4 @@
+import type { ChatImageReceipt } from './chat-image'
 import type { Provider } from './lanes'
 export type { Provider } from './lanes'
 export { CODEX_TIER_MODELS, CODEX_MODEL_ALIASES, WORK_LANES, codexRecommendations, isCrossProviderModelId, resolveCodexAlias } from './lanes'
@@ -48,6 +49,7 @@ export type FreeRelayErrorKind = 'free-unavailable' | 'free-busy' | 'free-minute
 export interface ChatMessage {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string
   delivery?: 'pending' | 'sent' | 'uncertain'
+  attachments?: readonly ChatImageReceipt[]
 }
 /** Codex fileChange 항목의 내용. add/delete의 diff는 파일 내용이고 update는 unified diff다. */
 export interface PermissionFileChange {

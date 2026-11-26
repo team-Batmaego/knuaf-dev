@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type ClipboardEventHandler, type KeyboardEvent } from 'react'
 import { CHAT } from '../copy'
 import { optionAnswer, splitOption, type ParsedQuestion } from '../../../shared/question'
 
@@ -20,6 +20,7 @@ interface Props {
   /** 직접 입력 칸의 값은 보통 입력칸과 **같은 초안 하나**다(설계 §3-1) — 오가도 글이 남는다. */
   draft: string
   onDraft: (text: string) => void
+  onPaste?: ClipboardEventHandler<HTMLTextAreaElement>
   /** 보기와 직접 입력은 인용 소비 규칙이 다르다. */
   onSend: (text: string) => Promise<boolean>
   onSendFree: () => Promise<boolean>
@@ -32,7 +33,7 @@ interface Props {
  * 생긴다). 보기를 누르거나 숫자 키를 누르면 바로 보내고, 마지막 줄 "직접 입력"은 내 말로
  * 답하는 자리다.
  */
-export function QuestionCard({ card, draft, onDraft, onSend, onSendFree, canSendFree, freeRequest }: Props) {
+export function QuestionCard({ card, draft, onDraft, onPaste, onSend, onSendFree, canSendFree, freeRequest }: Props) {
   const [mode, setMode] = useState<'pick' | 'free'>('pick')
   const [chosen, setChosen] = useState<number | null>(null)
   /**
@@ -132,6 +133,7 @@ export function QuestionCard({ card, draft, onDraft, onSend, onSendFree, canSend
           <div className="freebox">
             <textarea ref={free} value={draft} rows={2} placeholder={CHAT.freePlaceholder}
               onChange={(e) => onDraft(e.target.value)}
+              onPaste={onPaste}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (canSendFree) void send() } }} />
             <button type="button" className="send" onClick={() => { if (canSendFree) void send() }} disabled={!canSendFree}>{CHAT.send}</button>
           </div>

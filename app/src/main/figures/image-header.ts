@@ -26,21 +26,21 @@ function startsWith(bytes: Uint8Array, prefix: readonly number[]): boolean {
 }
 
 /** 바이트 머리에서 형식과 크기를 읽는다. 잘린 머리는 `truncated`. */
-export function sniffImage(bytes: Uint8Array): SniffResult {
-  if (startsWith(bytes, PNG_SIGNATURE)) return sniffPng(bytes)
-  if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return sniffGif(bytes)
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return sniffJpeg(bytes)
+export function sniffImage(bytes: Uint8Array, options: { readonly maxPixels?: number; readonly animatedGif?: boolean } = {}): SniffResult {
+  const maxPixels = options.maxPixels ?? MAX_PIXELS
+  if (startsWith(bytes, PNG_SIGNATURE)) return sniffPng(bytes, maxPixels)
+  if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return sniffGif(bytes, maxPixels, options.animatedGif === true)
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return sniffJpeg(bytes, maxPixels)
   return { ok: false, reason: 'format' }
 }
 
-function checkPixels(width: number, height: number, frames: number): SniffProblem | null {
+function checkPixels(width: number, height: number, maxPixels: number): SniffProblem | null {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return 'malformed'
-  // 프레임을 합쳐 셈한다 — GIF를 풀면 프레임만큼 화소가 필요하다.
-  if (width * height * Math.max(1, frames) > MAX_PIXELS) return 'pixels'
+  if (width * height > maxPixels) return 'pixels'
   return null
 }
 
-function sniffPng(bytes: Uint8Array): SniffResult {
+function sniffPng(bytes: Uint8Array, maxPixels: number): SniffResult {
   // IHDR는 첫 청크여야 한다: 길이(4) + 'IHDR'(4) + 폭(4) + 높이(4).
   if (bytes.length < 24) return { ok: false, reason: 'truncated' }
   if (!(bytes[12] === 0x49 && bytes[13] === 0x48 && bytes[14] === 0x44 && bytes[15] === 0x52)) {
@@ -49,22 +49,21 @@ function sniffPng(bytes: Uint8Array): SniffResult {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const width = view.getUint32(16, false)
   const height = view.getUint32(20, false)
-  const problem = checkPixels(width, height, 1)
+  const problem = checkPixels(width, height, maxPixels)
   if (problem) return { ok: false, reason: problem }
   return { ok: true, format: 'png', width, height, frames: 1 }
 }
 
-function sniffGif(bytes: Uint8Array): SniffResult {
+function sniffGif(bytes: Uint8Array, maxPixels: number, animated: boolean): SniffResult {
   if (bytes.length < 13) return { ok: false, reason: 'truncated' }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const width = view.getUint16(6, true)
   const height = view.getUint16(8, true)
   if (width <= 0 || height <= 0) return { ok: false, reason: 'malformed' }
-  // 화소 상한은 프레임 수를 센 뒤 다시 본다.
-  if (width * height > MAX_PIXELS) return { ok: false, reason: 'pixels' }
+  if (width * height > maxPixels) return { ok: false, reason: 'pixels' }
   const frames = countGifFrames(bytes)
   if (frames === null) return { ok: false, reason: 'malformed' }
-  if (frames > 1) return { ok: false, reason: 'frames' }
+  if (frames > 1 && !animated) return { ok: false, reason: 'frames' }
   return { ok: true, format: 'gif', width, height, frames }
 }
 
@@ -116,7 +115,7 @@ function skipGifSubBlocks(bytes: Uint8Array, start: number): number | null {
   }
 }
 
-function sniffJpeg(bytes: Uint8Array): SniffResult {
+function sniffJpeg(bytes: Uint8Array, maxPixels: number): SniffResult {
   let offset = 2
   while (offset + 3 < bytes.length) {
     if (bytes[offset] !== 0xff) return { ok: false, reason: 'malformed' }
@@ -141,7 +140,7 @@ function sniffJpeg(bytes: Uint8Array): SniffResult {
       if (offset + 7 >= bytes.length) return { ok: false, reason: 'truncated' }
       const height = view.getUint16(offset + 3, false)
       const width = view.getUint16(offset + 5, false)
-      const problem = checkPixels(width, height, 1)
+      const problem = checkPixels(width, height, maxPixels)
       if (problem) return { ok: false, reason: problem }
       return { ok: true, format: 'jpeg', width, height, frames: 1 }
     }
