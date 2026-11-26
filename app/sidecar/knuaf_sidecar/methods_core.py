@@ -309,8 +309,8 @@ def _troubleshoot_facts(root: Path) -> TroubleshootFacts:
             "capability_verified": tool["capability_verified"],
             "candidates": [{"installed": candidate["installed"]} for candidate in tool["candidates"]],
         }
-    except (ImportError, OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
-        # A broken tool cache or report must not hide unrelated folder facts.
+    except Exception as error:  # noqa: BLE001 - optional tool boundary
+        # Tool lookup failures must not hide unrelated folder facts.
         kordoc = {"status": "unavailable", "reason": type(error).__name__}
     try:
         snapshots = _core().history(root)

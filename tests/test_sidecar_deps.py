@@ -107,13 +107,22 @@ def test_troubleshooting_facts_do_not_wait_for_project_python(monkeypatch: pytes
     assert facts["kordoc"]["capability_verified"] is False
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("symlink loop in tool cache"),
+        AttributeError("missing tool metadata"),
+        subprocess.TimeoutExpired(["tool"], 1),
+    ],
+    ids=["runtime-error", "attribute-error", "timeout"],
+)
 def test_troubleshooting_keeps_folder_facts_when_tool_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch, project: Path,
+    monkeypatch: pytest.MonkeyPatch, project: Path, failure: Exception,
 ) -> None:
     import gg_kordoc
 
     def broken_cache() -> dict[str, str]:
-        raise RuntimeError("symlink loop in tool cache")
+        raise failure
 
     monkeypatch.setattr(gg_kordoc, "diagnose", broken_cache)
     orphan = ".gg-import-tool-cache-error"
@@ -125,7 +134,7 @@ def test_troubleshooting_keeps_folder_facts_when_tool_lookup_fails(
     reply = json.loads(out.getvalue())
     assert reply["id"] == "panel" and "error" not in reply, reply
     facts = reply["result"]
-    assert facts["kordoc"] == {"status": "unavailable", "reason": "RuntimeError"}
+    assert facts["kordoc"] == {"status": "unavailable", "reason": type(failure).__name__}
     assert facts["orphan_files"] == [orphan]
     assert facts["snapshots"][-1]["revision"] == 2
 
