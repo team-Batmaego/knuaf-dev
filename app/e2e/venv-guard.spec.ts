@@ -250,3 +250,18 @@ test('I-03 표식 되돌리기: 원문 그대로 복원, 없었으면 제거, �
     expect(de.revokeTrust(root, '_none')).toBe(false)
   } finally { h.cleanup() }
 })
+
+test('윈도 환경 실행기 자리: Scripts\\python.exe 만 인정하고 bin/python3 는 인정하지 않는다(맥에서도 platform 인자로 확인)', () => {
+  const h = harness()
+  try {
+    const de = h.depsEnv as Record<string, (...a: unknown[]) => unknown>
+    const posixOnly = join(h.dir, 'posix-only'), winLike = join(h.dir, 'win-like')
+    mkdirSync(join(posixOnly, 'bin'), { recursive: true }); writeFileSync(join(posixOnly, 'bin', 'python3'), '')
+    mkdirSync(join(winLike, 'Scripts'), { recursive: true }); writeFileSync(join(winLike, 'Scripts', 'python.exe'), '')
+    // CI 윈도 빨강의 뿌리: bin 꼴 가짜만 있으면 "no interpreter"(경로의 8.3 이름 RUNNER~1 과 무관 — 그 경우 오류는 'outside app data')
+    expect(de.envPython(posixOnly, 'win32')).toBeNull()
+    expect(de.envPython(winLike, 'win32')).toBe(join(winLike, 'Scripts', 'python.exe'))
+    expect(de.envPython(winLike, 'darwin')).toBeNull()
+    expect(de.envPython(posixOnly, 'darwin')).toBe(join(posixOnly, 'bin', 'python3'))
+  } finally { h.cleanup() }
+})
