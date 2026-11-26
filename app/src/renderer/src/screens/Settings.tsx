@@ -36,7 +36,7 @@ const SETTINGS_SECTIONS: { id: NewsSection; label: string }[] = [
   { id: 'info', label: '앱 정보' }
 ]
 
-export function SettingsScreen() {
+export function SettingsScreen({ open: settingsOpen }: { readonly open: boolean }) {
   const { root, settings, loadSettings, sidecar, refreshSidecar, logs, clearLogs, openHelper, open, loading, settingsFocus, clearSettingsFocus } = useProject(useShallow((s) => ({ root: s.root, settings: s.settings, loadSettings: s.loadSettings, sidecar: s.sidecar, refreshSidecar: s.refreshSidecar, logs: s.logs, clearLogs: s.clearLogs, openHelper: s.openHelper, open: s.open, loading: s.loading, settingsFocus: s.settingsFocus, clearSettingsFocus: s.clearSettingsFocus })))
   const [section, setSection] = useState<NewsSection>(() => settingsFocus === 'news:history' ? 'news' : settingsSectionForFocus(settingsFocus))
   const [news, setNews] = useState<NewsState | null>(null)
@@ -61,13 +61,13 @@ export function SettingsScreen() {
   useEffect(() => { setOverride(settings?.python_override ?? ''); void refreshSidecar() }, [settings])
   /** Failure deep links: open the matching 펼침, then clear so it behaves like a normal disclosure. */
   useLayoutEffect(() => {
-    if (!settingsFocus) return
+    if (!settingsOpen || !settingsFocus) return
     const target: NewsSection = settingsFocus === 'news:history' ? 'news' : settingsSectionForFocus(settingsFocus)
     if (section !== target) { setSection(target); return }
     const el = body.current?.querySelector<HTMLDetailsElement>(`details[data-preset="${CSS.escape(settingsFocus)}"]`)
     if (el) { el.open = true; el.scrollIntoView({ block: 'start' }) }
     clearSettingsFocus()
-  }, [settingsFocus, section, clearSettingsFocus])
+  }, [settingsOpen, settingsFocus, section, clearSettingsFocus])
   const save = async () => {
     setRestarting(true); setRestartErr(null)
     try {
@@ -196,7 +196,8 @@ export function SettingsScreen() {
 
       <section className="card" hidden={section !== 'trouble'}>
         <div className="card-head"><h2>{SETTINGS.troubleTitle}</h2></div>
-        <TroubleshootSections />
+        {/* A hidden dialog still mounts children. Only inspect the project's lock while this tab is visible. */}
+        {settingsOpen && section === 'trouble' && <TroubleshootSections />}
       </section>
 
       <section className="card" hidden={section !== 'tools'}>

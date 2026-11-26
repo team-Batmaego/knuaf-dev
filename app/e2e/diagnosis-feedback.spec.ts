@@ -1,13 +1,61 @@
 import { test, expect } from '@playwright/test'
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { launch, navTo, openPreset, openProject, plantStaleLock, synthProject } from './helpers'
+import { closeSheet, launch, navTo, openPreset, openProject, plantStaleLock, rewriteSection, synthProject } from './helpers'
 import type { LockInfo } from '../src/shared/types'
+import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 
 type RpcHandler = (...args: unknown[]) => Promise<unknown>
 type LockProbe = { held: boolean; lockHeld: boolean; armLock: boolean; snapshot: LockInfo; release: () => void; releaseLock: () => void }
 type MakeProbe = { built: boolean; held: boolean; release: () => void }
 type ProbeHost = typeof globalThis & { __ci4: LockProbe; __ci4Make: MakeProbe }
+
+type DiagnosisCalls = { lock: number; doctor: number }
+type DiagnosisHost = typeof globalThis & { __diagnosisCalls: DiagnosisCalls }
+
+test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', async () => {
+  const root = synthProject()
+  const env = fakeCodexEnv(join(scratch(), 'bin'), { FAKE_CODEX_MODE: 'logged-in' })
+  const { electronApp, page } = await launch({ env })
+  try {
+    await electronApp.evaluate(({ ipcMain }) => {
+      // Match the existing in-process RPC interception without changing Electron's types.
+      const ipc: typeof ipcMain & { readonly _invokeHandlers?: ReadonlyMap<string, RpcHandler> } = ipcMain
+      const real = ipc._invokeHandlers?.get('rpc')
+      if (!real) throw new Error('rpc handler not found')
+      const calls = { lock: 0, doctor: 0 }
+      Object.assign(globalThis, { __diagnosisCalls: calls })
+      ipcMain.removeHandler('rpc')
+      ipcMain.handle('rpc', (...args: unknown[]) => {
+        if (args[1] === 'lock.info') calls.lock++
+        if (args[1] === 'doctor.all') calls.doctor++
+        return real(...args)
+      })
+    })
+    const calls = () => electronApp.evaluate(() => (globalThis as DiagnosisHost).__diagnosisCalls)
+
+    // Don't use projectPrepared here: it explicitly opens Troubleshoot.
+    await openProject(page, root, undefined, { preparation: 'pending' })
+    const paper = page.locator('.paperpane')
+    await expect(paper).toContainText('농장A의 재배 면적은 600평이다.')
+    const settings = page.locator('dialog[data-screen="settings"]')
+    await expect(settings).not.toBeVisible()
+    expect(await calls(), '폴더를 연 뒤 숨은 진단이 시작됐다').toEqual({ lock: 0, doctor: 0 })
+
+    await navTo(page, '설정')
+    await settings.getByRole('button', { name: '폴더', exact: true }).click()
+    expect(await calls(), '다른 설정 탭에서 진단이 시작됐다').toEqual({ lock: 0, doctor: 0 })
+    await settings.getByRole('button', { name: '문제 해결', exact: true }).click()
+    await expect.poll(calls).toEqual({ lock: 1, doctor: 1 })
+    await expect(settings.locator('details[data-preset="fix:lock"] .card-head')).toContainText('잠금 구조 확인됨')
+
+    await closeSheet(page)
+    await expect(settings).not.toBeVisible()
+    rewriteSection(root, { body: '설정을 닫고 저장한 문단이다.', expected: 2 })
+    await expect(paper).toContainText('설정을 닫고 저장한 문단이다.')
+    expect(await calls(), '설정을 닫은 뒤 개정 갱신이 진단을 다시 시작했다').toEqual({ lock: 1, doctor: 1 })
+  } finally { await electronApp.close() }
+})
 
 test('잠금 관찰·probe·정리는 전체 점검 응답을 기다리지 않는다', async () => {
   const root = synthProject()
