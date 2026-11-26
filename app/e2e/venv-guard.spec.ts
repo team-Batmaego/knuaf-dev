@@ -29,7 +29,18 @@ function compile(path: string): Factory {
 const factory = compile(file)
 const depsEnvFactory = compile(join(appRoot, 'src/main/deps-env.ts'))
 
+/** CI 는 KNUAF_PYTHON 을 세워 둔다(choosePython 이 맨 앞에서 고르는 명시 지정). 이 시험은 그 값에 기대지 않는다. */
+const KNUAF_PYTHON_SAVED = process.env.KNUAF_PYTHON
+
+/** 이 OS 에서 앱이 "환경의 실행기"로 인정하는 자리(윈도 Scripts\\python.exe, 그 밖 bin/python3) — 빈 가짜 파일을 둔다. */
+function fakeInterpreter(env: string): string {
+  const exe = process.platform === 'win32' ? join(env, 'Scripts', 'python.exe') : join(env, 'bin', 'python3')
+  mkdirSync(join(exe, '..'), { recursive: true }); writeFileSync(exe, '')
+  return exe
+}
+
 function harness() {
+  delete process.env.KNUAF_PYTHON
   const dir = mkdtempSync(join(tmpdir(), 'knuaf-venv-guard-'))
   const userData = join(dir, 'userData'), managed = join(dir, 'managed', 'bin', 'python3')
   const root = join(dir, '남이 준 논문'), marker = join(dir, 'PWNED')
@@ -46,7 +57,10 @@ function harness() {
   const module: Record<string, unknown> = {}
   factory((name) => Object.hasOwn(dependencies, name) ? dependencies[name] : realRequire(name), module, join(appRoot, 'out', 'main'))
   return { dir, root, marker, managed, depsEnv, python: module as unknown as typeof PythonModule,
-    cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+    cleanup: () => {
+      if (KNUAF_PYTHON_SAVED === undefined) delete process.env.KNUAF_PYTHON; else process.env.KNUAF_PYTHON = KNUAF_PYTHON_SAVED
+      rmSync(dir, { recursive: true, force: true })
+    } }
 }
 
 /** 앱이 만들지 않은 `.venv`. 실행되면 표시 파일을 남긴다(posix: 셸 스크립트). */
@@ -219,7 +233,7 @@ test('I-03 표식 되돌리기: 원문 그대로 복원, 없었으면 제거, �
   try {
     const de = h.depsEnv as Record<string, (...a: unknown[]) => unknown>
     const root = join(h.dir, 'userData', 'deps'), key = 'aaaaaaaaaaaaaaaa', env = join(root, key)
-    mkdirSync(join(env, 'bin'), { recursive: true }); writeFileSync(join(env, 'bin', 'python3'), '')
+    const interpreter = fakeInterpreter(env)
     expect(de.readMark(root, key)).toBeNull()
     de.markReady(root, key)
     expect(de.trustedEnv(root, key)).toBe(env)
@@ -229,7 +243,7 @@ test('I-03 표식 되돌리기: 원문 그대로 복원, 없었으면 제거, �
     expect(de.readMark(root, key)).toBe(original)
     de.restoreMark(root, key, null)
     expect(de.trustedEnv(root, key)).toBe('')
-    expect(existsSync(join(env, 'bin', 'python3'))).toBe(true) // 환경 자체는 그대로(치우는 것은 discardUnmarked)
+    expect(existsSync(interpreter)).toBe(true) // 환경 자체는 그대로(치우는 것은 discardUnmarked)
     de.markReady(root, key)
     expect(de.revokeTrust(root, key)).toBe(true)
     expect(de.trustedEnv(root, key)).toBe('')
