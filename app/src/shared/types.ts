@@ -64,7 +64,7 @@ export interface TroubleshootFacts {
     readonly cli_path: string | null
     readonly capability_verified: boolean
     readonly candidates: readonly { readonly installed: boolean }[]
-  } | null
+  } | { readonly status: 'unavailable'; readonly reason: string }
 }
 export interface SectionRow { id: string; title: string; order: number; path: string; status: string; revision: number; draft_hash: string; draft_hash_ok: boolean; draft_chars?: number; claims: number | null; error?: string }
 /**

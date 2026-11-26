@@ -5,7 +5,7 @@ import json
 import sys
 from itertools import chain
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from .rpc import RpcError
 from .diagnostic_trace import trace_doctor
@@ -285,22 +285,23 @@ class TroubleshootTool(TypedDict):
     candidates: list[TroubleshootToolCandidate]
 
 
+class TroubleshootToolUnavailable(TypedDict):
+    status: Literal["unavailable"]
+    reason: str
+
+
 class TroubleshootFacts(TypedDict):
     snapshots: list[dict[str, str | int | bool | None]]
     orphan_files: list[str]
-    kordoc: TroubleshootTool | None
+    kordoc: TroubleshootTool | TroubleshootToolUnavailable
 
 
 def _troubleshoot_facts(root: Path) -> TroubleshootFacts:
     """Read panel facts without launching Python probes or observing the lock twice."""
-    kordoc: TroubleshootTool | None
+    kordoc: TroubleshootTool | TroubleshootToolUnavailable
     try:
         from gg_kordoc import diagnose
-    except ModuleNotFoundError as error:
-        if error.name != "gg_kordoc":
-            raise
-        kordoc = None
-    else:
+
         tool = diagnose()
         kordoc = {
             "installed": tool["installed"],
@@ -308,6 +309,9 @@ def _troubleshoot_facts(root: Path) -> TroubleshootFacts:
             "capability_verified": tool["capability_verified"],
             "candidates": [{"installed": candidate["installed"]} for candidate in tool["candidates"]],
         }
+    except (ImportError, OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+        # A broken tool cache or report must not hide unrelated folder facts.
+        kordoc = {"status": "unavailable", "reason": type(error).__name__}
     try:
         snapshots = _core().history(root)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):

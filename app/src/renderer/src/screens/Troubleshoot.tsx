@@ -122,6 +122,9 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
   const orphans = doc?.orphan_files ?? []
+  const tool = doc?.kordoc
+  const toolUnavailable = tool && 'status' in tool
+  const detectedTool = toolUnavailable ? undefined : tool
   return (
     <div>
       <div className="row" style={{ marginBottom: 'var(--sp-3)' }}>
@@ -195,10 +198,12 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
       </Disclosure>
 
       <Disclosure label="문서 읽기 도구" preset="fix:kordoc">
-        <div className="card-head"><h2>문서 읽기 도구</h2>{doc?.kordoc && <StatusBadge status={doc.kordoc.capability_verified ? 'pass' : 'pending'} label={doc.kordoc.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
-        {doc?.kordoc && <div className="caption">{doc.kordoc.cli_path ? <code>{doc.kordoc.cli_path}</code> : '아직 없어요.'} · 캐시 {doc.kordoc.candidates.some(c => c.installed) ? '있음' : '없음'}</div>}
+        <div className="card-head"><h2>문서 읽기 도구</h2>{toolUnavailable
+          ? <StatusBadge status="blocked" label={STATUS_LABEL.blocked} />
+          : detectedTool && <StatusBadge status={detectedTool.capability_verified ? 'pass' : 'pending'} label={detectedTool.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
+        {detectedTool && <div className="caption">{detectedTool.cli_path ? <code>{detectedTool.cli_path}</code> : '아직 없어요.'} · 캐시 {detectedTool.candidates.some(c => c.installed) ? '있음' : '없음'}</div>}
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
-          <button disabled={kordoc.busy || !!doc?.kordoc?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
+          <button disabled={kordoc.busy || !!detectedTool?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
           <span className="caption">{KORDOC_SENTENCE}</span>
         </div>
         <ProgressPanel busy={kordoc.busy} phase={kordoc.phase} elapsedMs={kordoc.elapsedMs} lines={kordoc.lines} onCancel={kordoc.cancel} />

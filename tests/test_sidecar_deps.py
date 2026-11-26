@@ -107,6 +107,29 @@ def test_troubleshooting_facts_do_not_wait_for_project_python(monkeypatch: pytes
     assert facts["kordoc"]["capability_verified"] is False
 
 
+def test_troubleshooting_keeps_folder_facts_when_tool_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, project: Path,
+) -> None:
+    import gg_kordoc
+
+    def broken_cache() -> dict[str, str]:
+        raise RuntimeError("symlink loop in tool cache")
+
+    monkeypatch.setattr(gg_kordoc, "diagnose", broken_cache)
+    orphan = ".gg-import-tool-cache-error"
+    (project / orphan).mkdir()
+    out = io.StringIO()
+    server = Server(out=out)
+    register(server)
+    server._handle({"id": "panel", "method": "doctor.all", "params": {"root": str(project), "scope": "troubleshoot"}})
+    reply = json.loads(out.getvalue())
+    assert reply["id"] == "panel" and "error" not in reply, reply
+    facts = reply["result"]
+    assert facts["kordoc"] == {"status": "unavailable", "reason": "RuntimeError"}
+    assert facts["orphan_files"] == [orphan]
+    assert facts["snapshots"][-1]["revision"] == 2
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX script wrapper; Windows tree termination requires real-device QA")
 @pytest.mark.parametrize("stop", ["cancel", "shutdown"])
 def test_stopping_ensure_also_stops_its_pip_child(tmp_path, stop):
