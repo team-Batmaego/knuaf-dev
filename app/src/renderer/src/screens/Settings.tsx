@@ -196,8 +196,8 @@ export function SettingsScreen({ open: settingsOpen }: { readonly open: boolean 
 
       <section className="card" hidden={section !== 'trouble'}>
         <div className="card-head"><h2>{SETTINGS.troubleTitle}</h2></div>
-        {/* A hidden dialog still mounts children. Only inspect the project's lock while this tab is visible. */}
-        {settingsOpen && section === 'trouble' && <TroubleshootSections />}
+        {/* Keep the running preparation and its cancel control across tab changes and dialog closes. */}
+        <TroubleshootSections key={root} active={settingsOpen && section === 'trouble'} />
       </section>
 
       <section className="card" hidden={section !== 'tools'}>
