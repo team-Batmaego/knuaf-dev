@@ -29,7 +29,7 @@ export async function expectConnected(page: Page, provider: 'codex' | 'claude' |
 let dependencySeed: string | undefined
 
 /** Install once per worker, then copy real directories; every project still passes the app's doctor. */
-function seedDependencies(root: string): void {
+export function seedDependencies(root: string): void {
   if (existsSync(join(root, '.venv'))) return
   if (!dependencySeed) {
     const seed = mkdtempSync(join(tmpdir(), 'kd-deps-'))
