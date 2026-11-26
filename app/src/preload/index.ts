@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
 import { CHAT_IMAGE_COPY, type ChatImageReply, type ImageScope } from '../shared/chat-image'
-import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
+import type { AppInfo, Envelope, OfflineRecovery, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import type { NoticeChoiceValue, NoticeRow } from '../shared/notice'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
 import {
@@ -273,6 +273,13 @@ const api = {
    * sidecar 로 넘기고, 정본·파일 다시 쓰기는 규칙집 몫이다. generic `rpc` 로는 그 method 가 거절된다.
    * 확인도 같은 경계다 — 화면 단추는 `(root, identity)`만 주고, 전달 답은 별도로 넘긴다.
    */
+  /**
+   * 옮긴 폴더 잠금 풀기 — 폴더·확인 값을 넘기지 않는다. main 이 열린 폴더로 자기 확인 창을 띄우고,
+   * 학생이 '잠금 풀기'를 눌렀을 때만 sidecar 를 부른다. generic `rpc` 로는 그 method 가 거절된다.
+   */
+  lock: {
+    upgradeOffline: (resume?: string): Promise<RpcResult<OfflineRecovery>> => ipcRenderer.invoke('lock:upgrade-offline', resume)
+  },
   notices: {
     read: (root: string): Promise<{ result: NoticesRead } | { error: { code: string; message: string } }> =>
       ipcRenderer.invoke('notices:read', root),

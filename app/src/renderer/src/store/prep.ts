@@ -85,7 +85,7 @@ export function waitPrepared(root: string, leave: () => boolean, watchLeave: (ch
 }
 
 export const WRITE_METHODS = new Set([
-  'kordoc.ensure', 'lock.unlock', 'paper.generate', 'project.export', 'project.init', 'project.restore',
+  'kordoc.ensure', 'lock.unlock', 'lock.upgrade_offline', 'paper.generate', 'project.export', 'project.init', 'project.restore',
   // 뷰어 직접 수정은 정본을 쓴다 — 빠지면 저장하는 동안 화면의 쓰기 대기 안내가 안 걸린다(설계 §9).
   'section.edit', 'section.edit_batch'
 ])

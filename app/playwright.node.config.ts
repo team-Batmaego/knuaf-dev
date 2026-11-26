@@ -53,7 +53,9 @@ export default defineConfig({
     'jobs.spec.ts',
     'job-control.spec.ts',
     'job-handoff.spec.ts',
-    'skill-unknown-read.spec.ts'
+    'skill-unknown-read.spec.ts',
+    'lock-moved.spec.ts',
+    'lock-upgrade-main.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

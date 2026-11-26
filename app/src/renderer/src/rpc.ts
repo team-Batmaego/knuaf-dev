@@ -1,4 +1,4 @@
-import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OfflineRecovery, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -112,6 +112,19 @@ export const rpc = {
   restore: (root: string, revision: number, expected_revision: number) => call<{ revision: number; restored_from: number; pre_restore_snapshot: string; notice: string }>('project.restore', { root, revision, expected_revision }),
   lockInfo: (root: string, probe = false) => call<LockInfo>('lock.info', { root, probe }),
   unlock: (root: string) => call<OwnerCleanup>('lock.unlock', { root }),
+  /**
+   * 옮긴·복사한 폴더의 잠금 복구 — 전용 IPC(Roh C-01). 폴더는 main 이 아는 열린 폴더, 확인은 main 이
+   * 직접 띄운 확인 창이다(취소하면 `cancelled` 오류, sidecar 는 안 불림). `resume` 은 끝나지 못한 복구의 ID.
+   * `root` 는 쓰기 대기 표시에만 쓴다.
+   */
+  upgradeOffline: async (root: string, resume?: string): Promise<OfflineRecovery> => {
+    usePrep.getState().begin(root, 'write')
+    try {
+      const r = await window.knuaf.lock.upgradeOffline(resume)
+      if (r.error) throw new RpcFailure(r.error)
+      return r.result as OfflineRecovery
+    } finally { usePrep.getState().end(root, 'write') }
+  },
   doctor: (root: string) => call<Record<string, any>>('doctor.all', { root }),
   depsDoctor: async (root: string, clientId?: string, onEvent?: EventHandler): Promise<DependencyReport> => {
     const env = await call<Envelope>('deps.doctor', { root }, onEvent, clientId)

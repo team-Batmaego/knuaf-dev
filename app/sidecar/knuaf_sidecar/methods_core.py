@@ -1,13 +1,17 @@
 """In-process gg_core methods (status, checks, lock, history, restore, export...)."""
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import sys
 from itertools import chain
 from pathlib import Path
 
 from .rpc import RpcError
 from .diagnostic_trace import trace_doctor
+
+_RECOVERY_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 REVIEW_KINDS = ("content", "logic", "calculation", "docx", "xlsx", "render")
 
@@ -216,11 +220,27 @@ def project_restore(ctx, params):
     return _core().restore(_root(params), rev, expected)
 
 
+def _offline_upgrade_supported(gg_lock):
+    """(가2) 옮긴 폴더 잠금 풀기는 규칙집이 승인된 폴더 식별값(`expected_identity`)을 받아
+    자기 첫 변경 조건으로 쓰는 판(v0.6.6~)에서만 연다. v0.6.5 꼴(인자 없음)은 사이드카 확인 뒤
+    규칙집이 경로로 폴더를 다시 읽는 틈이 있어 쓰지 않는다 — '업데이트 필요'로 닫는다."""
+    fn = getattr(gg_lock, "upgrade_offline", None)
+    if not callable(fn):
+        return False
+    try:
+        return "expected_identity" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def lock_info(ctx, params):
     import gg_lock
 
     root = _root(params)
-    return gg_lock.probe_lock(root) if params.get("probe") is True else gg_lock.inspect_lock(root)
+    result = gg_lock.probe_lock(root) if params.get("probe") is True else gg_lock.inspect_lock(root)
+    if isinstance(result, dict):
+        result = dict(result, relocation_supported=_offline_upgrade_supported(gg_lock))
+    return result
 
 
 def lock_unlock(ctx, params):
@@ -231,6 +251,113 @@ def lock_unlock(ctx, params):
     except gg_lock.LockError as error:
         code = "lock_held" if error.status == "busy" else "lock_ambiguous"
         raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
+
+
+def lock_identity(ctx, params):
+    """Real no-follow identity of the paper folder (gg_fs: POSIX st_dev+st_ino, Windows volume
+    serial+file ID). main captures it before showing its confirmation dialog and passes it back
+    as `expected_identity`, binding the student's confirmation to that exact directory."""
+    import gg_fs
+
+    try:
+        identity = gg_fs.identity(_root(params), kind="directory")
+    except gg_fs.FsError as error:
+        raise RpcError("lock_ambiguous", str(error), {"status": "unavailable", "reason": error.reason}) from error
+    # 불투명 문자열: Windows 파일 ID(64비트)는 2^53 을 넘어 main 의 JSON.parse(Number)에서 뭉개진다.
+    # main·화면은 이 문자열을 풀지 않고 그대로 되돌려 주고, 풀기는 파이썬에서만 한다.
+    return {"token": json.dumps(identity, sort_keys=True)}
+
+
+_IDENTITY_KEYS = {"platform", "kind", "device", "inode"}
+_IDENTITY_PLATFORMS = {"win32", "darwin", "linux"}  # gg_fs.identity 의 sys.platform 값
+_IDENTITY_TOKEN_MAX = 512  # 실제 값은 100자 안팎 — 파싱 전에 길이부터 자른다
+
+
+def _is_identity(value):
+    """gg_fs.identity(kind="directory") 가 낼 수 있는 꼴만: 정확한 키 넷, 알려진 platform,
+    불리언을 뺀 정수 device·inode(윈도 volume 32비트·file ID 64비트·0 아님, 그 밖은 부호 없는 64비트)."""
+    if not isinstance(value, dict) or set(value) != _IDENTITY_KEYS:
+        return False
+    platform, device, inode = value["platform"], value["device"], value["inode"]
+    if value["kind"] != "directory" or not isinstance(platform, str) or platform not in _IDENTITY_PLATFORMS:
+        return False
+    if type(device) is not int or type(inode) is not int:
+        return False
+    if platform == "win32":
+        return 0 <= device < 1 << 32 and 0 < inode < 1 << 64
+    return 0 <= device < 1 << 64 and 0 <= inode < 1 << 64
+
+
+def _reject_constant(name):
+    raise ValueError(name)
+
+
+def _decode_identity(value):
+    """`lock.identity` 의 token → 규칙집 식별값 dict. 모양·길이·값이 틀리면 None."""
+    if not (isinstance(value, dict) and set(value) == {"token"} and isinstance(value["token"], str)):
+        return None
+    if len(value["token"]) > _IDENTITY_TOKEN_MAX:
+        return None
+    try:
+        decoded = json.loads(value["token"], parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return None
+    return decoded if _is_identity(decoded) else None
+
+
+def lock_upgrade_offline(ctx, params):
+    """Offline recovery of a moved/copied workspace (규칙집 v0.6.5 `gg_lock.upgrade_offline`).
+
+    `offline_confirmed` is the student's explicit confirmation from the app's dialog and is
+    passed through only when it is literally `true`. The result dict (recovery_id, status,
+    commit_state, reason, ...) is gg_lock's own verdict; `blocked` is returned, not raised.
+    """
+    import gg_lock
+
+    root = _root(params)
+    if not _offline_upgrade_supported(gg_lock):
+        raise RpcError("skill_update_required", "설치된 규칙집에 승인 폴더에 묶인 옮긴 폴더 복구(upgrade_offline expected_identity)가 없음",
+                       {"feature": "lock.upgrade_offline"})
+    resume = params.get("resume")
+    if resume is not None and (not isinstance(resume, str) or not _RECOVERY_ID.fullmatch(resume)):
+        raise RpcError("invalid_params", "resume은 복구 ID(UUID) 문자열")
+    expected = _decode_identity(params.get("expected_identity"))
+    if expected is None:
+        raise RpcError("invalid_params", "expected_identity(확인 때 잡은 폴더 식별값) 필요")
+    # Same path is not the same folder: the folder must still be the one the student confirmed.
+    import gg_fs
+
+    try:
+        current = gg_fs.identity(root, kind="directory")
+    except gg_fs.FsError as error:
+        raise RpcError("target_changed", "확인한 폴더를 다시 찾지 못함", {"reason": error.reason}) from error
+    if not gg_fs.same_identity(current, expected):
+        raise RpcError("target_changed", "확인한 뒤 같은 자리의 폴더가 바뀜", {"reason": "identity_mismatch"})
+    # The dialog's boolean is not enough: re-read the folder here, inside the sidecar write
+    # lock (write=True), and only accept the two app paths. A new recovery is only for a
+    # folder gg_lock itself calls a relocation candidate; a resume is only for the recovery
+    # recorded as active in this same folder. gg_lock's wider offline recovery is not exposed.
+    status = gg_lock.inspect_lock(root)
+    observed = {"structure": status.get("structure"), "reason": status.get("reason"), "recovery_id": status.get("recovery_id")}
+    if resume is None:
+        if not (status.get("structure") == "damaged" and status.get("reason") == "directory_identity_mismatch"
+                and status.get("relocation_candidate") is True):
+            raise RpcError("not_relocation_candidate", "옮긴 폴더로 확인되지 않아 복구하지 않음", observed)
+    elif status.get("recovery_id") != resume:
+        raise RpcError("recovery_id_mismatch", "이 폴더에 남은 복구 ID가 아님", observed)
+    # (가2) 위 비교 뒤에도 같은 경로가 바뀔 수 있다(사이드카 쓰기 잠금은 바깥 폴더 변경을 못 막음).
+    # 승인된 값을 규칙집에 넘겨 규칙집이 첫 변경 전에 다시 비교하고 claim 도 그 값에 묶게 한다.
+    try:
+        result = gg_lock.upgrade_offline(root, offline_confirmed=params.get("offline_confirmed") is True,
+                                         resume_id=resume, expected_identity=expected)
+    except gg_lock.LockError as error:
+        code = "lock_held" if error.status == "busy" else "lock_ambiguous"
+        raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
+    if (isinstance(result, dict) and result.get("status") == "blocked"
+            and result.get("reason") == "target_changed" and result.get("commit_state") == "not_committed"):
+        raise RpcError("target_changed", "규칙집이 확인한 폴더와 지금 폴더가 다르다며 멈춤(첫 복구 폴더를 만든 뒤였을 수 있어 상태를 다시 확인해야 함)",
+                       {"reason": "target_changed", "commit_state": "not_committed", "recovery_id": result.get("recovery_id")})
+    return result
 
 
 def project_deps_report(report):
@@ -620,6 +747,8 @@ def register(server):
     server.register("project.restore", project_restore, write=True)
     server.register("lock.info", lock_info)
     server.register("lock.unlock", lock_unlock, write=True)
+    server.register("lock.identity", lock_identity)
+    server.register("lock.upgrade_offline", lock_upgrade_offline, write=True)
     server.register("doctor.all", doctor_all)
     server.register("fs.build_tree", fs_build_tree)
     server.register("materials.list", materials_list)
