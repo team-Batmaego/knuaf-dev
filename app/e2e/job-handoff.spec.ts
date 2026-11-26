@@ -78,6 +78,24 @@ test('main confirmed limit proposes design model without relay consent, opens on
   expect(f.opened[0].firstMessage).not.toMatch(/^\/[\w.:-]+ /m)
 })
 
+for (const withImage of [true, false]) {
+  test(`R-01 handoff first input ${withImage ? 'asks for reattachment even when image metadata was trimmed' : 'keeps text-only guidance'}`, async () => {
+    const f = fixture()
+    f.options.maxBytes = 1600
+    f.source.students = [
+      { text: 'OLD'.repeat(5000), attachments: withImage ? [{ name: 'capture.png', hash: sha256('image') }] : [] },
+      { text: 'NEW', attachments: [] }
+    ]
+    const proposal = await f.handoff.propose(f.source)
+    if (!proposal?.bundlePath) throw new Error('Expected a trimmed continuation packet')
+    expect(proposal.trimmed).toBe(true)
+    expect(await f.handoff.continue(proposal.proposalId)).not.toBeNull()
+    const first = f.opened[0].firstMessage
+    expect(first).not.toContain('capture.png')
+    expect(first.includes('추측하지 말고 다시 붙여 달라고')).toBe(withImage)
+  })
+}
+
 for (const reason of ['unknown', 'auth'] as const) test(`main ${reason} never offers continuation`, async () => {
   const f = fixture(); f.source.reason = reason
   expect(await f.handoff.propose(f.source)).toBeNull(); expect(f.opened).toEqual([])

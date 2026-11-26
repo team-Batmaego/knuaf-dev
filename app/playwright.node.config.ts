@@ -52,6 +52,7 @@ export default defineConfig({
     'lanes.spec.ts',
     'jobs.spec.ts',
     'job-control.spec.ts',
+    'job-handoff.spec.ts',
     'skill-unknown-read.spec.ts'
   ],
   timeout: 30_000,

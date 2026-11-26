@@ -28,6 +28,8 @@ import {
 } from '../src/main/chat/claude'
 import { isSkillHostPath, skillHostDir, skillHostRoot } from '../src/main/guard/scope'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
+import type { Options, PermissionResult, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { AgentEvents } from '../src/main/chat/contracts'
 
 const appRoot = resolve(__dirname, '..')
 /** 동봉 원본(`resources/skill`) — `pnpm stage:skill` 이 만든다. */
@@ -168,16 +170,18 @@ const nodeRequire = createRequire(__filename)
 /** vm 안 값은 프로토타입이 달라 `toEqual` 이 실패한다 — JSON 으로 옮겨 비교한다. */
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
-function claudeModule(): Record<string, any> {
-  const captured: any[] = []
+type QueryInput = { readonly prompt: string | AsyncIterable<SDKUserMessage>; readonly options: Options }
+
+function claudeModule(stream?: (args: QueryInput) => AsyncIterable<unknown>): Record<string, any> {
+  const captured: QueryInput[] = []
   const sdk = {
-    query: (args: any) => {
+    query: (args: QueryInput) => {
       captured.push(args)
       return {
         supportedCommands: async () => [{ name: 'knuaf-dev' }],
         accountInfo: async () => ({}),
         close() {},
-        async *[Symbol.asyncIterator]() { /* 한 턴에 메시지 없음 */ }
+        async *[Symbol.asyncIterator]() { if (stream) yield* stream(args) }
       }
     }
   }
@@ -239,26 +243,61 @@ async function rig(
   }
 }
 
-test('Claude image prompt is one streamed user message and the next text turn resumes normally', async () => {
-  const claude = claudeModule()
-  const { root } = box()
-  const connection = new claude.ClaudeConnection({ binary: 'claude', root, skill: join(root, 'skill'), env: {},
-    openExternal: async () => {} })
-  connection.status = async () => ({ installed: true, connected: true, version: null, probe: 'ok', detail: '' })
-  const events = { message: () => {}, permission: () => {}, note: () => {}, session: () => {}, skill: () => {} }
-  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII=', 'base64')
-  await connection.run('사진을 봐 주세요', 'session-1', events, false, [{ mime: 'image/png', bytes }])
-  const messages: unknown[] = []
-  for await (const message of claude.captured[0].prompt) messages.push(plain(message))
-  expect(messages).toEqual([{ type: 'user', session_id: 'session-1', parent_tool_use_id: null, message: { role: 'user', content: [
-    { type: 'text', text: expect.stringContaining('사진을 봐 주세요') },
-    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: bytes.toString('base64') } }
-  ] } }])
-  expect(claude.captured[0].options.resume).toBe('session-1')
-  await connection.run('이어서 하기', 'session-1', events)
-  expect(claude.captured[1].prompt).toBe('이어서 하기')
-  expect(claude.captured[1].options.resume).toBe('session-1')
-})
+for (const response of ['allow', 'deny', 'stop'] as const) {
+  test(`R-02 Claude image turn approval: ${response}, then a text turn on the same session`, async () => {
+    test.setTimeout(8_000)
+    const session = 'session-1'
+    const { root } = box()
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII=', 'base64')
+    const approval = Promise.withResolvers<Parameters<AgentEvents['permission']>[0]>()
+    const received: string[] = []
+    const decisions: (PermissionResult | null)[] = []
+    const events: AgentEvents = {
+      permission: approval.resolve, message: (_id, text) => received.push(text), note: () => {}, session: () => {}, skill: () => {}
+    }
+    const claude = claudeModule(async function* ({ prompt, options }) {
+      expect(options.resume).toBe(session)
+      if (prompt === '이어서 하기') {
+        expect(options.abortController?.signal.aborted).toBe(false)
+        yield { type: 'assistant', uuid: 'next', message: { content: [{ type: 'text', text: '다음 글 턴 응답' }] } }
+        return
+      }
+      if (typeof prompt === 'string' || !options.canUseTool || !options.abortController) throw new Error('Expected a streaming picture turn with approvals')
+      const input: SDKUserMessage[] = []
+      for await (const message of prompt) input.push(plain(message))
+      expect(input).toEqual([{ type: 'user', session_id: session, parent_tool_use_id: null, message: { role: 'user', content: [
+        { type: 'text', text: expect.stringContaining('사진을 봐 주세요') },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: bytes.toString('base64') } }
+      ] } }])
+      // The query is still running after reading the single input message. No host shell is launched.
+      const { signal } = options.abortController
+      decisions.push(await options.canUseTool('Write', { file_path: join(root, '..', 'approval-only.txt'), content: 'fixture' }, {
+        signal, toolUseID: 'write-fixture', requestId: 'approval-fixture'
+      }))
+      signal.throwIfAborted()
+      yield { type: 'assistant', uuid: 'image', message: { content: [{ type: 'text', text: '그림 턴 응답' }] } }
+    })
+    const connection = new claude.ClaudeConnection({ binary: 'claude', root, skill: join(root, 'skill'), env: {},
+      openExternal: async () => {}, trusted: () => false })
+    connection.status = async () => ({ installed: true, connected: true, version: null, probe: 'ok', detail: '' })
+    const turn: Promise<void> = connection.run('사진을 봐 주세요', session, events, false, [{ mime: 'image/png', bytes }])
+    try {
+      const card = await Promise.race([approval.promise, turn.then(() => { throw new Error('Turn ended before it requested approval') })])
+      if (response === 'stop') {
+        const stopped = turn.then(() => ({ name: 'completed' }), (error: unknown) => error)
+        await connection.stop()
+        expect(await stopped).toMatchObject({ name: 'AbortError' })
+      } else {
+        connection.respond(card.id, response === 'allow')
+        await turn
+      }
+      expect(decisions).toMatchObject([{ behavior: response === 'allow' ? 'allow' : 'deny' }])
+      expect(() => connection.respond(card.id, true)).toThrow()
+      await connection.run('이어서 하기', session, events)
+      expect(received).toEqual(response === 'stop' ? ['다음 글 턴 응답'] : ['그림 턴 응답', '다음 글 턴 응답'])
+    } finally { await connection.stop() }
+  })
+}
 
 /** 카드는 microtask 뒤에 뜬다 — 매달리지 않게 잠깐씩 양보하며 기다린다. */
 async function settle(cond: () => boolean): Promise<void> {

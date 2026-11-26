@@ -13,7 +13,8 @@ export type ImageBatch = {
   readonly accept: () => void
   readonly current: () => boolean
 }
-export const IMAGE_TURN_GUIDE = '첨부 그림은 보는 용도로만 전달되어 파일로 저장되어 있지 않습니다. 이 그림을 논문에 넣으려면 학생에게 논문 폴더의 figures/에 넣어 달라고 안내하세요. 앞서 받은 그림이 지금 보이지 않으면 추측하지 말고 다시 붙여 달라고 하세요.'
+export const IMAGE_REATTACH_GUIDE = '앞서 받은 그림이 지금 보이지 않으면 추측하지 말고 다시 붙여 달라고 하세요.'
+export const IMAGE_TURN_GUIDE = `첨부 그림은 보는 용도로만 전달되어 파일로 저장되어 있지 않습니다. 이 그림을 논문에 넣으려면 학생에게 논문 폴더의 figures/에 넣어 달라고 안내하세요. ${IMAGE_REATTACH_GUIDE}`
 
 const FORMATS = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' } as const
 const IMAGE_EXTENSIONS = /^(?:\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|svg|avif))$/i
