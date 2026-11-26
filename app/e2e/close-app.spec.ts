@@ -53,7 +53,11 @@ test('a dead launcher cannot hide a descendant that still holds its output', asy
   const script = `
     const {spawn} = require('node:child_process');
     const {writeFileSync} = require('node:fs');
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 12000)', '--', process.argv[2]], {stdio: ['ignore', 1, 2]});
+    // Windows libuv kills non-detached children when this launcher exits.
+    // On POSIX the descendant must stay in the launcher's process group.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', '--', process.argv[2]], {
+      detached: process.platform === 'win32', stdio: ['ignore', 1, 2],
+    });
     child.once('spawn', () => { writeFileSync(process.argv[1], String(child.pid)); process.exit(0); });
   `
   const tracked = trackLaunch(marker)
@@ -65,11 +69,13 @@ test('a dead launcher cannot hide a descendant that still holds its output', asy
   const pid = Number(readFileSync(pidFile, 'utf8'))
   try {
     expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
+    expect(process.kill(pid, 0), 'fixture descendant must outlive its launcher').toBe(true)
     expect(proc.stdout.destroyed || proc.stdout.readableEnded).toBe(false)
     await closeApp({ close: async () => {}, process: () => proc }, recorder(), { graceMs: 25 })
     expect(proc.stdout.destroyed || proc.stdout.readableEnded).toBe(true)
+    expect(() => process.kill(pid, 0), 'pipe-holding child survived a successful close').toThrow(expect.objectContaining({ code: 'ESRCH' }))
   } finally {
-    if (Number.isSafeInteger(pid) && pid > 0 && !proc.stdout.readableEnded && !proc.stdout.destroyed) {
+    if (Number.isSafeInteger(pid) && pid > 0) {
       try { process.kill(pid, 'SIGKILL') }
       catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error }
     }
@@ -82,7 +88,10 @@ test('closed pipes do not prove that a silent descendant exited', async ({}, inf
   const script = `
     const {spawn} = require('node:child_process');
     const {writeFileSync} = require('node:fs');
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 12000)'], {stdio: 'ignore'});
+    // Keep the silent orphan alive on Windows, without changing its ancestry or giving it the marker.
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
+      detached: process.platform === 'win32', stdio: 'ignore',
+    });
     child.once('spawn', () => { writeFileSync(process.argv[1], String(child.pid)); process.exit(0); });
   `
   const tracked = trackLaunch(marker)
@@ -94,9 +103,12 @@ test('closed pipes do not prove that a silent descendant exited', async ({}, inf
   const pid = Number(readFileSync(pidFile, 'utf8'))
   expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
   try {
+    expect(proc.stdout.destroyed || proc.stdout.readableEnded).toBe(true)
+    expect(process.kill(pid, 0), 'silent fixture descendant must outlive its launcher').toBe(true)
     const close = closeApp({ close: async () => {}, process: () => proc }, recorder())
     if (process.platform === 'win32') {
       await expect(close).rejects.toThrow('tree recovery unverified (4)')
+      expect(process.kill(pid, 0), 'unidentified child must not be killed by recovery').toBe(true)
     } else {
       await close
       expect(() => process.kill(pid, 0), 'silent child survived a successful close').toThrow(expect.objectContaining({ code: 'ESRCH' }))
