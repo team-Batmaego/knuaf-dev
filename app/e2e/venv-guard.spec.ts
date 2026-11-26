@@ -10,7 +10,7 @@
 // 이 시험은 고치기 전 빨강이 정상이다(설계 `DESIGN-venv-guard.md` 검토 판정 뒤 구현이 초록으로 만든다).
 import { test, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -121,5 +121,38 @@ test('S2: 표식 있는 앱 데이터 환경만 고르고, 표식 없음·키 �
     // 표식 없는 잔해 폐기는 앱 데이터 뿌리 안에서만, 표식 있는 환경은 그대로
     expect((h.depsEnv.discardUnmarked as (r: string, k: string) => boolean)(root, key)).toBe(false)
     expect(existsSync(envPy)).toBe(true)
+  } finally { h.cleanup() }
+})
+
+test('GC(§3.2): 앱 데이터 deps/ 에는 현재 키 + 직전(가장 최근 표식) 1개만 남긴다', async () => {
+  test.skip(process.platform === 'win32', '심볼릭 링크 장면을 posix 로 만든다')
+  const h = harness()
+  try {
+    const de = h.depsEnv as Record<string, (...a: unknown[]) => unknown>
+    const root = join(h.dir, 'userData', 'deps')
+    const env = (key: string, marked: boolean, ageSec: number) => {
+      const dir = join(root, key)
+      mkdirSync(join(dir, 'bin'), { recursive: true }); writeFileSync(join(dir, 'bin', 'python3'), '')
+      if (marked) {
+        de.markReady(root, key)
+        const t = Date.now() / 1000 - ageSec
+        utimesSync(join(dir, 'knuaf-ready.json'), t, t)
+      }
+      return dir
+    }
+    const current = env('aaaaaaaaaaaaaaaa', false, 0)   // 지금 키(준비 중일 수 있음) — 표식 없어도 남김
+    const newer = env('bbbbbbbbbbbbbbbb', true, 60)      // 직전 — 남김
+    const older = env('cccccccccccccccc', true, 3600)    // 더 옛것 — 지움
+    const debris = env('dddddddddddddddd', false, 0)     // 표식 없는 잔해 — 지움
+    const notes = join(root, 'notes'); mkdirSync(notes)  // 키 모양이 아님 — 건드리지 않음
+    const outside = join(h.dir, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'keep.txt'), 'x')
+    symlinkSync(outside, join(root, 'eeeeeeeeeeeeeeee'))  // 키 모양 링크 — 따라가지 않음
+    const removed = await de.pruneEnvs(root, 'aaaaaaaaaaaaaaaa') as string[]
+    expect(removed.sort()).toEqual([older, debris].sort())
+    for (const kept of [current, newer, notes]) expect(existsSync(kept)).toBe(true)
+    for (const gone of [older, debris]) expect(existsSync(gone)).toBe(false)
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('x')
+    // 뿌리가 없으면 조용히 빈 목록
+    expect(await de.pruneEnvs(join(h.dir, 'nope'), 'aaaaaaaaaaaaaaaa')).toEqual([])
   } finally { h.cleanup() }
 })

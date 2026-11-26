@@ -9,7 +9,8 @@
  * Electron 을 모른다: 뿌리 경로는 호출자(`python.ts`)가 넘긴다. 그래서 노드 시험이 그대로 부를 수 있다.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { join, relative, isAbsolute } from 'node:path'
 
 export const READY_FILE = 'knuaf-ready.json'
@@ -84,4 +85,33 @@ export function discardUnmarked(root: string, key: string): boolean {
   if (existsSync(join(dir, READY_FILE))) return false
   rmSync(dir, { recursive: true, force: true })
   return true
+}
+
+const KEY_NAME = /^[0-9a-f]{16}$/
+
+/**
+ * 오래된 키 환경 정리(§3.2): `root` 아래 키 모양 폴더 중 지금 키와, 표식 있는 것 가운데 가장 최근 것 1개(직전)만
+ * 남기고 지운다. 표식 없는 잔해도 지운다(지금 키는 준비 중일 수 있어 표식이 없어도 남긴다).
+ * 키 모양이 아닌 이름·링크·파일은 건드리지 않는다 — 앱 데이터 안에서도 앱이 만든 것만 지운다.
+ * 지운 폴더 목록을 돌려준다. 실패는 그 폴더만 건너뛴다(다음 시작 때 다시 본다).
+ */
+export async function pruneEnvs(root: string, keepKey: string): Promise<string[]> {
+  let names: string[]
+  try { names = readdirSync(root) } catch { return [] }
+  const others: { dir: string; readyAt: number | null }[] = []
+  for (const name of names) {
+    if (name === keepKey || !KEY_NAME.test(name)) continue
+    const dir = envDir(root, name)
+    try { if (!lstatSync(dir).isDirectory() || !inside(root, dir)) continue } catch { continue }
+    let readyAt: number | null = null
+    try { readyAt = statSync(join(dir, READY_FILE)).mtimeMs } catch { /* 표식 없음 */ }
+    others.push({ dir, readyAt })
+  }
+  const previous = others.filter((o) => o.readyAt !== null).sort((a, b) => (b.readyAt ?? 0) - (a.readyAt ?? 0))[0]
+  const removed: string[] = []
+  for (const o of others) {
+    if (o === previous) continue
+    try { await rm(o.dir, { recursive: true, force: true }); removed.push(o.dir) } catch { /* 다음 시작 때 */ }
+  }
+  return removed
 }

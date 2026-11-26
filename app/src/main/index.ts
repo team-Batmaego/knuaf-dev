@@ -6,7 +6,7 @@ import { registerIpc } from './ipc'
 import { QUIT_FLUSH_DELAYS_MS, type ChatService } from './chat/service'
 import type { AccountProbe } from './lanes/accounts'
 import { sweepRelayPlugins } from './chat/claude'
-import { APP_ROOT } from './python'
+import { APP_ROOT, pruneDepsEnvs } from './python'
 import { cleanupRuntime } from './runtime'
 import { installMenu, type MenuAction } from './menu'
 import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
@@ -266,6 +266,11 @@ else {
     try { sweepRelayPlugins(join(app.getPath('userData'), 'relay')) } catch (error) {
       console.error('[knuaf] relay-plugin sweep', error)
     }
+    // S-01 §3.2: 앱 데이터 의존성 환경은 지금 키 + 직전 1개만 남긴다(스킬·기반 python 이 바뀔 때마다 새 키가 생긴다).
+    // 키 모양 폴더만, 뿌리 안에서만 지운다. 창을 막지 않게 비동기로 돈다.
+    void pruneDepsEnvs().then((removed) => {
+      if (removed.length) console.log('[knuaf] deps env gc', removed)
+    }).catch((error) => console.error('[knuaf] deps env gc', error))
     if (isMac && !app.isPackaged && !hidden) {
       const iconPng = join(APP_ROOT, 'build', 'icon.png')
       if (existsSync(iconPng)) app.dock?.setIcon(nativeImage.createFromPath(iconPng))

@@ -4,7 +4,7 @@ import { app } from 'electron'
 import { managedPython } from './runtime'
 import { skillSource } from './agent'
 import { loadSettings } from './settings'
-import { depsKey, envPython, trustedEnv } from './deps-env'
+import { depsKey, envPython, pruneEnvs, trustedEnv } from './deps-env'
 
 /** app/ in a checkout (out/main → ../..); resources live next to it when packaged. */
 export const APP_ROOT = resolve(__dirname, '..', '..')
@@ -47,6 +47,11 @@ export function depsEnvKey(override: string | null = null): string {
  */
 export function depsVenv(override: string | null = null): string {
   return trustedEnv(depsRoot(), depsEnvKey(override))
+}
+
+/** 오래된 키 환경 정리(§3.2) — 지금 설정의 키 + 직전 1개만 남긴다. 앱 시작 때 한 번. */
+export function pruneDepsEnvs(): Promise<string[]> {
+  return pruneEnvs(depsRoot(), depsEnvKey(loadSettings().python_override))
 }
 
 export function depsPython(override: string | null = null): string | null {
