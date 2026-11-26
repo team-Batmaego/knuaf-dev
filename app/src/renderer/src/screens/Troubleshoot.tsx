@@ -11,7 +11,7 @@ import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
 import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, describeRecovery, type DescribedError } from '../copy'
-import { canRecoverMoved, recoveryOutcome, resumableRecovery, type RecoveryOutcome } from '../../../shared/lock-recovery'
+import { canRecoverMoved, needsSkillUpdate, recoveryOutcome, resumableRecovery, type RecoveryOutcome } from '../../../shared/lock-recovery'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -138,6 +138,7 @@ export function TroubleshootSections() {
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
   const canMove = canRecoverMoved(lock)
+  const updateFirst = needsSkillUpdate(lock)
   // 이어 하기 ID 는 폴더(lock.info)에서 다시 읽는다 — 화면을 다시 열어도 되살아난다(Roh I-02).
   const pendingId = resumableRecovery(lock)
   const movedView = moved?.root === root
@@ -190,6 +191,8 @@ export function TroubleshootSections() {
             {pendingId
               ? <Feedback kind="warning" title={LOCK_COPY.moveResumable} body={LOCK_COPY.moveResumableBody}
                   actions={<button className="primary" disabled={lockBusy} onClick={() => runMoved(pendingId)}>{LOCK_COPY.moveResume}</button>} />
+              : updateFirst
+              ? <Feedback kind="warning" title={LOCK_COPY.moveUpdate} body={LOCK_COPY.moveUpdateBody} />
               : canMove
               ? <Feedback kind="warning" title={LOCK_COPY.moved} body={LOCK_COPY.movedBody}
                   actions={<button className="primary" disabled={lockBusy} onClick={() => runMoved()}>{LOCK_COPY.moveRecover}</button>} />

@@ -504,7 +504,10 @@ export const LOCK_COPY = {
   moveCleanupPending: '새 잠금은 만들었지만 마무리 정리가 남았어요.',
   moveCleanupPendingBody: '"잠금 풀기 이어서 마치기"를 눌러 마무리해 주세요. 쓴 글과 파일은 그대로예요.',
   moveIndeterminate: '잠금 풀기가 어디까지 됐는지 확인하지 못했어요.',
-  moveIndeterminateBody: '폴더 안 파일을 지우거나 옮기지 말고, 아래 기록과 함께 담당자에게 알려 주세요.'
+  moveIndeterminateBody: '폴더 안 파일을 지우거나 옮기지 말고, 아래 기록과 함께 담당자에게 알려 주세요.',
+  // (가2) 규칙집이 확인한 폴더에 묶어 풀지 못하는 판(v0.6.5 이하)
+  moveUpdate: '이 폴더의 잠금을 풀려면 규칙집 업데이트가 필요해요',
+  moveUpdateBody: '지금 규칙집으로는 확인한 폴더에만 정확히 묶어 풀 수 없어서 잠금을 풀지 않았어요. "설정"에서 규칙집을 최신으로 업데이트한 뒤 다시 와 주세요. 쓴 글과 파일은 그대로예요.'
 } as const
 
 /**

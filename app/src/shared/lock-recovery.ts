@@ -6,9 +6,19 @@
  */
 import type { LockInfo, OfflineRecovery } from './types'
 
-/** 풀기 단추를 보일지: 규칙집이 '옮긴 폴더로 보인다'고 한 손상일 때만(L1). 다른 손상·옛 판은 안 보인다(L3·L4). */
+/**
+ * 풀기 단추를 보일지: 규칙집이 '옮긴 폴더로 보인다'고 한 손상이고, 그 규칙집이 승인된 폴더 식별값을 받는 판일 때만(L1·가2).
+ * 다른 손상·옛 판은 안 보인다(L3·L4).
+ */
 export function canRecoverMoved(lock: LockInfo | undefined | null): boolean {
   return !!lock && lock.structure === 'damaged' && lock.relocation_candidate === true && !lock.recovery_id
+    && lock.relocation_supported === true
+}
+
+/** 옮긴 폴더·멈춘 잠금 풀기가 보이지만 규칙집이 틈 있는 판(v0.6.5 이하)이라 단추 대신 '업데이트 필요'를 보일지(L4·가2). */
+export function needsSkillUpdate(lock: LockInfo | undefined | null): boolean {
+  if (!lock || lock.relocation_supported === true) return false
+  return (lock.structure === 'damaged' && lock.relocation_candidate === true) || validId(lock.recovery_id)
 }
 
 const RECOVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -20,7 +30,11 @@ const RECOVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
  */
 export function resumableRecovery(lock: LockInfo | undefined | null): string | null {
   const id = lock?.recovery_id
-  return typeof id === 'string' && RECOVERY_ID.test(id) ? id : null
+  return lock?.relocation_supported === true && validId(id) ? id as string : null
+}
+
+function validId(id: unknown): boolean {
+  return typeof id === 'string' && RECOVERY_ID.test(id)
 }
 
 export type RecoveryOutcome =

@@ -9,7 +9,7 @@
  *  3) RPC 이름이 쓰기 메서드 목록에 있다(동시 쓰기 막기), 규칙집 업데이트 필요 오류는 알아볼 수 있는 안내다.
  */
 import { expect, test } from '@playwright/test'
-import { canRecoverMoved, recoveryOutcome, resumableRecovery } from '../src/shared/lock-recovery'
+import { canRecoverMoved, needsSkillUpdate, recoveryOutcome, resumableRecovery } from '../src/shared/lock-recovery'
 import type { LockInfo, OfflineRecovery } from '../src/shared/types'
 import { LOCK_COPY, describeError, describeRecovery } from '../src/renderer/src/copy'
 import { WRITE_METHODS } from '../src/renderer/src/store/prep'
@@ -17,7 +17,7 @@ import { WRITE_METHODS } from '../src/renderer/src/store/prep'
 function lock(extra: Partial<LockInfo>): LockInfo {
   return {
     structure: 'damaged', lock_state: 'unprobed', reason: 'directory_identity_mismatch', protocol: null, owner: null,
-    observed_at: '2026-11-26T00:00:00Z', recovery_id: null, ...extra
+    observed_at: '2026-11-26T00:00:00Z', recovery_id: null, relocation_supported: true, ...extra
   }
 }
 
@@ -113,4 +113,23 @@ test('Roh r2 I-01: "다시 확인했어요"는 재조회가 성공했을 때만,
   expect(done.body).toContain(LOCK_COPY.moveRecheck)
   expect(LOCK_COPY.moveRecheck).toContain('확인했어요')
   expect(LOCK_COPY.moveRecheckAsk).toContain('확인해 주세요')
+})
+
+test('(가2) 규칙집이 승인 폴더 식별값을 못 받는 판이면 풀기·이어 하기 단추 대신 "업데이트 필요"(L4)', () => {
+  const rid = '0b8f8a0e-6c1e-4d3e-9f57-1c2d3e4f5a6b'
+  for (const supported of [false, undefined]) {
+    const moved = lock({ relocation_candidate: true, relocation_supported: supported })
+    expect(canRecoverMoved(moved)).toBe(false)
+    expect(needsSkillUpdate(moved)).toBe(true)
+    const pending = lock({ structure: 'ready', reason: 'recovery_active', recovery_id: rid, relocation_supported: supported })
+    expect(resumableRecovery(pending)).toBeNull()
+    expect(needsSkillUpdate(pending)).toBe(true)
+  }
+  // 지원 판이면 업데이트 안내는 없다. 옮긴 폴더가 아닌 손상·정상 폴더도 업데이트 안내를 띄우지 않는다(L3).
+  expect(needsSkillUpdate(lock({ relocation_candidate: true }))).toBe(false)
+  expect(needsSkillUpdate(lock({ relocation_candidate: false, relocation_supported: false }))).toBe(false)
+  expect(needsSkillUpdate(lock({ structure: 'ready', reason: null, relocation_supported: false }))).toBe(false)
+  expect(needsSkillUpdate(undefined)).toBe(false)
+  expect(LOCK_COPY.moveUpdate).toContain('업데이트')
+  expect(LOCK_COPY.moveUpdateBody).toContain('그대로')
 })

@@ -55,6 +55,8 @@ export interface LockInfo {
   recovery_id: string | null
   /** 규칙집 v0.6.5+: 폴더를 옮기거나 복사해서 생긴 손상으로 보일 때만 true. 옛 판은 키가 없다. */
   relocation_candidate?: boolean
+  /** 앱 사이드카: 규칙집 `upgrade_offline` 이 승인된 폴더 식별값(expected_identity)을 받는 판(v0.6.6+)일 때만 true — (가2). */
+  relocation_supported?: boolean
 }
 export interface OwnerCleanup extends LockInfo { owner_cleaned: boolean }
 /** `lock.upgrade_offline` 결과 — 규칙집 `gg_lock.upgrade_offline` 의 판정 그대로. `blocked` 는 오류가 아니라 결과로 온다. */

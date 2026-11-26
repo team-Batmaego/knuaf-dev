@@ -1,6 +1,7 @@
 """In-process gg_core methods (status, checks, lock, history, restore, export...)."""
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import sys
@@ -219,11 +220,27 @@ def project_restore(ctx, params):
     return _core().restore(_root(params), rev, expected)
 
 
+def _offline_upgrade_supported(gg_lock):
+    """(가2) 옮긴 폴더 잠금 풀기는 규칙집이 승인된 폴더 식별값(`expected_identity`)을 받아
+    자기 첫 변경 조건으로 쓰는 판(v0.6.6~)에서만 연다. v0.6.5 꼴(인자 없음)은 사이드카 확인 뒤
+    규칙집이 경로로 폴더를 다시 읽는 틈이 있어 쓰지 않는다 — '업데이트 필요'로 닫는다."""
+    fn = getattr(gg_lock, "upgrade_offline", None)
+    if not callable(fn):
+        return False
+    try:
+        return "expected_identity" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def lock_info(ctx, params):
     import gg_lock
 
     root = _root(params)
-    return gg_lock.probe_lock(root) if params.get("probe") is True else gg_lock.inspect_lock(root)
+    result = gg_lock.probe_lock(root) if params.get("probe") is True else gg_lock.inspect_lock(root)
+    if isinstance(result, dict):
+        result = dict(result, relocation_supported=_offline_upgrade_supported(gg_lock))
+    return result
 
 
 def lock_unlock(ctx, params):
@@ -263,8 +280,8 @@ def lock_upgrade_offline(ctx, params):
     import gg_lock
 
     root = _root(params)
-    if not callable(getattr(gg_lock, "upgrade_offline", None)):
-        raise RpcError("skill_update_required", "설치된 규칙집에 옮긴 폴더 복구(upgrade_offline)가 없음",
+    if not _offline_upgrade_supported(gg_lock):
+        raise RpcError("skill_update_required", "설치된 규칙집에 승인 폴더에 묶인 옮긴 폴더 복구(upgrade_offline expected_identity)가 없음",
                        {"feature": "lock.upgrade_offline"})
     resume = params.get("resume")
     if resume is not None and (not isinstance(resume, str) or not _RECOVERY_ID.fullmatch(resume)):
@@ -293,11 +310,19 @@ def lock_upgrade_offline(ctx, params):
             raise RpcError("not_relocation_candidate", "옮긴 폴더로 확인되지 않아 복구하지 않음", observed)
     elif status.get("recovery_id") != resume:
         raise RpcError("recovery_id_mismatch", "이 폴더에 남은 복구 ID가 아님", observed)
+    # (가2) 위 비교 뒤에도 같은 경로가 바뀔 수 있다(사이드카 쓰기 잠금은 바깥 폴더 변경을 못 막음).
+    # 승인된 값을 규칙집에 넘겨 규칙집이 첫 변경 전에 다시 비교하고 claim 도 그 값에 묶게 한다.
     try:
-        return gg_lock.upgrade_offline(root, offline_confirmed=params.get("offline_confirmed") is True, resume_id=resume)
+        result = gg_lock.upgrade_offline(root, offline_confirmed=params.get("offline_confirmed") is True,
+                                         resume_id=resume, expected_identity=expected)
     except gg_lock.LockError as error:
         code = "lock_held" if error.status == "busy" else "lock_ambiguous"
         raise RpcError(code, str(error), {"status": error.status, "reason": error.reason}) from error
+    if (isinstance(result, dict) and result.get("status") == "blocked"
+            and result.get("reason") == "target_changed" and result.get("commit_state") == "not_committed"):
+        raise RpcError("target_changed", "규칙집이 확인한 폴더와 지금 폴더가 다르다고 거절함(아무것도 안 바꿈)",
+                       {"reason": "target_changed", "commit_state": "not_committed", "recovery_id": result.get("recovery_id")})
+    return result
 
 
 def project_deps_report(report):

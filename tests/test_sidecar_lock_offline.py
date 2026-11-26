@@ -7,6 +7,7 @@
 동봉 규칙집이 1.0.14(함수 없음)면 실물 복구 시험은 건너뛰고, '업데이트 필요' 오류 시험이 실물로 돈다.
 1.0.17 실물로 돌리려면 `KNUAF_TEST_SCRIPTS_DIR=<v0.6.5 scripts>` 로 이 파일을 실행한다.
 """
+import inspect
 import io
 import json
 import shutil
@@ -22,8 +23,40 @@ from knuaf_sidecar.rpc import Server  # noqa: E402
 
 import gg_lock  # noqa: E402  (scripts dir is on sys.path via conftest)
 
+import gg_fs  # noqa: E402
+
 HAS_UPGRADE = callable(getattr(gg_lock, "upgrade_offline", None))
 needs_upgrade = pytest.mark.skipif(not HAS_UPGRADE, reason="설치 규칙집에 gg_lock.upgrade_offline 없음(1.0.14 동봉판)")
+_REAL_UPGRADE = getattr(gg_lock, "upgrade_offline", None)
+HAS_CONTRACT = HAS_UPGRADE and "expected_identity" in inspect.signature(_REAL_UPGRADE).parameters
+
+
+def _v065_upgrade(root, *, offline_confirmed, resume_id=None):
+    """v0.6.5 꼴(expected_identity 없음) — 틈 있는 판. 앱은 이 판으로 떨어지면 안 된다."""
+    pytest.fail("v0.6.5 꼴 upgrade_offline 이 불렸다")
+
+
+def _contract_upgrade(root, *, offline_confirmed, resume_id=None, expected_identity=None):
+    """시험 전용 (가2) 계약 꼴 — 규칙집 v0.6.6(t516 수락안)이 올 때까지 v0.6.5 실물에 인자만 단다. 앱에 동봉하지 않는다.
+
+    계약: 값이 있으면 첫 변경 전에 지금 폴더 식별값과 비교해 다르면 아무것도 안 바꾸고
+    blocked/target_changed/not_committed. (claim 을 그 값에 묶는 일은 v0.6.6 실물 몫 — 실물이 오면 다시 돌린다.)
+    """
+    if offline_confirmed and expected_identity is not None:
+        try:
+            current = gg_fs.identity(root, kind="directory")
+        except gg_fs.FsError:
+            current = None
+        if current is None or not gg_fs.same_identity(current, expected_identity):
+            return gg_lock._recovery_result(resume_id, "blocked", "not_committed", "target_changed")
+    return _REAL_UPGRADE(root, offline_confirmed=offline_confirmed, resume_id=resume_id)
+
+
+@pytest.fixture(autouse=True)
+def contract_skill(monkeypatch):
+    """v0.6.6 후보가 아직 없으면 v0.6.5 실물에 계약 인자를 단 시험용 함수로 돈다. 실물에 이미 있으면 그대로."""
+    if HAS_UPGRADE and not HAS_CONTRACT:
+        monkeypatch.setattr(gg_lock, "upgrade_offline", _contract_upgrade)
 
 
 def _rpc(method, params):
@@ -87,8 +120,8 @@ def test_only_literal_true_counts_as_confirmation(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: MOVED)
 
-    def fake(root, *, offline_confirmed, resume_id=None):
-        calls.append((offline_confirmed, resume_id))
+    def fake(root, *, offline_confirmed, resume_id=None, expected_identity=None):
+        calls.append((offline_confirmed, resume_id, expected_identity))
         return {"status": "blocked"}
 
     monkeypatch.setattr(gg_lock, "upgrade_offline", fake, raising=False)
@@ -97,18 +130,21 @@ def test_only_literal_true_counts_as_confirmation(tmp_path, monkeypatch):
         assert "result" in _upgrade(params)
     monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: dict(MOVED, recovery_id=RID))
     _upgrade({"root": str(tmp_path), "offline_confirmed": True, "resume": RID})
-    assert calls == [(False, None)] * 5 + [(True, RID)]
+    # (가2) ① 승인된 식별값이 새 복구·이어 하기 모두 규칙집까지 그대로 간다.
+    approved = gg_fs.identity(tmp_path, kind="directory")
+    assert [(c, r) for c, r, _ in calls] == [(False, None)] * 5 + [(True, RID)]
+    assert all(gg_fs.same_identity(e, approved) for _, _, e in calls), calls
 
 
 @pytest.mark.parametrize("resume", ["", 3, ["x"], "../x", "rid-1"])
 def test_bad_resume_is_invalid_params(tmp_path, monkeypatch, resume):
-    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, **k: pytest.fail("called"), raising=False)
+    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, expected_identity=None, **k: pytest.fail("called"), raising=False)
     error = _upgrade({"root": str(tmp_path), "offline_confirmed": True, "resume": resume})["error"]
     assert error["code"] == "invalid_params"
 
 
 def test_lock_error_maps_like_unlock(tmp_path, monkeypatch):
-    def busy(*a, **k):
+    def busy(*a, expected_identity=None, **k):
         raise gg_lock.LockError("busy", "guard_busy")
 
     monkeypatch.setattr(gg_lock, "upgrade_offline", busy, raising=False)
@@ -247,7 +283,7 @@ def test_identity_is_the_real_directory_identity(tmp_path):
 @pytest.mark.parametrize("expected", [None, "x", {"kind": "directory"}])
 def test_missing_or_bad_identity_is_invalid_params(tmp_path, monkeypatch, expected):
     """Roh r3 C-01: 확인 창 때 잡은 폴더 식별값 없이는 부르지 않는다."""
-    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, **k: pytest.fail("called"), raising=False)
+    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, expected_identity=None, **k: pytest.fail("called"), raising=False)
     params = {"root": str(tmp_path), "offline_confirmed": True}
     if expected is not None:
         params["expected_identity"] = expected
@@ -281,3 +317,82 @@ def test_resume_is_also_bound_to_the_confirmed_folder(moved, tmp_path):
         "expected_identity": _rpc("lock.identity", {"root": str(other)})["result"],
     })["error"]
     assert error["code"] == "target_changed", error
+
+
+# ---- (가2) 승인된 식별값을 규칙집의 첫 변경 조건까지 (Roh r4 C-01) ----
+
+def test_v065_signature_without_expected_identity_is_update_required(tmp_path, monkeypatch):
+    """(가2) ③ 인자 없는 v0.6.5 꼴이면 틈 있는 판으로 떨어지지 않고 '업데이트 필요'. 폴더 그대로, 함수는 안 불림."""
+    monkeypatch.setattr(gg_lock, "upgrade_offline", _v065_upgrade, raising=False)
+    monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: MOVED)
+    (tmp_path / "project.json").write_text("{}", encoding="utf-8")
+    before = _tree(tmp_path)
+    for extra in ({}, {"resume": RID}):
+        error = _upgrade(dict({"root": str(tmp_path), "offline_confirmed": True}, **extra))["error"]
+        assert error["code"] == "skill_update_required" and error["data"] == {"feature": "lock.upgrade_offline"}, error
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.skipif(not HAS_UPGRADE or HAS_CONTRACT, reason="설치 규칙집이 v0.6.5 꼴이 아님")
+def test_real_v065_is_update_required(moved, monkeypatch):
+    """(가2) ③ 핀 v0.6.5 실물(인자 없음) 그대로면 옮긴 폴더라도 '업데이트 필요', 단추 조건도 꺼짐."""
+    copy, _ = moved
+    monkeypatch.setattr(gg_lock, "upgrade_offline", _REAL_UPGRADE)
+    before = _tree(copy)
+    assert _upgrade({"root": str(copy), "offline_confirmed": True})["error"]["code"] == "skill_update_required"
+    assert _tree(copy) == before
+    info = _rpc("lock.info", {"root": str(copy)})["result"]
+    assert (info["relocation_candidate"], info["relocation_supported"]) == (True, False), info
+
+
+def test_lock_info_reports_contract_support(tmp_path, monkeypatch):
+    """화면은 relocation_supported 가 참일 때만 풀기·이어 하기 단추를 보인다."""
+    monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: dict(MOVED))
+    monkeypatch.setattr(gg_lock, "upgrade_offline", _contract_upgrade, raising=False)
+    assert _rpc("lock.info", {"root": str(tmp_path)})["result"]["relocation_supported"] is True
+    monkeypatch.setattr(gg_lock, "upgrade_offline", _v065_upgrade, raising=False)
+    assert _rpc("lock.info", {"root": str(tmp_path)})["result"]["relocation_supported"] is False
+    monkeypatch.delattr(gg_lock, "upgrade_offline", raising=False)
+    assert _rpc("lock.info", {"root": str(tmp_path)})["result"]["relocation_supported"] is False
+
+
+@pytest.mark.parametrize("resume", [None, RID])
+def test_skill_target_changed_maps_to_target_changed(tmp_path, monkeypatch, resume):
+    """(가2) ② 규칙집이 blocked/target_changed/not_committed 로 답하면 기존 target_changed 학생 문구로."""
+    monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: dict(MOVED, recovery_id=resume))
+
+    def skill(root, *, offline_confirmed, resume_id=None, expected_identity=None):
+        return gg_lock._recovery_result(resume_id, "blocked", "not_committed", "target_changed")
+
+    monkeypatch.setattr(gg_lock, "upgrade_offline", skill, raising=False)
+    params = {"root": str(tmp_path), "offline_confirmed": True}
+    if resume:
+        params["resume"] = resume
+    error = _upgrade(params)["error"]
+    assert error["code"] == "target_changed", error
+    assert error["data"]["reason"] == "target_changed" and error["data"]["commit_state"] == "not_committed"
+
+
+@needs_upgrade
+def test_swap_after_sidecar_check_is_refused_by_skill(moved, tmp_path, monkeypatch):
+    """Roh r4 C-01: 사이드카 식별값 확인 **뒤**, 규칙집이 대상을 잡기 전에 같은 경로가 다른 복구 후보로 바뀌어도
+    학생이 승인 안 한 폴더를 복구하지 않는다 — 승인된 값이 규칙집의 첫 변경 조건이라서. 두 폴더 모두 그대로."""
+    copy, _ = moved
+    confirmed = _rpc("lock.identity", {"root": str(copy)})["result"]
+    aside = tmp_path / "aside"
+    real_inspect = gg_lock.inspect_lock
+    swapped = {}
+
+    def inspect_then_swap(root):
+        # 사이드카는 식별값 비교 뒤 inspect_lock 을 부른다 — 바로 그 틈에 바꿔치기.
+        if not swapped:
+            copy.rename(aside)
+            shutil.copytree(tmp_path / "base", copy)
+            swapped["before"], swapped["aside"] = _tree(copy), _tree(aside)
+        return real_inspect(root)
+
+    monkeypatch.setattr(gg_lock, "inspect_lock", inspect_then_swap)
+    got = _rpc("lock.upgrade_offline", {"root": str(copy), "offline_confirmed": True, "expected_identity": confirmed})
+    assert swapped, "바꿔치기가 일어나지 않음"
+    assert got.get("error", {}).get("code") == "target_changed", got
+    assert _tree(copy) == swapped["before"] and _tree(aside) == swapped["aside"]
