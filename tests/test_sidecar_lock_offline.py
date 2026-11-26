@@ -277,10 +277,15 @@ def test_identity_is_the_real_directory_identity(tmp_path):
     import gg_fs
 
     got = _rpc("lock.identity", {"root": str(tmp_path)})["result"]
-    assert gg_fs.same_identity(got, gg_fs.identity(tmp_path, kind="directory")) and got["kind"] == "directory"
+    # 식별값은 불투명 문자열(token) — 숫자 필드가 JS Number 를 거치지 않는다. 풀어 보면 규칙집 값 그대로.
+    assert set(got) == {"token"} and isinstance(got["token"], str)
+    real = json.loads(got["token"])
+    assert gg_fs.same_identity(real, gg_fs.identity(tmp_path, kind="directory")) and real["kind"] == "directory"
 
 
-@pytest.mark.parametrize("expected", [None, "x", {"kind": "directory"}])
+@pytest.mark.parametrize("expected", [None, "x", {"kind": "directory"}, {"token": "x"}, {"token": "{}"}, {"token": 3},
+                                      {"token": '{"platform": "p", "kind": "file", "device": 1, "inode": 2}'},
+                                      {"platform": "p", "kind": "directory", "device": 1, "inode": 2}])
 def test_missing_or_bad_identity_is_invalid_params(tmp_path, monkeypatch, expected):
     """Roh r3 C-01: 확인 창 때 잡은 폴더 식별값 없이는 부르지 않는다."""
     monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, expected_identity=None, **k: pytest.fail("called"), raising=False)
@@ -398,3 +403,27 @@ def test_swap_after_sidecar_check_is_refused_by_skill(moved, tmp_path, monkeypat
     assert swapped, "바꿔치기가 일어나지 않음"
     assert got.get("error", {}).get("code") == "target_changed", got
     assert _tree(copy) == swapped["before"] and _tree(aside) == swapped["aside"]
+
+
+def _through_js(value):
+    """JS(main 의 JSON.parse → Number)를 거친 것처럼 정수를 2^53 정밀도로 뭉갠다."""
+    return json.loads(json.dumps(value), parse_int=lambda text: int(float(text)))
+
+
+def test_identity_with_inode_beyond_2_53_survives_the_js_number_channel(tmp_path, monkeypatch):
+    """윈도 NTFS 파일 ID 는 64비트라 흔히 2^53 을 넘는다. main 은 JSON.parse 로 Number 로 풀어 되돌려 주므로,
+    식별값이 숫자 필드로 오가면 자리를 잃어 윈도에서 늘 target_changed 가 된다."""
+    big = {"platform": "win32", "kind": "directory", "device": 305419896, "inode": (1 << 63) + 12345}
+    monkeypatch.setattr(gg_fs, "identity", lambda path, kind: dict(big))
+    seen = []
+
+    def skill(root, *, offline_confirmed, resume_id=None, expected_identity=None):
+        seen.append(expected_identity)
+        return {"status": "completed", "commit_state": "committed", "reason": None, "recovery_id": RID}
+
+    monkeypatch.setattr(gg_lock, "upgrade_offline", skill, raising=False)
+    monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: MOVED)
+    got = _through_js(_rpc("lock.identity", {"root": str(tmp_path)})["result"])
+    out = _through_js(_rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True, "expected_identity": got}))
+    assert "error" not in out, out
+    assert seen == [big], seen  # 규칙집에는 정밀도 그대로의 정수 값이 간다

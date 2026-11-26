@@ -260,9 +260,23 @@ def lock_identity(ctx, params):
     import gg_fs
 
     try:
-        return gg_fs.identity(_root(params), kind="directory")
+        identity = gg_fs.identity(_root(params), kind="directory")
     except gg_fs.FsError as error:
         raise RpcError("lock_ambiguous", str(error), {"status": "unavailable", "reason": error.reason}) from error
+    # 불투명 문자열: Windows 파일 ID(64비트)는 2^53 을 넘어 main 의 JSON.parse(Number)에서 뭉개진다.
+    # main·화면은 이 문자열을 풀지 않고 그대로 되돌려 주고, 풀기는 파이썬에서만 한다.
+    return {"token": json.dumps(identity, sort_keys=True)}
+
+
+def _decode_identity(value):
+    """`lock.identity` 의 token → 규칙집 식별값 dict. 모양이 틀리면 None."""
+    if not (isinstance(value, dict) and set(value) == {"token"} and isinstance(value["token"], str)):
+        return None
+    try:
+        decoded = json.loads(value["token"])
+    except ValueError:
+        return None
+    return decoded if _is_identity(decoded) else None
 
 
 def _is_identity(value):
@@ -286,8 +300,8 @@ def lock_upgrade_offline(ctx, params):
     resume = params.get("resume")
     if resume is not None and (not isinstance(resume, str) or not _RECOVERY_ID.fullmatch(resume)):
         raise RpcError("invalid_params", "resume은 복구 ID(UUID) 문자열")
-    expected = params.get("expected_identity")
-    if not _is_identity(expected):
+    expected = _decode_identity(params.get("expected_identity"))
+    if expected is None:
         raise RpcError("invalid_params", "expected_identity(확인 때 잡은 폴더 식별값) 필요")
     # Same path is not the same folder: the folder must still be the one the student confirmed.
     import gg_fs

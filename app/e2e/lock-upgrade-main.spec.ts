@@ -26,7 +26,8 @@ const factory = new Script(`(function(require,exports){${transpileModule(readFil
 }).outputText}\n})`, { filename: file }).runInThisContext() as (require: (name: string) => unknown, module: Partial<typeof IpcModule>) => void
 const source = join(appRoot, 'resources/skill')
 const RID = '0b8f8a0e-6c1e-4d3e-9f57-1c2d3e4f5a6b'
-const ID = (root: string) => ({ platform: 'test', kind: 'directory', device: 1, inode: root.length })
+// 식별값은 불투명 문자열이다 — 윈도 파일 ID(64비트)가 main 의 JSON.parse(Number)에서 뭉개지지 않게. 정수 자리를 일부러 2^53 위로 둔다.
+const ID = (root: string) => ({ token: `{"device": 1, "inode": ${9007199254740993n + BigInt(root.length)}, "kind": "directory", "platform": "test"}` })
 
 class ControlledSidecar extends EventEmitter {
   calls: { method: string; params: Record<string, unknown> }[] = []
@@ -35,7 +36,7 @@ class ControlledSidecar extends EventEmitter {
   isWrite(method: string) { return method === 'lock.upgrade_offline' }
   cancel() {}
   /** 폴더 식별값 — 경로가 같아도 폴더가 바뀌면 다른 값이다. 시험이 갈아 끼운다. */
-  identity: (root: string) => unknown = (root) => ({ platform: 'test', kind: 'directory', device: 1, inode: root.length })
+  identity: (root: string) => unknown = (root) => ID(root)
   async call(method: string, params: Record<string, unknown>) {
     this.calls.push({ method, params })
     if (method === 'lock.identity') return this.identity(params.root as string)
@@ -162,7 +163,7 @@ test('Roh r3 C-01: 확인 창을 띄우기 전에 폴더 식별값을 잡아, �
   try {
     await h.invoke('project:open', h.root)
     // 확인 창이 떠 있는 동안 같은 경로의 폴더가 바뀐다 — main 은 창 앞에서 잡은 값을 그대로 넘긴다.
-    h.setAnswer(async () => { h.sidecar.identity = () => ({ platform: 'test', kind: 'directory', device: 1, inode: 999 }); return 1 })
+    h.setAnswer(async () => { h.sidecar.identity = () => ({ token: '{"inode": 999}' }); return 1 })
     await h.invoke('lock:upgrade-offline')
     const order = h.sidecar.calls.map((call) => call.method)
     expect(order).toEqual(['lock.identity', 'lock.upgrade_offline'])
