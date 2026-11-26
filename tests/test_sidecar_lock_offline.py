@@ -427,3 +427,54 @@ def test_identity_with_inode_beyond_2_53_survives_the_js_number_channel(tmp_path
     out = _through_js(_rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True, "expected_identity": got}))
     assert "error" not in out, out
     assert seen == [big], seen  # 규칙집에는 정밀도 그대로의 정수 값이 간다
+
+
+def _token(**over):
+    value = {"platform": "win32", "kind": "directory", "device": 7, "inode": 1 << 60}
+    for key, new in over.items():
+        if new is _DROP:
+            value.pop(key)
+        else:
+            value[key] = new
+    return {"token": json.dumps(value)}
+
+
+_DROP = object()
+_BAD_TOKENS = {
+    "bool_inode": _token(inode=True), "bool_device": _token(device=False),
+    "float_inode": _token(inode=1.5), "float_integral": _token(inode=2.0), "string_inode": _token(inode="5"),
+    "null_device": _token(device=None),
+    "negative_inode": _token(inode=-1), "zero_inode_win": _token(inode=0),
+    "inode_over_64bit": _token(inode=1 << 64), "device_over_32bit_win": _token(device=1 << 32),
+    "device_negative": _token(device=-1), "device_over_64bit_posix": _token(platform="linux", device=1 << 64),
+    "numeric_platform": _token(platform=5), "unknown_platform": _token(platform="plan9"), "empty_platform": _token(platform=""),
+    "extra_key": _token(extra=1), "missing_inode": _token(inode=_DROP), "missing_platform": _token(platform=_DROP),
+    "kind_file": _token(kind="file"), "kind_number": _token(kind=1),
+    "long_platform": _token(platform="w" * 100_000), "huge_token": {"token": " " * 100_000 + json.dumps({"platform": "win32"})},
+    "nan": {"token": '{"platform": "win32", "kind": "directory", "device": NaN, "inode": 1}'},
+    "array": {"token": "[1, 2]"}, "not_json": {"token": "{"}, "extra_wrapper_key": dict(_token(), more=1),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_BAD_TOKENS))
+def test_malformed_identity_token_is_invalid_params(tmp_path, monkeypatch, name):
+    """Roh r7 I-01: 토큰 안쪽도 검증한다 — 길이 상한·정확한 키·platform 값·불리언 제외 정수·범위. 규칙집은 안 불린다."""
+    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda *a, expected_identity=None, **k: pytest.fail("called"), raising=False)
+    monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: MOVED)
+    error = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True, "expected_identity": _BAD_TOKENS[name]})["error"]
+    assert error["code"] == "invalid_params", (name, error)
+
+
+@pytest.mark.parametrize("platform,device,inode", [
+    ("win32", 0, 1), ("win32", (1 << 32) - 1, (1 << 64) - 1), ("darwin", 16777234, 123456789), ("linux", 0, 0), ("linux", (1 << 64) - 1, 1 << 53),
+])
+def test_wellformed_identity_tokens_are_accepted(tmp_path, monkeypatch, platform, device, inode):
+    seen = []
+    monkeypatch.setattr(gg_fs, "identity", lambda path, kind: {"platform": platform, "kind": kind, "device": device, "inode": inode})
+    monkeypatch.setattr(gg_lock, "inspect_lock", lambda root: MOVED)
+    monkeypatch.setattr(gg_lock, "upgrade_offline", lambda root, *, offline_confirmed, resume_id=None, expected_identity=None: (
+        seen.append(expected_identity) or {"status": "completed", "commit_state": "committed", "reason": None, "recovery_id": RID}), raising=False)
+    token = _rpc("lock.identity", {"root": str(tmp_path)})["result"]
+    out = _rpc("lock.upgrade_offline", {"root": str(tmp_path), "offline_confirmed": True, "expected_identity": token})
+    assert "error" not in out, out
+    assert seen == [{"platform": platform, "kind": "directory", "device": device, "inode": inode}]

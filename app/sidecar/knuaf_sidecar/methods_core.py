@@ -268,20 +268,41 @@ def lock_identity(ctx, params):
     return {"token": json.dumps(identity, sort_keys=True)}
 
 
-def _decode_identity(value):
-    """`lock.identity` 의 token → 규칙집 식별값 dict. 모양이 틀리면 None."""
-    if not (isinstance(value, dict) and set(value) == {"token"} and isinstance(value["token"], str)):
-        return None
-    try:
-        decoded = json.loads(value["token"])
-    except ValueError:
-        return None
-    return decoded if _is_identity(decoded) else None
+_IDENTITY_KEYS = {"platform", "kind", "device", "inode"}
+_IDENTITY_PLATFORMS = {"win32", "darwin", "linux"}  # gg_fs.identity 의 sys.platform 값
+_IDENTITY_TOKEN_MAX = 512  # 실제 값은 100자 안팎 — 파싱 전에 길이부터 자른다
 
 
 def _is_identity(value):
-    return (isinstance(value, dict) and value.get("kind") == "directory"
-            and all(key in value for key in ("platform", "device", "inode")))
+    """gg_fs.identity(kind="directory") 가 낼 수 있는 꼴만: 정확한 키 넷, 알려진 platform,
+    불리언을 뺀 정수 device·inode(윈도 volume 32비트·file ID 64비트·0 아님, 그 밖은 부호 없는 64비트)."""
+    if not isinstance(value, dict) or set(value) != _IDENTITY_KEYS:
+        return False
+    platform, device, inode = value["platform"], value["device"], value["inode"]
+    if value["kind"] != "directory" or not isinstance(platform, str) or platform not in _IDENTITY_PLATFORMS:
+        return False
+    if type(device) is not int or type(inode) is not int:
+        return False
+    if platform == "win32":
+        return 0 <= device < 1 << 32 and 0 < inode < 1 << 64
+    return 0 <= device < 1 << 64 and 0 <= inode < 1 << 64
+
+
+def _reject_constant(name):
+    raise ValueError(name)
+
+
+def _decode_identity(value):
+    """`lock.identity` 의 token → 규칙집 식별값 dict. 모양·길이·값이 틀리면 None."""
+    if not (isinstance(value, dict) and set(value) == {"token"} and isinstance(value["token"], str)):
+        return None
+    if len(value["token"]) > _IDENTITY_TOKEN_MAX:
+        return None
+    try:
+        decoded = json.loads(value["token"], parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        return None
+    return decoded if _is_identity(decoded) else None
 
 
 def lock_upgrade_offline(ctx, params):
