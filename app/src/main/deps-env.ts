@@ -11,7 +11,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { join, relative, isAbsolute } from 'node:path'
+import { basename, dirname, join, relative, isAbsolute } from 'node:path'
 
 export const READY_FILE = 'knuaf-ready.json'
 
@@ -154,7 +154,7 @@ export function revokeTrust(root: string, key: string): boolean {
 export const LOCK_FILE = '.lock'
 const heldHere = new Set<string>()
 const STALE_MS = 10 * 60_000 // 소유자를 알 수 없는(깨진·쓰는 중) 잠금이 이만큼 낡으면 잔해
-const GUARD_UNKNOWN_OWNER_MS = 10_000 // 소유자 pid 를 읽을 수 없는 회수 보호 파일이 이보다 낡으면 잔해(소유자가 보이면 나이를 보지 않는다)
+const CLAIM_UNKNOWN_OWNER_MS = 10_000 // 소유자 pid 를 읽을 수 없는 청구 파일이 이보다 낡으면 잔해(소유자가 보이면 나이를 보지 않는다)
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
@@ -178,42 +178,55 @@ function staleBody(path: string, raw: string): boolean {
 }
 
 /**
- * 낡은 잠금 회수. 판단(`seen`)과 삭제 사이에 다른 프로세스가 회수하고 **새 잠금**을 쥘 수 있으므로, 회수끼리는 보호 파일
- * (`.lock.reclaim`, wx)로 한 번에 하나만 하고, 보호를 쥔 채 **다시 읽어 판단한 그 잠금과 같을 때만** 지운다.
- * 잠금 경로가 있는 동안에는 아무도 wx 로 만들 수 없고(회수는 직렬, 해제는 자기 토큰만), 그러므로 같은 원문이면
- * 그 사이 바뀌지 않았다.
+ * 낡은 잠금 회수 — **죽은 잠금 한 개체마다 청구 파일 하나**(검토 r3·Roh).
  *
- * **살아 있는 소유자의 보호는 나이만으로 빼앗지 않는다**(검토 r3): 회수자가 살아 있는 채 오래 멈췄다 재개해도 그 사이
- * 다른 회수자가 끼어들 수 없다. 보호 파일은 **소유 프로세스가 죽었을 때만**(또는 소유자를 알 수 없는 깨진 파일이
- * 오래됐을 때만) 치운다 — 그래서 죽은 PID 가 재사용되면 오래 기다릴 수 있다(취소 가능, 알려진 한계). 삭제 직전에는
- * 보호 파일이 아직 내 토큰인지 한 번 더 확인한다.
+ * 앞선 판은 공용 보호 파일을 "확인 → 삭제"로 치웠는데, 확인과 삭제가 별도 연산이라 확인한 뒤 멈춘 쪽이 재개하면서 남이
+ * 새로 잡은 보호를 지울 수 있었다(다시 읽어도 못 막는다). 여기서는 지우는 일 자체를 없앤다: 청구 파일 이름이 **그 죽은
+ * 잠금의 원문 해시**에 묶여 있어(`.lock.claim.<해시>.<k>`) `wx` 로 만들 수 있는 쪽은 그 개체당 한 번에 하나뿐이다
+ * (원자적 소유 이전). 청구자가 아니면 아무것도 지우지 않는다.
+ * - 청구자가 살아 있으면(오래 멈췄어도) 기다린다 — 나이만으로 빼앗지 않는다. 청구자가 죽었으면 다음 번호(k+1)를
+ *   `wx` 로 잡는다(이전 청구 파일은 지우지 않으므로 지우기 경쟁이 없다).
+ * - 청구자가 `.lock` 을 지우는 순간 `.lock` 은 그 원문이 아니다. 죽은 원문은 다시 나타나지 않으므로(토큰이 매번 새것),
+ *   늦게 깨어난 옛 청구자의 "같은 원문이면 지운다"는 새 잠금을 건드릴 수 없다(원문이 다르다).
+ * 끝나면 그 원문의 청구 파일들을 치운다(남아도 해가 없다 — 해시가 다른 새 잠금과 무관).
  */
-function reclaimStale(path: string, seen: string, hook?: () => void | Promise<void>): boolean | Promise<boolean> {
-  const guard = path + '.reclaim', mine = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex') })
+async function reclaimStale(path: string, seen: string, hook?: () => void | Promise<void>): Promise<boolean> {
+  const key = createHash('sha256').update(seen).digest('hex').slice(0, 16)
+  const prefix = `${path}.claim.${key}.`
+  const mine = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex') })
+  let claim: string | null = null
+  for (let k = 0; k < 64 && claim === null; k++) {
+    const candidate = prefix + k
+    try {
+      writeFileSync(candidate, mine, { flag: 'wx' })
+      claim = candidate
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (!claimantGone(candidate)) return false // 살아 있는 청구자가 하고 있다 — 기다린다
+    }
+  }
+  if (claim === null) return false
   try {
-    writeFileSync(guard, mine, { flag: 'wx' })
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    const other = readRaw(guard)
-    let abandoned: boolean
+    if (readRaw(path) !== seen) return false // 그 죽은 잠금은 이미 사라졌다(다른 청구자가 끝냈다)
+    await hook?.() // 시험용: 확인을 마치고 삭제 직전에 멈춘다
+    if (readRaw(path) !== seen) return false // 멈춘 사이 바뀌었으면(옛 청구자가 늦게 깬 경우 포함) 새 잠금은 건드리지 않는다
+    rmSync(path, { force: true })
+    return true
+  } finally {
     try {
-      const pid = (JSON.parse(other ?? '') as { pid?: unknown }).pid
-      abandoned = typeof pid === 'number' ? pid !== process.pid && !pidAlive(pid) : statAge(guard) > GUARD_UNKNOWN_OWNER_MS
-    } catch { abandoned = statAge(guard) > GUARD_UNKNOWN_OWNER_MS } // 소유자를 알 수 없는 깨진·쓰는 중 파일
-    if (abandoned && readRaw(guard) === other) rmSync(guard, { force: true })
-    return false
+      const dir = dirname(path), base = basename(prefix)
+      for (const name of readdirSync(dir)) if (name.startsWith(base)) rmSync(join(dir, name), { force: true })
+    } catch { /* 청구 파일 잔해는 해롭지 않다 */ }
   }
-  const finish = (): void => { if (readRaw(guard) === mine) rmSync(guard, { force: true }) }
-  const done = async (): Promise<boolean> => {
-    try {
-      const current = readRaw(path) // 판단용 읽기 — 이 값이 `seen` 과 같을 때만 지운다
-      await hook?.() // 시험용: 읽은 직후 멈춘다
-      if (current !== seen || readRaw(guard) !== mine) return false // 그사이 바뀌었거나 보호를 잃었다 — 지우지 않는다
-      rmSync(path, { force: true })
-      return true
-    } finally { finish() }
-  }
-  return done()
+}
+
+/** 청구 파일의 주인이 없어졌나: 소유 PID 가 죽었으면 참, 살아 있으면 거짓, 소유자를 읽을 수 없는 파일은 오래됐을 때만 참. */
+function claimantGone(file: string): boolean {
+  try {
+    const pid = (JSON.parse(readRaw(file) ?? '') as { pid?: unknown }).pid
+    if (typeof pid === 'number') return pid !== process.pid && !pidAlive(pid)
+  } catch { /* 쓰는 중이거나 깨진 파일 */ }
+  return statAge(file) > CLAIM_UNKNOWN_OWNER_MS
 }
 
 /**

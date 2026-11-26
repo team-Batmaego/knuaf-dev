@@ -3,7 +3,8 @@
 // `onStaleJudged` 는 "남긴 잠금을 죽었다고 판단한 직후"에 순서를 제어하는 시험용 고리다(운영은 안 쓴다).
 import { expect, test } from '@playwright/test'
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { transpileModule, ModuleKind, ScriptTarget } from 'typescript'
@@ -21,6 +22,7 @@ const log = (e) => fs.appendFileSync(logFile, name + ' ' + e + ' ' + Date.now() 
   const opts = { pollMs: 5 }
   const pause = async () => { fs.writeFileSync(pauseFile, 'x'); while (!fs.existsSync(goFile)) await sleep(5) }
   if (pauseFile && process.env.PAUSE_AT === 'held') opts.onReclaimHeld = pause
+  else if (pauseFile && process.env.PAUSE_AT === 'guard') { opts.onGuardJudged = pause; opts.onStaleJudged = async () => {} } // 옛 판(보호 파일) 전용
   else if (pauseFile) opts.onStaleJudged = pause
   const release = await acquireEnvLock(root, opts)
   log('acquired'); await sleep(Number(holdMs)); log('release'); release()
@@ -34,7 +36,7 @@ function setup() {
   writeFileSync(mod, transpileModule(readFileSync(src, 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText)
   const child = join(dir, 'child.cjs'); writeFileSync(child, CHILD)
   const log = join(dir, 'log.txt'); writeFileSync(log, '')
-  const run = (name: string, hold: number, pause?: { pause: string; go: string; at?: 'held' }) => {
+  const run = (name: string, hold: number, pause?: { pause: string; go: string; at?: 'held' | 'guard' | 'judged' }) => {
     const proc = spawn(process.execPath, [child, mod, root, name, log, pause?.pause ?? '', pause?.go ?? '', String(hold)], { stdio: 'inherit', env: { ...process.env, PAUSE_AT: pause?.at ?? '' } })
     return new Promise<number | null>((res) => proc.on('exit', res))
   }
@@ -118,13 +120,55 @@ test('I-01 r3: 살아 있는 회수자가 10초 넘게 멈춰도 보호·잠금�
   } finally { h.cleanup() }
 })
 
-test('I-01 r3: 회수 도중 죽은 프로세스의 보호 파일은 PID 사망으로 치우고 회수를 이어 간다', async () => {
+test('I-01 r3: 회수 도중 죽은 청구자의 청구 파일은 PID 사망으로 건너뛰고 다음 번호로 회수를 이어 간다', async () => {
+  const h = setup()
+  try {
+    const raw = JSON.stringify({ pid: DEAD_PID, at: 'x' })
+    writeFileSync(join(h.root, '.lock'), raw)
+    const key = createHash('sha256').update(raw).digest('hex').slice(0, 16)
+    writeFileSync(join(h.root, `.lock.claim.${key}.0`), JSON.stringify({ pid: DEAD_PID + 1, token: 't' })) // 회수 도중 죽은 청구자
+    expect(await h.run('C', 20)).toBe(0)
+    expect(h.events().map((e) => e.event)).toEqual(['acquired', 'release'])
+    expect(readdirSync(h.root).filter((n) => n.startsWith('.lock.claim.'))).toEqual([]) // 끝나면 치운다
+  } finally { h.cleanup() }
+})
+
+// Roh r1 I-01: 죽은 **보호 파일**을 두 프로세스가 동시에 치우는 순서 — 확인(원문 읽기)과 삭제가 별도 연산이라, A 가 죽은
+// 보호를 확인한 뒤 삭제 직전에 멈춘 사이 B 가 그것을 치우고 새 보호를 잡아 멈추면, 재개한 A 가 B 의 새 보호를 지우고
+// 회수·주 잠금을 얻고, 재개한 B 는 (자기 보호가 지워진 줄 모른 채) 주 잠금을 지워 A 의 활성 잠금을 없앤다.
+test('I-01 roh: 죽은 보호 파일을 두 프로세스가 동시에 치워도 둘이 동시에 소유하지 않는다 (판정 순서 그대로)', async () => {
+  test.setTimeout(60_000)
   const h = setup()
   try {
     writeFileSync(join(h.root, '.lock'), JSON.stringify({ pid: DEAD_PID, at: 'x' }))
-    writeFileSync(join(h.root, '.lock.reclaim'), JSON.stringify({ pid: DEAD_PID + 1, token: 't' }))
-    expect(await h.run('C', 20)).toBe(0)
-    expect(h.events().map((e) => e.event)).toEqual(['acquired', 'release'])
-    expect(existsSync(join(h.root, '.lock.reclaim'))).toBe(false)
+    writeFileSync(join(h.root, '.lock.reclaim'), JSON.stringify({ pid: DEAD_PID + 1, token: 'dead-guard' })) // 죽은 보호(옛 판이 남긴 것)
+    const pa = join(h.dir, 'a-paused'), ga = join(h.dir, 'go-a'), pb = join(h.dir, 'b-paused'), gb = join(h.dir, 'go-b')
+    const a = h.run('A', 3000, { pause: pa, go: ga, at: process.env.ROH_A_AT as 'guard' | 'judged' ?? 'judged' })
+    await h.waitFor(() => existsSync(pa)) // A: 죽은 것을 확인했고 치우기 직전에 멈춤
+    const b = h.run('B', 3000, { pause: pb, go: gb, at: 'held' }) // B: 같은 죽은 것을 치우고 새 보호를 잡은 채 멈춤
+    await h.waitFor(() => existsSync(pb))
+    writeFileSync(ga, 'go') // A 재개 → 회수·획득
+    await h.waitFor(() => h.events().some((e) => e.name === 'A' && e.event === 'acquired'), 6000).catch(() => {})
+    writeFileSync(gb, 'go') // B 재개 — 옛 판단으로 A 의 활성 잠금을 지우면 안 된다
+    expect(await Promise.all([a, b])).toEqual([0, 0])
+    const events = h.events()
+    expect(events.filter((e) => e.event === 'acquired').map((e) => e.name).sort()).toEqual(['A', 'B'])
+    expect(overlaps(events)).toBe(false)
+  } finally { h.cleanup() }
+})
+
+test('I-01 roh: 여러 프로세스×여러 바퀴 — 죽은 잠금·죽은 보호/청구를 동시에 회수해도 동시 소유 0', async () => {
+  test.setTimeout(90_000)
+  const h = setup()
+  try {
+    for (let round = 0; round < 5; round++) {
+      writeFileSync(join(h.root, '.lock'), JSON.stringify({ pid: DEAD_PID, at: 'x' + round }))
+      if (round % 2) writeFileSync(join(h.root, '.lock.reclaim'), JSON.stringify({ pid: DEAD_PID + 1, token: 't' + round }))
+      const codes = await Promise.all(Array.from({ length: 6 }, (_, i) => h.run(`R${round}-${i}`, 30)))
+      expect(codes).toEqual([0, 0, 0, 0, 0, 0])
+    }
+    const events = h.events()
+    expect(events.filter((e) => e.event === 'acquired')).toHaveLength(30)
+    expect(overlaps(events)).toBe(false)
   } finally { h.cleanup() }
 })
