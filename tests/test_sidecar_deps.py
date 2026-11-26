@@ -9,13 +9,14 @@ import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
 from conftest import REPO, contract_skill_copy
 
 sys.path.insert(0, str(REPO / "app/sidecar"))
-from knuaf_sidecar.methods_core import project_deps_report  # noqa: E402
+from knuaf_sidecar.methods_core import project_deps_report, register  # noqa: E402
 from knuaf_sidecar import runner  # noqa: E402
 from knuaf_sidecar.rpc import Context, RpcError, Server  # noqa: E402
 from test_sidecar import Sidecar
@@ -77,6 +78,79 @@ def test_malformed_venv_probe_is_not_reinterpreted_as_install_needed(field, valu
     with pytest.raises(RpcError) as failure:
         project_deps_report(raw)
     assert failure.value.code == "deps_doctor"
+
+
+def test_troubleshooting_facts_do_not_wait_for_project_python(monkeypatch: pytest.MonkeyPatch, project: Path) -> None:
+    """A failed project interpreter must not hide snapshots, temp files or tool detection."""
+    import gg_deps
+
+    orphan = ".gg-import-incomplete-test"
+    (project / orphan).mkdir()
+    probes: list[str] = []
+
+    def time_out(python: Path, module: str, dist: str) -> tuple[bool, str | None]:
+        probes.append(module)
+        raise subprocess.TimeoutExpired([str(python), module, dist], 60)
+
+    monkeypatch.setattr(gg_deps, "venv_python", lambda _: Path(sys.executable))
+    monkeypatch.setattr(gg_deps, "_import_and_version", time_out)
+    out = io.StringIO()
+    server = Server(out=out)
+    register(server)
+    server._handle({"id": "panel", "method": "doctor.all", "params": {"root": str(project), "scope": "troubleshoot", "deps_venv": str(project.parent / "appdeps")}})
+    reply = json.loads(out.getvalue())
+    assert probes == [], f"Panel diagnosis ran the project Python probe: {probes}"
+    assert reply["id"] == "panel" and "result" in reply, reply
+    facts = reply["result"]
+    assert facts["orphan_files"] == [orphan]
+    assert facts["snapshots"][-1]["revision"] == 2
+    assert facts["kordoc"]["capability_verified"] is False
+
+
+def test_troubleshoot_facts_carry_legacy_venv_notice(project: Path) -> None:
+    """합본(#216+#217): 점검 화면은 troubleshoot 응답 하나만 보므로 옛 .venv 안내 사실도 거기 실려야 한다."""
+    def facts() -> dict:
+        out = io.StringIO()
+        server = Server(out=out)
+        register(server)
+        server._handle({"id": "panel", "method": "doctor.all", "params": {"root": str(project), "scope": "troubleshoot", "deps_venv": str(project.parent / "appdeps")}})
+        return json.loads(out.getvalue())["result"]
+
+    assert facts()["legacy_venv"] is False
+    (project / ".venv").mkdir()
+    assert facts()["legacy_venv"] is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("symlink loop in tool cache"),
+        AttributeError("missing tool metadata"),
+        subprocess.TimeoutExpired(["tool"], 1),
+    ],
+    ids=["runtime-error", "attribute-error", "timeout"],
+)
+def test_troubleshooting_keeps_folder_facts_when_tool_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, project: Path, failure: Exception,
+) -> None:
+    import gg_kordoc
+
+    def broken_cache() -> dict[str, str]:
+        raise failure
+
+    monkeypatch.setattr(gg_kordoc, "diagnose", broken_cache)
+    orphan = ".gg-import-tool-cache-error"
+    (project / orphan).mkdir()
+    out = io.StringIO()
+    server = Server(out=out)
+    register(server)
+    server._handle({"id": "panel", "method": "doctor.all", "params": {"root": str(project), "scope": "troubleshoot", "deps_venv": str(project.parent / "appdeps")}})
+    reply = json.loads(out.getvalue())
+    assert reply["id"] == "panel" and "error" not in reply, reply
+    facts = reply["result"]
+    assert facts["kordoc"] == {"status": "unavailable", "reason": type(failure).__name__}
+    assert facts["orphan_files"] == [orphan]
+    assert facts["snapshots"][-1]["revision"] == 2
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX script wrapper; Windows tree termination requires real-device QA")

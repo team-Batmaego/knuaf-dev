@@ -1,4 +1,4 @@
-import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OfflineRecovery, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status } from '../../shared/types'
+import type { ArtifactItem, DependencyReport, EditList, EditResult, Envelope, HistoryRow, LockInfo, MajorBinding, OfflineRecovery, OwnerCleanup, MaterialsData, RpcError, RpcResult, SectionRow, Status, TroubleshootFacts } from '../../shared/types'
 import type { StageBuildTree } from '../../shared/stage'
 import { usePrep, WRITE_METHODS } from './store/prep'
 
@@ -125,7 +125,7 @@ export const rpc = {
       return r.result as OfflineRecovery
     } finally { usePrep.getState().end(root, 'write') }
   },
-  doctor: (root: string) => call<Record<string, any>>('doctor.all', { root }),
+  troubleshoot: (root: string) => call<TroubleshootFacts>('doctor.all', { root, scope: 'troubleshoot' }),
   depsDoctor: async (root: string, clientId?: string, onEvent?: EventHandler): Promise<DependencyReport> => {
     const env = await call<Envelope>('deps.doctor', { root }, onEvent, clientId)
     const data = env?.data as DependencyReport | null

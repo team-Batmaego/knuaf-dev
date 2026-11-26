@@ -8,6 +8,7 @@ import re
 import sys
 from itertools import chain
 from pathlib import Path
+from typing import Literal, TypedDict
 
 from . import deps_contract
 from .rpc import RpcError
@@ -402,8 +403,63 @@ def project_deps_report(report):
     }
 
 
+class TroubleshootToolCandidate(TypedDict):
+    installed: bool
+
+
+class TroubleshootTool(TypedDict):
+    installed: bool
+    cli_path: str | None
+    capability_verified: bool
+    candidates: list[TroubleshootToolCandidate]
+
+
+class TroubleshootToolUnavailable(TypedDict):
+    status: Literal["unavailable"]
+    reason: str
+
+
+class TroubleshootFacts(TypedDict):
+    snapshots: list[dict[str, str | int | bool | None]]
+    orphan_files: list[str]
+    kordoc: TroubleshootTool | TroubleshootToolUnavailable
+    legacy_venv: bool
+
+
+def _troubleshoot_facts(root: Path) -> TroubleshootFacts:
+    """Read panel facts without launching Python probes or observing the lock twice."""
+    kordoc: TroubleshootTool | TroubleshootToolUnavailable
+    try:
+        from gg_kordoc import diagnose
+
+        tool = diagnose()
+        kordoc = {
+            "installed": tool["installed"],
+            "cli_path": tool["cli_path"],
+            "capability_verified": tool["capability_verified"],
+            "candidates": [{"installed": candidate["installed"]} for candidate in tool["candidates"]],
+        }
+    except Exception as error:  # noqa: BLE001 - optional tool boundary
+        # Tool lookup failures must not hide unrelated folder facts.
+        kordoc = {"status": "unavailable", "reason": type(error).__name__}
+    try:
+        snapshots = _core().history(root)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        snapshots = []  # An unopened or unreadable canon has no snapshots to show.
+    return {
+        "snapshots": snapshots,
+        "orphan_files": sorted(
+            str(path.relative_to(root))
+            for pattern in (".gg-tmp-*", ".gg-export-*", ".gg-import-*")
+            for path in root.rglob(pattern)
+        ),
+        "kordoc": kordoc,
+        # #216 D1 안내 — 논문 폴더 안의 옛 .venv 가 있으면 알린다(troubleshoot 응답에도 실어야 화면이 본다).
+        "legacy_venv": os.path.lexists(root / ".venv"),
+    }
+
+
 def doctor_all(ctx, params):
-    core = _core()
     root = _root(params)
     # R-01: 다른 의존성 메서드와 같은 공통 검사(키 누락 → deps_contract_missing, 폴더 안 경로 → deps_venv_untrusted).
     # 기동 env 가 실제 환경이므로 값은 쓰지 않는다 — 전역 os.environ 을 바꾸지 않는다.
@@ -414,7 +470,9 @@ def doctor_all(ctx, params):
     # 막았어도 다시 확인한다 — 시험·재import 에서도 같은 선.
     contract = deps_contract.fence_in_process()
     with trace_doctor(ctx):
-        report = core.doctor(root, probe=params.get("probe") is True)
+        if params.get("scope") == "troubleshoot":
+            return _troubleshoot_facts(root)
+        report = _core().doctor(root, probe=params.get("probe") is True)
         out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
         try:
             out["deps"] = project_deps_report(report["deps"]) if contract else deps_contract.unsupported_report()
