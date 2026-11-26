@@ -11,7 +11,7 @@ import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
 import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
-import type { HistoryRow, LockInfo } from '../../../shared/types'
+import type { LockInfo, TroubleshootFacts } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
 /**
@@ -21,7 +21,7 @@ import { useShallow } from 'zustand/react/shallow'
 export function TroubleshootSections({ active }: { readonly active: boolean }) {
   const { root, hasProject, status, refresh, refreshSidecar, sidecar } = useProject(useShallow((s) => ({ root: s.root, hasProject: s.hasProject, status: s.status, refresh: s.refresh, refreshSidecar: s.refreshSidecar, sidecar: s.sidecar })))
   const preparation = usePrep(s => root ? s.dependencies[root] : undefined)
-  const [diagnosis, setDiagnosis] = useState<{ root: string; data: Record<string, any> } | null>(null)
+  const [diagnosis, setDiagnosis] = useState<{ root: string; data: TroubleshootFacts } | null>(null)
   const doc = diagnosis?.root === root ? diagnosis.data : null
   const requestSeq = useRef(0)
   const lockRequestSeq = useRef(0)
@@ -54,7 +54,7 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
     })
     // Opening a folder owns preparation. Only an explicit recheck invalidates its result.
     const checked = checkDeps ? useProject.getState().prepareDeps(root, { install: false }) : undefined
-    const diagnosed = rpc.doctor(root).then((data) => {
+    const diagnosed = rpc.troubleshoot(root).then((data) => {
       if (seq === requestSeq.current) setDiagnosis({ root, data })
     }).catch((e: unknown) => {
       if (seq === requestSeq.current) setErr(describeError(e))
@@ -69,7 +69,7 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
   }, [active, load, status?.revision])
   if (!root) return <div className="caption">먼저 "내 논문"에서 폴더를 여세요.</div>
   const lock = lockObservation?.root === root ? lockObservation.data : undefined
-  const hist: HistoryRow[] = Array.isArray(doc?.snapshots) ? doc!.snapshots : []
+  const hist = doc?.snapshots ?? []
   const depsInfo = preparation?.report
   const act = async () => {
     if (!confirm) return
@@ -121,7 +121,10 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
     finally { if (seq === lockRequestSeq.current) setLockBusy(false) }
   }
   const canCleanup = lock?.structure === 'ready' && lock.lock_state === 'free' && !!lock.owner
-  const orphans: string[] = doc?.gg?.orphan_files ?? []
+  const orphans = doc?.orphan_files ?? []
+  const tool = doc?.kordoc
+  const toolUnavailable = tool && 'status' in tool
+  const detectedTool = toolUnavailable ? undefined : tool
   return (
     <div>
       <div className="row" style={{ marginBottom: 'var(--sp-3)' }}>
@@ -195,10 +198,12 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
       </Disclosure>
 
       <Disclosure label="문서 읽기 도구" preset="fix:kordoc">
-        <div className="card-head"><h2>문서 읽기 도구</h2>{doc?.kordoc && !doc.kordoc.error && <StatusBadge status={doc.kordoc.capability_verified ? 'pass' : 'pending'} label={doc.kordoc.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
-        {doc?.kordoc && !doc.kordoc.error && <div className="caption">{doc.kordoc.cli_path ? <code>{doc.kordoc.cli_path}</code> : '아직 없어요.'} · 캐시 {doc.kordoc.candidates?.some((c: { installed: boolean }) => c.installed) ? '있음' : '없음'}</div>}
+        <div className="card-head"><h2>문서 읽기 도구</h2>{toolUnavailable
+          ? <StatusBadge status="blocked" label={STATUS_LABEL.blocked} />
+          : detectedTool && <StatusBadge status={detectedTool.capability_verified ? 'pass' : 'pending'} label={detectedTool.installed ? STATUS_LABEL.installed : STATUS_LABEL.missing} />}</div>
+        {detectedTool && <div className="caption">{detectedTool.cli_path ? <code>{detectedTool.cli_path}</code> : '아직 없어요.'} · 캐시 {detectedTool.candidates.some(c => c.installed) ? '있음' : '없음'}</div>}
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
-          <button disabled={kordoc.busy || !!doc?.kordoc?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
+          <button disabled={kordoc.busy || !!detectedTool?.cli_path} onClick={prepareKordoc}>{kordoc.busy ? '준비 중…' : '도구 준비'}</button>
           <span className="caption">{KORDOC_SENTENCE}</span>
         </div>
         <ProgressPanel busy={kordoc.busy} phase={kordoc.phase} elapsedMs={kordoc.elapsedMs} lines={kordoc.lines} onCancel={kordoc.cancel} />

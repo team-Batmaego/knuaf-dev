@@ -56,6 +56,16 @@ export interface LockInfo {
 }
 export interface OwnerCleanup extends LockInfo { owner_cleaned: boolean }
 export interface HistoryRow { revision: number; hash: string; request_id: string | null; snapshot_path: string | null; snapshot_ok: boolean | null; current?: boolean }
+export interface TroubleshootFacts {
+  readonly snapshots: readonly HistoryRow[]
+  readonly orphan_files: readonly string[]
+  readonly kordoc: {
+    readonly installed: boolean
+    readonly cli_path: string | null
+    readonly capability_verified: boolean
+    readonly candidates: readonly { readonly installed: boolean }[]
+  } | { readonly status: 'unavailable'; readonly reason: string }
+}
 export interface SectionRow { id: string; title: string; order: number; path: string; status: string; revision: number; draft_hash: string; draft_hash_ok: boolean; draft_chars?: number; claims: number | null; error?: string }
 /**
  * 뷰어 직접 수정 — `section.edits`(설계 §5, §4-5-3).

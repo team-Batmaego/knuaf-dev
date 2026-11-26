@@ -14,7 +14,8 @@ type MakeProbe = { built: boolean; held: boolean; release: () => void; releaseDe
 type ProbeHost = typeof globalThis & { __ci4: LockProbe; __ci4Make: MakeProbe }
 
 type DiagnosisCalls = { lock: string[]; doctor: string[] }
-type DiagnosisHost = typeof globalThis & { __diagnosisCalls: DiagnosisCalls; __doctorReplies: string[]; __releasePeek: () => void }
+type DiagnosisReply = { readonly root: string; readonly outcome: 'success' | 'failed' }
+type DiagnosisHost = typeof globalThis & { __diagnosisCalls: DiagnosisCalls; __doctorReplies: DiagnosisReply[]; __releasePeek: () => void }
 type ProjectProbe = { readonly root: string; readonly revision: number }
 
 test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', async () => {
@@ -32,7 +33,7 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
       if (!real || !peek) throw new Error('project IPC handlers not found')
       const calls: DiagnosisCalls = { lock: [], doctor: [] }
       const gate = Promise.withResolvers<void>()
-      const doctorReplies: string[] = []
+      const doctorReplies: DiagnosisReply[] = []
       Object.assign(globalThis, { __diagnosisCalls: calls, __doctorReplies: doctorReplies, __releasePeek: gate.resolve })
       // open() publishes the new root before this reply closes the settings dialog.
       ipcMain.removeHandler('project:peek')
@@ -46,19 +47,25 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
         if (typeof params === 'object' && params !== null && 'root' in params && typeof params.root === 'string') {
           if (args[1] === 'lock.info') calls.lock.push(params.root)
           if (args[1] === 'doctor.all') calls.doctor.push(params.root)
+          if (args[1] === 'doctor.all' && (!('scope' in params) || params.scope !== 'troubleshoot')) {
+            throw new Error('Troubleshoot must not request dependency probes')
+          }
         }
         const reply = await real(...args)
         if (args[1] === 'doctor.all' && typeof params === 'object' && params !== null && 'root' in params && typeof params.root === 'string') {
-          doctorReplies.push(params.root)
+          const successful = typeof reply === 'object' && reply !== null && 'result' in reply && reply.result != null && !('error' in reply)
+          doctorReplies.push({ root: params.root, outcome: successful ? 'success' : 'failed' })
         }
         return reply
       })
     }, other)
     const calls = () => electronApp.evaluate(() => (globalThis as DiagnosisHost).__diagnosisCalls)
     const expectCalls = (roots: readonly string[]) => expect.poll(calls).toEqual({ lock: roots, doctor: roots })
-    // The real aggregate runs Python import probes; Windows CI took more than 5 s.
-    const expectDoctorReplies = (roots: readonly string[]) => expect.poll(() =>
-      electronApp.evaluate(() => (globalThis as DiagnosisHost).__doctorReplies), { timeout: 30_000 }).toEqual(roots)
+    const replies = () => electronApp.evaluate(() => (globalThis as DiagnosisHost).__doctorReplies)
+    const expectDoctorReplies = async (roots: readonly string[]) => {
+      await expect.poll(async () => (await replies()).map(reply => reply.root), { timeout: 30_000 }).toEqual(roots)
+      expect(await replies()).toEqual(roots.map(root => ({ root, outcome: 'success' })))
+    }
     const settleDiagnosis = async () => {
       // Cross the committed render/effect boundary and then drain earlier sends from this renderer.
       await page.evaluate(async () => {
@@ -229,7 +236,7 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
           if (method === 'doctor.all') {
             probe.diagnosis.push(method)
             // These tests own the not-installed → prepare flow, not the host's tool cache.
-            return { result: { kordoc: { installed: false, cli_path: null, candidates: [] } } }
+            return { result: { snapshots: [], orphan_files: [], kordoc: { installed: false, cli_path: null, capability_verified: false, candidates: [] } } }
           }
           if (method === 'lock.info') probe.diagnosis.push(method)
           return real(...args)
@@ -320,7 +327,7 @@ test('잠금 관찰·probe·정리는 전체 점검 응답을 기다리지 않�
           state.held = true
           await gate.promise
           // Every generation, including the post-cleanup one, delivers the old owner.
-          return { result: { lock: state.snapshot, gg: { orphan_files: ['.gg-import-ci4-observation'] }, snapshots: [] } }
+          return { result: { lock: state.snapshot, orphan_files: ['.gg-import-ci4-observation'], snapshots: [], kordoc: { status: 'unavailable', reason: 'RuntimeError' } } }
         }
         const reply = await real(...args)
         if (args[1] === 'lock.info' && state.armLock) { state.lockHeld = true; await lockGate.promise }
@@ -367,6 +374,7 @@ test('잠금 관찰·probe·정리는 전체 점검 응답을 기다리지 않�
     await electronApp.evaluate(() => (globalThis as ProbeHost).__ci4.release())
     await openPreset(page, 'fix:orphans')
     await expect(page.locator('details[data-preset="fix:orphans"]')).toContainText('.gg-import-ci4-observation')
+    await expect(page.locator('details[data-preset="fix:kordoc"] .card-head')).toContainText('아직 확인 못 함')
     // Late aggregates contain old owner records; only independent lock replies own this UI.
     await expect(lock).not.toContainText('마지막 점유 기록')
     await expect(lock.getByRole('button', { name: '소유 기록 정리', exact: true })).toBeDisabled()
