@@ -9,15 +9,15 @@ import time
 
 import pytest
 
-from conftest import REPO, SCRIPTS, bind_test_major
+from conftest import REPO, SCRIPTS, bind_test_major, contract_skill_copy
 
 SIDECAR_DIR = REPO / "app" / "sidecar"
 
 
 class Sidecar:
-    def __init__(self):
+    def __init__(self, scripts=None):
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "knuaf_sidecar", "--scripts-dir", str(SCRIPTS), "--interpreter-kind", "test"],
+            [sys.executable, "-m", "knuaf_sidecar", "--scripts-dir", str(scripts or SCRIPTS), "--interpreter-kind", "test"],
             cwd=str(SIDECAR_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8",
         )
@@ -319,8 +319,17 @@ def test_artifact_preview_xlsx(sidecar, project):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sh wrapper")
-def test_cancel_terminates_running_script(sidecar, project, tmp_path):
+def test_cancel_terminates_running_script(project, tmp_path):
     # deps.ensure spawns `base_python gg_deps.py ensure <root>`; a wrapper that just sleeps stands in for it.
+    # 계약을 선언한 스킬 사본으로 띄운다 — 모르는 판은 실행 전에 닫혀 취소할 자식이 없다(S-01 5단계).
+    sidecar = Sidecar(contract_skill_copy(tmp_path))
+    try:
+        _cancel_running_ensure(sidecar, project, tmp_path)
+    finally:
+        sidecar.close()
+
+
+def _cancel_running_ensure(sidecar, project, tmp_path):
     wrapper = tmp_path / "slow-python"
     wrapper.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
     os.chmod(wrapper, 0o755)

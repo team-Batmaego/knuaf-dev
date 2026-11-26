@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .rpc import RpcError
+from . import deps_contract
 from .runner import run_script
 
 TIMEOUTS = {"office": 120, "deps": 600, "kordoc": 240, "default": 120}
@@ -273,14 +274,15 @@ def office_clean(ctx, params):
 # --- deps / kordoc -----------------------------------------------------------
 
 
-# TODO(D-U): 고정 스킬 v0.6.5 의 gg_deps 는 아직 KNUAF_DEPS_VENV 를 모른다 — 스킬 계약(§3.1: 변수가 있으면
-# <폴더>/.venv 를 보지 않음, -m/-c 자식은 -I -X utf8 + cwd=환경)과 고정판 올림 전까지 doctor·ensure 는
-# 폴더 .venv 를 여전히 볼 수 있다. 계약 상수(gg_deps.DEPS_VENV_ENV) 확인도 그때 넣는다.
+# 스킬 계약(§3.1: KNUAF_DEPS_VENV 가 있으면 <폴더>/.venv 를 보지 않음, -m/-c 자식은 -I -X utf8 + cwd=환경)을
+# 선언하지 않은 판이면 gg_deps 를 띄우지 않는다(deps_contract.require → deps_contract_unsupported). 고정 v0.6.5 는
+# 선언이 없으므로 이 판에서는 준비·점검이 이 오류로 닫히는 것이 정상이다 — 판 올림(D-U) 뒤 열린다.
 def deps_ensure(ctx, params):
     root = _root(params)
     target = _deps_venv(params, root)
     if not target:
         raise RpcError("deps_contract_missing", "준비할 의존성 환경 경로(deps_venv)가 비어 있음")
+    deps_contract.require(_scripts_dir())
     base = params.get("base_python") or sys.executable
     argv = ["ensure", str(root)] + _flags(params, ("find_links", "no_index"))
     result = _run(ctx, params, "gg_deps.py", argv, timeout_key="deps", python=base,
@@ -297,6 +299,7 @@ def deps_doctor(ctx, params):
 
     root = _root(params)
     deps_venv = _deps_venv(params, root)
+    deps_contract.require(_scripts_dir())
     result = _run(ctx, params, "gg_deps.py", ["doctor", str(root)], cwd=SIDECAR_DIR, env_extra=_deps_child_env(deps_venv))
     if result["ok"]:
         result["data"] = project_deps_report(result["data"])

@@ -6,6 +6,7 @@ import sys
 from itertools import chain
 from pathlib import Path
 
+from . import deps_contract
 from .rpc import RpcError
 from .diagnostic_trace import trace_doctor
 
@@ -276,11 +277,14 @@ def project_deps_report(report):
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
+    # S-01: 계약을 모르는 gg_deps 는 같은 프로세스에서도 부르지 않는다(폴더 .venv 탐색). 사이드카 기동 때 이미
+    # 막았어도 다시 확인한다 — 시험·재import 에서도 같은 선.
+    contract = deps_contract.fence_in_process()
     with trace_doctor(ctx):
         report = core.doctor(root, probe=params.get("probe") is True)
         out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
         try:
-            out["deps"] = project_deps_report(report["deps"])
+            out["deps"] = project_deps_report(report["deps"]) if contract else deps_contract.unsupported_report()
         except RpcError as error:
             out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
         out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}

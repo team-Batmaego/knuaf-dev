@@ -10,7 +10,9 @@ import { sha256, zipBytes, readTree } from '../compose-skill.mjs'
 export const CONSUMER_TESTS = [
   'test_sidecar.py', 'test_sidecar_read_all.py', 'test_sidecar_publication.py', 'test_sidecar_deps.py', 'test_build_docx.py', 'test_excel_template.py',
   'test_excel_fill.py', 'test_excel_formula_patch.py', 'test_finance_save.py', 'test_office_static.py', 'test_deps.py', 'test_kordoc.py',
-  'test_skill_docs.py', 'test_cli_gg.py', 'test_core_checks.py', 'test_commands.py'
+  'test_skill_docs.py', 'test_cli_gg.py', 'test_core_checks.py', 'test_commands.py',
+  // S-01: 의존성 환경 계약(KNUAF_DEPS_VENV·-I) — 새 판이 계약을 빼면 동봉 거부(표시 없는 정상 계약 시험이 빨강).
+  'test_sidecar_venv_guard.py'
 ]
 // Retained protections from the removed app tests, not blanket discovery of upstream tests/.
 // Keep node IDs explicit: a missing/renamed replacement must fail collection, never lose coverage.

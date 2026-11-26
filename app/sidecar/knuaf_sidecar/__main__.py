@@ -40,7 +40,11 @@ def main(argv=None) -> int:
         sys.stdout.write('{"id": null, "error": {"code": "scripts_missing", "message": "%s"}}\n' % scripts)
         return 2
     sys.path.insert(0, str(scripts))
-    from . import methods_core, methods_edit, methods_scripts
+    from . import deps_contract, methods_core, methods_edit, methods_scripts
+
+    # S-01 5단계: 기동 때 한 번 — 계약을 모르는 스킬 판이면 같은 프로세스의 gg_deps.doctor·ensure 를 실행 전 거부로
+    # 바꾼다(doctor.all 이 폴더 .venv 를 보지 않게). 자식 gg_deps.py 는 메서드마다 deps_contract.require 가 본다.
+    deps_contract.fence_in_process()
     from .rpc import Server
 
     server = Server()
