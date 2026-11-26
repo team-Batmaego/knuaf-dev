@@ -1039,7 +1039,11 @@ test.describe('buildLaunchScript', () => {
     expect(prompt).toContain('작업 폴더: /tmp/논문')
     expect(prompt).toContain('논문 작업 파일은 여기서 바로 다루세요.')
     expect(prompt).toContain('논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요.')
-    expect(prompt).toContain('스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(.venv, sources/extracts 등)는 그대로 두어도 됩니다.')
+    expect(prompt).toContain('스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(sources/extracts 등)는 그대로 두어도 됩니다.')
+    // S-01 D-A·D1: 폴더 .venv 는 더 이상 허용 목록에 없고, 설치 거부(deps_venv_readonly)는 앱 준비 단추로 보낸다.
+    expect(prompt).not.toContain('(.venv,')
+    expect(prompt).toContain('deps_venv_readonly')
+    expect(prompt).toContain('"패키지 준비"')
     expect(prompt).not.toContain('`.venv` 외의 하위 폴더')
     expect(prompt).not.toContain('DOCX')
   })

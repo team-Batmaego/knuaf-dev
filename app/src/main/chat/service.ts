@@ -296,6 +296,8 @@ export class ChatService {
     ensureKordoc?: (root: string) => Promise<KordocRuntime | null>
     /** 도우미가 쓸 Python — 프로젝트 .venv 와 번들 CPython. */
     venvPython?: (root: string) => string | null
+    /** S-01 §3.4: 도우미 env 의 `KNUAF_DEPS_VENV`(앱 데이터 환경). 없으면 빈 값으로 닫는다(READONLY 는 늘). */
+    depsVenv?: () => string
     bundledPython?: () => string | null
     /** 학생이 "이 폴더에서는 계속 허용"을 고른 폴더인가. */
     isTrusted?: (root: string) => boolean
@@ -763,7 +765,7 @@ export class ChatService {
     let c = this.connections.get(key)
     if (!c) {
       const guard = this.guardFor(root)
-      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))
+      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.() ?? '')
       const figureEnv = this.opts.figures?.env
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
@@ -924,7 +926,7 @@ export class ChatService {
       const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
-        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))),
+        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.() ?? '')),
         openExternal: this.opts.openExternal, trusted: () => false,
         guard,
         skillBundleSource: () => this.opts.skillSource()

@@ -57,12 +57,18 @@ export function depsPython(override: string | null = null): string | null {
 /**
  * 예전 이름을 남긴 자리(에이전트·본대화·담당 PATH 가 `ctx.venvPython(root)` 로 부른다).
  * `projectRoot` 는 **보지 않는다** — 앱 데이터 환경만 돌려준다(S-01). 폴더가 열려 있지 않으면 null.
- * TODO(D-U·D-A): 스킬 gg_deps 가 KNUAF_DEPS_VENV 를 따르게 되면 에이전트·담당 env 에도 그 값을 싣고,
- * 에이전트의 공유 환경 설치 허용 여부(D-A, 추천: KNUAF_DEPS_VENV_READONLY=1)를 정해 함께 싣는다(설계 §3.4).
  */
 export function venvPython(projectRoot: string | null): string | null {
   if (!projectRoot) return null
   return depsPython(loadSettings().python_override)
+}
+
+/**
+ * 도우미(터미널·본대화·담당) env 의 `KNUAF_DEPS_VENV` 값 — 지금 설정의 신뢰된 앱 데이터 환경, 없으면 빈 값
+ * (설계 §3.4). READONLY(D-A)는 `agentDepsEnv` 가 늘 함께 싣는다.
+ */
+export function agentDepsVenv(): string {
+  return depsVenv(loadSettings().python_override)
 }
 
 /**

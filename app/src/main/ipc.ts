@@ -21,7 +21,7 @@ import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
 import { canonical } from './chat/jobs/isolation'
-import { APP_ROOT, basePython, bundledPython, depsEnvKey, depsRoot, venvPython, wheelhouseDir } from './python'
+import { agentDepsVenv, APP_ROOT, basePython, bundledPython, depsEnvKey, depsRoot, venvPython, wheelhouseDir } from './python'
 import { discardUnmarked, markReady } from './deps-env'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
@@ -693,7 +693,7 @@ export function registerIpc(
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
     dryRun: process.env.KNUAF_DRY_LAUNCH === '1',
-    open: (p) => shell.openPath(p), venvPython, bundledPython
+    open: (p) => shell.openPath(p), venvPython, depsVenv: agentDepsVenv, bundledPython
   })
   ipcMain.handle('agent:status', async (_e, root: string | null) => { try { return { result: await agentApi.status(agentCtx(), root ?? currentRoot) } } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } } })
   ipcMain.handle('agent:install-skill', (_e, kind: AgentKind, root: string | null) => {
@@ -734,7 +734,7 @@ export function registerIpc(
       binary,
       root,
       skill: '',
-      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [])),
+      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [], agentDepsVenv())),
       openExternal: (url) => shell.openExternal(url)
     }
   }
@@ -832,6 +832,7 @@ export function registerIpc(
     }),
     // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
+    depsVenv: agentDepsVenv,
     bundledPython,
     // 전역 기본이 '묻지 않기'면 폴더를 가리지 않는다. 'ask' 로 되돌려도 학생이 권한 카드에서
     // 직접 "이 폴더에서는 계속 허용"을 누른 폴더는 그대로 산다 — 받은 답을 무르지 않는다.

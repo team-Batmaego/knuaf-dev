@@ -121,7 +121,19 @@ export function pathKeyOf(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = pr
   return keys[0]
 }
 
-export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv {
+/**
+ * S-01 의존성 환경 계약(사이드카·스킬 gg_deps·도우미가 같은 글자를 본다). 값이 비어 있어도 "폴더 `.venv` 를 보지
+ * 않는다"는 뜻이다 — 준비 전이면 빈 값으로 닫힌다. READONLY 는 형님 결정 D-A: 도우미는 공유 환경에 설치하지 않는다.
+ */
+export const DEPS_VENV_ENV = 'KNUAF_DEPS_VENV'
+export const DEPS_READONLY_ENV = 'KNUAF_DEPS_VENV_READONLY'
+
+/** 도우미 프로세스에 싣는 두 값(터미널 스크립트·본대화·담당이 이 함수 하나를 쓴다). */
+export function agentDepsEnv(depsVenv = ''): Record<typeof DEPS_VENV_ENV | typeof DEPS_READONLY_ENV, string> {
+  return { [DEPS_VENV_ENV]: depsVenv, [DEPS_READONLY_ENV]: '1' }
+}
+
+export function subscriptionEnv(extraPathDirs: string[] = [], depsVenv = ''): NodeJS.ProcessEnv {
   const env = { ...process.env }
   // A user's unrelated API environment must never silently change billing for this app.
   for (const key of Object.keys(env)) {
@@ -162,6 +174,8 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   // 인코딩을 명시하지 않고 cp949 파일을 읽는 다른 도구에는 영향이 갈 수 있다(규칙집은 UTF-8 전제).
   env.PYTHONUTF8 = '1'
   env.PYTHONIOENCODING = 'utf-8'
+  // 사용자 값도 덮는다 — 학생 PC 의 변수가 도우미를 폴더 `.venv` 로 돌리지 못하게(S-01 D-A).
+  Object.assign(env, agentDepsEnv(depsVenv))
   return env
 }
 

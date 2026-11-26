@@ -135,6 +135,12 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '다시 만들거나 파일을 지우지 말고, 정본과 수령증을 도우미와 먼저 확인해 주세요.',
     kind: 'warning'
   },
+  /** S-01 D-A: 도우미 쪽 설치 거부(스킬 code). 앱의 준비는 이 값을 물려받지 않으므로 여기 오면 도우미 경로다. */
+  deps_venv_readonly: {
+    title: '도우미는 패키지를 직접 설치하지 않아요.',
+    action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 주세요.',
+    kind: 'warning'
+  },
   deps_not_ready: {
     title: '작업 준비가 아직 끝나지 않았어요.',
     action: '준비 작업을 자동으로 다시 시도해요. 계속되면 "설정 > 문제 해결"에서 확인해 주세요.',

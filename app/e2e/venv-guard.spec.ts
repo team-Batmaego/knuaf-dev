@@ -105,6 +105,7 @@ test('S2: 표식 있는 앱 데이터 환경만 고르고, 표식 없음·키 �
     writeFileSync(envPy, '')
     // 표식 없음(만들다 만 잔해) → 신뢰 안 함
     expect(py.depsVenv(null)).toBe('')
+    expect(py.agentDepsVenv()).toBe('')
     expect(h.python.choosePython(h.root, null).python).toBe(h.managed)
     // 키가 다른 표식 → 신뢰 안 함
     writeFileSync(join(env, 'knuaf-ready.json'), JSON.stringify({ key: 'other' }))
@@ -116,6 +117,7 @@ test('S2: 표식 있는 앱 데이터 환경만 고르고, 표식 없음·키 �
     expect(pick).toEqual({ python: envPy, kind: 'venv' })
     expect(pick.python).not.toBe(planted)
     expect(h.python.venvPython(h.root)).toBe(envPy) // 에이전트·본대화·담당 PATH 입력
+    expect(py.agentDepsVenv()).toBe(env) // 에이전트·본대화·담당 env 의 KNUAF_DEPS_VENV(D-A)
     // 표식 없는 잔해 폐기는 앱 데이터 뿌리 안에서만, 표식 있는 환경은 그대로
     expect((h.depsEnv.discardUnmarked as (r: string, k: string) => boolean)(root, key)).toBe(false)
     expect(existsSync(envPy)).toBe(true)

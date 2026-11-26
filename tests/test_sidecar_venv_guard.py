@@ -197,3 +197,21 @@ def test_contract_constant_is_declared():
 
     assert getattr(gg_deps, "DEPS_VENV_ENV", None) == DEPS_ENV
     assert os.environ.get(DEPS_ENV) is None  # 시험 기본 환경이 계약값을 새지 않는다
+
+
+# --- D-A(형님 결정): READONLY 는 도우미 전용 — 사이드카(앱의 '준비하기')가 띄우는 자식에는 물려주지 않는다 ------
+
+
+def test_sidecar_deps_children_never_inherit_readonly(tmp_path, monkeypatch):
+    from knuaf_sidecar import runner
+
+    monkeypatch.setenv("KNUAF_DEPS_VENV_READONLY", "1")  # 어쩌다 앱 프로세스에 실린 값
+    seen = tmp_path / "seen.txt"
+    script = tmp_path / "show_env.py"
+    script.write_text(
+        "import os, pathlib\n"
+        "pathlib.Path(%r).write_text(repr((os.environ.get('KNUAF_DEPS_VENV_READONLY'), os.environ.get('KNUAF_DEPS_VENV'))))\n"
+        "print('{\"ok\": true}')\n" % str(seen))
+    env_extra = methods_scripts._deps_child_env("/app/deps/k0")
+    runner.run_script(_ctx(), sys.executable, script, [], tmp_path, 30, env_extra=env_extra)
+    assert seen.read_text() == repr((None, "/app/deps/k0"))

@@ -13,6 +13,13 @@ TIMEOUTS = {"office": 120, "deps": 600, "kordoc": 240, "default": 120}
 # `.venv` 는 찾지 않는다. gg_deps.py 자식의 작업 디렉터리는 이 사이드카 폴더(앱 자원) — 폴더는 인자로만.
 SIDECAR_DIR = Path(__file__).resolve().parent
 DEPS_ENV = "KNUAF_DEPS_VENV"
+# 형님 결정 D-A: 도우미(에이전트) env 에만 1 로 싣는 "공유 환경 설치 거부" 표시. 사이드카는 앱의 '준비하기'
+# 경로라 설치해야 하므로 자식에 절대 물려주지 않는다. 스킬이 거부하면 code `deps_venv_readonly`.
+READONLY_ENV = "KNUAF_DEPS_VENV_READONLY"
+
+
+def _deps_child_env(deps_venv: str) -> dict:
+    return {DEPS_ENV: deps_venv, READONLY_ENV: None}
 _ENV_INTERPRETERS = (("bin", "python3"), ("bin", "python"), ("Scripts", "python.exe"))
 
 
@@ -277,7 +284,7 @@ def deps_ensure(ctx, params):
     base = params.get("base_python") or sys.executable
     argv = ["ensure", str(root)] + _flags(params, ("find_links", "no_index"))
     result = _run(ctx, params, "gg_deps.py", argv, timeout_key="deps", python=base,
-                  cwd=SIDECAR_DIR, env_extra={DEPS_ENV: target})
+                  cwd=SIDECAR_DIR, env_extra=_deps_child_env(target))
     if result["ok"]:
         vpy = _env_python(target)
         result["venv_python"] = str(vpy) if vpy else None
@@ -290,7 +297,7 @@ def deps_doctor(ctx, params):
 
     root = _root(params)
     deps_venv = _deps_venv(params, root)
-    result = _run(ctx, params, "gg_deps.py", ["doctor", str(root)], cwd=SIDECAR_DIR, env_extra={DEPS_ENV: deps_venv})
+    result = _run(ctx, params, "gg_deps.py", ["doctor", str(root)], cwd=SIDECAR_DIR, env_extra=_deps_child_env(deps_venv))
     if result["ok"]:
         result["data"] = project_deps_report(result["data"])
     return result

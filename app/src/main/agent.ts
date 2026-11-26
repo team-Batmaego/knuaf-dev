@@ -10,7 +10,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { accessSync, chmodSync, constants, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { APP_NAME } from '../shared/name'
-import { pathKeyOf } from './chat/contracts'
+import { agentDepsEnv, pathKeyOf } from './chat/contracts'
 import { renameWithRetry, writeFileAtomic } from './safeWrite'
 import { isSkillHostPath, skillHostDir, skillHostRoot } from './guard/scope'
 import { resolveSkillSource } from './update/source'
@@ -39,6 +39,11 @@ export interface LaunchScriptOptions {
   agentPath: string
   venvBin: string | null
   bundledBin: string | null
+  /**
+   * 앱 데이터 의존성 환경(S-01). 없으면 빈 값으로 싣는다 — 스킬은 빈 값도 "폴더 `.venv` 보지 않음"으로 읽는다.
+   * READONLY(D-A)는 늘 함께 싣는다(`agentDepsEnv`).
+   */
+  depsVenv?: string
   firstPrompt: string
   /** $HOME — codex 의 전역 스킬 사본을 끄는 `-c` 오버라이드를 만들 때 쓴다. */
   home?: string
@@ -103,6 +108,8 @@ export interface AgentCtx {
   dryRun: boolean
   open: (path: string) => Promise<string>
   venvPython: (root: string | null) => string | null
+  /** S-01 §3.4: 도우미 env 의 `KNUAF_DEPS_VENV`(앱 데이터 환경). 없으면 빈 값으로 닫는다. */
+  depsVenv?: () => string
   /** Optional: bundled interpreter, so its bin dir can be put on PATH for the agent. */
   bundledPython?: () => string | null
   /** Defaults to process.env; tests pass their own PATH/HOME. */
@@ -661,6 +668,8 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
     // 스킬 스크립트가 논문 폴더에 `__pycache__` 를 남기지 않게 한다(§4.1 표). 앱 채팅도 같은 값을
     // 넘긴다(`contracts.ts subscriptionEnv`·`claude.ts` query 옵션) — 세 경로가 같은 값이어야 한다.
     'export PYTHONDONTWRITEBYTECODE=1',
+    // S-01: 도우미가 돌리는 스킬 스크립트도 앱 데이터 환경만 쓰고(폴더 .venv 안 봄) 거기 설치하지 않는다(D-A).
+    ...Object.entries(agentDepsEnv(o.depsVenv)).map(([k, v]) => `export ${k}=${sq(v)}`),
     `printf '%s\\n' ${sq(BANNER)}`,
     "printf '%s\\n' ''",
     execLine,
@@ -734,6 +743,7 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
     'set "PYTHONIOENCODING=utf-8"',
     'set "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"',
     'set "PYTHONDONTWRITEBYTECODE=1"',
+    ...Object.entries(agentDepsEnv(o.depsVenv)).map(([k, v]) => `set "${k}=${batLiteral(v)}"`),
     `echo ${batLiteral(BANNER)}`,
     'echo.',
     execLine,
@@ -744,8 +754,15 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
 
 // ---------------------------------------------------------------- 7. launch
 
+/**
+ * S-01 D-A: 도우미는 앱이 준비한 의존성 환경(`KNUAF_DEPS_VENV`)을 읽기만 한다. 스킬이 설치를 거부하면
+ * code `deps_venv_readonly`(0 아닌 종료 코드)로 끝난다 — 그때 도우미가 우회 설치하지 않고 학생을 앱의 준비 단추로 보낸다.
+ * 폴더의 `.venv` 는 v0.7.5부터 쓰지 않는다(D1) — 만들지도, 실행하지도 않게 한다.
+ */
+export const DEPS_INSTRUCTIONS = 'Python 패키지는 앱이 이 컴퓨터에 준비한 환경(환경변수 KNUAF_DEPS_VENV)만 씁니다. pip 등으로 직접 설치하거나 논문 폴더에 .venv 를 만들지 마세요. gg_deps.py 가 deps_venv_readonly 로 설치를 거부하거나 패키지가 없다고 하면, 학생에게 앱의 "설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 달라고 안내하세요.'
+
 export function workFolderInstructions(root: string): string {
-  return `작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 논문 작업 파일은 여기서 바로 다루세요. 논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요. 스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(.venv, sources/extracts 등)는 그대로 두어도 됩니다.`
+  return `작업 폴더: ${root}\n이 폴더 자체가 논문 작업 폴더예요. 논문 작업 파일은 여기서 바로 다루세요. 논문 작업용 하위 폴더(예: knuaf-work)를 새로 만들어 그 안에서 작업하지 마세요. 스킬 스크립트(gg.py·gg_deps.py 등)가 정해진 자리에 스스로 만드는 폴더(sources/extracts 등)는 그대로 두어도 됩니다.\n${DEPS_INSTRUCTIONS}`
 }
 
 export function firstPromptFor(revision: number | null, root?: string): string {
@@ -822,6 +839,7 @@ export const agentApi = {
       agentPath,
       venvBin: venv ? dirname(venv) : null,
       bundledBin: bundled ? dirname(bundled) : null,
+      depsVenv: ctx.depsVenv?.() ?? '',
       firstPrompt: firstPromptFor(o.revision, o.root),
       home: ctx.home,
       supportDir: ctx.supportDir,
