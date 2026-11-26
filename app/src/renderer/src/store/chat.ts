@@ -6,6 +6,9 @@ import type { ChatModelInfo, ChatModels, ChatSnapshot, ConnectionStatus, ModelCh
 import { useEdits } from './edits'
 import { useProject } from './project'
 import type { RunState } from '../../../shared/chat'
+import { CHAT_IMAGE_COPY, CHAT_IMAGE_LIMITS, type ChatImageChip } from '../../../shared/chat-image'
+
+type AttachmentIntent = { readonly kind: 'pick' } | { readonly kind: 'drop' | 'paste'; readonly files: readonly File[] }
 
 /** 직전 스냅샷의 실행 상태 — 턴이 정상으로 끝났는지(진행→idle) 판정한다(§6-3). */
 let previousState: RunState | null = null
@@ -114,6 +117,12 @@ interface ChatState {
   setDraft: (draft: string) => void
   /** Append a picked/dropped file path to the draft as plain text — nothing else happens. */
   insertPath: (path: string) => void
+  images: readonly ChatImageChip[]
+  imageNote: string | null
+  imagePending: boolean
+  attachImages: (intent: AttachmentIntent) => Promise<void>
+  removeImage: (id: string) => void
+  clearImages: () => void
   /**
    * Append a prepared request (e.g. 점검의 "고쳐달라기") to the draft, keeping whatever the
    * student was typing. Never replaces — same join rule as insertPath. Never sends: the send
@@ -169,6 +178,9 @@ export const useChat = create<ChatState>((set, get) => ({
   connState: 'checking',
   draft: '',
   draftSeq: 0,
+  images: [],
+  imageNote: null,
+  imagePending: false,
   busy: false,
   waitingPrep: false,
   visit: 0,
@@ -194,6 +206,52 @@ export const useChat = create<ChatState>((set, get) => ({
     get().setDraft(d ? (d.endsWith('\n') ? d + path : d + '\n' + path) : path)
   },
   appendDraft: (text) => get().insertPath(text),
+  attachImages: async (intent) => {
+    const { root, visit, provider, imagePending } = get()
+    if (!root || root !== useProject.getState().root || imagePending) return
+    const api = window.knuaf.chat
+    const current = () => get().root === root && get().visit === visit && get().provider === provider && useProject.getState().root === root
+    set(state => ({ imagePending: true, imageNote: null, images: state.images.filter(chip => chip.expiresAt > Date.now()) }))
+    try {
+      const scope = await api.imageScope()
+      if (!current()) return
+      if (!scope || scope.root !== root) { set({ imageNote: CHAT_IMAGE_COPY.changed }); return }
+      const attach = async (file?: File) => {
+        if (!file) return api.pickImage(scope)
+        if (intent.kind === 'drop') return api.dropImage(scope, file)
+        if (file.size > CHAT_IMAGE_LIMITS.bytes) return { kind: 'error', message: CHAT_IMAGE_COPY.size } as const
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        return current() ? api.pasteImage(scope, bytes) : { kind: 'canceled' } as const
+      }
+      const sources = intent.kind === 'pick' ? [undefined] : intent.files
+      for (const source of sources) {
+        if (!current()) break
+        const result = await attach(source)
+        if (!current()) {
+          if (result.kind === 'image') await api.removeImage(result.chip.id)
+          break
+        }
+        if (result.kind === 'error') { set({ imageNote: result.message }); break }
+        if (result.kind === 'file') { get().insertPath(result.path); set({ imageNote: CHAT_IMAGE_COPY.file }) }
+        if (result.kind === 'image') set(state => ({ images: [...state.images, result.chip] }))
+      }
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      if (current()) set({ imageNote: CHAT_IMAGE_COPY.read })
+    } finally {
+      if (get().visit === visit) set({ imagePending: false })
+    }
+  },
+  removeImage: (id) => {
+    set(state => ({ images: state.images.filter(chip => chip.id !== id), imageNote: null }))
+    void window.knuaf.chat.removeImage(id)
+  },
+  clearImages: () => {
+    const { images, imageNote, imagePending } = get()
+    if (!images.length && !imageNote && !imagePending) return
+    set(state => ({ images: [], imageNote: null, imagePending: false, visit: state.visit + 1, busy: false, waitingPrep: false }))
+    for (const { id } of images) void window.knuaf.chat.removeImage(id)
+  },
   clearError: () => set({ error: null }),
   load: async (root, provider = get().provider) => {
     // 폴더·공급자가 바뀌면 **이전 대화의** 로그인 기다림만 끝난다(규칙은 store/connect 한 곳에 있다).
@@ -213,6 +271,7 @@ export const useChat = create<ChatState>((set, get) => ({
      * 드러난 공통 원인이다. 폴더나 공급자가 실제로 바뀔 때만 비운다(다른 대화를 섞지 않는다).
      */
     const samePair = !switching && get().provider === provider
+    if (!samePair) get().clearImages()
     set({
       root, provider, error: null,
       // 다른 대화로 옮기면 새 방문이다 — 앞 방문의 전송·준비 대기가 쥐고 있던 잠금과 진행 표시를 푼다.
@@ -298,12 +357,17 @@ export const useChat = create<ChatState>((set, get) => ({
     })
   },
   send: async (text, opts) => {
-    const { root, provider, draft } = get()
+    const { root, provider, draft, images, imagePending } = get()
+    const consume = text === undefined || opts?.consumeDraft
+    if (consume && imagePending) return false
+    const imageIds = consume && images.length ? images.map(chip => chip.id) : undefined
+    if (imageIds && provider === 'free') { set({ imageNote: CHAT_IMAGE_COPY.provider }); return false }
+    const prompt = text ?? (imageIds && !draft.trim() ? CHAT_IMAGE_COPY.ask : draft)
     // 재확인 메모를 **보내기 직전** 붙인다(설계 §6-1). 보내는 길 셋(자유 입력·질문 카드 보기·
     // 여러 칸 폼)이 모두 이 함수를 지나므로 여기 한 곳이면 다 덮인다. 확인 전 고침이 없으면
     // 본문 그대로다. 제목은 지금 등록된 절 목록에서 읽는다(옛 제목을 붙이지 않는다).
     const titles = Object.fromEntries((useProject.getState().sections ?? []).map((sec) => [sec.id, sec.title]))
-    let attached = useEdits.getState().attach((text ?? draft), titles)
+    let attached = useEdits.getState().attach(prompt, titles)
     let body = attached.text.trim()
     if (!root || !body) return false
     // 실패 복구 초안에 메모를 넣지 않는다 — 입력칸에 메모 전문이 드러나면 §6-1 위반이고,
@@ -353,7 +417,9 @@ export const useChat = create<ChatState>((set, get) => ({
     }
     const requestId = crypto.randomUUID()
     const snapshotAtSend = get().snapshot
-    const r = await window.knuaf.chat.send(root, provider, body, requestId) as Reply<ChatSnapshot>
+    const r = (imageIds
+      ? await window.knuaf.chat.send(root, provider, body, requestId, imageIds)
+      : await window.knuaf.chat.send(root, provider, body, requestId)) as Reply<ChatSnapshot>
     if ('result' in r && recovery !== undefined) {
       const before = get()
       // 같은 방문에서 새로 편집했다면 문자열이 우연히 같아도 소비하지 않는다.
@@ -389,11 +455,16 @@ export const useChat = create<ChatState>((set, get) => ({
         ? draftAfterSend(seqAtSend, get().draftSeq, get().draft)
         : get().draft
       // 승인·초안 정리 응답보다 스트림 알림이 먼저 올 수 있다. 이미 받은 답변·완료 상태가 최신이다.
-      set({ busy: false, ...(get().snapshot === snapshotAtSend ? { snapshot: r.result } : {}), draft: keep })
+      set(state => ({ busy: false, ...(state.snapshot === snapshotAtSend ? { snapshot: r.result } : {}), draft: keep,
+        ...(imageIds ? { images: state.images.filter(chip => !imageIds.includes(chip.id)), imageNote: null } : {}) }))
       void window.knuaf.chat.setDraft(root, keep)
       return true
     }
-    set({ busy: false, error: messageOf(r) })
+    if (imageIds && (r.error?.code === 'reattach' || r.error?.code === 'changed')) {
+      const changed = r.error.code === 'changed'
+      set(state => ({ busy: false, imageNote: messageOf(r),
+        images: state.images.filter(chip => (!changed && chip.expiresAt > Date.now()) || !imageIds.includes(chip.id)) }))
+    } else set({ busy: false, error: messageOf(r) })
     return false
   },
   respond: async (id, allow) => {

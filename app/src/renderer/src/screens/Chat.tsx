@@ -1,10 +1,11 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type ReactNode } from 'react'
 import { useProject } from '../store/project'
 import { chatProvider, resolveChatMode, useChat, type ChatMode } from '../store/chat'
 import { chosenProvider, useConnect, type ConnState } from '../store/connect'
 import { useReview, buildQuotedMessage, type ReviewEdit } from '../store/review'
 import { preparationFailureTitle, usePrep, waitKind } from '../store/prep'
 import { cutAtLine, formFold as formFoldOf, hiddenChars, progressGroups, stripLines } from '../../../shared/chat-fold'
+import { CHAT_IMAGE_COPY } from '../../../shared/chat-image'
 import { mergeFoldSpans, progressHide } from '../../../shared/progress-list'
 import { ChatMarkdown } from '../components/ChatMarkdown'
 import { ProgressFold } from '../components/ProgressFold'
@@ -129,6 +130,7 @@ export interface FoldOptions { spans: { start: number; end: number }[]; count: n
 function Delivery({ m, sending, onResend }: { m: ChatMessage; sending: boolean; onResend?: () => void }) {
   if (m.role !== 'user') return null
   if (m.delivery === 'uncertain') {
+    if (m.attachments?.length) return <div className="deliv bad" data-st="unsure">{CHAT.uncertainLine} · {CHAT_IMAGE_COPY.resend}</div>
     return <div className="deliv bad" data-st="unsure">{CHAT.uncertainLine}{onResend && <> · <button className="lk" onClick={onResend}>{CHAT.resend}</button></>}</div>
   }
   if (sending && m.delivery === 'pending') return <div className="deliv" data-st="sending"><span className="dots" aria-hidden="true"><i /><i /><i /></span>{CHAT.sendingLine}</div>
@@ -170,6 +172,9 @@ function Message({ m, onResend, onFileLink, fold, hide, sending = false }: { m: 
           <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{quoted[1]}</span>
         </span>{quoted[3]}
       </> : recheck.body}
+        {!!m.attachments?.length && <div className="chat-image-receipt">
+          그림 {m.attachments.length}장 · {m.attachments.map(image => image.name).join(', ')}
+        </div>}
         {recheck.memo && (
           <span className="msg-recheck" title={recheck.memo}>{recheckChipLabel(recheck.count)}</span>
         )}</div>
@@ -285,7 +290,10 @@ export function Chat() {
   const lanesUnavailable = useLanes((s) => s.unavailable)
   /** 카드별 무효 사유(`account-changed` 만 다른 문구). */
   const laneInvalid = useLanes((s) => s.invalid)
-  const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, insertPath, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, insertPath: s.insertPath, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
+  const { root, snapshot, status, statusFailed, connState, draft, busy, error, mode, setDraft, clearError, load, send, respond, stop } = useChat(useShallow((s) => ({ root: s.root, snapshot: s.snapshot, status: s.status, statusFailed: s.statusFailed, connState: s.connState, draft: s.draft, busy: s.busy, error: s.error, mode: s.mode, setDraft: s.setDraft, clearError: s.clearError, load: s.load, send: s.send, respond: s.respond, stop: s.stop })))
+  const { images, imageNote, imagePending, attachImages, removeImage } = useChat(useShallow(s => ({
+    images: s.images, imageNote: s.imageNote, imagePending: s.imagePending, attachImages: s.attachImages, removeImage: s.removeImage
+  })))
   /** 준비·정본 쓰기 중에는 자유 입력 전송을 막는다(알림창 B안). */
   const waiting = usePrep((s) => waitKind(s, projectRoot))
   // 안내 문구는 prep 우선이지만 쓰기 잠금은 두 작업이 겹쳐도 독립적으로 유지한다.
@@ -667,7 +675,25 @@ export function Chat() {
     wasRunning.current = running
   }, [running])
   const lastUncertain = snapshot?.messages.filter((m) => m.role === 'user' && m.delivery === 'uncertain').at(-1)
-  const attach = async (): Promise<void> => { const p = await window.knuaf.pickFile({ title: CHAT.attach }); if (p) insertPath(p) }
+  const imageChips = images.length > 0 && (
+    <ul className="chat-image-chips" aria-label="첨부 그림">
+      {images.map(chip => <li key={chip.id}>
+        <img src={chip.preview} alt="" width="36" height="36" />
+        <span title={chip.name}>{chip.name}</span>
+        <button type="button" aria-label={`${chip.name} 첨부 빼기`} onClick={() => removeImage(chip.id)}>
+          <Icon name="x" size={16} />
+        </button>
+      </li>)}
+    </ul>
+  )
+  const pasteImages = (e: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const files = Array.from(e.clipboardData.items)
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .flatMap(item => { const file = item.getAsFile(); return file ? [file] : [] })
+    if (files.length === 0) return
+    e.preventDefault()
+    void attachImages({ kind: 'paste', files })
+  }
 
   /**
    * 종이에서 고른 문장(인용) — 입력칸 위 칩이 보여 주고, 보낼 때 메시지에 합쳐진다(N-I03).
@@ -699,7 +725,7 @@ export function Chat() {
   }, [projectRoot, clearQuote])
 
   /** 인용은 현재 논문에서 고른 것만 보낼 수 있다. */
-  const canSend = !!draft.trim() || !!quote && quote.root === projectRoot
+  const canSend = !imagePending && (!!draft.trim() || !!quote && quote.root === projectRoot || images.length > 0)
 
   const emptyChat = !!snapshot && snapshot.messages.length === 0
   const hasRevision = (revision ?? 0) >= 1
@@ -989,7 +1015,7 @@ export function Chat() {
         {chatErr && !laneLimitLine && <ZoneLine tone={toneOf(chatErr.kind)} title={chatErr.title} sub={chatErr.action} raw={chatErr.raw} onClose={clearError} onReport={toneOf(chatErr.kind) !== 'info' ? () => requestReport(chatErr.title) : undefined} />}
         {snapshot && haltKey && !closedNotes.has(haltKey) && (
           <ZoneLine tone="attn" title={snapshot.state === 'stopped' ? CHAT.stoppedTitle : CHAT.interruptedTitle} sub={snapshot.state === 'stopped' ? CHAT.stoppedBody : CHAT.interruptedBody}
-            actions={lastUncertain ? <button type="button" className="lk" onClick={() => void send(lastUncertain.text)} disabled={running || busy || !!waiting}>{CHAT.resend}</button> : undefined}
+            actions={lastUncertain && !lastUncertain.attachments?.length ? <button type="button" className="lk" onClick={() => void send(lastUncertain.text)} disabled={running || busy || !!waiting}>{CHAT.resend}</button> : undefined}
             onClose={() => closeNote(haltKey)} onReport={() => requestReport(snapshot.state === 'stopped' ? CHAT.stoppedTitle : CHAT.interruptedTitle)} />
         )}
         {snapErr && snapErrKey && !closedNotes.has(snapErrKey) && <ZoneLine tone={toneOf(snapErr.kind)} title={snapErr.title} sub={snapErr.action} raw={snapErr.raw} onClose={() => closeNote(snapErrKey)} onReport={() => requestReport(snapErr.title)} />}
@@ -1012,7 +1038,8 @@ export function Chat() {
               {quote && quote.root === projectRoot && <ReviewQuoteChip quote={quote} onRemove={clearQuote} style={{ marginTop: 'var(--sp-4)', marginBottom: -8, position: 'relative', zIndex: 1 }} />}
               {/* 질문 카드는 입력칸 자리를 대신 차지해 아래 칩 줄이 안 보인다 — 같은 자리에 여기서 띄운다(B4). */}
               {pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
-              <QuestionCard key={zone.messageId} card={zone.card} draft={draft} onDraft={setDraft} onSend={send}
+              {imageChips}
+              <QuestionCard key={zone.messageId} card={zone.card} draft={draft} onDraft={setDraft} onPaste={pasteImages} onSend={send}
                 onSendFree={() => sendBody()} canSendFree={canSend && !busy && !waiting} freeRequest={freeRequest?.messageId === zone.messageId ? freeRequest.seq : 0} />
             </div>
             <div className="crow question-model"><ComposerModelChip /></div>
@@ -1024,10 +1051,12 @@ export function Chat() {
             {/* 여러 칸 질문도 입력칸 자리를 대신 쓴다 — 칩을 여기서 띄운다(B4). 직접 입력으로
                 넘어가면 아래 입력칸 줄이 칩을 맡으므로 겹치지 않게 `!freeForm` 일 때만. */}
             {!freeForm && pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
+            {!freeForm && imageChips}
             <div hidden={freeForm}><QuestionForm key={zone.messageId} form={zone.form} onFree={() => setFreeFormId(zone.messageId)} onSend={send} disabled={busy || !!waiting} /></div>
             {!freeForm && <div className="crow question-model"><ComposerModelChip /></div>}
           </>
         )}
+        <div className="chat-attachment-note" role="status">{imagePending ? '그림 확인 중…' : imageNote}</div>
 
         {(zone.kind === 'running' || zone.kind === 'composer' || zone.kind === 'disconnected' || freeForm) && (
           <>
@@ -1044,19 +1073,21 @@ export function Chat() {
                 인용 칩과 **같은 자리**를 쓰되 겹쳐 뜨지 않게 둘 다 있으면 위아래로 쌓인다. */}
             {pendingEdits > 0 && <div className="recheck-chip" role="status">{EDIT.chip(pendingEdits)}</div>}
             <div className="chat-composer" data-dragging={dragging || undefined}
-              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true) }}
+              onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.stopPropagation(); setDragging(true) } }}
               onDragLeave={() => setDragging(false)}
               onDrop={(e) => {
                 e.preventDefault(); e.stopPropagation(); setDragging(false)
-                const f = e.dataTransfer.files[0]
-                if (f) insertPath(window.knuaf.pathForFile(f))
+                const files = Array.from(e.dataTransfer.files)
+                if (files.length) void attachImages({ kind: 'drop', files })
               }}>
+              {imageChips}
               {/* 한 줄에서 시작해 글이 늘면 자란다 — 최대 높이 뒤에는 스크롤(시안 P/L). */}
               {/* placeholder 는 추천 문구로 바뀌지만 접근 이름은 고정이다(`aria-label`) — 낭독이 흔들리지 않고
                   선택자도 placeholder 에 기대지 않는다. `aria-live` 는 붙이지 않는다(입력칸 이름이 조용해야 한다). */}
               <textarea ref={taRef} value={draft} rows={1} aria-label={CHAT.placeholder}
                 placeholder={suggestion ? CHAT.suggestionPlaceholder(suggestion) : CHAT.placeholder} title={CHAT.placeholderHint}
                 onChange={(e) => setDraft(e.target.value)}
+                onPaste={pasteImages}
                 onKeyDown={(e) => {
                   /**
                    * → 키: 빈 입력칸이면 예시를 **채우기만** 한다(보내지 않는다 — Enter 는 학생 몫).
@@ -1076,8 +1107,8 @@ export function Chat() {
                   void sendBody()
                 }} />
               <div className="crow">
-                {/* 왼쪽 아래 32×32 원형 `+` — 파일 첨부(기존 동작 그대로). */}
-                <button type="button" className="circ" title={CHAT.attach} aria-label={CHAT.attach} onClick={() => void attach()}><Icon name="plus" size={16} /></button>
+                {/* 같은 + 자리에서 그림과 기존 파일 경로를 고른다. */}
+                <button type="button" className="circ" title={CHAT.attach} aria-label={CHAT.attach} disabled={imagePending} onClick={() => void attachImages({ kind: 'pick' })}><Icon name="plus" size={16} /></button>
                 <ComposerModelChip />
                 <span className="sp" />
                 {/* 오른쪽 아래 34×34 원형 위 화살표(먹색 채움) — 작업 중이면 같은 자리 멈추기. */}

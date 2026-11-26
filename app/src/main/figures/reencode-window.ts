@@ -38,6 +38,8 @@ export interface ReencodeOptions {
   decode?: ImageDecoder
   /** 디코드 상한(설계 R4-5: 10초). */
   timeoutMs?: number
+  /** Bound the encoded canvas for a preview, without changing the source bytes. */
+  maxEdge?: number
 }
 
 export const DECODE_TIMEOUT_MS = 10_000
@@ -53,7 +55,7 @@ export const DECODE_TIMEOUT_MS = 10_000
 export async function reencodeToPng(bytes: Uint8Array, options: ReencodeOptions = {}): Promise<ReencodeResult> {
   if (bytes.length === 0) return { ok: false, reason: 'empty' }
   const timeoutMs = options.timeoutMs ?? DECODE_TIMEOUT_MS
-  const decode = options.decode ?? electronDecoder
+  const decode = options.decode ?? ((bytes, timeout, signal) => electronDecoder(bytes, timeout, signal, options.maxEdge))
   const abort = new AbortController()
   const timer = setTimeout(() => abort.abort(), timeoutMs)
   const expired = new Promise<null>((settle) => {
@@ -93,7 +95,7 @@ function isAbortError(error: unknown): boolean {
  * 뒤 AbortError로 거절한다 — 부름쪽만 풀리고 창은 남는 일이 없다. ③ 렌더러가 죽거나(`render-process-gone`)
  * 멈추면(`unresponsive`) 그 창은 못 쓰므로 상한까지 기다리지 않고 바로 실패로 닫는다.
  */
-const electronDecoder: ImageDecoder = async (bytes, _timeoutMs, signal) => {
+async function electronDecoder(bytes: Uint8Array, _timeoutMs: number, signal?: AbortSignal, maxEdge?: number): Promise<DecodedImage> {
   // electron은 Electron 안에서만 값을 내놓는다(`import type`은 지워지므로 안전). 정적 import는
   // 단위 시험(맨 Node)에서 모듈 로드 자체를 깨뜨리므로 값은 여기서 동적으로 가져온다.
   const electron: ElectronModule = await import('electron')
@@ -140,9 +142,11 @@ const electronDecoder: ImageDecoder = async (bytes, _timeoutMs, signal) => {
       const raw = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) raw[i] = binary.charCodeAt(i);
       const bitmap = await createImageBitmap(new Blob([raw]));
-      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const edge = ${JSON.stringify(maxEdge ?? null)};
+      const scale = edge === null ? 1 : Math.min(1, edge / Math.max(bitmap.width, bitmap.height));
+      const canvas = new OffscreenCanvas(Math.max(1, Math.round(bitmap.width * scale)), Math.max(1, Math.round(bitmap.height * scale)));
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(bitmap, 0, 0);
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
       bitmap.close();
       const blob = await canvas.convertToBlob({ type: 'image/png' });
       const buffer = new Uint8Array(await blob.arrayBuffer());

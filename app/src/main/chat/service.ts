@@ -10,6 +10,7 @@ import { ClaudeAuthenticationError, ClaudeConnection } from './claude'
 import { CodexAuthenticationError, CodexConnection } from './codex'
 // v0.7(C4 인계 이음매·잡 러너·레인 실패)와 v0.6.4(지킴이·kordoc MCP)가 같은 파일에 산다.
 import { MainTurnUsageError, subscriptionEnv, type AgentConnection, type AgentOptions, type GuardContext } from './contracts'
+import { ChatImageError, type AgentImage, type ImageBatch, type ChatImages } from './images'
 import { chatConnectionKey } from './jobs/key'
 import { JobRunner, type JobConnection, type JobRecord, type JobResult, type JobSpec, type RelayRequest } from './jobs'
 import { JobStore, type ConsentRecord } from './jobs/store'
@@ -203,6 +204,7 @@ export class ChatService {
   /** 종료 시작과 동시에 새 연결·상태 확인을 막는다. 기존 연결은 close()가 정리한다. */
   beginShutdown(): void {
     this.shuttingDown = true
+    this.opts.chatImages?.clear()
     // 종료도 그림 준비 대기를 깨운다(I-02) — 종료 중에 매달린 전송이 남지 않게.
     for (const prep of this.preps.values()) prep.wake()
   }
@@ -278,6 +280,7 @@ export class ChatService {
   constructor(private opts: {
     skillSource: () => string; userData: string; env?: NodeJS.ProcessEnv
     emit: (s: ChatSnapshot) => void; openExternal: (url: string) => Promise<void>
+    chatImages?: ChatImages
     /** Test seam: build connections without spawning real agent processes (e2e/chat.spec.ts). */
     connectionFactory?: (provider: Provider, options: AgentOptions) => AgentConnection
     /**
@@ -979,9 +982,10 @@ export class ChatService {
       } catch (error) { this.pendingLogins.delete(provider); throw error }
     })
   }
-  async send(root: string, provider: Provider, text: string, requestId: string) {
+  async send(root: string, provider: Provider, text: string, requestId: string, imageBatch?: ImageBatch) {
     agentActivity.ensureActive()
     if (!text.trim() || text.length > 100_000) throw new Error('답변을 입력해 주세요. 한 번에 100,000자까지 보낼 수 있어요.')
+    if (imageBatch && provider !== 'codex' && provider !== 'claude') throw new ChatImageError('provider')
     this.effectiveChoice(provider)
     this.snapshot(root, provider)
     const s = this.snapshots.get(this.key(root, provider))!
@@ -1011,6 +1015,7 @@ export class ChatService {
       // 폴더의 첫 전송에서만 kordoc 런타임을 확인해 이 연결에 넘긴다(§3.2). 실패해도 대화는 간다.
       // 상태를 확인하지 못한 연결은 버리고 새 연결을 받을 수 있다(M1-02) — 그 연결로 실행한다.
       const attach = await this.attachKordoc(s, connection)
+      imageBatch?.accept()
       for (const note of attach.notes) {
         s.messages.push({ id: randomUUID(), role: 'system', text: note, at: new Date().toISOString() })
       }
@@ -1018,7 +1023,8 @@ export class ChatService {
       s.skillHash = version; s.skillLoaded = false; s.state = 'running'; s.error = undefined
       s.errorKind = undefined
       s.authRequired = undefined
-      s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending' })
+      s.messages.push({ id: requestId, role: 'user', text, at: new Date().toISOString(), delivery: 'pending',
+        ...(imageBatch ? { attachments: imageBatch.images.map(item => item.receipt) } : {}) })
       this.publish(s)
       /**
        * 그림 통로 고리 — 학생 메시지가 대화에 남은 뒤, 엔진을 부르기 전. 그림 명령이 없는 판에서는
@@ -1057,7 +1063,7 @@ export class ChatService {
           prep.settle()
           if (this.preps.get(figureKey) === prep) this.preps.delete(figureKey)
         }
-        if (prep.cancelled) {
+        if (prep.cancelled || imageBatch?.current() === false) {
           // 중단·종료가 준비 도중에 왔다. `stop()` 이 이미 `stopped` 를 게시했다 — 여기서 엔진을 부르면
           // 학생이 멈춘 턴이 뒤늦게 시작된다. 잠금만 풀고 지금 스냅샷을 돌려준다.
           //
@@ -1084,7 +1090,7 @@ export class ChatService {
        * 잠금을 그대로 풀고 `endTurn()` **약속만** `figureClosing` 에 잡아 둔다 — 다음 턴이 시작 전에
        * 그 약속을 기다린다(위 `figures` 블록). 통로가 없으면 이 블록 자체가 없다(바이트 동일 경로).
        */
-      const finished = this.execute(s, live, text, requestId)
+      const finished = this.execute(s, live, text, requestId, imageBatch?.images.map(item => item.image))
       const run = figures
         ? finished.finally(() => {
           // 턴이 성공·실패·중단 어느 쪽으로 끝나도 닫는다. 동기 예외까지 삼키고 잠금은 반드시 푼다.
@@ -1103,7 +1109,7 @@ export class ChatService {
       return structuredClone(s)
     } catch (e) { release(); throw e }
   }
-  private async execute(s: ChatSnapshot, connection: AgentConnection, text: string, requestId: string) {
+  private async execute(s: ChatSnapshot, connection: AgentConnection, text: string, requestId: string, images?: readonly AgentImage[]) {
     const key = this.key(s.root, s.provider)
     this.limitTurns.delete(key)
     // 서버 재생(과거 턴)은 스냅샷에 assistant 기록이 하나도 없을 때만 — 이미 있으면
@@ -1157,7 +1163,7 @@ export class ChatService {
           }
           delivered(); this.publish(s)
         }
-      }, replayHistory)
+      }, replayHistory, images)
       delivered()
       // 정상 종료는 답변 도착을 보장하지 않는다. 원인(문맥 소진 등)은 단정하지 않는다.
       // 중단·복구·승인 대기는 기존 상태를 유지하고 무료 본대화에만 안내한다.
@@ -1751,7 +1757,8 @@ export class ChatService {
         root: s.root,
         entry: error.entry,
         reason: 'limit',
-        students: s.messages.filter(m => m.role === 'user').map(m => ({ text: m.text, attachments: [] })),
+        students: s.messages.filter(m => m.role === 'user').map(m => ({ text: m.text,
+          attachments: (m.attachments ?? []).map(({ name, sha256 }) => ({ name, hash: sha256 })) })),
         lastAssistant: lastAssistant ? { text: lastAssistant.text, interrupted: false } : null,
         beforeHashes: store.thesisBaseline(s.root) ?? {},
         afterHashes: thesisHashes(s.root),
@@ -1800,6 +1807,8 @@ export class ChatService {
     if (!seam) throw new LaneFailure('unavailable', '이어 받기가 아직 앱에 이어지지 않았어요.')
     const proposal = seam.visible().find(entry => entry.proposalId === proposalId && entry.root === canonical(root))
     if (!proposal) throw new LaneFailure('not-found', '이어 받을 대화를 찾지 못했어요.')
+    const previous = this.snapshots.get(this.key(root, proposal.oldOwner.company)) ?? this.readChat(root, proposal.oldOwner.company)
+    const imageCount = previous?.messages.reduce((count, message) => count + (message.attachments?.length ?? 0), 0) ?? 0
     const owner = await seam.continue(proposalId)
     if (!owner) throw new LaneFailure('unavailable', '지금은 이어 받을 수 없어요 — 상황이 바뀌었어요.')
     await this.switchOwner(root, owner)
@@ -1807,7 +1816,7 @@ export class ChatService {
       id: randomUUID(), at: new Date().toISOString(), kind: 'handoff-done',
       from: proposal.from,
       to: { company: proposal.entry.company, model: proposal.entry.model ?? '', effort: proposal.entry.effort },
-      archiveId: proposal.proposalId
+      archiveId: proposal.proposalId, ...(imageCount ? { imageCount } : {})
     })
   }
   /** §4-1 [나중에] — 제안을 접는다. 기존 대화 오류 줄이 그대로 남는다. */
@@ -1854,6 +1863,7 @@ export class ChatService {
     this.handoffOpened.set(request.id, previous ? structuredClone(previous) : null)
     await this.connections.get(key)?.stop()
     this.connections.delete(key)
+    this.opts.chatImages?.clear(request.root)
     const fresh: ChatSnapshot = { root: request.root, provider, state: 'idle', messages: [] }
     this.snapshots.set(key, fresh)
     this.publish(fresh)

@@ -1,7 +1,8 @@
 // Node-only registered IPC/ChatService regressions. No Electron or account process is launched.
 import { test, expect } from '@playwright/test'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -10,6 +11,8 @@ import { transpileModule, ModuleKind, ScriptTarget } from 'typescript'
 import { ChatService } from '../src/main/chat/service'
 import { consumePendingDesign } from '../src/main/lanes/cards'
 import type { AgentConnection } from '../src/main/chat/contracts'
+import type { AgentImage } from '../src/main/chat/images'
+import { CHAT_IMAGE_LIMITS } from '../src/shared/chat-image'
 import type * as IpcModule from '../src/main/ipc'
 import type { DependencyReport, Envelope, SidecarInfo } from '../src/shared/types'
 
@@ -50,12 +53,14 @@ function harness(sidecar = new ControlledSidecar()) {
   const dir = mkdtempSync(join(tmpdir(), 'knuaf-main-prep-')), root = join(dir, '합성 논문 A'), other = join(dir, '합성 논문 B')
   mkdirSync(root); mkdirSync(other)
   const handlers = new Map<string, (...args: unknown[]) => unknown>(), sent: string[] = []
+  const deliveredImages: (readonly AgentImage[] | undefined)[] = []
   const settings: { first_project_permission_asked_at?: string; python_override: null } = {
     first_project_permission_asked_at: 'synthetic-consent', python_override: null
   }
   const connection: AgentConnection = { status: async () => ({ connected: true, installed: true, version: 'test', detail: '' }),
     login: async () => { throw new Error('Login is forbidden in this test') },
-    run: async body => { sent.push(body) }, respond: () => {}, stop: async () => {} }
+    run: async (body, _session, _events, _replay, images) => { sent.push(body); deliveredImages.push(images) },
+    respond: () => {}, stop: async () => {} }
   const dependencies: Record<string, unknown> = {
     electron: { app: { isPackaged: false, getPath: () => dir, getVersion: () => '0.6.0' },
       ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler) },
@@ -64,6 +69,7 @@ function harness(sidecar = new ControlledSidecar()) {
     './settings': { loadSettings: () => settings, rememberRecent: () => {}, saveSettings: () => {} },
     './menu': { openGuide: () => {} },
     './agent': { ...realRequire('./agent'), skillSource: () => source },
+    './figures/reencode-window': { reencodeToPng: async () => ({ ok: true, png: Buffer.from([1]) }) },
     './chat/service': { ChatService: class extends ChatService {
       constructor(options: ConstructorParameters<typeof ChatService>[0]) { super({ ...options, connectionFactory: () => connection }) }
     } }
@@ -71,11 +77,47 @@ function harness(sidecar = new ControlledSidecar()) {
   const module: Partial<typeof IpcModule> = {}
   factory(name => Object.hasOwn(dependencies,name) ? dependencies[name] : realRequire(name), module)
   const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null)
-  return { root, other, sidecar, settings, sent, chat: services.chat,
+  return { dir, root, other, sidecar, settings, sent, deliveredImages, chat: services.chat,
     invoke: async (name: string, ...args: unknown[]): Promise<unknown> => handlers.get(name)!(null, ...args),
     cleanup: async () => { await services.chat.close(); rmSync(dir, { recursive: true, force: true }) }
   }
 }
+
+test('image IPC sends only snapshots, rejects paths before engine calls, and persists metadata only', async () => {
+  const h = harness()
+  h.sidecar.ready = true
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII=', 'base64')
+  const file = join(h.dir, 'outside.png')
+  try {
+    writeFileSync(file, png)
+    await h.invoke('project:open', h.root)
+    expect(await h.invoke('deps:ensure', h.root, 'prepare')).toMatchObject({ result: { ok: true } })
+    const scope = await h.invoke('chat:image-scope')
+    const issued = await h.invoke('chat:image-drop', scope, file)
+    expect(issued).toMatchObject({ kind: 'image', chip: { name: 'outside.png' } })
+    if (typeof issued !== 'object' || !issued || !('chip' in issued) || typeof issued.chip !== 'object' ||
+        !issued.chip || !('id' in issued.chip) || typeof issued.chip.id !== 'string') throw new TypeError('No image ticket')
+    const { id } = issued.chip
+    expect(await h.invoke('chat:send', h.root, 'codex', 'no', 'forged', [file])).toHaveProperty('error.code', 'reattach')
+    expect(await h.invoke('chat:image-paste', scope, Buffer.alloc(CHAT_IMAGE_LIMITS.bytes + 1))).toMatchObject({ kind: 'error' })
+    expect(h.sent).toEqual([])
+    unlinkSync(file)
+    expect(await h.invoke('chat:send', h.root, 'codex', 'see it', 'image-turn', [id])).toHaveProperty('result')
+    expect(h.deliveredImages).toEqual([[{ mime: 'image/png', bytes: png }]])
+    const historyDir = join(h.root, '.knuaf-gui')
+    const historyFile = readdirSync(historyDir).find(name => name === 'chat-codex.json')
+    if (!historyFile) throw new Error('No Codex conversation record')
+    const written = readFileSync(join(historyDir, historyFile), 'utf8')
+    expect(JSON.parse(written).messages).toEqual([expect.objectContaining({ attachments: [{
+      name: 'outside.png', mime: 'image/png', size: png.length, sha256: createHash('sha256').update(png).digest('hex')
+    }] })])
+    expect(written).not.toContain(png.toString('base64'))
+    expect(written).not.toContain(file)
+    expect(readdirSync(h.root)).not.toContain('attachments')
+    expect(await h.invoke('chat:send', h.root, 'codex', 'no', 'reused', [id])).toHaveProperty('error.code', 'reattach')
+    expect(h.sent).toEqual(['see it'])
+  } finally { await h.cleanup() }
+})
 
 test('main coalesces automatic/manual installation and holds chat through reconfiguration/recheck', async () => {
   const h = harness(), install = Promise.withResolvers<Envelope>(), verify = Promise.withResolvers<Envelope>()

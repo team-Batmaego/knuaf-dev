@@ -511,6 +511,7 @@ export const useProject = create<ProjectState>((set, get) => ({
     // Publish this visit and register checking before the first follow-up await.
     const settings = get().settings
     currentVisit = seq
+    useChat.getState().clearImages()
     set({
       root, hasProject: opened.hasProject, sidecar: opened.sidecar, status: null, peek: null, firstProjectGate: null,
       // 폴더마다 다른 취향이므로 폴더가 바뀌면 여기서 다시 읽는다(전역 settings 는 그대로).

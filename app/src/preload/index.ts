@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { ChatModels, ChatSnapshot, ModelChoice, Provider } from '../shared/chat'
+import { CHAT_IMAGE_COPY, type ChatImageReply, type ImageScope } from '../shared/chat-image'
 import type { AppInfo, Envelope, OpenProjectReply, PreviewPayload, RpcResult, RuntimeInstallReply, RuntimeStatus } from '../shared/types'
 import type { NoticeChoiceValue, NoticeRow } from '../shared/notice'
 import { UPDATE_RECOVERY_COPY } from '../shared/copy'
@@ -178,7 +179,16 @@ const api = {
     draft: (root: string) => ipcRenderer.invoke('chat:draft', root),
     setDraft: (root: string, text: string, expected?: string) => ipcRenderer.invoke('chat:set-draft', root, text, expected),
     login: (root: string, provider: Provider) => ipcRenderer.invoke('chat:login', root, provider),
-    send: (root: string, provider: Provider, text: string, requestId: string) => ipcRenderer.invoke('chat:send', root, provider, text, requestId),
+    send: (root: string, provider: Provider, text: string, requestId: string, imageIds?: readonly string[]) => ipcRenderer.invoke('chat:send', root, provider, text, requestId, imageIds),
+    imageScope: (): Promise<ImageScope | null> => ipcRenderer.invoke('chat:image-scope'),
+    dropImage: (scope: ImageScope, file: File): Promise<ChatImageReply> => {
+      // Only Electron's dropped File supplies this path. The page cannot pass a path argument.
+      const path = webUtils.getPathForFile(file)
+      return path ? ipcRenderer.invoke('chat:image-drop', scope, path) : Promise.resolve({ kind: 'error', message: CHAT_IMAGE_COPY.read })
+    },
+    pasteImage: (scope: ImageScope, bytes: Uint8Array): Promise<ChatImageReply> => ipcRenderer.invoke('chat:image-paste', scope, bytes),
+    pickImage: (scope: ImageScope): Promise<ChatImageReply> => ipcRenderer.invoke('chat:image-pick', scope),
+    removeImage: (id: string): Promise<void> => ipcRenderer.invoke('chat:image-remove', id),
     respond: (root: string, provider: Provider, id: string, allow: boolean) => ipcRenderer.invoke('chat:respond', root, provider, id, allow),
     stop: (root: string, provider: Provider) => ipcRenderer.invoke('chat:stop', root, provider),
     /**

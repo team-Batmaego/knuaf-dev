@@ -138,6 +138,24 @@ test('§10-23 ⓐ 열거 결과가 thread/start 의 config 로 실리고, 턴 �
   expect(loadCodexThreads(s.guard)).toEqual({ 't-fake': { fingerprint: FOREIGN_FINGERPRINT, turns: ['u-1'] } })
 })
 
+test('T-5 Codex sends the checked bytes as an inline image, never a file input', async () => {
+  const s = scene('inline-image')
+  const conn = connection(s)
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII=', 'base64')
+  try {
+    await conn.run('이 그림에 뭐가 보여?', undefined, s.events, false, [{ mime: 'image/png', bytes }])
+  } finally {
+    await conn.stop()
+  }
+  const turns = s.requests().filter(r => r.method === 'turn/start')
+  expect(turns).toHaveLength(1)
+  expect(turns[0].params.input).toEqual([
+    expect.objectContaining({ type: 'text', text: expect.stringContaining('이 그림에 뭐가 보여?') }),
+    expect.objectContaining({ type: 'skill' }),
+    { type: 'image', url: `data:image/png;base64,${bytes.toString('base64')}` }
+  ])
+})
+
 test('v065 설치 플러그인 실응답은 잠금 config 로 전달된 뒤에만 턴을 연다', async () => {
   const id = 'documents@openai-primary-runtime'
   const s = scene('marketplace', {

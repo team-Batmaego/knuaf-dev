@@ -11,6 +11,7 @@ import { writeFileAtomic } from '../safeWrite'
 // v0.7(한도 실패 구분·레인 출처)와 v0.6.4(지킴이 스레드·도구 잠금, kordoc MCP)가 같은 파일에 산다.
 // `codexTokens`·`tokenRecord` 는 위에서 이미 들여왔다 — 여기서 다시 넣지 않는다.
 import { MainTurnUsageError, type AgentConnection, type AgentEvents, type AgentOptions } from './contracts'
+import { IMAGE_TURN_GUIDE, type AgentImage } from './images'
 import type { ChatModelInfo, ConnectionStatus, PermissionFileChange, PermissionRequest } from '../../shared/chat'
 import { isCrossProviderModelId, resolveCodexAlias } from '../../shared/chat'
 import type { LaneEntry, ModelCatalogEntry } from '../../shared/lanes'
@@ -864,9 +865,9 @@ export class CodexConnection implements AgentConnection {
    * 연결 안에서 한다 — 실패한 rpc 를 닫고 spec 을 비우면 다음 `runTurn` 이 MCP 없이 뜬다.
    * 인자를 빼는 것만으로는 부족하므로 잠금 표식을 함께 세운다(아래 `mcpLocked`).
    */
-  async run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+  async run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false, images: readonly AgentImage[] = []) {
     try {
-      return await this.runTurn(text, sessionId, events, replayHistory)
+      return await this.runTurn(text, sessionId, events, replayHistory, images)
     } catch (e) {
       if (!(e instanceof McpSafetyError)) throw e
       this.mcpSpec = null
@@ -883,7 +884,7 @@ export class CodexConnection implements AgentConnection {
       this.retriedWithoutMcp = true
       // 검증 실패는 `turn/start` 앞이라 그 대화에는 아무 턴도 없다 — 같은 입력으로 새 프로세스에서
       // 다시 시작한다(새 대화면 빈 thread 하나가 남지만 학생 기록에는 아무것도 안 남는다).
-      return this.runTurn(text, sessionId, events, replayHistory)
+      return this.runTurn(text, sessionId, events, replayHistory, images)
     }
   }
   /**
@@ -911,13 +912,13 @@ export class CodexConnection implements AgentConnection {
     return { config: { mcp_servers: { [MCP_SERVER_NAME]: { enabled: false } } }, locked: [MCP_SERVER_NAME] }
   }
   /** 한 턴 전체(기동 검증·턴 시작·완료 대기)를 "진행 중"으로 표시하고 본문을 돈다(M2-R1-02). */
-  private async runTurn(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+  private async runTurn(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory: boolean, images: readonly AgentImage[]) {
     this.turnActive = true
-    try { return await this.turnBody(text, sessionId, events, replayHistory) }
+    try { return await this.turnBody(text, sessionId, events, replayHistory, images) }
     catch (error) { throw this.free && !(error instanceof FreeRelayError) ? freeRelayError(error) : error }
     finally { this.turnActive = false }
   }
-  private async turnBody(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory = false) {
+  private async turnBody(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory: boolean, images: readonly AgentImage[]) {
     let rpc = await this.connect()
     if (!(await this.status()).connected) throw new Error('Codex에서 ChatGPT 계정 로그인을 먼저 완료해 주세요.')
     this.events = events
@@ -1009,7 +1010,11 @@ export class CodexConnection implements AgentConnection {
       this.waiter = { resolve, reject }
       rpc.request('turn/start', {
         threadId: this.thread,
-        input: [{ type: 'text', text: prompt, text_elements: [] }, { type: 'skill', name: SKILL_NAME, path: skillPath }],
+        input: [
+          { type: 'text', text: images.length ? `${prompt}\n\n${IMAGE_TURN_GUIDE}` : prompt, text_elements: [] },
+          { type: 'skill', name: SKILL_NAME, path: skillPath },
+          ...images.map(({ mime, bytes }) => ({ type: 'image', url: `data:${mime};base64,${bytes.toString('base64')}` }))
+        ],
         ...turnModel.params
       }).then(r => {
         // 원장 기록은 첫 알림보다 **먼저** — 턴 id 를 받은 즉시(§4.1-C ⑨).

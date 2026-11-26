@@ -239,6 +239,27 @@ async function rig(
   }
 }
 
+test('Claude image prompt is one streamed user message and the next text turn resumes normally', async () => {
+  const claude = claudeModule()
+  const { root } = box()
+  const connection = new claude.ClaudeConnection({ binary: 'claude', root, skill: join(root, 'skill'), env: {},
+    openExternal: async () => {} })
+  connection.status = async () => ({ installed: true, connected: true, version: null, probe: 'ok', detail: '' })
+  const events = { message: () => {}, permission: () => {}, note: () => {}, session: () => {}, skill: () => {} }
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII=', 'base64')
+  await connection.run('사진을 봐 주세요', 'session-1', events, false, [{ mime: 'image/png', bytes }])
+  const messages: unknown[] = []
+  for await (const message of claude.captured[0].prompt) messages.push(plain(message))
+  expect(messages).toEqual([{ type: 'user', session_id: 'session-1', parent_tool_use_id: null, message: { role: 'user', content: [
+    { type: 'text', text: expect.stringContaining('사진을 봐 주세요') },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: bytes.toString('base64') } }
+  ] } }])
+  expect(claude.captured[0].options.resume).toBe('session-1')
+  await connection.run('이어서 하기', 'session-1', events)
+  expect(claude.captured[1].prompt).toBe('이어서 하기')
+  expect(claude.captured[1].options.resume).toBe('session-1')
+})
+
 /** 카드는 microtask 뒤에 뜬다 — 매달리지 않게 잠깐씩 양보하며 기다린다. */
 async function settle(cond: () => boolean): Promise<void> {
   for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5))
