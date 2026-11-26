@@ -4,7 +4,10 @@
 // `app.exit` 분기를 훼손해도 그것들은 통과했다. 이 시험은 **앱을 진짜로 띄워** 홀드된 턴을
 // 남긴 채 종료하고, (1) 종료가 마감 안에 돌아오는지 (2) 엔진 자식이 남지 않는지
 // (3) `[shutdown]` 진단 줄이 실제로 남는지를 본다.
-import { expect, test, type ElectronApplication } from '@playwright/test'
+import { _electron, expect, test, type ElectronApplication } from '@playwright/test'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
+import { mock } from 'node:test'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -252,4 +255,44 @@ test('launch가 준비 화면 확인에 실패해도 시작한 Electron을 남�
   const pid = /^\d+ stage=boot pid=(\d+) /m.exec(log)?.[1]
   expect(pid, '실제 Electron main PID를 기동 로그에서 읽지 못했다').toBeDefined()
   expect(alive(Number(pid)), '호출자에게 반환되지 않은 Electron이 아직 살아 있다').toBe(false)
+})
+
+test('디버그 연결 실패로 앱 핸들을 못 받아도 원래 오류와 프로세스 회수를 보장한다', async () => {
+  const failure = new Error('debug connection refused')
+  let child: ChildProcess | undefined
+  const launcher = mock.method(_electron, 'launch', async (options: Parameters<typeof _electron.launch>[0]) => {
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', ...(options?.args ?? [])], {
+      detached: process.platform !== 'win32', stdio: 'ignore'
+    })
+    await once(child, 'spawn')
+    throw failure
+  })
+  try {
+    await expect(launch({ env: fakeCodexEnv(join(scratch(), 'bin')) })).rejects.toBe(failure)
+    const pid = child?.pid
+    expect(pid, '기동 대역이 실제 자식 프로세스를 띄웠어야 한다').toBeDefined()
+    expect(alive(Number(pid)), '연결 전에 띄운 소유 프로세스가 남아 있다').toBe(false)
+  } finally {
+    launcher.mock.restore()
+    child?.kill('SIGKILL')
+  }
+})
+
+test('a stalled debug handshake is reclaimed before the active test expires', async ({}, info) => {
+  info.setTimeout(13_000)
+  let child: ChildProcess | undefined
+  const launcher = mock.method(_electron, 'launch', async (options: Parameters<typeof _electron.launch>[0]) => {
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', ...(options?.args ?? [])], {
+      detached: process.platform !== 'win32', stdio: 'ignore'
+    })
+    return Promise.withResolvers<ElectronApplication>().promise
+  })
+  try {
+    await expect(launch({ env: fakeCodexEnv(join(scratch(), 'bin')) })).rejects.toThrow(/deadline exceeded: debug connection/)
+    const pid = child?.pid
+    expect(typeof pid === 'number' && !alive(pid)).toBe(true)
+  } finally {
+    launcher.mock.restore()
+    child?.kill('SIGKILL')
+  }
 })
