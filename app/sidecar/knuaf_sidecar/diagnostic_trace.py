@@ -8,6 +8,7 @@ import time
 
 _STAGES = {
     ("gg_core", "doctor"): "aggregate",
+    ("knuaf_sidecar.methods_core", "_troubleshoot_facts"): "aggregate",
     ("gg_lock", "inspect_lock"): "lock.inspect",
     ("gg_lock", "probe_lock"): "lock.probe",
     ("gg_deps", "doctor"): "dependencies",
@@ -50,7 +51,7 @@ def trace_doctor(ctx):
             begin = calls.pop(id(frame), now)
             record(stage, "end", now, duration_ms=round((now - begin) * 1000, 3))
             if stage == "history":
-                # In the pinned doctor, history is followed by the orphan scan and report assembly.
+                # Both diagnosis paths scan temporary files after history.
                 scan_started = now
                 record("orphan_scan", "start", now)
             elif stage == "aggregate" and scan_started is not None:
