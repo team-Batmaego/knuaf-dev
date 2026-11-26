@@ -484,4 +484,3 @@ test('S-01 12단계 I-01: 사이드카는 띄울 논문 폴더를 알려 주고 
   await h.sidecar.configure('/paper/B', null)
   expect(h.depsProjects).toEqual(['/paper/A', '/paper/B'])
 })
-

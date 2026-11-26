@@ -578,4 +578,3 @@ test('S-01 12단계 I-01: 설치 뒤에 자리가 어긋났으면(링크로 바�
     expect(h.events.slice(h.events.indexOf('lock'))).toEqual(['lock', 'discard', 'discard', 'unlock'])
   } finally { await h.cleanup() }
 })
-
