@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { ChildProcess, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { closeApp, trackLaunch, type ForceKiller } from './electron-lifecycle'
 
@@ -47,62 +47,73 @@ test('close cannot report recovery when no owned PID was obtained', async () => 
     .rejects.toThrow('no owned PID')
 })
 
+// Cleanup signals this fixture instance, not a PID that the OS may have recycled.
+const waitForFixtureStop = `
+  const {existsSync} = require('node:fs');
+  const stopFile = process.argv[1];
+  setInterval(() => { if (existsSync(stopFile)) process.exit(0); }, 25);
+  setTimeout(() => process.exit(0), 30000);
+`
+
 test('a dead launcher cannot hide a descendant that still holds its output', async ({}, info) => {
   const pidFile = info.outputPath('descendant.pid')
+  const stopFile = info.outputPath(`stop-${randomUUID()}`)
   const marker = `--knuaf-e2e-launch-id=${randomUUID()}`
   const script = `
     const {spawn} = require('node:child_process');
     const {writeFileSync} = require('node:fs');
-    // Windows libuv kills non-detached children when this launcher exits.
+    // Windows libuv normally places non-detached children in a kill-on-close job.
+    // Detach the fixture child so it can outlive this launcher.
     // On POSIX the descendant must stay in the launcher's process group.
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', '--', process.argv[2]], {
+    const child = spawn(process.execPath, ['-e', ${JSON.stringify(waitForFixtureStop)}, '--', process.argv[2], process.argv[3]], {
       detached: process.platform === 'win32', stdio: ['ignore', 1, 2],
     });
     child.once('spawn', () => { writeFileSync(process.argv[1], String(child.pid)); process.exit(0); });
   `
   const tracked = trackLaunch(marker)
-  const proc = spawn(process.execPath, ['-e', script, pidFile, marker], { detached: process.platform !== 'win32' })
+  const proc = spawn(process.execPath, ['-e', script, pidFile, stopFile, marker], { detached: process.platform !== 'win32' })
+  let descendantGone = false
   try {
-    const [code] = await once(proc, 'exit')
-    expect(code).toBe(0)
-  } finally { tracked.stop() }
-  const pid = Number(readFileSync(pidFile, 'utf8'))
-  try {
+    try {
+      const [code] = await once(proc, 'exit')
+      expect(code).toBe(0)
+    } finally { tracked.stop() }
+    const pid = Number(readFileSync(pidFile, 'utf8'))
     expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
     expect(process.kill(pid, 0), 'fixture descendant must outlive its launcher').toBe(true)
     expect(proc.stdout.destroyed || proc.stdout.readableEnded).toBe(false)
     await closeApp({ close: async () => {}, process: () => proc }, recorder(), { graceMs: 25 })
     expect(proc.stdout.destroyed || proc.stdout.readableEnded).toBe(true)
     expect(() => process.kill(pid, 0), 'pipe-holding child survived a successful close').toThrow(expect.objectContaining({ code: 'ESRCH' }))
+    descendantGone = true
   } finally {
-    if (Number.isSafeInteger(pid) && pid > 0) {
-      try { process.kill(pid, 'SIGKILL') }
-      catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error }
-    }
+    if (!descendantGone) writeFileSync(stopFile, '')
   }
 })
 
 test('closed pipes do not prove that a silent descendant exited', async ({}, info) => {
   const pidFile = info.outputPath('silent.pid')
+  const stopFile = info.outputPath(`stop-${randomUUID()}`)
   const marker = `--knuaf-e2e-launch-id=${randomUUID()}`
   const script = `
     const {spawn} = require('node:child_process');
     const {writeFileSync} = require('node:fs');
     // Keep the silent orphan alive on Windows, without changing its ancestry or giving it the marker.
-    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
+    const child = spawn(process.execPath, ['-e', ${JSON.stringify(waitForFixtureStop)}, '--', process.argv[2]], {
       detached: process.platform === 'win32', stdio: 'ignore',
     });
     child.once('spawn', () => { writeFileSync(process.argv[1], String(child.pid)); process.exit(0); });
   `
   const tracked = trackLaunch(marker)
-  const proc = spawn(process.execPath, ['-e', script, pidFile, marker], { detached: process.platform !== 'win32' })
+  const proc = spawn(process.execPath, ['-e', script, pidFile, stopFile, marker], { detached: process.platform !== 'win32' })
+  let descendantGone = false
   try {
-    const [code] = await once(proc, 'close')
-    expect(code).toBe(0)
-  } finally { tracked.stop() }
-  const pid = Number(readFileSync(pidFile, 'utf8'))
-  expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
-  try {
+    try {
+      const [code] = await once(proc, 'close')
+      expect(code).toBe(0)
+    } finally { tracked.stop() }
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
     expect(proc.stdout.destroyed || proc.stdout.readableEnded).toBe(true)
     expect(process.kill(pid, 0), 'silent fixture descendant must outlive its launcher').toBe(true)
     const close = closeApp({ close: async () => {}, process: () => proc }, recorder())
@@ -112,9 +123,9 @@ test('closed pipes do not prove that a silent descendant exited', async ({}, inf
     } else {
       await close
       expect(() => process.kill(pid, 0), 'silent child survived a successful close').toThrow(expect.objectContaining({ code: 'ESRCH' }))
+      descendantGone = true
     }
   } finally {
-    try { process.kill(pid, 'SIGKILL') }
-    catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error }
+    if (!descendantGone) writeFileSync(stopFile, '')
   }
 })
