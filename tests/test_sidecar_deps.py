@@ -9,13 +9,14 @@ import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
 from conftest import REPO
 
 sys.path.insert(0, str(REPO / "app/sidecar"))
-from knuaf_sidecar.methods_core import project_deps_report  # noqa: E402
+from knuaf_sidecar.methods_core import project_deps_report, register  # noqa: E402
 from knuaf_sidecar import runner  # noqa: E402
 from knuaf_sidecar.rpc import Context, RpcError, Server  # noqa: E402
 from test_sidecar import Sidecar
@@ -77,6 +78,33 @@ def test_malformed_venv_probe_is_not_reinterpreted_as_install_needed(field, valu
     with pytest.raises(RpcError) as failure:
         project_deps_report(raw)
     assert failure.value.code == "deps_doctor"
+
+
+def test_troubleshooting_facts_do_not_wait_for_project_python(monkeypatch: pytest.MonkeyPatch, project: Path) -> None:
+    """A failed project interpreter must not hide snapshots, temp files or tool detection."""
+    import gg_deps
+
+    orphan = ".gg-import-incomplete-test"
+    (project / orphan).mkdir()
+    probes: list[str] = []
+
+    def time_out(python: Path, module: str, dist: str) -> tuple[bool, str | None]:
+        probes.append(module)
+        raise subprocess.TimeoutExpired([str(python), module, dist], 60)
+
+    monkeypatch.setattr(gg_deps, "venv_python", lambda _: Path(sys.executable))
+    monkeypatch.setattr(gg_deps, "_import_and_version", time_out)
+    out = io.StringIO()
+    server = Server(out=out)
+    register(server)
+    server._handle({"id": "panel", "method": "doctor.all", "params": {"root": str(project), "scope": "troubleshoot"}})
+    reply = json.loads(out.getvalue())
+    assert probes == [], f"Panel diagnosis ran the project Python probe: {probes}"
+    assert reply["id"] == "panel" and "result" in reply, reply
+    facts = reply["result"]
+    assert facts["orphan_files"] == [orphan]
+    assert facts["snapshots"][-1]["revision"] == 2
+    assert facts["kordoc"]["capability_verified"] is False
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX script wrapper; Windows tree termination requires real-device QA")

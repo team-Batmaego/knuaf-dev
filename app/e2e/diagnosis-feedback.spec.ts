@@ -46,6 +46,9 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
         if (typeof params === 'object' && params !== null && 'root' in params && typeof params.root === 'string') {
           if (args[1] === 'lock.info') calls.lock.push(params.root)
           if (args[1] === 'doctor.all') calls.doctor.push(params.root)
+          if (args[1] === 'doctor.all' && (!('scope' in params) || params.scope !== 'troubleshoot')) {
+            throw new Error('Troubleshoot must not request dependency probes')
+          }
         }
         const reply = await real(...args)
         if (args[1] === 'doctor.all' && typeof params === 'object' && params !== null && 'root' in params && typeof params.root === 'string') {
@@ -56,7 +59,6 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
     }, other)
     const calls = () => electronApp.evaluate(() => (globalThis as DiagnosisHost).__diagnosisCalls)
     const expectCalls = (roots: readonly string[]) => expect.poll(calls).toEqual({ lock: roots, doctor: roots })
-    // The real aggregate runs Python import probes; Windows CI took more than 5 s.
     const expectDoctorReplies = (roots: readonly string[]) => expect.poll(() =>
       electronApp.evaluate(() => (globalThis as DiagnosisHost).__doctorReplies), { timeout: 30_000 }).toEqual(roots)
     const settleDiagnosis = async () => {
@@ -229,7 +231,7 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
           if (method === 'doctor.all') {
             probe.diagnosis.push(method)
             // These tests own the not-installed → prepare flow, not the host's tool cache.
-            return { result: { kordoc: { installed: false, cli_path: null, candidates: [] } } }
+            return { result: { snapshots: [], orphan_files: [], kordoc: { installed: false, cli_path: null, capability_verified: false, candidates: [] } } }
           }
           if (method === 'lock.info') probe.diagnosis.push(method)
           return real(...args)
@@ -320,7 +322,7 @@ test('잠금 관찰·probe·정리는 전체 점검 응답을 기다리지 않�
           state.held = true
           await gate.promise
           // Every generation, including the post-cleanup one, delivers the old owner.
-          return { result: { lock: state.snapshot, gg: { orphan_files: ['.gg-import-ci4-observation'] }, snapshots: [] } }
+          return { result: { lock: state.snapshot, orphan_files: ['.gg-import-ci4-observation'], snapshots: [], kordoc: null } }
         }
         const reply = await real(...args)
         if (args[1] === 'lock.info' && state.armLock) { state.lockHeld = true; await lockGate.promise }

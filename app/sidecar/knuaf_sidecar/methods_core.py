@@ -5,6 +5,7 @@ import json
 import sys
 from itertools import chain
 from pathlib import Path
+from typing import TypedDict
 
 from .rpc import RpcError
 from .diagnostic_trace import trace_doctor
@@ -273,11 +274,61 @@ def project_deps_report(report):
     }
 
 
+class TroubleshootToolCandidate(TypedDict):
+    installed: bool
+
+
+class TroubleshootTool(TypedDict):
+    installed: bool
+    cli_path: str | None
+    capability_verified: bool
+    candidates: list[TroubleshootToolCandidate]
+
+
+class TroubleshootFacts(TypedDict):
+    snapshots: list[dict[str, str | int | bool | None]]
+    orphan_files: list[str]
+    kordoc: TroubleshootTool | None
+
+
+def _troubleshoot_facts(root: Path) -> TroubleshootFacts:
+    """Read panel facts without launching Python probes or observing the lock twice."""
+    kordoc: TroubleshootTool | None
+    try:
+        from gg_kordoc import diagnose
+    except ModuleNotFoundError as error:
+        if error.name != "gg_kordoc":
+            raise
+        kordoc = None
+    else:
+        tool = diagnose()
+        kordoc = {
+            "installed": tool["installed"],
+            "cli_path": tool["cli_path"],
+            "capability_verified": tool["capability_verified"],
+            "candidates": [{"installed": candidate["installed"]} for candidate in tool["candidates"]],
+        }
+    try:
+        snapshots = _core().history(root)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        snapshots = []  # An unopened or unreadable canon has no snapshots to show.
+    return {
+        "snapshots": snapshots,
+        "orphan_files": sorted(
+            str(path.relative_to(root))
+            for pattern in (".gg-tmp-*", ".gg-export-*", ".gg-import-*")
+            for path in root.rglob(pattern)
+        ),
+        "kordoc": kordoc,
+    }
+
+
 def doctor_all(ctx, params):
-    core = _core()
     root = _root(params)
     with trace_doctor(ctx):
-        report = core.doctor(root, probe=params.get("probe") is True)
+        if params.get("scope") == "troubleshoot":
+            return _troubleshoot_facts(root)
+        report = _core().doctor(root, probe=params.get("probe") is True)
         out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
         try:
             out["deps"] = project_deps_report(report["deps"])
