@@ -154,7 +154,7 @@ export function revokeTrust(root: string, key: string): boolean {
 export const LOCK_FILE = '.lock'
 const heldHere = new Set<string>()
 const STALE_MS = 10 * 60_000 // 소유자를 알 수 없는(깨진·쓰는 중) 잠금이 이만큼 낡으면 잔해
-const GUARD_STALE_MS = 10_000 // 회수 보호 파일은 밀리초만 쥔다 — 이보다 오래면 그 프로세스가 죽은 것
+const GUARD_UNKNOWN_OWNER_MS = 10_000 // 소유자 pid 를 읽을 수 없는 회수 보호 파일이 이보다 낡으면 잔해(소유자가 보이면 나이를 보지 않는다)
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
@@ -181,27 +181,39 @@ function staleBody(path: string, raw: string): boolean {
  * 낡은 잠금 회수. 판단(`seen`)과 삭제 사이에 다른 프로세스가 회수하고 **새 잠금**을 쥘 수 있으므로, 회수끼리는 보호 파일
  * (`.lock.reclaim`, wx)로 한 번에 하나만 하고, 보호를 쥔 채 **다시 읽어 판단한 그 잠금과 같을 때만** 지운다.
  * 잠금 경로가 있는 동안에는 아무도 wx 로 만들 수 없고(회수는 직렬, 해제는 자기 토큰만), 그러므로 같은 원문이면
- * 그 사이 바뀌지 않았다. 보호 파일 자체가 낡았으면(회수 중 죽음) 치우고 다음 바퀴에 다시 한다.
+ * 그 사이 바뀌지 않았다.
+ *
+ * **살아 있는 소유자의 보호는 나이만으로 빼앗지 않는다**(검토 r3): 회수자가 살아 있는 채 오래 멈췄다 재개해도 그 사이
+ * 다른 회수자가 끼어들 수 없다. 보호 파일은 **소유 프로세스가 죽었을 때만**(또는 소유자를 알 수 없는 깨진 파일이
+ * 오래됐을 때만) 치운다 — 그래서 죽은 PID 가 재사용되면 오래 기다릴 수 있다(취소 가능, 알려진 한계). 삭제 직전에는
+ * 보호 파일이 아직 내 토큰인지 한 번 더 확인한다.
  */
-function reclaimStale(path: string, seen: string): boolean {
+function reclaimStale(path: string, seen: string, hook?: () => void | Promise<void>): boolean | Promise<boolean> {
   const guard = path + '.reclaim', mine = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex') })
   try {
     writeFileSync(guard, mine, { flag: 'wx' })
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     const other = readRaw(guard)
-    let dead = statAge(guard) > GUARD_STALE_MS
-    try { const pid = (JSON.parse(other ?? '') as { pid?: unknown }).pid; if (typeof pid === 'number' && pid !== process.pid) dead = dead || !pidAlive(pid) } catch { /* 깨진 보호 파일은 나이로만 */ }
-    if (dead && readRaw(guard) === other) rmSync(guard, { force: true })
+    let abandoned: boolean
+    try {
+      const pid = (JSON.parse(other ?? '') as { pid?: unknown }).pid
+      abandoned = typeof pid === 'number' ? pid !== process.pid && !pidAlive(pid) : statAge(guard) > GUARD_UNKNOWN_OWNER_MS
+    } catch { abandoned = statAge(guard) > GUARD_UNKNOWN_OWNER_MS } // 소유자를 알 수 없는 깨진·쓰는 중 파일
+    if (abandoned && readRaw(guard) === other) rmSync(guard, { force: true })
     return false
   }
-  try {
-    if (readRaw(path) !== seen) return false // 그사이 다른 작업이 바꿨다 — 지우지 않는다
-    rmSync(path, { force: true })
-    return true
-  } finally {
-    if (readRaw(guard) === mine) rmSync(guard, { force: true })
+  const finish = (): void => { if (readRaw(guard) === mine) rmSync(guard, { force: true }) }
+  const done = async (): Promise<boolean> => {
+    try {
+      const current = readRaw(path) // 판단용 읽기 — 이 값이 `seen` 과 같을 때만 지운다
+      await hook?.() // 시험용: 읽은 직후 멈춘다
+      if (current !== seen || readRaw(guard) !== mine) return false // 그사이 바뀌었거나 보호를 잃었다 — 지우지 않는다
+      rmSync(path, { force: true })
+      return true
+    } finally { finish() }
   }
+  return done()
 }
 
 /**
@@ -212,7 +224,7 @@ function reclaimStale(path: string, seen: string): boolean {
  * 기다리는 동안 `isCancelled()` 가 참이면 null — 호출자가 취소·방문 변경으로 닫는다. 반환 함수가 잠금을 돌려준다.
  * `onStaleJudged` 는 "낡았다고 판단한 직후" 순서를 제어하는 시험용 고리다.
  */
-export async function acquireEnvLock(root: string, opts: { isCancelled?: () => boolean; pollMs?: number; onStaleJudged?: () => void | Promise<void> } = {}): Promise<(() => void) | null> {
+export async function acquireEnvLock(root: string, opts: { isCancelled?: () => boolean; pollMs?: number; onStaleJudged?: () => void | Promise<void>; onReclaimHeld?: () => void | Promise<void> } = {}): Promise<(() => void) | null> {
   mkdirSync(root, { recursive: true })
   const path = join(root, LOCK_FILE), poll = opts.pollMs ?? 100
   const body = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex'), at: new Date().toISOString() })
@@ -232,7 +244,7 @@ export async function acquireEnvLock(root: string, opts: { isCancelled?: () => b
         if (seen === null) continue // 그사이 풀렸다
         if (staleBody(path, seen)) {
           await opts.onStaleJudged?.()
-          if (reclaimStale(path, seen)) continue
+          if (await reclaimStale(path, seen, opts.onReclaimHeld)) continue
         }
       }
     }

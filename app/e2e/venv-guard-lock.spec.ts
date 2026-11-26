@@ -19,7 +19,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const log = (e) => fs.appendFileSync(logFile, name + ' ' + e + ' ' + Date.now() + '\\n')
 ;(async () => {
   const opts = { pollMs: 5 }
-  if (pauseFile) opts.onStaleJudged = async () => { fs.writeFileSync(pauseFile, 'x'); while (!fs.existsSync(goFile)) await sleep(5) }
+  const pause = async () => { fs.writeFileSync(pauseFile, 'x'); while (!fs.existsSync(goFile)) await sleep(5) }
+  if (pauseFile && process.env.PAUSE_AT === 'held') opts.onReclaimHeld = pause
+  else if (pauseFile) opts.onStaleJudged = pause
   const release = await acquireEnvLock(root, opts)
   log('acquired'); await sleep(Number(holdMs)); log('release'); release()
 })()
@@ -32,8 +34,8 @@ function setup() {
   writeFileSync(mod, transpileModule(readFileSync(src, 'utf8'), { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText)
   const child = join(dir, 'child.cjs'); writeFileSync(child, CHILD)
   const log = join(dir, 'log.txt'); writeFileSync(log, '')
-  const run = (name: string, hold: number, pause?: { pause: string; go: string }) => {
-    const proc = spawn(process.execPath, [child, mod, root, name, log, pause?.pause ?? '', pause?.go ?? '', String(hold)], { stdio: 'inherit' })
+  const run = (name: string, hold: number, pause?: { pause: string; go: string; at?: 'held' }) => {
+    const proc = spawn(process.execPath, [child, mod, root, name, log, pause?.pause ?? '', pause?.go ?? '', String(hold)], { stdio: 'inherit', env: { ...process.env, PAUSE_AT: pause?.at ?? '' } })
     return new Promise<number | null>((res) => proc.on('exit', res))
   }
   const events = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => { const [name, event, at] = l.split(' '); return { name, event, at: Number(at) } })
@@ -89,5 +91,40 @@ test('I-01 r2: 해제는 자기 잠금일 때만 지운다 — 남이 쥔 현재
     writeFileSync(join(h.root, '.lock'), foreign) // 내 잠금이 (잘못) 회수되어 남이 쥔 상황
     release!()
     expect(readFileSync(join(h.root, '.lock'), 'utf8')).toBe(foreign)
+  } finally { h.cleanup() }
+})
+
+
+// 검토 r3 I-01: 크래시가 없어도 — 회수 보호를 쥔 살아 있는 프로세스 A 가 10초 넘게 멈추면 B 가 보호를 나이만으로
+// 빼앗아 이전 잠금을 지우고 새 잠금을 쥐고, 재개한 A 가 B 의 현재 잠금을 지워 둘 다 소유했다.
+test('I-01 r3: 살아 있는 회수자가 10초 넘게 멈춰도 보호·잠금을 나이만으로 빼앗지 않는다', async () => {
+  test.setTimeout(60_000)
+  const h = setup()
+  try {
+    writeFileSync(join(h.root, '.lock'), JSON.stringify({ pid: DEAD_PID, at: 'x' }))
+    const pause = join(h.dir, 'a-held'), go = join(h.dir, 'go')
+    const a = h.run('A', 300, { pause, go, at: 'held' })
+    await h.waitFor(() => existsSync(pause)) // A: 보호를 쥐고 주 잠금 원문을 확인한 채 멈춤(살아 있음)
+    await new Promise((r) => setTimeout(r, 10_500)) // 보호 파일이 10초보다 낡아진다
+    const b = h.run('B', 3000)
+    await new Promise((r) => setTimeout(r, 700)) // B 가 (빼앗을 수 있다면) 빼앗아 획득하고 아직 쥐고 있는 동안
+    writeFileSync(go, 'go')
+    expect(await Promise.all([a, b])).toEqual([0, 0])
+    const events = h.events()
+    expect(events.filter((e) => e.event === 'acquired').map((e) => e.name).sort()).toEqual(['A', 'B'])
+    expect(overlaps(events)).toBe(false)
+    expect(existsSync(join(h.root, '.lock'))).toBe(false)
+    expect(existsSync(join(h.root, '.lock.reclaim'))).toBe(false)
+  } finally { h.cleanup() }
+})
+
+test('I-01 r3: 회수 도중 죽은 프로세스의 보호 파일은 PID 사망으로 치우고 회수를 이어 간다', async () => {
+  const h = setup()
+  try {
+    writeFileSync(join(h.root, '.lock'), JSON.stringify({ pid: DEAD_PID, at: 'x' }))
+    writeFileSync(join(h.root, '.lock.reclaim'), JSON.stringify({ pid: DEAD_PID + 1, token: 't' }))
+    expect(await h.run('C', 20)).toBe(0)
+    expect(h.events().map((e) => e.event)).toEqual(['acquired', 'release'])
+    expect(existsSync(join(h.root, '.lock.reclaim'))).toBe(false)
   } finally { h.cleanup() }
 })
