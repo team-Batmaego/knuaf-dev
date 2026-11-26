@@ -39,7 +39,7 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
     activeRef.current = active
     return () => { activeRef.current = false }
   }, [active])
-  const load = useCallback(async () => {
+  const load = useCallback(async (checkDeps = false) => {
     if (!activeRef.current || !root || useProject.getState().root !== root) return
     const seq = ++requestSeq.current
     const lockSeq = ++lockRequestSeq.current
@@ -52,7 +52,8 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
     }).finally(() => {
       if (lockSeq === lockRequestSeq.current) setLockBusy(false)
     })
-    const checked = useProject.getState().prepareDeps(root, { install: false })
+    // Opening a folder owns preparation. Only an explicit recheck invalidates its result.
+    const checked = checkDeps ? useProject.getState().prepareDeps(root, { install: false }) : undefined
     const diagnosed = rpc.doctor(root).then((data) => {
       if (seq === requestSeq.current) setDiagnosis({ root, data })
     }).catch((e: unknown) => {
@@ -124,7 +125,7 @@ export function TroubleshootSections({ active }: { readonly active: boolean }) {
   return (
     <div>
       <div className="row" style={{ marginBottom: 'var(--sp-3)' }}>
-        <button className="quiet" disabled={lockBusy} onClick={load}><Icon name="refresh" size={16} /> 다시 진단</button>
+        <button className="quiet" disabled={lockBusy} onClick={() => void load(true)}><Icon name="refresh" size={16} /> 다시 진단</button>
       </div>
       {err && <Feedback kind={err.kind} title={err.title} body={err.action} details={<code>{err.raw}</code>} />}
       {msg && <Feedback kind="completion" title={msg.title} body={msg.body} />}

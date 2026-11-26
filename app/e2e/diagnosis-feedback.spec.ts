@@ -10,7 +10,7 @@ import { fakeCodexEnv, scratch } from './fixtures/fake-codex'
 
 type RpcHandler = (...args: unknown[]) => Promise<unknown>
 type LockProbe = { held: boolean; lockHeld: boolean; armLock: boolean; snapshot: LockInfo; release: () => void; releaseLock: () => void }
-type MakeProbe = { built: boolean; held: boolean; release: () => void }
+type MakeProbe = { built: boolean; held: boolean; release: () => void; releaseDeps: () => void }
 type ProbeHost = typeof globalThis & { __ci4: LockProbe; __ci4Make: MakeProbe }
 
 type DiagnosisCalls = { lock: string[]; doctor: string[] }
@@ -55,8 +55,9 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
     }, other)
     const calls = () => electronApp.evaluate(() => (globalThis as DiagnosisHost).__diagnosisCalls)
     const expectCalls = (roots: readonly string[]) => expect.poll(calls).toEqual({ lock: roots, doctor: roots })
+    // The real aggregate runs Python import probes; Windows CI took more than 5 s.
     const expectDoctorReplies = (roots: readonly string[]) => expect.poll(() =>
-      electronApp.evaluate(() => (globalThis as DiagnosisHost).__doctorReplies)).toEqual(roots)
+      electronApp.evaluate(() => (globalThis as DiagnosisHost).__doctorReplies), { timeout: 30_000 }).toEqual(roots)
     const settleDiagnosis = async () => {
       // Cross the committed render/effect boundary and then drain earlier sends from this renderer.
       await page.evaluate(async () => {
@@ -111,9 +112,9 @@ test('문제 해결이 보일 때만 잠금과 전체 진단을 조회한다', a
     await troubleTab.click()
     await expectCalls([root, root])
     await expect(lockHead).toContainText('잠금 구조 확인됨')
+    await expectDoctorReplies([root, root])
     await openPreset(page, 'fix:orphans')
     await expect(settings.locator('details[data-preset="fix:orphans"]')).toContainText(orphan)
-    await expectDoctorReplies([root, root])
     await settleDiagnosis()
     expect(await calls()).toEqual({ lock: [root, root], doctor: [root, root] })
 
@@ -187,7 +188,6 @@ type ToolPreparationProbe = {
   clientId: string | null
   cancelled: string[]
   diagnosis: string[]
-  doctorDone: number
   finish: () => void
 }
 type ToolPreparationHost = typeof globalThis & { __toolPreparation: ToolPreparationProbe }
@@ -204,7 +204,7 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
         const real = ipc._invokeHandlers?.get('rpc')
         const cancel = ipc._invokeHandlers?.get('rpc:cancel')
         if (!real || !cancel) throw new Error('project RPC handlers not found')
-        const probe: ToolPreparationProbe = { clientId: null, cancelled: [], diagnosis: [], doctorDone: 0, finish: () => {} }
+        const probe: ToolPreparationProbe = { clientId: null, cancelled: [], diagnosis: [], finish: () => {} }
         Object.assign(globalThis, { __toolPreparation: probe })
         ipcMain.removeHandler('rpc')
         ipcMain.handle('rpc', async (...args: unknown[]) => {
@@ -221,10 +221,13 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
             return { result: { ok: true, exit: 0, data: null, path: null, status: null, block_reason: null,
               stdout: '', stderr: '', argv: [], python: 'fixture', duration_ms: 1 } satisfies Envelope }
           }
-          if (method === 'lock.info' || method === 'doctor.all') probe.diagnosis.push(method)
-          const reply = await real(...args)
-          if (method === 'doctor.all') probe.doctorDone++
-          return reply
+          if (method === 'doctor.all') {
+            probe.diagnosis.push(method)
+            // These tests own the not-installed → prepare flow, not the host's tool cache.
+            return { result: { kordoc: { installed: false, cli_path: null, candidates: [] } } }
+          }
+          if (method === 'lock.info') probe.diagnosis.push(method)
+          return real(...args)
         })
         ipcMain.removeHandler('rpc:cancel')
         ipcMain.handle('rpc:cancel', (...args: unknown[]) => {
@@ -237,8 +240,8 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
         })
       })
       const readProbe = () => electronApp.evaluate(() => {
-        const { clientId, cancelled, diagnosis, doctorDone } = (globalThis as ToolPreparationHost).__toolPreparation
-        return { clientId, cancelled, diagnosis, doctorDone }
+        const { clientId, cancelled, diagnosis } = (globalThis as ToolPreparationHost).__toolPreparation
+        return { clientId, cancelled, diagnosis }
       })
       const settings = page.locator('dialog[data-screen="settings"]')
       const tool = settings.locator('details[data-preset="fix:kordoc"]')
@@ -252,7 +255,8 @@ for (const surface of ['설정 닫기', '다른 탭'] as const) {
 
       await navTo(page, '설정')
       await openPreset(page, 'fix:kordoc')
-      await expect.poll(async () => (await readProbe()).doctorDone).toBe(1)
+      await expect(tool).toContainText('아직 없어요.')
+      expect((await readProbe()).diagnosis).toEqual(['lock.info', 'doctor.all'])
       await prep.click()
       await expect(tool).toContainText('문서 읽기 도구 확인 중')
       const first = (await readProbe()).clientId
@@ -376,16 +380,22 @@ test('DOCX 결과는 갱신이 끝난 뒤 진행 표시와 함께가 아닌 단�
       const ipc = ipcMain as unknown as { _invokeHandlers: Map<string, RpcHandler> }
       const real = ipc._invokeHandlers.get('rpc')!
       const gate = Promise.withResolvers<void>()
-      const state = { built: false, held: false, release: gate.resolve }
+      const deps = Promise.withResolvers<void>()
+      const state = { built: false, held: false, release: gate.resolve, releaseDeps: deps.resolve }
       ;(globalThis as ProbeHost).__ci4Make = state
       ipcMain.removeHandler('rpc')
       ipcMain.handle('rpc', async (...args: unknown[]) => {
+        if (args[1] === 'deps.doctor') await deps.promise
         const reply = await real(...args)
         if (args[1] === 'docx.build') state.built = true
         if (args[1] === 'project.status' && state.built) { state.held = true; await gate.promise }
         return reply
       })
     })
+    // A slow dependency recheck used to invalidate this folder's proven readiness
+    // whenever Troubleshoot reopened, even without clicking 다시 진단.
+    await navTo(page, '설정')
+    await expect(page.locator('dialog[open] [data-preset="fix:lock"] .card-head')).toContainText('잠금 구조 확인됨')
     await navTo(page, '결과물')
     const row = page.locator('.paper-head .popover [data-make="docx"]')
     await row.getByRole('button').click()
@@ -403,5 +413,12 @@ test('DOCX 결과는 갱신이 끝난 뒤 진행 표시와 함께가 아닌 단�
     await expect(row.locator('.make-fb')).toContainText('DOCX를 만들었어요')
     await expect(row.locator('.make-fb.running')).toHaveCount(0)
     await expect(row.locator('.pop-make > button')).toBeEnabled()
-  } finally { await electronApp.close() }
+  } finally {
+    await electronApp.evaluate(() => {
+      const probe = (globalThis as Partial<ProbeHost>).__ci4Make
+      probe?.releaseDeps()
+      probe?.release()
+    })
+    await electronApp.close()
+  }
 })
