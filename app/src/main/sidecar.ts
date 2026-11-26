@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline'
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import type { RpcError, SidecarInfo } from '../shared/types'
-import { choosePython, depsNoneDir, depsVenv, scriptsDir, sidecarDir } from './python'
+import { choosePython, depsNoneDir, depsVenv, revokeDepsTrust, scriptsDir, sidecarDir } from './python'
 import { skillSwitch } from './update/switch'
 import { agentActivity } from './update/activity'
 import { diag } from './diagLog'
@@ -20,6 +20,9 @@ type OwnedProcess = {
 const START_CANCELLED: RpcError = { code: 'sidecar_start_cancelled', message: 'sidecar startup interrupted by stop' }
 
 /** Owns one sidecar until both its process and stdio have closed. */
+/** 앱 환경 python 고장으로 볼 수 있는 시작 실패 — 철회 후 기본 실행기로 한 번 되돌린다(I-04). */
+const REVOCABLE_START_FAILURES = new Set(['spawn_failed', 'sidecar_exited', 'sidecar_start_timeout'])
+
 export class Sidecar extends EventEmitter {
   private owner: OwnedProcess | null = null
   private pending = new Map<string, Pending>()
@@ -88,7 +91,7 @@ export class Sidecar extends EventEmitter {
     const pid = this.owner?.child.pid
     return typeof pid === 'number' && pid > 0 ? [pid] : []
   }
-  private async configureNow(projectRoot: string | null, override: string | null, version: number): Promise<SidecarInfo> {
+  private async configureNow(projectRoot: string | null, override: string | null, version: number, retried = false): Promise<SidecarInfo> {
     if (version !== this.stopVersion) throw START_CANCELLED
     this.projectRoot = projectRoot
     this.override = override
@@ -123,6 +126,14 @@ export class Sidecar extends EventEmitter {
     } catch (error) {
       // An explicit stop already owns cleanup; do not retry its failure or extend its deadline.
       if (version === this.stopVersion) await this.stopNow()
+      // I-04: 표식 있는 앱 환경의 python 이 안 떠서 폴더가 못 열리는 길을 닫는다 — 그 환경의 신뢰를 철회하고(표식만)
+      // 기본 실행기로 한 번 다시 띄운다. 학생이 고른 실행기(env)·기본 실행기 자체의 실패는 대상이 아니다.
+      if (!retried && pick.kind === 'venv' && version === this.stopVersion && REVOCABLE_START_FAILURES.has((error as RpcError)?.code)) {
+        if (revokeDepsTrust(override)) {
+          this.emit('log', { stream: 'stderr', line: '의존성 환경의 python 이 시작되지 않아 신뢰를 철회하고 기본 실행기로 다시 시작해요.' })
+          return this.configureNow(projectRoot, override, version, true)
+        }
+      }
       throw error
     } finally {
       clearTimeout(timer)

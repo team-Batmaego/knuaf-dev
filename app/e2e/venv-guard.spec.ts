@@ -180,3 +180,59 @@ test('B-01: 환경이 없을 때 모든 갈래가 같은 "없음" 경로(앱 데
     expect(existsSync(none)).toBe(false)
   } finally { h.cleanup() }
 })
+
+test('I-01 실제 잠금: 한 번에 하나, 취소하면 null, 죽은 프로세스의 잠금은 잔해로 치운다', async () => {
+  const h = harness()
+  try {
+    const de = h.depsEnv as Record<string, (...a: unknown[]) => unknown>
+    const root = join(h.dir, 'userData', 'deps')
+    const acquire = (opts?: object) => de.acquireEnvLock(root, { pollMs: 5, ...opts }) as Promise<(() => void) | null>
+    const first = await acquire()
+    expect(first).not.toBeNull()
+    expect(existsSync(join(root, '.lock'))).toBe(true)
+    let secondGot = false
+    const second = acquire().then((release) => { secondGot = true; return release })
+    await new Promise((r) => setTimeout(r, 40))
+    expect(secondGot).toBe(false) // 기다린다
+    let cancelled = false
+    expect(await acquire({ isCancelled: () => cancelled || (cancelled = true) })).toBeNull() // 기다리다 취소
+    first!()
+    const release2 = await second
+    expect(secondGot).toBe(true)
+    release2!()
+    expect(existsSync(join(root, '.lock'))).toBe(false)
+    // 죽은 프로세스가 남긴 잠금: 치우고 가져간다
+    writeFileSync(join(root, '.lock'), JSON.stringify({ pid: 2 ** 22 + 12345, at: 'x' }))
+    const third = await acquire()
+    expect(third).not.toBeNull()
+    third!()
+    // 살아 있는 다른 프로세스(부모)의 잠금: 가져가지 못한다
+    writeFileSync(join(root, '.lock'), JSON.stringify({ pid: process.ppid, at: 'x' }))
+    let n = 0
+    expect(await acquire({ isCancelled: () => ++n > 5 })).toBeNull()
+    rmSync(join(root, '.lock'), { force: true })
+  } finally { h.cleanup() }
+})
+
+test('I-03 표식 되돌리기: 원문 그대로 복원, 없었으면 제거, 신뢰 철회는 표식만 지운다', () => {
+  const h = harness()
+  try {
+    const de = h.depsEnv as Record<string, (...a: unknown[]) => unknown>
+    const root = join(h.dir, 'userData', 'deps'), key = 'aaaaaaaaaaaaaaaa', env = join(root, key)
+    mkdirSync(join(env, 'bin'), { recursive: true }); writeFileSync(join(env, 'bin', 'python3'), '')
+    expect(de.readMark(root, key)).toBeNull()
+    de.markReady(root, key)
+    expect(de.trustedEnv(root, key)).toBe(env)
+    const original = de.readMark(root, key) as string
+    de.markReady(root, key, { again: true })
+    de.restoreMark(root, key, original)
+    expect(de.readMark(root, key)).toBe(original)
+    de.restoreMark(root, key, null)
+    expect(de.trustedEnv(root, key)).toBe('')
+    expect(existsSync(join(env, 'bin', 'python3'))).toBe(true) // 환경 자체는 그대로(치우는 것은 discardUnmarked)
+    de.markReady(root, key)
+    expect(de.revokeTrust(root, key)).toBe(true)
+    expect(de.trustedEnv(root, key)).toBe('')
+    expect(de.revokeTrust(root, '_none')).toBe(false)
+  } finally { h.cleanup() }
+})

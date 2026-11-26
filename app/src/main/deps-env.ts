@@ -9,7 +9,7 @@
  * Electron 을 모른다: 뿌리 경로는 호출자(`python.ts`)가 넘긴다. 그래서 노드 시험이 그대로 부를 수 있다.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join, relative, isAbsolute } from 'node:path'
 
@@ -118,4 +118,78 @@ export async function pruneEnvs(root: string, keepKey: string): Promise<string[]
     try { await rm(o.dir, { recursive: true, force: true }); removed.push(o.dir) } catch { /* 다음 시작 때 */ }
   }
   return removed
+}
+
+/** 이번 작업 전의 표식 원문(없으면 null). 실패·취소 때 이것으로 되돌린다(I-03). */
+export function readMark(root: string, key: string): string | null {
+  if (!KEY_SHAPE.test(key)) return null
+  try { return readFileSync(join(envDir(root, key), READY_FILE), 'utf-8') } catch { return null }
+}
+
+/**
+ * 표식을 `before` 로 되돌린다: 이전에 있었으면 그 원문 그대로(이전 정상 환경은 계속 신뢰), 없었으면 표식을 지운다
+ * (그러면 표식 없는 잔해가 되어 `discardUnmarked` 가 치울 수 있다). 앱 데이터 뿌리 안 키 폴더에서만 한다.
+ */
+export function restoreMark(root: string, key: string, before: string | null): void {
+  if (!KEY_SHAPE.test(key)) return
+  const dir = envDir(root, key)
+  if (!inside(root, dir)) return
+  const file = join(dir, READY_FILE)
+  if (before === null) { rmSync(file, { force: true }); return }
+  const tmp = file + '.tmp-' + process.pid
+  writeFileSync(tmp, before)
+  renameSync(tmp, file)
+}
+
+/** 신뢰 철회(I-04): 표식만 지운다 — 환경 폴더는 다음 준비 때 `discardUnmarked` 가 치운다. 사용자 파일은 안 건드린다. */
+export function revokeTrust(root: string, key: string): boolean {
+  if (!KEY_SHAPE.test(key)) return false
+  const dir = envDir(root, key)
+  if (!inside(root, dir) || !existsSync(join(dir, READY_FILE))) return false
+  rmSync(join(dir, READY_FILE), { force: true })
+  return true
+}
+
+// ---- 공유 환경 전환 잠금(설계 §3.2 `deps/.lock`, 검토 r1 I-01) ----------------------------------------------
+export const LOCK_FILE = '.lock'
+const heldHere = new Set<string>()
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
+}
+
+function staleLock(path: string): boolean {
+  try {
+    const held = JSON.parse(readFileSync(path, 'utf-8')) as { pid?: unknown }
+    if (typeof held.pid !== 'number') return statAge(path) > 10 * 60_000
+    return held.pid === process.pid ? !heldHere.has(path) : !pidAlive(held.pid)
+  } catch { return statAge(path) > 10 * 60_000 } // 쓰는 중이거나 깨진 파일 — 한참 지난 것만 잔해로 본다
+}
+function statAge(path: string): number {
+  try { return Date.now() - statSync(path).mtimeMs } catch { return Infinity }
+}
+
+/**
+ * 공유 환경(`deps/<키>`)을 건드리는 준비 한 건이 쥐는 잠금. 폴더(root)별 flight 는 합쳐도 설치 대상은 PC 하나라서,
+ * 잔해 정리~설치~검증~표식~재시작~실패 정리가 끝날 때까지 다른 준비가 같은 환경을 지우거나 덮지 못하게 한다.
+ * 같은 프로세스(폴더 전환)와 다른 프로세스(앱 둘) 모두 `wx` 파일로 막고, 쥔 프로세스가 죽은 잠금은 잔해로 치운다.
+ * 기다리는 동안 `isCancelled()` 가 참이면 null — 호출자가 취소·방문 변경으로 닫는다. 반환 함수가 잠금을 돌려준다.
+ */
+export async function acquireEnvLock(root: string, opts: { isCancelled?: () => boolean; pollMs?: number } = {}): Promise<(() => void) | null> {
+  mkdirSync(root, { recursive: true })
+  const path = join(root, LOCK_FILE), poll = opts.pollMs ?? 100
+  for (;;) {
+    if (opts.isCancelled?.()) return null
+    if (!heldHere.has(path)) {
+      try {
+        writeFileSync(path, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' })
+        heldHere.add(path)
+        return () => { heldHere.delete(path); rmSync(path, { force: true }) }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (staleLock(path)) { rmSync(path, { force: true }); continue }
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, poll))
+  }
 }

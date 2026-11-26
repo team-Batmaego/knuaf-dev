@@ -4,7 +4,7 @@ import { app } from 'electron'
 import { managedPython } from './runtime'
 import { skillSource } from './agent'
 import { loadSettings } from './settings'
-import { depsKey, envPython, pruneEnvs, trustedEnv } from './deps-env'
+import { depsKey, envPython, pruneEnvs, revokeTrust, trustedEnv } from './deps-env'
 
 /** app/ in a checkout (out/main → ../..); resources live next to it when packaged. */
 export const APP_ROOT = resolve(__dirname, '..', '..')
@@ -52,6 +52,14 @@ export function depsVenv(override: string | null = null): string {
 /** 오래된 키 환경 정리(§3.2) — 지금 설정의 키 + 직전 1개만 남긴다. 앱 시작 때 한 번. */
 export function pruneDepsEnvs(): Promise<string[]> {
   return pruneEnvs(depsRoot(), depsEnvKey(loadSettings().python_override))
+}
+
+/**
+ * 신뢰 철회(I-04): 표식 있는 앱 환경의 python 이 고장 나 사이드카가 못 뜰 때, 그 환경의 표식만 지운다 — 다음 선택은
+ * 기본 실행기이고 준비 단추가 다시 만든다(표식 없는 폴더는 `discardUnmarked` 가 치운다). 환경 폴더는 여기서 안 지운다.
+ */
+export function revokeDepsTrust(override: string | null = null): boolean {
+  return revokeTrust(depsRoot(), depsEnvKey(override))
 }
 
 export function depsPython(override: string | null = null): string | null {

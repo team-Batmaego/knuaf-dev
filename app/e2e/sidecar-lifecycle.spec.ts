@@ -70,6 +70,10 @@ function harness(platform = 'darwin') {
   let deps = ''
   let automaticReady = true
   let failSpawn = false
+  const exitQueue: number[] = []
+  let venvTrusted = false
+  let revoked = 0
+  const spawnCommands: string[] = []
   const exported: { exports: { Sidecar?: new () => Sidecar } } = { exports: {} }
   runInNewContext(source, {
     module: exported, exports: exported.exports, Promise,
@@ -84,7 +88,10 @@ function harness(platform = 'darwin') {
       // 이 스펙 기준으로 풀리고, 그 오류가 16개 시험을 한꺼번에 죽였다(맥 CI, e102bb4).
       if (name === './diagLog') return { diag: () => {} }
       if (name === './python') return {
-        choosePython: (_root: string | null, override: string | null) => ({ python: override ?? 'base', kind: 'env' }),
+        choosePython: (_root: string | null, override: string | null) => venvTrusted
+          ? { python: 'venv-python', kind: 'venv' } : { python: override ?? 'base', kind: 'env' },
+        // I-04: 신뢰 철회 — 이후 선택은 앱 환경이 아니라 기본 실행기
+        revokeDepsTrust: () => { revoked++; const was = venvTrusted; venvTrusted = false; return was },
         scriptsDir: () => scripts, sidecarDir: () => '/sidecar',
         // S-01 설계 3판 §3.3: 신뢰된 앱 데이터 의존성 환경(없으면 빈 문자열)
         depsVenv: () => deps,
@@ -93,6 +100,7 @@ function harness(platform = 'darwin') {
       }
       if (name === 'node:child_process') return { spawn: (command: string, args: string[], options: object) => {
         spawnArgs.push(args)
+        spawnCommands.push(command)
         spawnEnvs.push(((options as { env?: Record<string, string | undefined> }).env) ?? {})
         const child = new Child(1000 + children.length + killers.length)
         if (command.endsWith('taskkill.exe')) {
@@ -101,6 +109,9 @@ function harness(platform = 'darwin') {
         if (failSpawn) {
           failSpawn = false
           queueMicrotask(() => { child.emit('error', new Error('ENOENT')); child.close() })
+        } else if (exitQueue.length) {
+          const code = exitQueue.shift()!
+          queueMicrotask(() => { child.exit(code); child.close() }) // ready 전에 죽는 고장 환경 python
         } else if (automaticReady) queueMicrotask(() => child.ready())
         children.push(child)
         return child
@@ -115,6 +126,9 @@ function harness(platform = 'darwin') {
     setDeps: (path: string) => { deps = path },
     manualReady: () => { automaticReady = false },
     failNextSpawn: () => { failSpawn = true },
+    exitNextSpawn: (...codes: number[]) => { exitQueue.push(...codes) },
+    trustVenv: () => { venvTrusted = true },
+    spawnCommands, revokedCount: () => revoked,
     async advance(ms: number) {
       await flush()
       const end = now + ms
@@ -427,4 +441,38 @@ test('B-01: 준비 전에도 사이드카 기동 env·호출 인자의 의존성
   await h.sidecar.configure('/project', 'base')
   expect(h.spawnEnvs[1].KNUAF_DEPS_VENV).toBe('/app-data/deps/0123456789abcdef')
   await h.sidecar.stop()
+})
+
+
+// 검토 r1 I-04: 표식 있는 앱 환경의 python 이 고장 나 사이드카가 못 뜨면 폴더가 안 열리고, 안내된 "패키지 준비"도 닿지 못했다.
+test('I-04: 신뢰한 앱 환경 python 이 안 떠도 신뢰를 철회하고 기본 실행기로 다시 띄워 열린다 (exit)', async () => {
+  const h = harness(); h.trustVenv(); h.exitNextSpawn(98)
+  const info = await h.sidecar.configure('/project', null)
+  expect(h.revokedCount()).toBe(1)
+  expect(h.spawnCommands).toEqual(['venv-python', 'base'])
+  expect(info).toMatchObject({ running: true, kind: 'env', depsVenv: '' })
+  await h.sidecar.stop()
+})
+
+test('I-04: 못 띄움(spawn 실패)도 같다 — 한 번만 되돌려 다시 띄운다', async () => {
+  const h = harness(); h.trustVenv(); h.failNextSpawn()
+  const info = await h.sidecar.configure('/project', null)
+  expect(h.revokedCount()).toBe(1)
+  expect(info.running).toBe(true)
+  expect(h.spawnCommands).toEqual(['venv-python', 'base'])
+  await h.sidecar.stop()
+})
+
+test('I-04: 학생이 고른 실행기(env)는 철회·재시도 대상이 아니다 — 그대로 실패한다', async () => {
+  const h = harness(); h.failNextSpawn()
+  await expect(h.sidecar.configure('/project', 'base')).rejects.toMatchObject({ code: 'spawn_failed' })
+  expect(h.revokedCount()).toBe(0)
+  expect(h.spawnCommands).toEqual(['base'])
+})
+
+test('I-04: 다시 띄운 기본 실행기도 실패하면 더 되풀이하지 않는다', async () => {
+  const h = harness(); h.trustVenv(); h.exitNextSpawn(98, 97) // 첫 spawn(앱 환경)과 다시 띄운 spawn(기본 실행기) 모두 죽는다
+  await expect(h.sidecar.configure('/project', null)).rejects.toMatchObject({ code: 'sidecar_exited' })
+  expect(h.revokedCount()).toBe(1)
+  expect(h.spawnCommands).toHaveLength(2)
 })

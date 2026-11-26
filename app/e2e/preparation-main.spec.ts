@@ -33,13 +33,15 @@ class ControlledSidecar extends EventEmitter {
   calls: { method: string; params: Record<string, unknown> }[] = []
   cancelled: string[] = []
   ready = false
+  up = true
   diagnose: () => Promise<Envelope> = async () => env(this.ready)
   install: () => Promise<Envelope> = async () => { this.ready = true; return env(true) }
-  status(): SidecarInfo { return { python: '/bundled/python', kind: 'bundled', scriptsDir: join(source, 'scripts'), running: true } }
-  async configure(root: string) { this.configured.push(root); return this.status() }
+  status(): SidecarInfo { return { python: '/bundled/python', kind: 'bundled', scriptsDir: join(source, 'scripts'), running: this.up } }
+  async configure(root: string) { this.configured.push(root); this.up = true; return this.status() }
   isWrite(method: string) { return method === 'deps.ensure' }
   cancel(id: string) { this.cancelled.push(id) }
   async call(method: string, params: Record<string, unknown>, _onEvent: unknown, onId?: (id: string) => void) {
+    if (!this.up) throw { code: 'sidecar_down', message: 'Python 사이드카가 실행 중이 아님' }
     this.calls.push({ method, params }); onId?.(`m${this.calls.length}`)
     if (method === 'deps.doctor') return this.diagnose()
     if (method === 'deps.ensure') return this.install()
@@ -50,7 +52,8 @@ function harness(sidecar = new ControlledSidecar()) {
   const dir = mkdtempSync(join(tmpdir(), 'knuaf-main-prep-')), root = join(dir, '합성 논문 A'), other = join(dir, '합성 논문 B')
   mkdirSync(root); mkdirSync(other)
   const handlers = new Map<string, (...args: unknown[]) => unknown>(), sent: string[] = []
-  const marked: string[] = [], discarded: string[] = []
+  const marked: string[] = [], discarded: string[] = [], restored: (string | null)[] = [], events: string[] = []
+  let prior: string | null = null, trusted = '', lockHeld = false
   const settings: { first_project_permission_asked_at?: string; python_override: null } = {
     first_project_permission_asked_at: 'synthetic-consent', python_override: null
   }
@@ -64,8 +67,18 @@ function harness(sidecar = new ControlledSidecar()) {
     './python': { APP_ROOT: appRoot, basePython: () => '/bundled/python', bundledPython: () => null, venvPython: () => null, wheelhouseDir: () => '/offline/wheels',
       depsRoot: () => join(dir, 'deps'), depsEnvKey: () => 'k0' },
     // S-01 I-01: 표식 쓰기·잔해 폐기는 기록만 한다(대역 사이드카는 실제 환경을 만들지 않는다).
-    './deps-env': { markReady: (root: string, key: string) => { marked.push(join(root, key)); return join(root, key) },
-      discardUnmarked: (root: string, key: string) => { discarded.push(join(root, key)); return false } },
+    './deps-env': { markReady: (root: string, key: string) => { marked.push(join(root, key)); events.push('mark'); return join(root, key) },
+      discardUnmarked: (root: string, key: string) => { discarded.push(join(root, key)); events.push('discard'); return false },
+      // I-03: 이번 작업 전의 표식(있으면 문자열)을 읽어 두고, 실패·취소 때 그것으로 되돌린다(없었으면 null → 표식 제거).
+      trustedEnv: () => trusted,
+      readMark: () => prior,
+      restoreMark: (_root: string, _key: string, before: string | null) => { restored.push(before); events.push('restore') },
+      // I-01: 공유 환경 전환 잠금 — 한 번에 한 작업. 기다리는 동안 취소·방문 변경이면 null.
+      acquireEnvLock: async (_root: string, opts?: { isCancelled?: () => boolean }) => {
+        while (lockHeld) { if (opts?.isCancelled?.()) return null; await new Promise(r => setTimeout(r, 5)) }
+        lockHeld = true; events.push('lock')
+        return () => { lockHeld = false; events.push('unlock') }
+      } },
     './settings': { loadSettings: () => settings, rememberRecent: () => {}, saveSettings: () => {} },
     './menu': { openGuide: () => {} },
     './agent': { ...realRequire('./agent'), skillSource: () => source },
@@ -76,7 +89,8 @@ function harness(sidecar = new ControlledSidecar()) {
   const module: Partial<typeof IpcModule> = {}
   factory(name => Object.hasOwn(dependencies,name) ? dependencies[name] : realRequire(name), module)
   const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null)
-  return { root, other, sidecar, settings, sent, marked, discarded, chat: services.chat,
+  return { root, other, sidecar, settings, sent, marked, discarded, restored, events,
+    setPrior: (v: string | null) => { prior = v }, setTrusted: (v: string) => { trusted = v }, chat: services.chat,
     invoke: async (name: string, ...args: unknown[]): Promise<unknown> => handlers.get(name)!(null, ...args),
     cleanup: async () => { await services.chat.close(); rmSync(dir, { recursive: true, force: true }) }
   }
@@ -388,4 +402,122 @@ test('R272-01 folder switch during model lookup preserves the reservation', asyn
     expect(store.pendingDesign(h.root)).toEqual(pending)
     expect(store.pendingDesign(h.other)).toBeNull()
   } finally { release.resolve(); await h.cleanup() }
+})
+
+
+// 검토 r1 I-01: 폴더(root)별 flight 는 합쳐도 설치 대상은 PC 하나(deps/<키>)다 — 다른 폴더의 준비가 진행 중인 설치 환경을
+// 잔해로 알고 지우면 안 된다. 잔해 정리~설치~검증~표식~재시작~실패 정리까지 한 작업이 전환 잠금을 쥔다.
+test('S-01 I-01: 다른 폴더의 준비는 공유 환경 설치가 끝날 때까지 잔해 정리·설치를 시작하지 않는다', async () => {
+  const h = harness(), installA = Promise.withResolvers<Envelope>()
+  let ensures = 0
+  h.sidecar.install = async () => { events(); return ensures === 1 ? installA.promise : env(true) }
+  const events = () => { ensures++; h.events.push('ensure#' + ensures) }
+  try {
+    await h.invoke('project:open', h.root)
+    const a = h.invoke('deps:ensure', h.root, 'A'); await flush()
+    expect(ensures).toBe(1)
+    await h.invoke('project:open', h.other)
+    const b = h.invoke('deps:ensure', h.other, 'B'); await flush()
+    await new Promise(r => setTimeout(r, 40)) // B 는 잠금을 기다린다
+    expect(ensures).toBe(1)
+    expect(h.events.filter(e => e === 'discard')).toHaveLength(1) // A 의 설치 전 정리 하나뿐 — B 가 A 의 환경을 못 지움
+    h.sidecar.ready = true
+    installA.resolve(env(true))
+    expect(await a).toMatchObject({ error: { code: 'project_changed' } })
+    expect(await b).toMatchObject({ result: { ok: true } })
+    // A 의 설치·정리·잠금 반납이 모두 끝난 뒤에야 B 가 정리·설치한다.
+    const order = h.events.join(',')
+    expect(order.indexOf('unlock')).toBeLessThan(order.lastIndexOf('lock'))
+    expect(h.events.indexOf('ensure#2')).toBeGreaterThan(h.events.indexOf('unlock'))
+    expect(h.events.filter(e => e === 'lock')).toHaveLength(2)
+    expect(h.events.filter(e => e === 'unlock')).toHaveLength(2)
+  } finally { await h.cleanup() }
+})
+
+test('S-01 I-01: 잠금을 기다리다 취소하면 정리·설치 없이 cancelled 로 닫고 남의 환경은 안 건드린다', async () => {
+  const h = harness(), installA = Promise.withResolvers<Envelope>()
+  h.sidecar.install = async () => installA.promise
+  try {
+    await h.invoke('project:open', h.root)
+    const a = h.invoke('deps:ensure', h.root, 'A'); await flush()
+    await h.invoke('project:open', h.other)
+    const b = h.invoke('deps:ensure', h.other, 'B'); await flush()
+    await h.invoke('rpc:cancel', 'B')
+    expect(await b).toMatchObject({ error: { code: 'cancelled' } })
+    expect(h.events.filter(e => e === 'discard')).toHaveLength(1) // A 의 것뿐
+    expect(h.sidecar.calls.filter(c => c.method === 'deps.ensure')).toHaveLength(1)
+    installA.resolve(env(true)); await a
+  } finally { await h.cleanup() }
+})
+
+// 검토 r1 I-03: 표식을 쓴 뒤 재시작 대기 중 취소·실패하면 신뢰 표식이 남아 다음 실행이 반쯤 전환된 환경을 신뢰한다.
+test('S-01 I-03: 표식 뒤 재시작 대기 중 취소 — 이번 작업의 표식을 회수하고 사이드카 상태를 되맞춘다', async () => {
+  const h = harness(), hold = Promise.withResolvers<void>()
+  h.sidecar.configure = async function (this: ControlledSidecar, root: string) {
+    this.configured.push(root)
+    if (h.marked.length && !h.restored.length) await hold.promise
+    return this.status()
+  }
+  try {
+    await h.invoke('project:open', h.root)
+    const pending = h.invoke('deps:ensure', h.root, 'owner'); await flush()
+    expect(h.marked).toHaveLength(1)
+    await h.invoke('rpc:cancel', 'owner')
+    hold.resolve()
+    expect(await pending).toMatchObject({ error: { code: 'cancelled' } })
+    expect(h.restored).toEqual([null]) // 이전에 표식이 없었으니 제거
+    expect(h.events.at(-1)).toBe('unlock')
+    expect(h.events.slice(h.events.indexOf('restore'))).toEqual(['restore', 'discard', 'unlock']) // 표식 회수 뒤 잔해 폐기
+    expect(h.sidecar.configured.length).toBeGreaterThanOrEqual(3) // 열기·전환·되맞춤
+  } finally { await h.cleanup() }
+})
+
+test('S-01 I-03: 재시작이 실패해도 표식을 회수한다', async () => {
+  const h = harness()
+  let fail = false
+  h.sidecar.configure = async function (this: ControlledSidecar, root: string) {
+    this.configured.push(root)
+    if (fail && h.marked.length && !h.restored.length) throw { code: 'sidecar_exited', message: 'boom' }
+    return this.status()
+  }
+  try {
+    await h.invoke('project:open', h.root)
+    fail = true
+    const result = await h.invoke('deps:ensure', h.root, 'owner')
+    expect(result).toMatchObject({ error: { code: 'sidecar_exited' } })
+    expect(h.restored).toEqual([null])
+  } finally { await h.cleanup() }
+})
+
+test('S-01 I-03: 이전에 정상이던 환경이었다면 회수가 아니라 이전 표식 그대로 되돌린다(폐기하지 않음)', async () => {
+  const h = harness(), hold = Promise.withResolvers<void>()
+  h.setPrior('{"key":"k0"}')
+  h.sidecar.configure = async function (this: ControlledSidecar, root: string) {
+    this.configured.push(root)
+    if (h.marked.length && !h.restored.length) await hold.promise
+    return this.status()
+  }
+  try {
+    await h.invoke('project:open', h.root)
+    const pending = h.invoke('deps:ensure', h.root, 'owner'); await flush()
+    await h.invoke('rpc:cancel', 'owner'); hold.resolve()
+    expect(await pending).toMatchObject({ error: { code: 'cancelled' } })
+    expect(h.restored).toEqual(['{"key":"k0"}'])
+    expect(h.events.slice(h.events.indexOf('restore'))).toEqual(['restore', 'unlock']) // 이전 환경은 지우지 않는다
+  } finally { await h.cleanup() }
+})
+
+
+// 검토 r1 I-04: 이미 열린 폴더에서 사이드카가 내려가 있으면 준비가 deps.doctor 부터 sidecar_down 으로 끝났다.
+test('S-01 I-04: 사이드카가 내려가 있으면 준비가 먼저 다시 띄우고(고장 환경이면 기본 실행기로) 진행한다', async () => {
+  const h = harness()
+  try {
+    await h.invoke('project:open', h.root)
+    h.sidecar.up = false
+    const opened = h.sidecar.configured.length
+    const result = await h.invoke('deps:ensure', h.root, 'owner')
+    expect(result).toMatchObject({ result: { ok: true } })
+    expect(h.sidecar.configured.length).toBeGreaterThan(opened)
+    expect(h.sidecar.calls[0].method).toBe('deps.doctor')
+  } finally { await h.cleanup() }
 })

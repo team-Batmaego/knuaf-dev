@@ -22,7 +22,7 @@ import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult
 import type { ModelChoice, Provider } from '../shared/chat'
 import { canonical } from './chat/jobs/isolation'
 import { agentDepsVenv, APP_ROOT, basePython, bundledPython, depsEnvKey, depsRoot, venvPython, wheelhouseDir } from './python'
-import { discardUnmarked, markReady } from './deps-env'
+import { acquireEnvLock, discardUnmarked, markReady, readMark, restoreMark, trustedEnv } from './deps-env'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService, type HandoffSeam } from './chat/service'
@@ -1073,8 +1073,16 @@ export function registerIpc(
       const wheels = wheelhouseDir()
       if (wheels) { params.find_links = wheels; params.no_index = true }
       let phase: 'checking' | 'installing' | 'verifying' = 'checking'
+      // I-01: 공유 환경을 건드리는 구간(잔해 정리~설치~검증~표식~재시작~실패 정리)은 잠금 하나로 이어진다.
+      // I-03: 이번 작업이 쓴 표식만 회수한다 — 작업 전 표식 원문을 쥐고 있다가 실패·취소 때 그것으로 되돌린다.
+      let release: (() => void) | null = null
+      let priorMark: string | null = null
+      let wroteMark = false
       try {
         live()
+        // I-04: 이미 열린 폴더에서 사이드카가 내려가 있으면(고장 환경 등) 진단이 sidecar_down 으로 끝나 복구에 닿지 못한다 —
+        // 먼저 다시 띄운다. 고장 난 앱 환경이면 configure 가 신뢰를 철회하고 기본 실행기로 뜬다.
+        if (!sidecar.status().running) { await sidecar.configure(root, override); live() }
         const before = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
         live()
         const report = before.data as DependencyReport | null
@@ -1085,7 +1093,21 @@ export function registerIpc(
           if (dependencyGate && mine()) dependencyGate.phase = 'ready'
           return { result: before }
         }
+        release = await acquireEnvLock(envRoot, { isCancelled: () => flight.cancelled || !mine() })
+        live() // 기다리다 취소·방문 변경이면 여기서 닫힌다(release 는 null — 정리할 것 없음)
+        // 기다리는 사이 다른 폴더의 준비가 같은 환경을 끝냈을 수 있다 — 신뢰 환경이 생겼으면 사이드카를 맞추고 다시 진단한다.
+        if (trustedEnv(envRoot, envKey)) {
+          await sidecar.configure(root, override)
+          live()
+          const again = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
+          live()
+          if (again.ok && (again.data as DependencyReport | null)?.ready === true) {
+            if (dependencyGate && mine()) dependencyGate.phase = 'ready'
+            return { result: again }
+          }
+        }
         phase = 'installing'
+        priorMark = readMark(envRoot, envKey)
         discardUnmarked(envRoot, envKey)
         let result = await sidecar.call<Envelope>('deps.ensure', params, onEvent, onId)
         live()
@@ -1106,6 +1128,7 @@ export function registerIpc(
           }
           try {
             markReady(envRoot, envKey, { app: app.getVersion() })
+            wroteMark = true
           } catch (error) {
             // 고정 스킬이 KNUAF_DEPS_VENV 를 따르지 않으면(TODO(D-U)) 앱 자리에 환경이 안 생긴다 — 신뢰하지 않고 닫는다.
             throw { code: 'deps_env_missing', message: '의존성 환경을 앱 자리에 만들지 못했어요.', data: { installation: result, detail: String(error) } }
@@ -1120,12 +1143,19 @@ export function registerIpc(
         hideAppDirs(root)
         return { result }
       } catch (error) {
-        if (phase !== 'checking') discardUnmarked(envRoot, envKey)
+        if (wroteMark) {
+          // I-03: 표식 뒤(재시작 대기·재시작 실패·취소)의 실패 — 이번 작업의 표식을 이전 상태로 되돌리고(처음이면 제거 →
+          // 잔해로 폐기), 사이드카가 반쯤 전환된 채 남지 않게 지금 상태로 다시 맞춘다. 이전 정상 환경은 지우지 않는다.
+          restoreMark(envRoot, envKey, priorMark)
+          if (priorMark === null) discardUnmarked(envRoot, envKey)
+          try { await sidecar.configure(currentRoot, override) } catch { /* 되맞춤 실패는 다음 열기·재시도가 다룬다 */ }
+        } else if (phase !== 'checking') discardUnmarked(envRoot, envKey)
         if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
         const failure = ipcError(error) as NonNullable<RpcResult['error']>
         return { error: { code: failure.code ?? 'deps_ensure', message: failure.message ?? String(error),
           data: { phase, detail: failure.data } } }
       } finally {
+        release?.()
         inflight.delete(clientId)
         if (dependencyFlights.get(root) === flight) dependencyFlights.delete(root)
       }
