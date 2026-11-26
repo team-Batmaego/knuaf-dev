@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from conftest import REPO
+from conftest import REPO, contract_skill_copy
 
 sys.path.insert(0, str(REPO / "app/sidecar"))
 from knuaf_sidecar.methods_core import project_deps_report  # noqa: E402
@@ -97,10 +97,11 @@ def test_stopping_ensure_also_stops_its_pip_child(tmp_path, stop):
         % (sys.executable, child_code), encoding="utf-8",
     )
     os.chmod(wrapper, 0o755)
-    sidecar = Sidecar()
+    sidecar = Sidecar(contract_skill_copy(tmp_path.parent / (tmp_path.name + "-skill")))  # 계약 선언 판(S-01 5단계)
     connection = None
     try:
-        rid = sidecar.send("deps.ensure", root=str(tmp_path), base_python=str(wrapper))
+        deps_venv = tmp_path.parent / (tmp_path.name + "-appdeps")  # 앱 데이터 자리(폴더 밖), S-01
+        rid = sidecar.send("deps.ensure", root=str(tmp_path), base_python=str(wrapper), deps_venv=str(deps_venv))
         connection, _ = listener.accept()
         connection.settimeout(5)
         assert connection.recv(20) == b"child-ready"

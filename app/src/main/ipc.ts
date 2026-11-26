@@ -21,7 +21,8 @@ import type { Sidecar } from './sidecar'
 import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult, WindowInfo } from '../shared/types'
 import type { ModelChoice, Provider } from '../shared/chat'
 import { canonical } from './chat/jobs/isolation'
-import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from './python'
+import { agentDepsVenv, APP_ROOT, basePython, bundledPython, depsEnvKey, depsRoot, venvPython, wheelhouseDir } from './python'
+import { acquireEnvLock, discardUnmarked, envPlacement, markReady, readMark, restoreMark, trustedEnv } from './deps-env'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService, type HandoffSeam } from './chat/service'
@@ -241,7 +242,8 @@ export function registerIpc(
    * is dropped rather than passed through as argv[0]. `timeout` is clamped so a
    * huge value cannot disable the sidecar's wall-clock kill.
    */
-  const EXECUTABLE_PARAMS = ['base_python', 'node', 'pnpm', 'kordoc'] as const
+  // deps_venv: 실행할 의존성 환경(S-01) — main(Sidecar.call)만 정한다.
+  const EXECUTABLE_PARAMS = ['base_python', 'node', 'pnpm', 'kordoc', 'deps_venv'] as const
   const MAX_TIMEOUT_SECONDS = 1800
   function sanitiseRpcParams(params: Record<string, unknown>): Record<string, unknown> {
     const out = { ...(params ?? {}) }
@@ -701,7 +703,7 @@ export function registerIpc(
     home: app.getPath('home'), appRoot: APP_ROOT, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
     supportDir: join(app.getPath('userData'), 'launch'), userData: app.getPath('userData'),
     dryRun: process.env.KNUAF_DRY_LAUNCH === '1',
-    open: (p) => shell.openPath(p), venvPython, bundledPython
+    open: (p) => shell.openPath(p), venvPython, depsVenv: agentDepsVenv, bundledPython
   })
   ipcMain.handle('agent:status', async (_e, root: string | null) => { try { return { result: await agentApi.status(agentCtx(), root ?? currentRoot) } } catch (error) { return { error: { code: error instanceof UpdateSuspendedError ? error.code : 'internal', message: String(error) } } } })
   ipcMain.handle('agent:install-skill', (_e, kind: AgentKind, root: string | null) => {
@@ -735,14 +737,14 @@ export function registerIpc(
     providerOf(company)
     const binary = findExecutable(company === 'free' ? 'codex' : company)
     if (!binary) throw new Error(`${company !== 'claude' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 설치 안내를 열어 주세요.`)
-    // 본대화와 같은 PATH 앞자리(프로젝트 .venv → 번들 CPython) — 담당이 도우미와 같은
+    // 본대화와 같은 PATH 앞자리(앱 데이터 의존성 환경 → 번들 CPython) — 담당이 도우미와 같은
     // 인터프리터를 찾아야 스킬 스크립트가 같은 결과를 낸다.
-    const python = venvPython(currentRoot) ?? bundledPython()
+    const python = venvPython(root) ?? bundledPython()
     return {
       binary,
       root,
       skill: '',
-      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [])),
+      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [], agentDepsVenv(root))),
       openExternal: (url) => shell.openExternal(url)
     }
   }
@@ -839,8 +841,9 @@ export function registerIpc(
       const node = (envelope.data as { node_path?: unknown } | null | undefined)?.node_path
       return typeof node === 'string' && node ? runtimeFromEnsureEnvelope(envelope, node) : null
     }),
-    // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
+    // 도우미에게도 앱 데이터 의존성 환경과 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
+    depsVenv: agentDepsVenv,
     bundledPython,
     // 전역 기본이 '묻지 않기'면 폴더를 가리지 않는다. 'ask' 로 되돌려도 학생이 권한 카드에서
     // 직접 "이 폴더에서는 계속 허용"을 누른 폴더는 그대로 산다 — 받은 답을 무르지 않는다.
@@ -1085,12 +1088,32 @@ export function registerIpc(
       if (flight.cancelled) sidecar.cancel(id)
     }
     const operation = async (): Promise<RpcResult<Envelope>> => {
-      const params: Record<string, unknown> = { root, base_python: basePython(loadSettings().python_override) }
+      // S-01 §3.2 I-01: 의존성은 앱 데이터 deps/<키>/ 에만 설치한다. 이 경로를 실행에 쓰는 것은 이번 준비 건에
+      // 한정되고, 진단까지 통과한 뒤에야 main 이 표식을 써서 신뢰로 바꾼다. 실패·취소면 표식 없는 그 폴더를 버린다.
+      // 폴더의 옛 .venv 는 보지도 승격하지도 않는다(D1: 준비 카드가 안내만 한다). 앱이 단일 인스턴스라 다른 창과의
+      // 동시 준비는 없고, 같은 창 안에서는 dependencyFlights 가 묶는다.
+      const override = loadSettings().python_override
+      const envRoot = depsRoot(), envKey = depsEnvKey(override), target = join(envRoot, envKey)
+      const params: Record<string, unknown> = { root, base_python: basePython(override), deps_venv: target }
       const wheels = wheelhouseDir()
       if (wheels) { params.find_links = wheels; params.no_index = true }
       let phase: 'checking' | 'installing' | 'verifying' = 'checking'
+      // I-01: 공유 환경을 건드리는 구간(잔해 정리~설치~검증~표식~재시작~실패 정리)은 잠금 하나로 이어진다.
+      // I-03: 이번 작업이 쓴 표식만 회수한다 — 작업 전 표식 원문을 쥐고 있다가 실패·취소 때 그것으로 되돌린다.
+      let release: (() => void) | null = null
+      let priorMark: string | null = null
+      let wroteMark = false
+      // 격리 계약 전제 ①②: 환경 자리가 앱 데이터 밖으로 풀리거나 이 논문 폴더와 겹치면 아무것도 만들거나 지우지 않는다.
+      const requirePlacement = (): void => {
+        const problem = envPlacement(envRoot, envKey, root)
+        if (problem) throw { code: 'deps_env_placement', message: '의존성 환경 자리를 믿을 수 없어 준비하지 않았어요.', data: { problem, target } }
+      }
       try {
         live()
+        requirePlacement()
+        // I-04: 이미 열린 폴더에서 사이드카가 내려가 있으면(고장 환경 등) 진단이 sidecar_down 으로 끝나 복구에 닿지 못한다 —
+        // 먼저 다시 띄운다. 고장 난 앱 환경이면 configure 가 신뢰를 철회하고 기본 실행기로 뜬다.
+        if (!sidecar.status().running) { await sidecar.configure(root, override); live() }
         const before = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
         live()
         const report = before.data as DependencyReport | null
@@ -1101,7 +1124,23 @@ export function registerIpc(
           if (dependencyGate && mine()) dependencyGate.phase = 'ready'
           return { result: before }
         }
+        release = await acquireEnvLock(envRoot, { isCancelled: () => flight.cancelled || !mine() })
+        live() // 기다리다 취소·방문 변경이면 여기서 닫힌다(release 는 null — 정리할 것 없음)
+        // 기다리는 사이 다른 폴더의 준비가 같은 환경을 끝냈을 수 있다 — 신뢰 환경이 생겼으면 사이드카를 맞추고 다시 진단한다.
+        requirePlacement()
+        if (trustedEnv(envRoot, envKey, root)) {
+          await sidecar.configure(root, override)
+          live()
+          const again = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
+          live()
+          if (again.ok && (again.data as DependencyReport | null)?.ready === true) {
+            if (dependencyGate && mine()) dependencyGate.phase = 'ready'
+            return { result: again }
+          }
+        }
         phase = 'installing'
+        priorMark = readMark(envRoot, envKey)
+        discardUnmarked(envRoot, envKey, root)
         let result = await sidecar.call<Envelope>('deps.ensure', params, onEvent, onId)
         live()
         const offline = wheels ? result : undefined
@@ -1114,23 +1153,48 @@ export function registerIpc(
         if (result.ok) {
           phase = 'verifying'
           onEvent('progress', { phase: 'verifying' })
-          await sidecar.configure(root, loadSettings().python_override)
-          live()
-          const checked = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
+          const checked = await sidecar.call<Envelope>('deps.doctor', { root, deps_venv: target }, onEvent, onId)
           live()
           if (!checked.ok || (checked.data as DependencyReport | null)?.ready !== true) {
-            throw { code: 'deps_verify', message: '설치 뒤 프로젝트 .venv 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
+            throw { code: 'deps_verify', message: '설치 뒤 의존성 환경 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
+          }
+          requirePlacement()
+          try {
+            markReady(envRoot, envKey, { app: app.getVersion() })
+            wroteMark = true
+          } catch (error) {
+            // 고정 스킬이 KNUAF_DEPS_VENV 를 따르지 않으면(TODO(D-U)) 앱 자리에 환경이 안 생긴다 — 신뢰하지 않고 닫는다.
+            throw { code: 'deps_env_missing', message: '의존성 환경을 앱 자리에 만들지 못했어요.', data: { installation: result, detail: String(error) } }
+          }
+          const switched = await sidecar.configure(root, override) // depsVenv 가 바뀌었으므로 사이드카를 다시 띄운다(§3.3-3)
+          live()
+          // 검토 r2 I-04: 새 환경으로 뜨지 못하면 configure 가 신뢰를 철회하고 기본 실행기로 복구해 **정상 반환**한다.
+          // 그 복구는 "목표 환경으로 전환 완료"가 아니다 — 실제로 쓰는 환경이 목표인지 확인하고, 아니면 실패·정리 경로로 간다.
+          if (switched.depsVenv !== target) {
+            throw { code: 'deps_activate_failed', message: '준비한 환경으로 앱을 다시 시작하지 못했어요. 기본 실행기로 돌아갔어요.',
+              data: { installation: result, active: switched.depsVenv ?? '', target } }
           }
           if (dependencyGate && mine()) dependencyGate.phase = 'ready'
-        } else if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+        } else {
+          discardUnmarked(envRoot, envKey, root)
+          if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
+        }
         hideAppDirs(root)
         return { result }
       } catch (error) {
+        if (wroteMark) {
+          // I-03: 표식 뒤(재시작 대기·재시작 실패·취소)의 실패 — 이번 작업의 표식을 이전 상태로 되돌리고(처음이면 제거 →
+          // 잔해로 폐기), 사이드카가 반쯤 전환된 채 남지 않게 지금 상태로 다시 맞춘다. 이전 정상 환경은 지우지 않는다.
+          restoreMark(envRoot, envKey, priorMark)
+          if (priorMark === null) discardUnmarked(envRoot, envKey, root)
+          try { await sidecar.configure(currentRoot, override) } catch { /* 되맞춤 실패는 다음 열기·재시도가 다룬다 */ }
+        } else if (phase !== 'checking') discardUnmarked(envRoot, envKey, root)
         if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
         const failure = ipcError(error) as NonNullable<RpcResult['error']>
         return { error: { code: failure.code ?? 'deps_ensure', message: failure.message ?? String(error),
           data: { phase, detail: failure.data } } }
       } finally {
+        release?.()
         inflight.delete(clientId)
         if (dependencyFlights.get(root) === flight) dependencyFlights.delete(root)
       }

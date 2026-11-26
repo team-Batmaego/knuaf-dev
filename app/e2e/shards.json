@@ -37,7 +37,9 @@
       "kordoc-mcp-lifecycle",
       "news-storage-failure",
       "outline-note",
-      "lock-upgrade-main"
+      "lock-upgrade-main",
+      "venv-guard-agent",
+      "venv-guard-lock"
     ],
     [
       "agent-busy",
@@ -209,7 +211,9 @@
       "skill-unknown-read",
       "main-watchdog",
       "chat-images",
-      "lock-moved"
+      "lock-moved",
+      "venv-guard",
+      "venv-guard-chat"
     ]
   ],
   "macos": [
@@ -314,7 +318,9 @@
       "outline-note",
       "main-watchdog",
       "chat-images",
-      "lock-moved"
+      "lock-moved",
+      "venv-guard",
+      "venv-guard-chat"
     ],
     [
       "agent-busy",
@@ -416,7 +422,9 @@
       "empty-toc",
       "figure-wiring",
       "skill-unknown-read",
-      "lock-upgrade-main"
+      "lock-upgrade-main",
+      "venv-guard-agent",
+      "venv-guard-lock"
     ]
   ]
 }

@@ -297,8 +297,10 @@ export class ChatService {
      * 실패는 `null` 또는 예외(둘 다 "이번엔 못 붙었다")이고, 그때도 대화는 그대로 간다.
      */
     ensureKordoc?: (root: string) => Promise<KordocRuntime | null>
-    /** 도우미가 쓸 Python — 프로젝트 .venv 와 번들 CPython. */
+    /** 도우미가 쓸 Python — 앱 데이터 의존성 환경(S-01)과 번들 CPython. */
     venvPython?: (root: string) => string | null
+    /** S-01 §3.4: 도우미 env 의 `KNUAF_DEPS_VENV`(앱 데이터 환경). 없으면 빈 값으로 닫는다(READONLY 는 늘). */
+    depsVenv?: (root: string) => string
     bundledPython?: () => string | null
     /** 학생이 "이 폴더에서는 계속 허용"을 고른 폴더인가. */
     isTrusted?: (root: string) => boolean
@@ -359,7 +361,7 @@ export class ChatService {
     handoff?: HandoffSeam
   }) {}
   private get writeFs(): SafeWriteFs { return this.opts.fs ?? { writeFileSync, renameSync, unlinkSync, readFileSync: (p) => readFileSync(p, 'utf8') } }
-  /** PATH 앞자리에 둘 인터프리터 bin 경로 — 프로젝트 .venv 가 번들보다 우선한다. */
+  /** PATH 앞자리에 둘 인터프리터 bin 경로 — 앱 데이터 의존성 환경이 번들보다 우선한다. */
   private pythonBinDirs(root: string): string[] {
     const venv = this.opts.venvPython?.(root) ?? null
     const bundled = this.opts.bundledPython?.() ?? null
@@ -766,7 +768,7 @@ export class ChatService {
     let c = this.connections.get(key)
     if (!c) {
       const guard = this.guardFor(root)
-      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))
+      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.(root) ?? '')
       const figureEnv = this.opts.figures?.env
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
@@ -794,8 +796,29 @@ export class ChatService {
         c = provider !== 'claude' ? new CodexConnection(options) : new ClaudeConnection(options)
       }
       this.connections.set(key, c)
+      this.connEnvSig.set(c, this.envSignature(root))
     }
     return c
+  }
+  /** 연결을 만들 때 읽은 도우미 환경(앱 의존성 환경 + PATH 앞자리)의 서명 — 전송 직전에 지금 값과 비교한다(I-02). */
+  private connEnvSig = new WeakMap<AgentConnection, string>()
+  private envSignature(root: string): string {
+    return JSON.stringify([this.opts.depsVenv?.(root) ?? '', this.pythonBinDirs(root)])
+  }
+  /**
+   * 전송에 쓸 연결. 준비 전에 만든 연결은 빈 환경·옛 PATH 를 계속 쥐므로(I-02), 환경이 바뀌었으면 — 이 전송은
+   * 폴더·공급자별 실행 잠금 안이라 진행 중인 턴이 없다 — 옛 연결을 정리하고 새로 연다. 같은 폴더·공급자의 대화는
+   * 스냅샷의 sessionId 로 이어진다(reopenConnection 과 같은 길). env 를 밖에서 고정해 준 경우는 비교하지 않는다.
+   */
+  private async currentConnection(root: string, provider: Provider): Promise<AgentConnection> {
+    const key = this.key(root, provider)
+    const existing = this.connections.get(key)
+    if (existing && !this.opts.env && this.connEnvSig.get(existing) !== this.envSignature(root)) {
+      this.connections.delete(key)
+      this.kordocAttach.delete(existing)
+      try { await existing.stop() } catch { /* 이미 죽은 연결 — 버리는 것이 목적이다 */ }
+    }
+    return this.connection(root, provider)
   }
   async status(root: string, provider: Provider): Promise<ConnectionStatus> {
     return agentActivity.run(async () => {
@@ -927,7 +950,7 @@ export class ChatService {
       const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
-        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root))),
+        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.(root) ?? '')),
         openExternal: this.opts.openExternal, trusted: () => false,
         guard,
         skillBundleSource: () => this.opts.skillSource()
@@ -1007,7 +1030,7 @@ export class ChatService {
         installSkill(source, skill, version, source)
         s.messages.push({ id: randomUUID(), role: 'system', text: `규칙집이 갱신됐어요 (이전 ${old} → 현재 ${version})`, at: new Date().toISOString() })
       } else installSkill(source, skill, version, source) // Refresh GUI ownership even for an unchanged copy.
-      const connection = this.connection(root, provider)
+      const connection = await this.currentConnection(root, provider)
       if (!(await this.checkedStatus(provider, connection)).connected) throw new Error(this.authRequired.has(provider) ? authCopy(provider) : 'AI 계정 연결을 먼저 완료해 주세요.')
       // 전송 전 확인 — 여기서 던지면 보낸 말이 대화에 남지 않고 초안도 그대로다. 예전 모델로
       // 조용히 보내는 대신 학생에게 오류로 알린다(검토 MC1-01).

@@ -5,6 +5,7 @@ import type { GuardKey } from '../guard/store'
 import type { KordocMcpSpec } from './kordocMcp'
 import { deleteFreeRelayEnvKeys } from '../free/provider'
 import type { AgentImage } from './images'
+import { noDepsEnvFallback } from '../deps-env'
 
 export interface AgentEvents {
   message: (id: string, text: string) => void
@@ -122,7 +123,22 @@ export function pathKeyOf(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = pr
   return keys[0]
 }
 
-export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv {
+/**
+ * S-01 의존성 환경 계약(사이드카·스킬 gg_deps·도우미가 같은 글자를 본다). 값이 비어 있어도 "폴더 `.venv` 를 보지
+ * 않는다"는 뜻이다 — 준비 전이면 빈 값으로 닫힌다. READONLY 는 형님 결정 D-A: 도우미는 공유 환경에 설치하지 않는다.
+ */
+export const DEPS_VENV_ENV = 'KNUAF_DEPS_VENV'
+export const DEPS_READONLY_ENV = 'KNUAF_DEPS_VENV_READONLY'
+
+/** 값이 안 넘어온 호출자를 위한 안전망(B-01). 운영에서는 `python.ts depsNoneDir()` 가 값을 정한다. */
+export { noDepsEnvFallback }
+
+/** 도우미 프로세스에 싣는 두 값(터미널 스크립트·본대화·담당이 이 함수 하나를 쓴다). 값은 늘 비어 있지 않다. */
+export function agentDepsEnv(depsVenv?: string, platform: NodeJS.Platform = process.platform): Record<typeof DEPS_VENV_ENV | typeof DEPS_READONLY_ENV, string> {
+  return { [DEPS_VENV_ENV]: depsVenv || noDepsEnvFallback(platform), [DEPS_READONLY_ENV]: '1' }
+}
+
+export function subscriptionEnv(extraPathDirs: string[] = [], depsVenv?: string): NodeJS.ProcessEnv {
   const env = { ...process.env }
   // A user's unrelated API environment must never silently change billing for this app.
   for (const key of Object.keys(env)) {
@@ -145,7 +161,7 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   // codex 는 `#!/usr/bin/env node` 스크립트라 그 PATH 로는 셔뱅이 죽고
   // "env: node: No such file or directory" 만 남는다(claude 는 네이티브라 멀쩡했다).
   // 바이너리를 찾는 것과 그 바이너리가 인터프리터를 찾는 것은 다른 문제다.
-  // 프로젝트 .venv → 번들 CPython → 시스템 위치 순. 임베디드 터미널(terminal.ts)은
+  // 앱 데이터 의존성 환경(S-01) → 번들 CPython → 시스템 위치 순. 임베디드 터미널(terminal.ts)은
   // 이미 이렇게 하고 있었고, 채팅 경로만 빠져 있었다. 학생 맥의 기본 python3 는 3.9 라
   // 스킬의 최소 조건(3.10)에 못 미치는데, 이게 없으면 앱은 번들 3.12 로 잘 도는 반면
   // 도우미만 "쓸 수 있는 Python 이 없다"에 막힌다.
@@ -163,6 +179,8 @@ export function subscriptionEnv(extraPathDirs: string[] = []): NodeJS.ProcessEnv
   // 인코딩을 명시하지 않고 cp949 파일을 읽는 다른 도구에는 영향이 갈 수 있다(규칙집은 UTF-8 전제).
   env.PYTHONUTF8 = '1'
   env.PYTHONIOENCODING = 'utf-8'
+  // 사용자 값도 덮는다 — 학생 PC 의 변수가 도우미를 폴더 `.venv` 로 돌리지 못하게(S-01 D-A).
+  Object.assign(env, agentDepsEnv(depsVenv))
   return env
 }
 

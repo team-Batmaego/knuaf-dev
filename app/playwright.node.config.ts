@@ -55,7 +55,11 @@ export default defineConfig({
     'job-handoff.spec.ts',
     'skill-unknown-read.spec.ts',
     'lock-moved.spec.ts',
-    'lock-upgrade-main.spec.ts'
+    'lock-upgrade-main.spec.ts',
+    'venv-guard.spec.ts',
+    'venv-guard-agent.spec.ts',
+    'venv-guard-chat.spec.ts',
+    'venv-guard-lock.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,

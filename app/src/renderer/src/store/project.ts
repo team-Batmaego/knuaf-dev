@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { usePrep, type DependencyPreparation } from './prep'
+import { skillRefusalCode, usePrep, type DependencyPreparation } from './prep'
 import type { ArtifactItem, MaterialsData, ProjectPeek, SectionRow, Settings, SidecarInfo, Status } from '../../../shared/types'
 import type { StageBuildTree } from '../../../shared/stage'
 import { outlineStateOf, type OutlineState } from '../../../shared/outline'
@@ -576,14 +576,14 @@ export const useProject = create<ProjectState>((set, get) => ({
         live()
         prep.updateDependency(root, operationId, { report })
         if (!report.ready) {
-          if (options?.install === false && !dependencyRuns.get(root)?.installRequested) throw new RpcFailure({ code: 'deps_required', message: '프로젝트 .venv를 준비해야 해요.' })
+          if (options?.install === false && !dependencyRuns.get(root)?.installRequested) throw new RpcFailure({ code: 'deps_required', message: '이 컴퓨터에서 패키지를 준비해야 해요.' })
           phase = 'installing'
           prep.updateDependency(root, operationId, { phase, report })
           const reply = await window.knuaf.depsEnsure(root, options?.onEvent, operationId)
           live()
           if (reply.error) throw new RpcFailure(reply.error)
           if (!reply.result?.ok) throw new RpcFailure({
-            code: 'deps_ensure', message: reply.result?.block_reason || reply.result?.stderr || '패키지 설치 실패', data: reply.result
+            code: skillRefusalCode(reply.result?.data) ?? 'deps_ensure', message: reply.result?.block_reason || reply.result?.stderr || '패키지 설치 실패', data: reply.result
           })
           phase = 'verifying'
           prep.updateDependency(root, operationId, { phase })
@@ -591,7 +591,7 @@ export const useProject = create<ProjectState>((set, get) => ({
           live()
           report = await rpc.depsDoctor(root, operationId, options?.onEvent)
           live()
-          if (!report.ready) throw new RpcFailure({ code: 'deps_verify', message: '프로젝트 .venv의 import·버전 확인을 통과하지 못했어요.', data: report })
+          if (!report.ready) throw new RpcFailure({ code: 'deps_verify', message: '준비한 패키지의 import·버전 확인을 통과하지 못했어요.', data: report })
         }
         result = { visit, operationId, phase: 'ready', report }
       } catch (error) {

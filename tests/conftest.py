@@ -12,6 +12,19 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = Path(os.environ.get("KNUAF_TEST_SCRIPTS_DIR") or REPO / "app" / "resources" / "skill" / "scripts").resolve()
+
+
+def contract_skill_copy(dest: Path) -> Path:
+    """S-01 계약(`DEPS_VENV_ENV = "KNUAF_DEPS_VENV"`)을 선언한 스킬 사본. 계약을 모르는 판에서는 사이드카가
+    deps.ensure·deps.doctor 를 실행 전에 닫으므로(deps_contract_unsupported), 그 메서드의 다른 성질(취소·종료)을
+    보는 시험이 이 사본으로 사이드카를 띄운다. 이미 선언한 판이면 그대로 복사만 한다."""
+    scripts = dest / "contract-skill" / "scripts"
+    shutil.copytree(SCRIPTS, scripts, ignore=shutil.ignore_patterns("__pycache__"))
+    gg_deps = scripts / "gg_deps.py"
+    text = gg_deps.read_text(encoding="utf-8")
+    if 'DEPS_VENV_ENV = "KNUAF_DEPS_VENV"' not in text:
+        gg_deps.write_text(text + '\nDEPS_VENV_ENV = "KNUAF_DEPS_VENV"\n', encoding="utf-8")
+    return scripts
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))

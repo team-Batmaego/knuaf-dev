@@ -158,6 +158,33 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
     action: '다시 만들거나 파일을 지우지 말고, 정본과 수령증을 도우미와 먼저 확인해 주세요.',
     kind: 'warning'
   },
+  /** S-01 규칙집 거부 코드(store/prep.ts SKILL_REFUSAL_TITLES 와 같은 제목). 준비는 앱의 단추로만 한다. */
+  deps_venv_readonly: {
+    title: '도우미는 패키지를 직접 설치하지 않아요',
+    action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 주세요.',
+    kind: 'warning'
+  },
+  deps_venv_empty: {
+    title: '이 컴퓨터에서 아직 패키지를 준비하지 않았어요',
+    action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 눌러 주세요. 한 번만 하면 이 컴퓨터의 모든 논문 폴더에서 써요.',
+    kind: 'warning'
+  },
+  /** 검토 r2 I-04: 설치는 끝났지만 그 환경으로 앱(사이드카)을 다시 띄우지 못해 기본 실행기로 돌아갔다. */
+  deps_env_placement: {
+    title: '패키지를 둘 자리를 믿을 수 없어 준비하지 않았어요',
+    action: '논문 폴더가 앱의 데이터 폴더를 품고 있거나 그 안에 있으면 다른 폴더(예: "문서" 아래 새 폴더)를 골라 주세요. 아니라면 앱 데이터의 "deps" 폴더가 다른 곳으로 이어지는 바로가기인지 확인해 주세요.',
+    kind: 'warning'
+  },
+  deps_activate_failed: {
+    title: '준비한 패키지로 앱을 다시 시작하지 못했어요',
+    action: '"설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 한 번 더 눌러 주세요. 계속되면 앱을 다시 켜 주세요.',
+    kind: 'warning'
+  },
+  deps_contract_unsupported: {
+    title: '이 앱 판의 규칙집으로는 패키지를 준비할 수 없어요',
+    action: '앱을 최신 판으로 업데이트해 주세요. 쓴 글은 그대로 있어요.',
+    kind: 'error'
+  },
   deps_not_ready: {
     title: '작업 준비가 아직 끝나지 않았어요.',
     action: '준비 작업을 자동으로 다시 시도해요. 계속되면 "설정 > 문제 해결"에서 확인해 주세요.',
@@ -1213,8 +1240,8 @@ export const CHAT = {
   depthTitle: '생각 깊이',
   // --- 아래 칸: 작업 중 한 줄(설계 §3) --------------------------------------
   runningLine: '도우미가 작업 중이에요',
-  /** 폴더 준비(.venv) 중 — 입력칸 위 진행 표시(store/prep.ts). 처음 한 번, 윈도우에서는 몇 분 걸린다. */
-  preparingLine: '이 폴더를 처음 쓸 준비를 하고 있어요 — 몇 분 걸릴 수 있어요',
+  /** 패키지 준비(이 컴퓨터의 앱 자리, S-01) 중 — 입력칸 위 진행 표시(store/prep.ts). PC당 처음 한 번, 윈도우에서는 몇 분 걸린다. */
+  preparingLine: '이 컴퓨터에서 처음 쓸 준비를 하고 있어요 — 몇 분 걸릴 수 있어요',
   preparingQueued: '준비가 끝나면 바로 보낼게요',
   appBusyTitle: '앱이 저장·검사를 마치는 중이에요',
   appBusyBody: '끝나면 다시 보내 주세요.',
@@ -1693,6 +1720,17 @@ export const SETTINGS = {
  * 앱 전용 Python 준비(DESIGN D8·D9, §7 PY-D1-02). 학생이 터미널·설정을 몰라도 되게 하는
  * 문구만 둔다 — 크기 안내에는 실제 내려받기 크기(명세의 size)가 들어간다.
  */
+/**
+ * 준비 카드(설정 > 문제 해결 > 준비 상태) 문구 — S-01: 패키지는 논문 폴더가 아니라 이 컴퓨터의 앱 자리에 한 번 준비한다.
+ * D1(형님 결정): v0.7.4 이하가 폴더에 만든 `.venv` 는 더 이상 쓰지 않는다. 앱은 지우지 않고 알리기만 한다.
+ */
+export const DEPS_COPY = {
+  installCaption: '이 컴퓨터의 앱 자리에 한 번만 설치하고, 모든 논문 폴더에서 같이 써요. 전역 Python과 논문 폴더는 건드리지 않아요.',
+  readyBody: '이 컴퓨터에 준비한 패키지의 import·버전을 확인했어요.',
+  legacyVenvTitle: '이 폴더의 .venv 폴더는 이제 쓰지 않아요',
+  legacyVenvBody: '예전 판이 논문 폴더 안에 만든 .venv 는 지워도 돼요(앱은 지우지 않아요). 패키지는 이 컴퓨터에서 한 번 "패키지 준비"를 누르면 모든 논문 폴더에서 써요.'
+} as const
+
 export const RUNTIME = {
   fixTitle: 'Python을 자동으로 준비할 수 있어요.',
   /** 버튼이 실제로 보일 때만 이 문장을 쓴다(D9). */
@@ -1707,7 +1745,7 @@ export const RUNTIME = {
   retryFailedTitle: 'Python은 준비됐지만 이 폴더는 아직 열리지 않았어요.',
   retryFailedBody: '아래에 새 오류를 같이 보여 드려요.',
   /** 읽을 수 있는 낡은 venv 는 선택에서 빠지고, cfg 를 못 읽는 venv 만 여기로 온다. */
-  venvStaleAction: '이 폴더 안의 .venv 폴더가 오래된 Python으로 만들어져 있어요. Finder/탐색기에서 .venv 폴더 이름을 .venv-old로 바꾼 뒤 다시 열어 주세요.',
+  venvStaleAction: '이 컴퓨터에 준비한 패키지 환경의 Python을 실행하지 못했어요. "설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 다시 눌러 주세요.',
   settingsNote: '앱 전용 Python을 이 컴퓨터에 준비해요. 컴퓨터에 설치된 Python은 바꾸지 않아요.',
   /** 진행 이벤트에 단계 이름이 없을 때의 한 단어. */
   progressFallback: '진행',
