@@ -15,11 +15,15 @@
 성공(ok·ready·문서 파일)과 증인 존재를 함께 요구한다(r2 B-01 ①). 키 누락 거부는 따로, 오류 코드까지 본다.
 """
 import ast
-import importlib.util
+import errno
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import venv
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -62,8 +66,9 @@ def _record():
     if target:
         with open(target, "a", encoding="utf-8") as out:
             out.write(json.dumps({"argv": list(getattr(sys, "orig_argv", [])), "prefix": sys.prefix,
+                                  "base_prefix": sys.base_prefix, "cwd": os.getcwd(),
                                   "path": list(sys.path), "isolated": sys.flags.isolated,
-                                  "no_user_site": sys.flags.no_user_site}) + "\\n")
+                                  "no_user_site": sys.flags.no_user_site, "utf8": sys.flags.utf8_mode}) + "\\n")
 
 atexit.register(_record)
 """ % WITNESS_ENV
@@ -75,15 +80,38 @@ def _make_venv(env: Path, with_pip: bool) -> Path:
     return env / "Lib" / "site-packages" if os.name == "nt" else next(env.glob("lib/python*/site-packages"))
 
 
+def _install_deps(purelib: Path):
+    """실행기에 깔린 의존 패키지(필수 의존까지)를 대상 venv 안으로 복사한다 — 바깥 site 폴더를 `.pth` 로 잇지 않는다
+    (격리 계약의 검색 경로는 기반 설치 폴더와 환경 폴더 아래뿐이다)."""
+    required = ["openpyxl", "python-docx", "pypdf"]
+    queue, seen = required + (["pywin32"] if os.name == "nt" else []), set()
+    while queue:
+        name = queue.pop()
+        key = re.sub(r"[-_.]+", "-", name).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            dist = metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            assert name not in required, name + " 이 시험 실행기에 없음"
+            continue  # 이 OS·파이썬 판에는 필요 없는 의존
+        queue += [re.match(r"[A-Za-z0-9_.-]+", need).group(0) for need in dist.requires or [] if "extra ==" not in need]
+        for item in dist.files or []:
+            source = Path(dist.locate_file(item))
+            if ".." in item.parts or "__pycache__" in item.parts or not source.is_file():
+                continue
+            target = purelib.joinpath(*item.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 @pytest.fixture(scope="module")
 def app_env(tmp_path_factory):
-    """앱 데이터 쪽 신뢰 환경: pip 포함 venv + 시험 실행기의 의존성(docx·openpyxl·pypdf) 경로 + 실행 증인."""
+    """앱 데이터 쪽 신뢰 환경: pip 포함 venv + 그 안에 복사한 의존성(docx·openpyxl·pypdf …) + 실행 증인."""
     env = tmp_path_factory.mktemp("userData") / "deps" / "k0"
     purelib = _make_venv(env, with_pip=True)
-    # 실행기의 site 폴더 전부가 아니라 의존성이 실제로 놓인 폴더만 — 사용자 site·기반 설치 폴더를 통째로 넣지 않는다.
-    found = [importlib.util.find_spec(name) for name in ("docx", "openpyxl", "pypdf")]
-    deps = sorted({str(Path(spec.origin).parent.parent) for spec in found if spec and spec.origin})
-    (purelib / "runner-deps.pth").write_text("\n".join(deps) + "\n", encoding="utf-8")
+    _install_deps(purelib)
     (purelib / "knuaf_test_witness.py").write_text(WITNESS_MODULE, encoding="utf-8")
     (purelib / "zz_knuaf_witness.pth").write_text("import knuaf_test_witness\n", encoding="utf-8")
     return env
@@ -111,11 +139,29 @@ def scene(tmp_path, monkeypatch, app_env):
 
 
 def _tree(path: Path) -> list:
-    """폴더 `.venv` 가 그대로인지 보는 목록(이름 + pyvenv.cfg 내용). 링크는 따라가지 않는다."""
-    names = sorted(os.path.relpath(os.path.join(base, name), path)
-                   for base, dirs, files in os.walk(path) for name in dirs + files if name != "__pycache__"
-                   and "__pycache__" not in base)
-    return [*names, (path / "pyvenv.cfg").read_bytes()]
+    """폴더 `.venv` 가 그대로인지 보는 목록: 이름마다 링크 대상 또는 파일 내용(미끼 `.pth`·실행기 포함). 링크는 안 따라간다."""
+    found = []
+    for base, dirs, files in os.walk(path):
+        for name in dirs + files:
+            full = os.path.join(base, name)
+            if name == "__pycache__" or "__pycache__" in base:
+                continue
+            if os.path.islink(full):
+                state = os.readlink(full)
+            else:
+                state = Path(full).read_bytes() if os.path.isfile(full) else None
+            found.append((os.path.relpath(full, path), state))
+    return sorted(found, key=lambda item: item[0])
+
+
+def _link_dir(link: Path, target: Path):
+    """폴더 심볼릭 링크. 링크를 만들 **권한이 없는** 자리만 사유와 함께 건너뛴다 — 다른 오류는 시험 실패."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        if error.errno not in (errno.EPERM, errno.EACCES) and getattr(error, "winerror", None) != 1314:
+            raise
+        pytest.skip("심볼릭 링크를 만들 권한이 없음: %s" % error)
 
 
 def _under(entry: str, folder: Path) -> bool:
@@ -220,10 +266,7 @@ def test_project_inside_deps_venv_is_refused(scene, via_link):
     project.mkdir(parents=True)
     if via_link:
         alias = scene["tmp"] / "paper-alias"
-        try:
-            alias.symlink_to(project, target_is_directory=True)
-        except OSError as error:
-            pytest.skip("심볼릭 링크를 만들 수 없음: %s" % error)
+        _link_dir(alias, project)
         project = alias
     with pytest.raises(RpcError) as caught:
         methods_scripts.deps_doctor(_ctx(), {"root": str(project), "deps_venv": str(env)})
@@ -231,20 +274,55 @@ def test_project_inside_deps_venv_is_refused(scene, via_link):
     assert _fired(scene) == []
 
 
-# --- 12단계 I-02(격리 계약 2판): 실제 -c·pip 자식이 대상 환경 prefix 에서 격리돼 돈다(윈도 CI 포함) ----------------
+# --- 12단계 I-02 · 13단계 I-03(격리 계약 2판): 실제 -c·pip 자식이 대상 환경에서 격리돼 돈다(윈도 CI 포함) ----------
+
+
+def _run(python, code: str, **env) -> None:
+    subprocess.run([str(python), "-c", code], check=True, timeout=60, cwd=env.pop("cwd", None),
+                   env={**os.environ, **env})
+
+
+def _live_decoys(scene, monkeypatch):
+    """미끼 세 갈래를 만들고, 격리하지 않으면 실제로 돈다는 것을 먼저 확인한 뒤 표시를 지운다(양성 대조)."""
+    # 폴더 .venv
+    folder = scene["root"] / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
+    _run(folder, "pass")
+    assert scene["marks"]["venv"].read_text() == "ran"
+    scene["marks"]["venv"].unlink()
+    # PYTHONPATH 의 동명 모듈
+    decoys = scene["tmp"] / "pythonpath-decoys"
+    decoys.mkdir()
+    path_mark = scene["tmp"] / "PWNED-pythonpath"
+    (decoys / "knuaf_path_decoy.py").write_text(_marker_writer(path_mark), encoding="utf-8")
+    for name in ("docx", "pip", "openpyxl", "pypdf"):
+        (decoys / (name + ".py")).write_text("", encoding="utf-8")
+    python = scene["app_env"] / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
+    _run(python, "import knuaf_path_decoy", PYTHONPATH=str(decoys))
+    assert path_mark.exists()
+    # 사용자 site 의 .pth (venv 는 사용자 site 를 끄므로 기반 python 으로 대조한다)
+    base = getattr(sys, "_base_executable", sys.executable)
+    userbase = scene["tmp"] / "userbase"
+    user_site = Path(subprocess.run([base, "-c", "import site; print(site.getusersitepackages())"], check=True,
+                                    capture_output=True, text=True, timeout=60,
+                                    env={**os.environ, "PYTHONUSERBASE": str(userbase)}).stdout.strip())
+    assert _under(str(user_site), userbase), user_site
+    user_site.mkdir(parents=True)
+    user_mark = scene["tmp"] / "PWNED-usersite"
+    (user_site / "zz_user_decoy.pth").write_text(
+        "import pathlib; pathlib.Path(%r).write_text('ran')\n" % str(user_mark), encoding="utf-8")
+    _run(base, "pass", PYTHONUSERBASE=str(userbase))
+    assert user_mark.exists()
+    scene["witness"].unlink(missing_ok=True)  # 대조 실행의 기록은 버린다
+    monkeypatch.setenv("PYTHONPATH", str(decoys))
+    monkeypatch.setenv("PYTHONUSERBASE", str(userbase))
+    return decoys, userbase
 
 
 @D_U
 def test_real_m_and_c_children_run_in_target_prefix_without_user_site_or_decoys(scene, monkeypatch):
-    decoys = scene["tmp"] / "pythonpath-decoys"
-    decoys.mkdir()
-    # 미끼: 자식이 PYTHONPATH 를 따르면 검색 경로에 이 폴더가 남는다. 부모(`gg_deps.py` 의 current 열 검사)는 호출자
-    # 환경변수를 따르는 별도 신뢰 입력이라(계약 밖) 여기서 단언하지 않는다 — 단언 대상은 `-m`·`-c` 자식이다.
-    for name in ("docx", "pip", "openpyxl", "pypdf"):
-        (decoys / (name + ".py")).write_text("", encoding="utf-8")
-    userbase = scene["tmp"] / "userbase"
-    monkeypatch.setenv("PYTHONPATH", str(decoys))
-    monkeypatch.setenv("PYTHONUSERBASE", str(userbase))
+    # 부모(`gg_deps.py` 의 current 열 검사)는 호출자 환경변수를 따르는 별도 신뢰 입력이라(계약 밖) 부모 쪽 미끼 실행은
+    # 단언하지 않는다 — 단언 대상은 대상 환경에서 뜬 `-m`·`-c` 자식 전부다.
+    decoys, userbase = _live_decoys(scene, monkeypatch)
     wheels = scene["tmp"] / "empty-wheels"
     wheels.mkdir()
     ensured = methods_scripts.deps_ensure(_ctx(), _params(scene, base_python=sys.executable,
@@ -254,14 +332,28 @@ def test_real_m_and_c_children_run_in_target_prefix_without_user_site_or_decoys(
     assert checked["data"]["ready"] is True, checked
     children = [r for r in _witnessed(scene) if "-c" in r["argv"] or "-m" in r["argv"]]
     assert any("-c" in r["argv"] for r in children), children  # import 검사
-    assert any("pip" in r["argv"] for r in children), children  # python -m pip
+    assert any(_runs_module(r["argv"], "pip") for r in children), children  # python -m pip
     for record in children:
+        argv = record["argv"]
         assert os.path.samefile(record["prefix"], scene["app_env"]), record
-        assert record["isolated"] == 1 and record["no_user_site"] == 1, record
+        assert "-I" in argv and record["isolated"] == 1 and record["no_user_site"] == 1, record
+        assert _flag_value(argv, "-X") == "utf8" and record["utf8"] == 1, record
+        assert os.path.samefile(record["cwd"], scene["app_env"]), record
         assert all(record["path"]) and all(os.path.isabs(entry) for entry in record["path"]), record
+        # 허용 목록: 기반 파이썬 설치 폴더와 환경 폴더 아래만(윈도는 환경 폴더 자신 포함).
+        allowed = (Path(record["base_prefix"]), scene["app_env"])
+        assert [e for e in record["path"] if not any(_under(e, folder) for folder in allowed)] == [], record
         for banned in (scene["root"], decoys, userbase):
             assert not [e for e in record["path"] if _under(e, banned)], record
     assert _fired(scene) == []
+
+
+def _runs_module(argv: list, module: str) -> bool:
+    return any(a == "-m" and b == module for a, b in zip(argv, argv[1:]))
+
+
+def _flag_value(argv: list, flag: str):
+    return next((b for a, b in zip(argv, argv[1:]) if a == flag), None)
 
 
 # --- B-03 정적 계약: 스킬이 python 을 -m/-c 로 띄우는 곳은 모두 -I(작업 디렉터리 제외) -----------------
@@ -428,8 +520,6 @@ def test_stage_skill_gate_runs_this_contract_suite():
 
 @pytest.mark.parametrize("kind", ["fake-venv", "dangling-link", "none"])
 def test_doctor_all_reports_legacy_folder_venv_without_touching_it(scene, monkeypatch, kind):
-    import shutil
-
     import gg_core as core
 
     core.init(scene["root"])
@@ -437,10 +527,7 @@ def test_doctor_all_reports_legacy_folder_venv_without_touching_it(scene, monkey
     if kind != "fake-venv":
         shutil.rmtree(venv_dir)
     if kind == "dangling-link":
-        try:
-            venv_dir.symlink_to(scene["tmp"] / "no-such-dir", target_is_directory=True)
-        except OSError as error:  # 윈도에서 링크 권한이 없는 자리
-            pytest.skip("심볼릭 링크를 만들 수 없음: %s" % error)
+        _link_dir(venv_dir, scene["tmp"] / "no-such-dir")
     before = sorted(p.name for p in scene["root"].iterdir())
     monkeypatch.setitem(sys.modules, "gg_deps", _fake_gg_deps(False, []))
     out = methods_core.doctor_all(_ctx(), _params(scene))
@@ -470,6 +557,17 @@ def test_none_path_means_not_ready_for_dependent_scripts(scene):
         methods_scripts.docx_build(_ctx(), {"root": str(scene["root"]), "deps_venv": str(none),
                                             "in": "sections/word-body.md", "out": "build/x.docx"})
     assert caught.value.code == "deps_not_ready"
+    assert not none.exists()
+    assert _fired(scene) == []
+
+
+def test_fallback_none_path_is_never_an_ensure_target(scene):
+    """13단계 I-02: 앱 데이터 `_none` 이 안전하지 않을 때 main 이 싣는 고정 경로도 설치 대상이 아니다."""
+    none = scene["tmp"] / "var-empty" / "knuaf-deps-none"
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.deps_ensure(_ctx(), {"root": str(scene["root"]), "deps_venv": str(none),
+                                             "base_python": sys.executable, "no_index": True})
+    assert caught.value.code == "deps_contract_missing"
     assert not none.exists()
     assert _fired(scene) == []
 

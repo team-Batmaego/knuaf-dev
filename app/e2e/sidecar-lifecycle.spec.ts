@@ -69,6 +69,8 @@ function harness(platform = 'darwin') {
   const spawnEnvs: Record<string, string | undefined>[] = []
   let deps = ''
   const depsProjects: (string | null)[] = []
+  const pickedWith: (string | undefined)[] = []
+  const noneProjects: unknown[] = []
   let automaticReady = true
   let failSpawn = false
   const exitQueue: number[] = []
@@ -89,15 +91,17 @@ function harness(platform = 'darwin') {
       // 이 스펙 기준으로 풀리고, 그 오류가 16개 시험을 한꺼번에 죽였다(맥 CI, e102bb4).
       if (name === './diagLog') return { diag: () => {} }
       if (name === './python') return {
-        choosePython: (_root: string | null, override: string | null) => venvTrusted
-          ? { python: 'venv-python', kind: 'venv' } : { python: override ?? 'base', kind: 'env' },
+        choosePython: (_root: string | null, override: string | null, judged?: string) => {
+          pickedWith.push(judged)
+          return venvTrusted ? { python: 'venv-python', kind: 'venv' } : { python: override ?? 'base', kind: 'env' }
+        },
         // I-04: 신뢰 철회 — 이후 선택은 앱 환경이 아니라 기본 실행기
         revokeDepsTrust: () => { revoked++; const was = venvTrusted; venvTrusted = false; return was },
         scriptsDir: () => scripts, sidecarDir: () => '/sidecar',
         // S-01 설계 3판 §3.3: 신뢰된 앱 데이터 의존성 환경(없으면 빈 문자열)
         depsVenv: (_override: string | null, project: string | null) => { depsProjects.push(project); return deps },
         // B-01: 환경이 없을 때 쓰는 "없음" 경로(존재하지 않는 앱 데이터 안 고정 경로)
-        depsNoneDir: () => '/app-data/deps/_none'
+        depsNoneDir: (project?: string | null) => { noneProjects.push(project); return '/app-data/deps/_none' }
       }
       if (name === 'node:child_process') return { spawn: (command: string, args: string[], options: object) => {
         spawnArgs.push(args)
@@ -124,7 +128,7 @@ function harness(platform = 'darwin') {
   return {
     sidecar, children, killers, kills,
     spawnArgs, spawnEnvs, setScripts: (path: string) => { scripts = path },
-    setDeps: (path: string) => { deps = path }, depsProjects,
+    setDeps: (path: string) => { deps = path }, depsProjects, pickedWith, noneProjects,
     manualReady: () => { automaticReady = false },
     failNextSpawn: () => { failSpawn = true },
     exitNextSpawn: (...codes: number[]) => { exitQueue.push(...codes) },
@@ -482,5 +486,35 @@ test('S-01 12단계 I-01: 사이드카는 띄울 논문 폴더를 알려 주고 
   const h = harness()
   await h.sidecar.configure('/paper/A', null)
   await h.sidecar.configure('/paper/B', null)
-  expect(h.depsProjects).toEqual(['/paper/A', '/paper/B'])
+  // 띄우는 configure 는 중지 앞뒤로 두 번, 그대로 두는 configure 는 한 번 판정한다(13단계) — 늘 그때의 논문 폴더로 묻는다.
+  expect(h.depsProjects).toEqual(['/paper/A', '/paper/A', '/paper/B'])
+})
+
+// 13단계 venv4 I-01: 판정과 시작 사이에 중지 대기가 있으면, 그사이 바뀐 자리(논문 쪽 링크)를 못 본다.
+test('S-01 13단계 I-01: 중지를 기다리는 동안 환경 판정이 바뀌면 시작 직전의 판정 하나로 실행기와 환경을 정한다', async () => {
+  const h = harness()
+  h.setDeps('/app-data/deps/0123456789abcdef')
+  await h.sidecar.configure('/paper', null)
+  const old = h.children[0]
+  old.shutdown = false
+  h.setScripts('/scripts/S1') // 재시작이 필요한 변화
+  const next = h.sidecar.configure('/paper', null)
+  await flush()
+  expect(h.children).toHaveLength(1) // 아직 중지 대기
+  h.setDeps('') // 그사이 자리가 겹치게 됨
+  old.close()
+  await next
+  expect(h.spawnEnvs[1].KNUAF_DEPS_VENV).toBe('/app-data/deps/_none')
+  expect(h.sidecar.status().depsVenv).toBe('')
+  expect(h.pickedWith.at(-1)).toBe('') // 실행기도 같은 판정으로
+  await h.sidecar.stop()
+})
+
+test('S-01 13단계 I-02: "없음" 경로는 지금 논문 폴더를 알려 주고 받는다(기동 env·호출 인자)', async () => {
+  const h = harness()
+  await h.sidecar.configure('/paper', null)
+  await h.sidecar.call('project.status')
+  expect(h.noneProjects.length).toBeGreaterThanOrEqual(2)
+  expect(new Set(h.noneProjects)).toEqual(new Set(['/paper']))
+  await h.sidecar.stop()
 })

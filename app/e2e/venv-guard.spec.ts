@@ -285,7 +285,9 @@ function expectRejected(h: ReturnType<typeof harness>, project: string): void {
   const py = h.python as unknown as Api
   expect(py.depsVenv(null, project)).toBe('')
   expect(py.venvPython(project)).toBeNull()
-  expect(py.agentDepsVenv(project)).toBe(py.depsNoneDir())
+  const sent = py.agentDepsVenv(project) as string
+  expect(sent).toBe(py.depsNoneDir(project)) // 그 폴더 기준의 "없음" 값
+  expect((h.depsEnv as unknown as Api).envPython(sent)).toBeNull()
   expect(h.python.choosePython(project, null)).toEqual({ python: h.managed, kind: 'managed' })
 }
 
@@ -386,7 +388,8 @@ test('I-01 ① 환경 링크가 논문 폴더 안을 가리키면 거부한다',
 test('I-02 실제 실행: 고른 앱 환경 python 은 대상 prefix 로 돌고 논문 폴더 .venv·미끼가 끼지 않는다', () => {
   const base = [KNUAF_PYTHON_SAVED, process.platform === 'win32' ? 'python' : 'python3']
     .find((c): c is string => !!c && spawnSync(c, ['-c', 'import venv'], { timeout: 20_000 }).status === 0)
-  test.skip(!base, 'venv 를 만들 수 있는 python 이 이 기계에 없다')
+  test.skip(!base && !process.env.CI, 'venv 를 만들 수 있는 python 이 이 기계에 없다')
+  expect(base, 'CI 에서는 실제 venv 시험을 건너뛰지 않는다').toBeTruthy()
   const h = harness()
   try {
     const py = h.python as unknown as Api
@@ -417,5 +420,151 @@ test('I-02 실제 실행: 고른 앱 환경 python 은 대상 prefix 로 돌고 
     const planted = (h.depsEnv as unknown as Api).envPython(join(h.root, '.venv')) as string
     spawnSync(planted, ['-c', 'pass'], { cwd: h.dir, timeout: 20_000 })
     expect(existsSync(h.marker)).toBe(true)
+  } finally { h.cleanup() }
+})
+
+// ---- 13단계 venv4(웹 독립검토) 재현 ------------------------------------------------------------------------------
+
+/** 대소문자를 구분하는 윈도 폴더 흉내(NTFS 디렉터리별 설정): 이름이 대소문자만 다른 두 폴더는 서로 다른 것이다. */
+function caseSensitiveWindowsFs(dirs: string[], files: Record<string, string>, links: Record<string, string>) {
+  const win = realRequire('node:path').win32 as typeof import('node:path')
+  const nodes = new Map<string, { kind: 'dir' | 'file' | 'link'; ino: bigint; target?: string; text?: string }>()
+  let ino = 10n
+  for (const d of ['C:', ...dirs]) nodes.set(d, { kind: 'dir', ino: ino++ })
+  for (const [f, text] of Object.entries(files)) nodes.set(f, { kind: 'file', ino: ino++, text })
+  for (const [l, target] of Object.entries(links)) nodes.set(l, { kind: 'link', ino: ino++, target })
+  const fail = (code: string): never => { throw Object.assign(new Error(code), { code }) }
+  const walk = (path: string, followLast: boolean): { path: string; node: NonNullable<ReturnType<typeof nodes.get>> } => {
+    const parts = win.normalize(path).replace(/\\$/, '').split('\\')
+    let current = parts[0]
+    for (let i = 1; i < parts.length; i++) {
+      current += '\\' + parts[i]
+      const node = nodes.get(current) ?? fail('ENOENT')
+      if (node.kind === 'link' && (followLast || i < parts.length - 1)) current = walk(node.target!, true).path
+    }
+    return { path: current, node: nodes.get(current) ?? fail('ENOENT') }
+  }
+  const stats = (n: { kind: string; ino: bigint }) => ({ dev: 1n, ino: n.ino, mtimeMs: 0, isDirectory: () => n.kind === 'dir', isSymbolicLink: () => n.kind === 'link' })
+  const removed: string[] = [], written: string[] = []
+  const native = (p: string) => walk(p, true).path
+  const fs = {
+    lstatSync: (p: string) => stats(walk(p, false).node), statSync: (p: string) => stats(walk(p, true).node),
+    existsSync: (p: string) => { try { walk(p, true); return true } catch { return false } },
+    realpathSync: Object.assign((p: string) => native(p), { native }),
+    readdirSync: (p: string) => { const at = native(p) + '\\'; return [...nodes.keys()].filter((k) => k.startsWith(at) && !k.slice(at.length).includes('\\')).map((k) => k.slice(at.length)) },
+    readFileSync: (p: string) => walk(p, true).node.text ?? fail('EISDIR'),
+    rmSync: (p: string) => { removed.push(p) }, writeFileSync: (p: string) => { written.push(p) }, renameSync: (_a: string, b: string) => { written.push(b) },
+    mkdirSync: () => {}
+  }
+  const exports: Record<string, unknown> = {}
+  depsEnvFactory((name) => name === 'node:path' ? win : name === 'node:fs' ? fs : name === 'node:fs/promises' ? { rm: async (p: string) => { removed.push(p) } } : realRequire(name),
+    exports, join(appRoot, 'out', 'main'))
+  return { api: exports as unknown as Api, removed, written }
+}
+
+test('13단계 B-01: 대소문자만 다른 별개 폴더로 이어지는 deps 정션은 앱 데이터 밖이다(식별자가 다르면 글자 비교로 뒤집지 않는다)', async () => {
+  const key = KEY, loose = 'bbbbbbbbbbbbbbbb', away = 'C:\\DATA\\elsewhere'
+  const w = caseSensitiveWindowsFs(
+    ['C:\\data', 'C:\\DATA', away, `${away}\\${key}`, `${away}\\${key}\\bin`, `${away}\\${key}\\Scripts`, `${away}\\${loose}`],
+    { [`${away}\\${key}\\knuaf-ready.json`]: JSON.stringify({ key }), [`${away}\\${key}\\bin\\python3`]: '', [`${away}\\${key}\\Scripts\\python.exe`]: '' },
+    { 'C:\\data\\deps': away })
+  const root = 'C:\\data\\deps'
+  expect(w.api.trustedEnv(root, key)).toBe('')
+  expect(() => w.api.markReady(root, key)).toThrow(/outside app data/)
+  expect(w.api.discardUnmarked(root, loose)).toBe(false)
+  expect(await w.api.pruneEnvs(root, key)).toEqual([])
+  expect(w.removed).toEqual([])
+  expect(w.written).toEqual([])
+  expect(w.api.envPlacement(root, key, null)).toBe('outside_app_data')
+})
+
+test('13단계 B-01 윈도 실물: 대소문자 구분 폴더에서 이름만 다른 폴더로 가는 정션을 거부한다', () => {
+  test.skip(process.platform !== 'win32', '윈도 NTFS 의 디렉터리별 대소문자 구분이 있어야 한다')
+  const h = harness()
+  try {
+    const cs = join(h.dir, 'cs'); mkdirSync(cs)
+    const enabled = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', cs, 'enable'], { encoding: 'utf8' })
+    test.skip(enabled.status !== 0, `대소문자 구분을 켤 수 없는 자리: ${enabled.stdout}${enabled.stderr}`)
+    const de = h.depsEnv as unknown as Api
+    const away = join(cs, 'DATA', 'elsewhere'), root = join(cs, 'data', 'deps'), loose = 'bbbbbbbbbbbbbbbb'
+    mkdirSync(join(cs, 'data')); mkdirSync(join(away, loose), { recursive: true })
+    fakeInterpreter(join(away, KEY)); writeFileSync(join(away, KEY, 'knuaf-ready.json'), JSON.stringify({ key: KEY }))
+    symlinkSync(away, root, 'junction')
+    expect(de.trustedEnv(root, KEY)).toBe('')
+    expect(de.discardUnmarked(root, loose)).toBe(false)
+    expect(existsSync(join(away, loose))).toBe(true)
+    expect(de.envPlacement(root, KEY, null)).toBe('outside_app_data')
+  } finally { h.cleanup() }
+})
+
+test('13단계 I-01: 링크 뒤의 `..` 는 접기 전에 파일 시스템으로 푼다(실제로 환경 안인 폴더는 겹침)', () => {
+  test.skip(process.platform === 'win32', '윈도는 OS 가 `..` 를 글자로 먼저 접는다 — posix 의 실제 해석 장면이다')
+  const h = harness()
+  try {
+    const { root, key, env } = trustedFixture(h), de = h.depsEnv as unknown as Api
+    mkdirSync(join(env, 'sub')); symlinkSync(join(env, 'sub'), join(h.root, 'alias'))
+    const project = join(h.root, 'alias') + '/..' // join 은 `..` 를 접으므로 글자로 붙인다
+    expect(realpathSync.native(project)).toBe(realpathSync.native(env))
+    expectRejected(h, project)
+    expect(de.envPlacement(root, key, project)).toBe('overlaps_project')
+    // 없는 곳을 거쳐 `..` 로 나오는 경로는 풀 수 없는 것으로 거부한다
+    expect(de.envPlacement(root, key, join(h.root, '없음') + '/..')).toBe('overlaps_project')
+  } finally { h.cleanup() }
+})
+
+/** 거부된 장면에서 앱이 도우미·사이드카에 싣는 값 — 미끼가 있는 자리를 가리키면 안 되고, 그 자리에 실행기가 없어야 한다. */
+function expectSafeNone(h: ReturnType<typeof harness>, project: string | null, bait: string): void {
+  const py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
+  for (const value of [py.agentDepsVenv(project), py.processDepsVenv(null, project), py.depsNoneDir(project)] as string[]) {
+    expect(de.envPython(value)).toBeNull() // 도우미·사이드카가 이 값에서 실행기를 찾으면 미끼가 돈다
+    expect(existsSync(value) && realpathSync.native(value) === realpathSync.native(bait)).toBe(false)
+    expect(value).toBe(de.noDepsEnvFallback())
+  }
+}
+
+for (const where of ['논문 폴더 안', '앱 데이터 밖'] as const) {
+  test(`13단계 I-02: deps 가 ${where}을(를) 가리키고 거기 _none 미끼가 있으면 "없음" 값은 만들 수 없는 고정 경로다`, () => {
+    const h = harness()
+    try {
+      const py = h.python as unknown as Api
+      const root = py.depsRoot() as string
+      const away = where === '논문 폴더 안' ? join(h.root, '받은-deps') : join(h.dir, '바깥-deps')
+      const bait = join(away, '_none'); fakeInterpreter(bait)
+      mkdirSync(join(root, '..'), { recursive: true }); symlinkSync(away, root, 'junction')
+      expectSafeNone(h, h.root, bait)
+      expectSafeNone(h, null, bait)
+    } finally { h.cleanup() }
+  })
+}
+
+test('13단계 I-02: _none 이 아직 없어도, 논문 폴더가 그 자리를 품으면(누가 만들 수 있으면) 쓰지 않는다', () => {
+  const h = harness()
+  try {
+    const py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
+    const none = join(py.depsRoot() as string, '_none')
+    expect(py.agentDepsVenv(h.root)).toBe(none) // 정상 배치: 앱 데이터의 "없음" 경로 그대로
+    for (const project of [h.dir, join(h.dir, 'userData')]) {
+      expect(py.agentDepsVenv(project)).not.toBe(none)
+      expect(py.agentDepsVenv(project)).toBe(de.noDepsEnvFallback())
+    }
+  } finally { h.cleanup() }
+})
+
+test('13단계 I-02: 앱 데이터에 _none 이 어쩌다 생겨 있으면 쓰지 않는다', () => {
+  const h = harness()
+  try {
+    const py = h.python as unknown as Api
+    const bait = join(py.depsRoot() as string, '_none'); fakeInterpreter(bait)
+    expectSafeNone(h, h.root, bait)
+  } finally { h.cleanup() }
+})
+
+test('13단계 R-01: 순환 링크인 환경 자리는 거부한다', () => {
+  const h = harness()
+  try {
+    const py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
+    const root = py.depsRoot() as string, other = join(h.dir, 'userData', '고리'); mkdirSync(root, { recursive: true })
+    symlinkSync(other, join(root, KEY), 'junction'); symlinkSync(join(root, KEY), other, 'junction')
+    expect(de.envPlacement(root, KEY, h.root)).toBe('outside_app_data')
   } finally { h.cleanup() }
 })

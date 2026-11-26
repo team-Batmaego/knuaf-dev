@@ -12,7 +12,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 export const READY_FILE = 'knuaf-ready.json'
 
@@ -58,14 +58,17 @@ export type PlacementProblem = 'outside_app_data' | 'overlaps_project'
 /**
  * 링크·정션·8.3 짧은 이름을 푼 실제 경로. 아직 없는 꼬리는 있는 조상의 실제 경로에 붙인다.
  * 풀 수 없는 것(끊긴 링크·순환·권한)은 "아직 없음"이 아니라 null — 호출자가 거부한다.
+ * `..` 는 미리 글자로 접지 않는다(posix 는 링크 대상 기준으로 풀린다, venv4 I-01) — 파일 시스템에 그대로 묻고,
+ * 아직 없는 꼬리에 `.`·`..` 가 있으면 풀 수 없는 것으로 본다.
  */
 function resolveReal(path: string): string | null {
   const tail: string[] = []
-  let current = resolve(path)
+  let current = path
   for (;;) {
     try { lstatSync(current) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(current) === current) return null
-      tail.unshift(basename(current)); current = dirname(current); continue
+      const name = basename(current)
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(current) === current || name === '.' || name === '..') return null
+      tail.unshift(name); current = dirname(current); continue
     }
     try { return join(realpathSync.native(current), ...tail) } catch { return null }
   }
@@ -76,11 +79,16 @@ function identity(path: string): string | null {
   try { const s = statSync(path, { bigint: true }); return s.ino ? `${s.dev}:${s.ino}` : null } catch { return null }
 }
 
-/** `inner` 가 `outer` 자신이거나 그 아래인가. 둘 다 `resolveReal` 을 거친 값이어야 한다. */
+/**
+ * `inner` 가 `outer` 자신이거나 그 아래인가. 둘 다 `resolveReal` 을 거친 값이어야 한다.
+ * 양쪽 식별자가 있으면 **식별자만** 본다 — 대소문자 구분 폴더(윈도 NTFS 설정)에서 이름이 대소문자만 다른 것은
+ * 다른 폴더다(venv4 B-01). 없으면(아직 없는 꼬리·번호 없는 파일 시스템) 실제 경로의 글자가 정확히 같을 때만 같다.
+ */
 function contains(outer: string, inner: string): boolean {
   const target = identity(outer)
   for (let p = inner; ; p = dirname(p)) {
-    if (relative(outer, p) === '' || (target !== null && identity(p) === target)) return true
+    const own = identity(p)
+    if (target !== null && own !== null ? own === target : p === outer) return true
     if (dirname(p) === p) return false
   }
 }
@@ -100,6 +108,35 @@ export function envPlacement(root: string, key: string, projectRoot: string | nu
   const project = resolveReal(projectRoot)
   if (!project || contains(project, env) || contains(env, project)) return 'overlaps_project'
   return null
+}
+
+/** "환경 없음"을 나타내는 앱 데이터 안 폴더 이름(B-01). 만들지 않는다. */
+export const NONE_NAME = '_none'
+
+/**
+ * 앱 데이터 의존성 환경이 아직 없거나 호출자가 값을 못 넘겼을 때 쓰는 **일반 사용자가 만들 수 없는 고정 경로**(B-01).
+ * 빈 값은 쓰지 않는다 — 윈도 cmd 의 `set "K="` 는 변수를 지워 규칙집이 폴더 `.venv` 로 돌아간다.
+ */
+export function noDepsEnvFallback(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? 'C:\\Windows\\knuaf-deps-none' : '/var/empty/knuaf-deps-none'
+}
+
+/**
+ * 프로세스에 실을 "없음" 경로(venv4 I-02): `<root>/_none` 은 그것이 앱 데이터 안(링크 없이 풀림)에 있고, 아직 아무것도
+ * 없으며, 논문 폴더가 그 자리를 품지 않을 때만 "없음"이다. 아니면 누가 거기에 실행기를 둘 수 있으므로 고정 경로를 쓴다.
+ */
+export function noneEnvDir(root: string, projectRoot: string | null = null): string {
+  const dir = join(root, NONE_NAME)
+  const base = resolveReal(dirname(root)), deps = resolveReal(root)
+  if (!base || !deps || !strictlyInside(base, deps)) return noDepsEnvFallback()
+  try { lstatSync(dir); return noDepsEnvFallback() } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return noDepsEnvFallback()
+  }
+  if (projectRoot) {
+    const project = resolveReal(projectRoot)
+    if (!project || contains(project, join(deps, NONE_NAME))) return noDepsEnvFallback()
+  }
+  return dir
 }
 
 /** 신뢰된 환경 폴더, 없으면 빈 문자열. `projectRoot` 는 지금 일하는 논문 폴더(겹침 검사). */

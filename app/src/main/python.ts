@@ -4,7 +4,7 @@ import { app } from 'electron'
 import { managedPython } from './runtime'
 import { skillSource } from './agent'
 import { loadSettings } from './settings'
-import { depsKey, envPython, pruneEnvs, revokeTrust, trustedEnv } from './deps-env'
+import { depsKey, envPython, noneEnvDir, pruneEnvs, revokeTrust, trustedEnv } from './deps-env'
 
 /** app/ in a checkout (out/main → ../..); resources live next to it when packaged. */
 export const APP_ROOT = resolve(__dirname, '..', '..')
@@ -87,17 +87,19 @@ export function agentDepsVenv(projectRoot: string | null): string {
 }
 
 /**
- * "환경 없음"을 나타내는 앱 데이터 안 고정 경로(B-01). **만들지 않는다** — 규칙집은 그 폴더의 실행 파일만 보므로
- * 없으면 환경 없음이고, 폴더 `.venv` 로 돌아가지 않는다. 빈 값은 윈도 cmd 에서 변수 삭제가 되므로 쓰지 않는다.
+ * "환경 없음"을 나타내는 값(B-01) — 보통은 앱 데이터 `deps/_none`(**만들지 않는다**: 규칙집은 그 폴더의 실행 파일만
+ * 보므로 없으면 환경 없음이고, 폴더 `.venv` 로 돌아가지 않는다). 그 자리를 누가 채울 수 있으면(링크로 앱 데이터를
+ * 벗어남·논문 폴더가 품음·이미 있음) 일반 사용자가 만들 수 없는 고정 경로로 바꾼다(venv4 I-02, `noneEnvDir`).
+ * 빈 값은 윈도 cmd 에서 변수 삭제가 되므로 쓰지 않는다.
  * `_none` 은 키(16자리 16진수)가 아니라서 표식·정리·준비 대상이 될 수 없다(deps-env 가 키 모양만 받는다).
  */
-export function depsNoneDir(): string {
-  return join(depsRoot(), '_none')
+export function depsNoneDir(projectRoot: string | null = null): string {
+  return noneEnvDir(depsRoot(), projectRoot)
 }
 
 /** 프로세스(사이드카 기동 env·호출 인자·도우미 env)에 싣는 값: 신뢰 환경, 없으면 "없음" 경로. 늘 비어 있지 않다. */
 export function processDepsVenv(override: string | null = null, projectRoot: string | null = null): string {
-  return depsVenv(override, projectRoot) || depsNoneDir()
+  return depsVenv(override, projectRoot) || depsNoneDir(projectRoot)
 }
 
 /**
@@ -105,11 +107,13 @@ export function processDepsVenv(override: string | null = null, projectRoot: str
  * managed runtime, bundled runtime, PATH.
  * 관리 런타임은 사용자가 버튼을 눌렀을 때만 생기므로 번들보다 앞이다 — 번들이 깨진
  * 설치본에서도 버튼이 실제로 효과가 있어야 한다(D6).
+ * `judged` = 호출자가 이미 판정한 앱 환경(`depsVenv`). 실행기와 넘길 환경이 같은 판정에서 나오게 한다(venv4 I-01).
  */
-export function choosePython(projectRoot: string | null, override: string | null): Pick<SidecarInfo, 'python' | 'kind'> {
+export function choosePython(projectRoot: string | null, override: string | null, judged?: string): Pick<SidecarInfo, 'python' | 'kind'> {
   if (override && existsSync(override)) return { python: override, kind: 'env' }
   if (process.env.KNUAF_PYTHON && existsSync(process.env.KNUAF_PYTHON)) return { python: process.env.KNUAF_PYTHON, kind: 'env' }
-  const deps = projectRoot ? depsPython(override, projectRoot) : null
+  const env = projectRoot ? judged ?? depsVenv(override, projectRoot) : ''
+  const deps = env ? envPython(env) : null
   if (deps) return { python: deps, kind: 'venv' }
   const managed = managedPython()
   if (managed) return { python: managed, kind: 'managed' }

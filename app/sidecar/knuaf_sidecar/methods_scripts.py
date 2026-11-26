@@ -14,7 +14,9 @@ TIMEOUTS = {"office": 120, "deps": 600, "kordoc": 240, "default": 120}
 # `.venv` 는 찾지 않는다. gg_deps.py 자식의 작업 디렉터리는 이 사이드카 폴더(앱 자원) — 폴더는 인자로만.
 SIDECAR_DIR = Path(__file__).resolve().parent
 DEPS_ENV = "KNUAF_DEPS_VENV"
-NONE_NAME = "_none"  # main(python.ts depsNoneDir)가 환경 없음을 알리는 앱 데이터 안 고정 폴더 이름 — 만들지 않는다.
+# main(deps-env.ts noneEnvDir)이 환경 없음을 알리는 폴더 이름 — 앱 데이터 `_none`, 그 자리가 안전하지 않을 때는
+# 만들 수 없는 고정 경로. 둘 다 설치 대상이 아니다.
+NONE_NAMES = ("_none", "knuaf-deps-none")
 # 형님 결정 D-A: 도우미(에이전트) env 에만 1 로 싣는 "공유 환경 설치 거부" 표시. 사이드카는 앱의 '준비하기'
 # 경로라 설치해야 하므로 자식에 절대 물려주지 않는다. 스킬이 거부하면 code `deps_venv_readonly`.
 READONLY_ENV = "KNUAF_DEPS_VENV_READONLY"
@@ -283,9 +285,9 @@ def deps_ensure(ctx, params):
     target = _deps_venv(params, root)
     if not target:
         raise RpcError("deps_contract_missing", "준비할 의존성 환경 경로(deps_venv)가 비어 있음")
-    if Path(target).name == NONE_NAME:
+    if Path(target).name in NONE_NAMES:
         # B-01: "환경 없음" 표시 경로는 만들지 않는다 — 준비 대상은 키 폴더뿐이다.
-        raise RpcError("deps_contract_missing", "'환경 없음' 경로(%s)는 준비 대상이 아님" % NONE_NAME)
+        raise RpcError("deps_contract_missing", "'환경 없음' 경로(%s)는 준비 대상이 아님" % Path(target).name)
     deps_contract.require(_scripts_dir())
     base = params.get("base_python") or sys.executable
     argv = ["ensure", str(root)] + _flags(params, ("find_links", "no_index"))
