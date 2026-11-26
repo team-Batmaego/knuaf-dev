@@ -62,3 +62,14 @@ test('도우미 지시문: 규칙집 거부 코드 둘 다 앱의 준비 단추�
   expect(text).toContain('"패키지 준비"')
   expect(text).not.toContain('(.venv,')
 })
+
+test('D1 문구: 옛 폴더 .venv 는 지워도 되고, 이 컴퓨터에서 한 번 준비하면 된다(앱은 지우지 않음)', async () => {
+  const { DEPS_COPY, RUNTIME } = await import('../src/renderer/src/copy')
+  expect(DEPS_COPY.legacyVenvTitle).toContain('.venv')
+  expect(DEPS_COPY.legacyVenvBody).toContain('지워도 돼요')
+  expect(DEPS_COPY.legacyVenvBody).toContain('"패키지 준비"')
+  // 준비 카드 설명·완료 문구가 더 이상 "프로젝트 폴더 안 .venv" 에 설치한다고 말하지 않는다.
+  for (const text of [DEPS_COPY.installCaption, DEPS_COPY.readyBody, RUNTIME.venvStaleAction]) {
+    expect(text).not.toMatch(/폴더 안.*\.venv|프로젝트 \.venv/)
+  }
+})

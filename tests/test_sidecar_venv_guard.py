@@ -332,3 +332,28 @@ def test_stage_skill_gate_runs_this_contract_suite():
     text = gate.read_text(encoding="utf-8")
     block = text.split("export const CONSUMER_TESTS = [", 1)[1].split("]", 1)[0]
     assert "'test_sidecar_venv_guard.py'" in block
+
+
+# --- D1(형님 결정: 옛 폴더 .venv 는 쓰지 않음 → PC당 1회 준비): 있다는 사실만 알린다 --------------------------------
+
+
+@pytest.mark.parametrize("kind", ["fake-venv", "dangling-link", "none"])
+def test_doctor_all_reports_legacy_folder_venv_without_touching_it(scene, monkeypatch, kind):
+    import shutil
+
+    import gg_core as core
+
+    core.init(scene["root"])
+    venv_dir = scene["root"] / ".venv"
+    if kind != "fake-venv":
+        shutil.rmtree(venv_dir)
+    if kind == "dangling-link":
+        venv_dir.symlink_to(scene["tmp"] / "no-such-dir")
+    before = sorted(p.name for p in scene["root"].iterdir())
+    monkeypatch.setitem(sys.modules, "gg_deps", _fake_gg_deps(False, []))
+    out = methods_core.doctor_all(_ctx(), _params(scene))
+    assert out["legacy_venv"] is (kind != "none")
+    assert _fired(scene) == []  # 존재 확인만 — 실행하지 않는다
+    assert sorted(p.name for p in scene["root"].iterdir()) == before  # 지우지도 옮기지도 않는다
+    if kind == "fake-venv":
+        assert scene["fake"].read_text().startswith("#!/bin/sh")

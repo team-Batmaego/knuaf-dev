@@ -156,7 +156,7 @@ export function subscriptionEnv(extraPathDirs: string[] = [], depsVenv = ''): No
   // codex 는 `#!/usr/bin/env node` 스크립트라 그 PATH 로는 셔뱅이 죽고
   // "env: node: No such file or directory" 만 남는다(claude 는 네이티브라 멀쩡했다).
   // 바이너리를 찾는 것과 그 바이너리가 인터프리터를 찾는 것은 다른 문제다.
-  // 프로젝트 .venv → 번들 CPython → 시스템 위치 순. 임베디드 터미널(terminal.ts)은
+  // 앱 데이터 의존성 환경(S-01) → 번들 CPython → 시스템 위치 순. 임베디드 터미널(terminal.ts)은
   // 이미 이렇게 하고 있었고, 채팅 경로만 빠져 있었다. 학생 맥의 기본 python3 는 3.9 라
   // 스킬의 최소 조건(3.10)에 못 미치는데, 이게 없으면 앱은 번들 3.12 로 잘 도는 반면
   // 도우미만 "쓸 수 있는 Python 이 없다"에 막힌다.

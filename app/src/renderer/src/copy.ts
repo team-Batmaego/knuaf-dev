@@ -1170,8 +1170,8 @@ export const CHAT = {
   depthTitle: '생각 깊이',
   // --- 아래 칸: 작업 중 한 줄(설계 §3) --------------------------------------
   runningLine: '도우미가 작업 중이에요',
-  /** 폴더 준비(.venv) 중 — 입력칸 위 진행 표시(store/prep.ts). 처음 한 번, 윈도우에서는 몇 분 걸린다. */
-  preparingLine: '이 폴더를 처음 쓸 준비를 하고 있어요 — 몇 분 걸릴 수 있어요',
+  /** 패키지 준비(이 컴퓨터의 앱 자리, S-01) 중 — 입력칸 위 진행 표시(store/prep.ts). PC당 처음 한 번, 윈도우에서는 몇 분 걸린다. */
+  preparingLine: '이 컴퓨터에서 처음 쓸 준비를 하고 있어요 — 몇 분 걸릴 수 있어요',
   preparingQueued: '준비가 끝나면 바로 보낼게요',
   appBusyTitle: '앱이 저장·검사를 마치는 중이에요',
   appBusyBody: '끝나면 다시 보내 주세요.',
@@ -1650,6 +1650,17 @@ export const SETTINGS = {
  * 앱 전용 Python 준비(DESIGN D8·D9, §7 PY-D1-02). 학생이 터미널·설정을 몰라도 되게 하는
  * 문구만 둔다 — 크기 안내에는 실제 내려받기 크기(명세의 size)가 들어간다.
  */
+/**
+ * 준비 카드(설정 > 문제 해결 > 준비 상태) 문구 — S-01: 패키지는 논문 폴더가 아니라 이 컴퓨터의 앱 자리에 한 번 준비한다.
+ * D1(형님 결정): v0.7.4 이하가 폴더에 만든 `.venv` 는 더 이상 쓰지 않는다. 앱은 지우지 않고 알리기만 한다.
+ */
+export const DEPS_COPY = {
+  installCaption: '이 컴퓨터의 앱 자리에 한 번만 설치하고, 모든 논문 폴더에서 같이 써요. 전역 Python과 논문 폴더는 건드리지 않아요.',
+  readyBody: '이 컴퓨터에 준비한 패키지의 import·버전을 확인했어요.',
+  legacyVenvTitle: '이 폴더의 .venv 폴더는 이제 쓰지 않아요',
+  legacyVenvBody: '예전 판이 논문 폴더 안에 만든 .venv 는 지워도 돼요(앱은 지우지 않아요). 패키지는 이 컴퓨터에서 한 번 "패키지 준비"를 누르면 모든 논문 폴더에서 써요.'
+} as const
+
 export const RUNTIME = {
   fixTitle: 'Python을 자동으로 준비할 수 있어요.',
   /** 버튼이 실제로 보일 때만 이 문장을 쓴다(D9). */
@@ -1664,7 +1675,7 @@ export const RUNTIME = {
   retryFailedTitle: 'Python은 준비됐지만 이 폴더는 아직 열리지 않았어요.',
   retryFailedBody: '아래에 새 오류를 같이 보여 드려요.',
   /** 읽을 수 있는 낡은 venv 는 선택에서 빠지고, cfg 를 못 읽는 venv 만 여기로 온다. */
-  venvStaleAction: '이 폴더 안의 .venv 폴더가 오래된 Python으로 만들어져 있어요. Finder/탐색기에서 .venv 폴더 이름을 .venv-old로 바꾼 뒤 다시 열어 주세요.',
+  venvStaleAction: '이 컴퓨터에 준비한 패키지 환경의 Python을 실행하지 못했어요. "설정 > 문제 해결 > 준비 상태"에서 "패키지 준비"를 다시 눌러 주세요.',
   settingsNote: '앱 전용 Python을 이 컴퓨터에 준비해요. 컴퓨터에 설치된 Python은 바꾸지 않아요.',
   /** 진행 이벤트에 단계 이름이 없을 때의 한 단어. */
   progressFallback: '진행',

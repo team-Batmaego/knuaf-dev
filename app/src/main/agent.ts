@@ -679,7 +679,7 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
 
 /**
  * 윈도우 대응 실행물 — `.command`(bash) 대신 `.cmd`(배치)다. 같은 일을 한다: 작업 폴더로
- * 이동하고, 프로젝트 .venv·번들 파이썬 자리를 PATH 앞에 두고, 같은 환경변수를 세우고,
+ * 이동하고, 앱 데이터 의존성 환경·번들 파이썬 자리를 PATH 앞에 두고, 같은 환경변수를 세우고,
  * 같은 가드레일(`--setting-sources=` / `--strict-mcp-config` / 앱 스킬 자리 / 전역 knuaf-dev 사본
  * 끄기)로 도우미를 띄운다.
  *

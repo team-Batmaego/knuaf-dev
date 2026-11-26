@@ -294,7 +294,7 @@ export class ChatService {
      * 실패는 `null` 또는 예외(둘 다 "이번엔 못 붙었다")이고, 그때도 대화는 그대로 간다.
      */
     ensureKordoc?: (root: string) => Promise<KordocRuntime | null>
-    /** 도우미가 쓸 Python — 프로젝트 .venv 와 번들 CPython. */
+    /** 도우미가 쓸 Python — 앱 데이터 의존성 환경(S-01)과 번들 CPython. */
     venvPython?: (root: string) => string | null
     /** S-01 §3.4: 도우미 env 의 `KNUAF_DEPS_VENV`(앱 데이터 환경). 없으면 빈 값으로 닫는다(READONLY 는 늘). */
     depsVenv?: () => string
@@ -358,7 +358,7 @@ export class ChatService {
     handoff?: HandoffSeam
   }) {}
   private get writeFs(): SafeWriteFs { return this.opts.fs ?? { writeFileSync, renameSync, unlinkSync, readFileSync: (p) => readFileSync(p, 'utf8') } }
-  /** PATH 앞자리에 둘 인터프리터 bin 경로 — 프로젝트 .venv 가 번들보다 우선한다. */
+  /** PATH 앞자리에 둘 인터프리터 bin 경로 — 앱 데이터 의존성 환경이 번들보다 우선한다. */
   private pythonBinDirs(root: string): string[] {
     const venv = this.opts.venvPython?.(root) ?? null
     const bundled = this.opts.bundledPython?.() ?? null

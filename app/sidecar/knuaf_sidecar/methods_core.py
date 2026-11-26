@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from itertools import chain
 from pathlib import Path
@@ -288,6 +289,9 @@ def doctor_all(ctx, params):
         except RpcError as error:
             out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
         out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
+        # D1(형님 결정): v0.7.4 이하가 폴더에 만든 `.venv` 는 더 이상 쓰지 않는다. 있다는 사실만 알린다 —
+        # lexists(링크를 따라가지 않음)만 보고, 실행·삭제·이동은 하지 않는다. 안내는 준비 카드가 한다.
+        out["legacy_venv"] = os.path.lexists(root / ".venv")
         return out
 
 

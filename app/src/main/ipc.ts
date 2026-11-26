@@ -727,7 +727,7 @@ export function registerIpc(
     providerOf(company)
     const binary = findExecutable(company === 'free' ? 'codex' : company)
     if (!binary) throw new Error(`${company !== 'claude' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 설치 안내를 열어 주세요.`)
-    // 본대화와 같은 PATH 앞자리(프로젝트 .venv → 번들 CPython) — 담당이 도우미와 같은
+    // 본대화와 같은 PATH 앞자리(앱 데이터 의존성 환경 → 번들 CPython) — 담당이 도우미와 같은
     // 인터프리터를 찾아야 스킬 스크립트가 같은 결과를 낸다.
     const python = venvPython(currentRoot) ?? bundledPython()
     return {
@@ -830,7 +830,7 @@ export function registerIpc(
       const node = (envelope.data as { node_path?: unknown } | null | undefined)?.node_path
       return typeof node === 'string' && node ? runtimeFromEnsureEnvelope(envelope, node) : null
     }),
-    // 도우미에게도 프로젝트 .venv 와 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
+    // 도우미에게도 앱 데이터 의존성 환경과 번들 인터프리터를 건넨다 — Homebrew 없는 맥에서 막히지 않게.
     venvPython,
     depsVenv: agentDepsVenv,
     bundledPython,
@@ -1065,7 +1065,7 @@ export function registerIpc(
     const operation = async (): Promise<RpcResult<Envelope>> => {
       // S-01 §3.2 I-01: 의존성은 앱 데이터 deps/<키>/ 에만 설치한다. 이 경로를 실행에 쓰는 것은 이번 준비 건에
       // 한정되고, 진단까지 통과한 뒤에야 main 이 표식을 써서 신뢰로 바꾼다. 실패·취소면 표식 없는 그 폴더를 버린다.
-      // 폴더의 옛 .venv 는 보지도 승격하지도 않는다(TODO(D1): 안내 문구). 앱이 단일 인스턴스라 다른 창과의
+      // 폴더의 옛 .venv 는 보지도 승격하지도 않는다(D1: 준비 카드가 안내만 한다). 앱이 단일 인스턴스라 다른 창과의
       // 동시 준비는 없고, 같은 창 안에서는 dependencyFlights 가 묶는다.
       const override = loadSettings().python_override
       const envRoot = depsRoot(), envKey = depsEnvKey(override), target = join(envRoot, envKey)

@@ -43,7 +43,7 @@ export function depsEnvKey(override: string | null = null): string {
 /**
  * 신뢰된 앱 데이터 의존성 환경 폴더(표식 있음), 없으면 빈 문자열(S-01 §3.2).
  * 논문 폴더의 `.venv` 는 어떤 경우에도 고르지 않는다 — 폴더에 쓸 수 있는 사람이 앱 권한으로
- * 코드를 돌리는 길이었다(S-01). 옛 판이 폴더에 만든 `.venv` 의 처리(D1)는 TODO(D1): 결정 대기.
+ * 코드를 돌리는 길이었다(S-01). 옛 판이 폴더에 만든 `.venv` 는 쓰지 않고 알리기만 한다(D1, 사이드카 doctor.all `legacy_venv`).
  */
 export function depsVenv(override: string | null = null): string {
   return trustedEnv(depsRoot(), depsEnvKey(override))
