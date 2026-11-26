@@ -44,8 +44,8 @@ def _deps_venv(params, root: Path) -> str:
         raise RpcError("invalid_params", "deps_venv 는 문자열이어야 함")
     if value:
         env, base = Path(value).resolve(), root.resolve()
-        if env == base or base in env.parents:
-            raise RpcError("deps_venv_untrusted", "의존성 환경이 논문 폴더 안에 있음", {"deps_venv": value})
+        if env == base or base in env.parents or env in base.parents:
+            raise RpcError("deps_venv_untrusted", "의존성 환경과 논문 폴더가 겹침", {"deps_venv": value})
     return value
 
 

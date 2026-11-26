@@ -60,3 +60,24 @@ test('I-02: 환경이 그대로면 연결을 다시 만들지 않는다', async 
     expect(h.created[0].stopped).toBe(false)
   } finally { await h.service.close() }
 })
+
+// 12단계 I-01: 앱 환경이 겹치는지는 논문 폴더마다 다르다 — 본대화는 그 대화의 폴더로 환경을 묻는다.
+test('12단계 I-01: 본대화 연결은 그 대화의 논문 폴더로 앱 환경을 묻는다(겹치는 폴더면 "없음" 경로)', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'knuaf-i01-')), root = mkdtempSync(join(tmpdir(), 'knuaf-i01-root-'))
+  const asked: unknown[] = [], envs: (string | undefined)[] = []
+  const service = new ChatService({
+    skillSource: () => source, userData, emit: () => {}, openExternal: async () => {},
+    depsVenv: (project: string) => { asked.push(project); return '/app/deps/_none' }, venvPython: () => null,
+    connectionFactory: (_provider, options) => {
+      envs.push(options.env!['KNUAF_DEPS_VENV'])
+      return { status: async () => ({ connected: true, installed: true, version: 'test', detail: '' }),
+        login: async () => { throw new Error('login forbidden') }, run: async () => {}, respond: () => {}, stop: async () => {} }
+    }
+  })
+  try {
+    await service.send(root, 'codex', '하나', 'req-1')
+    expect(asked.length).toBeGreaterThan(0)
+    expect(new Set(asked)).toEqual(new Set([root]))
+    expect(envs).toEqual(['/app/deps/_none'])
+  } finally { await service.close() }
+})

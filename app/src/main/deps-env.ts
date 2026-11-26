@@ -2,7 +2,8 @@
  * 앱 데이터 의존성 환경(S-01 설계 3판 §3.2). 논문 폴더의 `.venv` 는 보지 않는다 — 폴더에 쓸 수 있는
  * 사람이 앱 권한으로 코드를 돌릴 수 없게, 의존성 환경은 앱만 쓰는 자리에 둔다.
  *
- * 신뢰 조건은 하나: `<환경>/knuaf-ready.json` 이 있고 그 안 `key` 가 지금 키와 같으며 실행 파일이 있다.
+ * 신뢰 조건: `<환경>/knuaf-ready.json` 이 있고 그 안 `key` 가 지금 키와 같으며 실행 파일이 있고, 환경 자리가
+ * `envPlacement` 를 통과한다(앱 데이터 밖으로 풀리지 않고 논문 폴더와 겹치지 않는다).
  * 이 표식은 main 만, 준비(설치·진단)가 끝난 **뒤에** 쓴다(I-01). 내용 해시·지문은 두지 않는다 —
  * 공격자가 못 쓰는 자리라서다.
  *
@@ -11,7 +12,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
-import { basename, dirname, join, relative, isAbsolute } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 
 export const READY_FILE = 'knuaf-ready.json'
 
@@ -52,9 +53,58 @@ export function envPython(dir: string, platform = process.platform): string | nu
   return candidates.find((c) => existsSync(c)) ?? null
 }
 
-/** 신뢰된 환경 폴더, 없으면 빈 문자열. */
-export function trustedEnv(root: string, key: string): string {
-  if (!KEY_SHAPE.test(key)) return ''
+export type PlacementProblem = 'outside_app_data' | 'overlaps_project'
+
+/**
+ * 링크·정션·8.3 짧은 이름을 푼 실제 경로. 아직 없는 꼬리는 있는 조상의 실제 경로에 붙인다.
+ * 풀 수 없는 것(끊긴 링크·순환·권한)은 "아직 없음"이 아니라 null — 호출자가 거부한다.
+ */
+function resolveReal(path: string): string | null {
+  const tail: string[] = []
+  let current = resolve(path)
+  for (;;) {
+    try { lstatSync(current) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(current) === current) return null
+      tail.unshift(basename(current)); current = dirname(current); continue
+    }
+    try { return join(realpathSync.native(current), ...tail) } catch { return null }
+  }
+}
+
+/** 파일 시스템이 보는 같은 것의 표시(samefile). 번호를 주지 않는 파일 시스템이면 null → 실제 경로 비교만. */
+function identity(path: string): string | null {
+  try { const s = statSync(path, { bigint: true }); return s.ino ? `${s.dev}:${s.ino}` : null } catch { return null }
+}
+
+/** `inner` 가 `outer` 자신이거나 그 아래인가. 둘 다 `resolveReal` 을 거친 값이어야 한다. */
+function contains(outer: string, inner: string): boolean {
+  const target = identity(outer)
+  for (let p = inner; ; p = dirname(p)) {
+    if (relative(outer, p) === '' || (target !== null && identity(p) === target)) return true
+    if (dirname(p) === p) return false
+  }
+}
+
+const strictlyInside = (outer: string, inner: string): boolean => contains(outer, inner) && !contains(inner, outer)
+
+/**
+ * 환경 자리 검사(D-U 격리 계약 2판 전제 ①②) — 사이드카를 띄우기 전, 준비·표식·삭제 전에 본다.
+ * ② `<root>/<key>` 는 링크를 따라가도 앱 데이터(`root` 의 부모) 안의 `root` 안에 있어야 한다.
+ * ① `projectRoot` 가 있으면 그 논문 폴더와 환경 폴더는 어느 쪽도 다른 쪽 안에 있지 않아야 한다.
+ * 문제가 없으면 null.
+ */
+export function envPlacement(root: string, key: string, projectRoot: string | null = null): PlacementProblem | null {
+  const base = resolveReal(dirname(root)), deps = resolveReal(root), env = resolveReal(envDir(root, key))
+  if (!base || !deps || !env || !strictlyInside(base, deps) || !strictlyInside(deps, env)) return 'outside_app_data'
+  if (!projectRoot) return null
+  const project = resolveReal(projectRoot)
+  if (!project || contains(project, env) || contains(env, project)) return 'overlaps_project'
+  return null
+}
+
+/** 신뢰된 환경 폴더, 없으면 빈 문자열. `projectRoot` 는 지금 일하는 논문 폴더(겹침 검사). */
+export function trustedEnv(root: string, key: string, projectRoot: string | null = null): string {
+  if (!KEY_SHAPE.test(key) || envPlacement(root, key, projectRoot)) return ''
   const dir = envDir(root, key)
   try {
     const ready = JSON.parse(readFileSync(join(dir, READY_FILE), 'utf-8')) as { key?: unknown }
@@ -63,15 +113,10 @@ export function trustedEnv(root: string, key: string): string {
   return envPython(dir) ? dir : ''
 }
 
-function inside(root: string, path: string): boolean {
-  const rel = relative(realOr(root), realOr(path))
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
-}
-
 /** 준비가 끝난 환경에 표식을 원자적으로 쓴다. 실행 파일이 없으면 신뢰하지 않는다. */
 export function markReady(root: string, key: string, meta: Record<string, unknown> = {}): string {
   const dir = envDir(root, key)
-  if (!inside(root, dir)) throw new Error('deps env outside app data: ' + dir)
+  if (envPlacement(root, key)) throw new Error('deps env outside app data: ' + dir)
   const python = envPython(dir)
   if (!python) throw new Error('deps env has no interpreter: ' + dir)
   const tmp = join(dir, READY_FILE + '.tmp-' + process.pid)
@@ -82,12 +127,12 @@ export function markReady(root: string, key: string, meta: Record<string, unknow
 
 /**
  * 표식 없는 환경 폴더 = 앱이 만들다 만 잔해(앱 데이터 안, 학생 자료 아님) → 지운다.
- * 표식 있는 환경은 건드리지 않는다. 앱 데이터 뿌리 밖이면 아무것도 하지 않는다.
+ * 표식 있는 환경은 건드리지 않는다. 앱 데이터 밖으로 풀리거나 논문 폴더와 겹치는 자리면 아무것도 하지 않는다.
  */
-export function discardUnmarked(root: string, key: string): boolean {
+export function discardUnmarked(root: string, key: string, projectRoot: string | null = null): boolean {
   if (!KEY_SHAPE.test(key)) return false
   const dir = envDir(root, key)
-  if (!existsSync(dir) || !inside(root, dir)) return false
+  if (!existsSync(dir) || envPlacement(root, key, projectRoot)) return false
   if (existsSync(join(dir, READY_FILE))) return false
   rmSync(dir, { recursive: true, force: true })
   return true
@@ -106,7 +151,7 @@ export async function pruneEnvs(root: string, keepKey: string): Promise<string[]
   for (const name of names) {
     if (name === keepKey || !KEY_SHAPE.test(name)) continue
     const dir = envDir(root, name)
-    try { if (!lstatSync(dir).isDirectory() || !inside(root, dir)) continue } catch { continue }
+    try { if (!lstatSync(dir).isDirectory() || envPlacement(root, name)) continue } catch { continue }
     let readyAt: number | null = null
     try { readyAt = statSync(join(dir, READY_FILE)).mtimeMs } catch { /* 표식 없음 */ }
     others.push({ dir, readyAt })
@@ -133,7 +178,7 @@ export function readMark(root: string, key: string): string | null {
 export function restoreMark(root: string, key: string, before: string | null): void {
   if (!KEY_SHAPE.test(key)) return
   const dir = envDir(root, key)
-  if (!inside(root, dir)) return
+  if (envPlacement(root, key)) return
   const file = join(dir, READY_FILE)
   if (before === null) { rmSync(file, { force: true }); return }
   const tmp = file + '.tmp-' + process.pid
@@ -145,7 +190,7 @@ export function restoreMark(root: string, key: string, before: string | null): v
 export function revokeTrust(root: string, key: string): boolean {
   if (!KEY_SHAPE.test(key)) return false
   const dir = envDir(root, key)
-  if (!inside(root, dir) || !existsSync(join(dir, READY_FILE))) return false
+  if (envPlacement(root, key) || !existsSync(join(dir, READY_FILE))) return false
   rmSync(join(dir, READY_FILE), { force: true })
   return true
 }

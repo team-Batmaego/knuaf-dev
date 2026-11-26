@@ -100,7 +100,7 @@ export class Sidecar extends EventEmitter {
     const scripts = scriptsDir()
     // S-01 §3.3-3: 의존성 환경이 바뀌면 실행기·scripts 가 같아도 다시 띄운다 — 기동 env(doctor.all)와
     // 호출 인자(deps.doctor 등)가 서로 다른 환경을 보지 않게.
-    const deps = depsVenv(override)
+    const deps = depsVenv(override, projectRoot)
     if (this.status().running && pick.python === this.info.python && scripts === this.info.scriptsDir && deps === (this.info.depsVenv ?? '')) return this.status()
     await this.stopNow()
     if (version !== this.stopVersion) throw START_CANCELLED

@@ -62,6 +62,7 @@ export function preparationFailureTitle(error: DependencyPreparation['error']): 
   const refusal = skillRefusalCode(error)
   if (refusal) return SKILL_REFUSAL_TITLES[refusal]
   if (error?.code === 'deps_contract_unsupported') return '이 앱 판의 규칙집으로는 패키지를 준비할 수 없어요'
+  if (error?.code === 'deps_env_placement') return '패키지를 둘 자리를 믿을 수 없어 준비하지 않았어요'
   if (error?.code === 'deps_required') return '이 컴퓨터에서 패키지를 준비해 주세요'
   if (error?.code === 'cancelled') return '준비를 취소했어요'
   if (error?.code === 'agent_busy') return '도우미가 작업 중이라 준비를 시작하지 못했어요'

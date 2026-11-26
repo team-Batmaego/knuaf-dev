@@ -22,7 +22,7 @@ import type { DependencyReport, Envelope, PreviewPayload, ProjectPeek, RpcResult
 import type { ModelChoice, Provider } from '../shared/chat'
 import { canonical } from './chat/jobs/isolation'
 import { agentDepsVenv, APP_ROOT, basePython, bundledPython, depsEnvKey, depsRoot, venvPython, wheelhouseDir } from './python'
-import { acquireEnvLock, discardUnmarked, markReady, readMark, restoreMark, trustedEnv } from './deps-env'
+import { acquireEnvLock, discardUnmarked, envPlacement, markReady, readMark, restoreMark, trustedEnv } from './deps-env'
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService, type HandoffSeam } from './chat/service'
@@ -729,12 +729,12 @@ export function registerIpc(
     if (!binary) throw new Error(`${company !== 'claude' ? 'Codex' : 'Claude Code'} 설치가 필요해요. 설치 안내를 열어 주세요.`)
     // 본대화와 같은 PATH 앞자리(앱 데이터 의존성 환경 → 번들 CPython) — 담당이 도우미와 같은
     // 인터프리터를 찾아야 스킬 스크립트가 같은 결과를 낸다.
-    const python = venvPython(currentRoot) ?? bundledPython()
+    const python = venvPython(root) ?? bundledPython()
     return {
       binary,
       root,
       skill: '',
-      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [], agentDepsVenv())),
+      env: providerEnv(company, subscriptionEnv(python ? [dirname(python)] : [], agentDepsVenv(root))),
       openExternal: (url) => shell.openExternal(url)
     }
   }
@@ -1078,8 +1078,14 @@ export function registerIpc(
       let release: (() => void) | null = null
       let priorMark: string | null = null
       let wroteMark = false
+      // 격리 계약 전제 ①②: 환경 자리가 앱 데이터 밖으로 풀리거나 이 논문 폴더와 겹치면 아무것도 만들거나 지우지 않는다.
+      const requirePlacement = (): void => {
+        const problem = envPlacement(envRoot, envKey, root)
+        if (problem) throw { code: 'deps_env_placement', message: '의존성 환경 자리를 믿을 수 없어 준비하지 않았어요.', data: { problem, target } }
+      }
       try {
         live()
+        requirePlacement()
         // I-04: 이미 열린 폴더에서 사이드카가 내려가 있으면(고장 환경 등) 진단이 sidecar_down 으로 끝나 복구에 닿지 못한다 —
         // 먼저 다시 띄운다. 고장 난 앱 환경이면 configure 가 신뢰를 철회하고 기본 실행기로 뜬다.
         if (!sidecar.status().running) { await sidecar.configure(root, override); live() }
@@ -1096,7 +1102,8 @@ export function registerIpc(
         release = await acquireEnvLock(envRoot, { isCancelled: () => flight.cancelled || !mine() })
         live() // 기다리다 취소·방문 변경이면 여기서 닫힌다(release 는 null — 정리할 것 없음)
         // 기다리는 사이 다른 폴더의 준비가 같은 환경을 끝냈을 수 있다 — 신뢰 환경이 생겼으면 사이드카를 맞추고 다시 진단한다.
-        if (trustedEnv(envRoot, envKey)) {
+        requirePlacement()
+        if (trustedEnv(envRoot, envKey, root)) {
           await sidecar.configure(root, override)
           live()
           const again = await sidecar.call<Envelope>('deps.doctor', { root }, onEvent, onId)
@@ -1108,7 +1115,7 @@ export function registerIpc(
         }
         phase = 'installing'
         priorMark = readMark(envRoot, envKey)
-        discardUnmarked(envRoot, envKey)
+        discardUnmarked(envRoot, envKey, root)
         let result = await sidecar.call<Envelope>('deps.ensure', params, onEvent, onId)
         live()
         const offline = wheels ? result : undefined
@@ -1126,6 +1133,7 @@ export function registerIpc(
           if (!checked.ok || (checked.data as DependencyReport | null)?.ready !== true) {
             throw { code: 'deps_verify', message: '설치 뒤 의존성 환경 준비 확인에 실패했어요.', data: { installation: result, diagnosis: checked } }
           }
+          requirePlacement()
           try {
             markReady(envRoot, envKey, { app: app.getVersion() })
             wroteMark = true
@@ -1143,7 +1151,7 @@ export function registerIpc(
           }
           if (dependencyGate && mine()) dependencyGate.phase = 'ready'
         } else {
-          discardUnmarked(envRoot, envKey)
+          discardUnmarked(envRoot, envKey, root)
           if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
         }
         hideAppDirs(root)
@@ -1153,9 +1161,9 @@ export function registerIpc(
           // I-03: 표식 뒤(재시작 대기·재시작 실패·취소)의 실패 — 이번 작업의 표식을 이전 상태로 되돌리고(처음이면 제거 →
           // 잔해로 폐기), 사이드카가 반쯤 전환된 채 남지 않게 지금 상태로 다시 맞춘다. 이전 정상 환경은 지우지 않는다.
           restoreMark(envRoot, envKey, priorMark)
-          if (priorMark === null) discardUnmarked(envRoot, envKey)
+          if (priorMark === null) discardUnmarked(envRoot, envKey, root)
           try { await sidecar.configure(currentRoot, override) } catch { /* 되맞춤 실패는 다음 열기·재시도가 다룬다 */ }
-        } else if (phase !== 'checking') discardUnmarked(envRoot, envKey)
+        } else if (phase !== 'checking') discardUnmarked(envRoot, envKey, root)
         if (dependencyGate && mine()) dependencyGate.phase = 'blocked'
         const failure = ipcError(error) as NonNullable<RpcResult['error']>
         return { error: { code: failure.code ?? 'deps_ensure', message: failure.message ?? String(error),

@@ -110,7 +110,7 @@ export interface AgentCtx {
   open: (path: string) => Promise<string>
   venvPython: (root: string | null) => string | null
   /** S-01 §3.4: 도우미 env 의 `KNUAF_DEPS_VENV`(앱 데이터 환경). 없으면 빈 값으로 닫는다. */
-  depsVenv?: () => string
+  depsVenv?: (root: string) => string
   /** Optional: bundled interpreter, so its bin dir can be put on PATH for the agent. */
   bundledPython?: () => string | null
   /** Defaults to process.env; tests pass their own PATH/HOME. */
@@ -840,7 +840,7 @@ export const agentApi = {
       agentPath,
       venvBin: venv ? dirname(venv) : null,
       bundledBin: bundled ? dirname(bundled) : null,
-      depsVenv: ctx.depsVenv?.(),
+      depsVenv: ctx.depsVenv?.(o.root),
       firstPrompt: firstPromptFor(o.revision, o.root),
       home: ctx.home,
       supportDir: ctx.supportDir,

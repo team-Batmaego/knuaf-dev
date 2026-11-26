@@ -44,9 +44,10 @@ export function depsEnvKey(override: string | null = null): string {
  * 신뢰된 앱 데이터 의존성 환경 폴더(표식 있음), 없으면 빈 문자열(S-01 §3.2).
  * 논문 폴더의 `.venv` 는 어떤 경우에도 고르지 않는다 — 폴더에 쓸 수 있는 사람이 앱 권한으로
  * 코드를 돌리는 길이었다(S-01). 옛 판이 폴더에 만든 `.venv` 는 쓰지 않고 알리기만 한다(D1, 사이드카 doctor.all `legacy_venv`).
+ * `projectRoot`(지금 일하는 논문 폴더)와 환경이 겹치거나 환경이 앱 데이터 밖으로 풀리면 고르지 않는다.
  */
-export function depsVenv(override: string | null = null): string {
-  return trustedEnv(depsRoot(), depsEnvKey(override))
+export function depsVenv(override: string | null = null, projectRoot: string | null = null): string {
+  return trustedEnv(depsRoot(), depsEnvKey(override), projectRoot)
 }
 
 /** 오래된 키 환경 정리(§3.2) — 지금 설정의 키 + 직전 1개만 남긴다. 앱 시작 때 한 번. */
@@ -62,26 +63,27 @@ export function revokeDepsTrust(override: string | null = null): boolean {
   return revokeTrust(depsRoot(), depsEnvKey(override))
 }
 
-export function depsPython(override: string | null = null): string | null {
-  const dir = depsVenv(override)
+export function depsPython(override: string | null = null, projectRoot: string | null = null): string | null {
+  const dir = depsVenv(override, projectRoot)
   return dir ? envPython(dir) : null
 }
 
 /**
  * 예전 이름을 남긴 자리(에이전트·본대화·담당 PATH 가 `ctx.venvPython(root)` 로 부른다).
- * `projectRoot` 는 **보지 않는다** — 앱 데이터 환경만 돌려준다(S-01). 폴더가 열려 있지 않으면 null.
+ * `projectRoot` 안은 **뒤지지 않는다** — 앱 데이터 환경만 돌려주고(S-01), 폴더는 겹침 검사에만 쓴다.
+ * 폴더가 열려 있지 않으면 null.
  */
 export function venvPython(projectRoot: string | null): string | null {
   if (!projectRoot) return null
-  return depsPython(loadSettings().python_override)
+  return depsPython(loadSettings().python_override, projectRoot)
 }
 
 /**
  * 도우미(터미널·본대화·담당) env 의 `KNUAF_DEPS_VENV` 값 — 지금 설정의 신뢰된 앱 데이터 환경, 없으면 빈 값
  * (설계 §3.4). READONLY(D-A)는 `agentDepsEnv` 가 늘 함께 싣는다.
  */
-export function agentDepsVenv(): string {
-  return processDepsVenv(loadSettings().python_override)
+export function agentDepsVenv(projectRoot: string | null): string {
+  return processDepsVenv(loadSettings().python_override, projectRoot)
 }
 
 /**
@@ -94,8 +96,8 @@ export function depsNoneDir(): string {
 }
 
 /** 프로세스(사이드카 기동 env·호출 인자·도우미 env)에 싣는 값: 신뢰 환경, 없으면 "없음" 경로. 늘 비어 있지 않다. */
-export function processDepsVenv(override: string | null = null): string {
-  return depsVenv(override) || depsNoneDir()
+export function processDepsVenv(override: string | null = null, projectRoot: string | null = null): string {
+  return depsVenv(override, projectRoot) || depsNoneDir()
 }
 
 /**
@@ -107,7 +109,7 @@ export function processDepsVenv(override: string | null = null): string {
 export function choosePython(projectRoot: string | null, override: string | null): Pick<SidecarInfo, 'python' | 'kind'> {
   if (override && existsSync(override)) return { python: override, kind: 'env' }
   if (process.env.KNUAF_PYTHON && existsSync(process.env.KNUAF_PYTHON)) return { python: process.env.KNUAF_PYTHON, kind: 'env' }
-  const deps = projectRoot ? depsPython(override) : null
+  const deps = projectRoot ? depsPython(override, projectRoot) : null
   if (deps) return { python: deps, kind: 'venv' }
   const managed = managedPython()
   if (managed) return { python: managed, kind: 'managed' }

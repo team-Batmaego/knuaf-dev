@@ -297,7 +297,7 @@ export class ChatService {
     /** 도우미가 쓸 Python — 앱 데이터 의존성 환경(S-01)과 번들 CPython. */
     venvPython?: (root: string) => string | null
     /** S-01 §3.4: 도우미 env 의 `KNUAF_DEPS_VENV`(앱 데이터 환경). 없으면 빈 값으로 닫는다(READONLY 는 늘). */
-    depsVenv?: () => string
+    depsVenv?: (root: string) => string
     bundledPython?: () => string | null
     /** 학생이 "이 폴더에서는 계속 허용"을 고른 폴더인가. */
     isTrusted?: (root: string) => boolean
@@ -765,7 +765,7 @@ export class ChatService {
     let c = this.connections.get(key)
     if (!c) {
       const guard = this.guardFor(root)
-      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.() ?? '')
+      const env = this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.(root) ?? '')
       const figureEnv = this.opts.figures?.env
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
@@ -800,7 +800,7 @@ export class ChatService {
   /** 연결을 만들 때 읽은 도우미 환경(앱 의존성 환경 + PATH 앞자리)의 서명 — 전송 직전에 지금 값과 비교한다(I-02). */
   private connEnvSig = new WeakMap<AgentConnection, string>()
   private envSignature(root: string): string {
-    return JSON.stringify([this.opts.depsVenv?.() ?? '', this.pythonBinDirs(root)])
+    return JSON.stringify([this.opts.depsVenv?.(root) ?? '', this.pythonBinDirs(root)])
   }
   /**
    * 전송에 쓸 연결. 준비 전에 만든 연결은 빈 환경·옛 PATH 를 계속 쥐므로(I-02), 환경이 바뀌었으면 — 이 전송은
@@ -947,7 +947,7 @@ export class ChatService {
       const guard = this.guardFor(root)
       const options: AgentOptions = {
         binary: '', root, skill: this.skillDir(root, provider),
-        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.() ?? '')),
+        env: providerEnv(provider, this.opts.env ?? subscriptionEnv(this.pythonBinDirs(root), this.opts.depsVenv?.(root) ?? '')),
         openExternal: this.opts.openExternal, trusted: () => false,
         guard,
         skillBundleSource: () => this.opts.skillSource()

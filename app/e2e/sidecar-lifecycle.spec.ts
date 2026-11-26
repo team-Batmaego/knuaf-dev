@@ -68,6 +68,7 @@ function harness(platform = 'darwin') {
   const spawnArgs: string[][] = []
   const spawnEnvs: Record<string, string | undefined>[] = []
   let deps = ''
+  const depsProjects: (string | null)[] = []
   let automaticReady = true
   let failSpawn = false
   const exitQueue: number[] = []
@@ -94,7 +95,7 @@ function harness(platform = 'darwin') {
         revokeDepsTrust: () => { revoked++; const was = venvTrusted; venvTrusted = false; return was },
         scriptsDir: () => scripts, sidecarDir: () => '/sidecar',
         // S-01 설계 3판 §3.3: 신뢰된 앱 데이터 의존성 환경(없으면 빈 문자열)
-        depsVenv: () => deps,
+        depsVenv: (_override: string | null, project: string | null) => { depsProjects.push(project); return deps },
         // B-01: 환경이 없을 때 쓰는 "없음" 경로(존재하지 않는 앱 데이터 안 고정 경로)
         depsNoneDir: () => '/app-data/deps/_none'
       }
@@ -123,7 +124,7 @@ function harness(platform = 'darwin') {
   return {
     sidecar, children, killers, kills,
     spawnArgs, spawnEnvs, setScripts: (path: string) => { scripts = path },
-    setDeps: (path: string) => { deps = path },
+    setDeps: (path: string) => { deps = path }, depsProjects,
     manualReady: () => { automaticReady = false },
     failNextSpawn: () => { failSpawn = true },
     exitNextSpawn: (...codes: number[]) => { exitQueue.push(...codes) },
@@ -476,3 +477,11 @@ test('I-04: 다시 띄운 기본 실행기도 실패하면 더 되풀이하지 �
   expect(h.revokedCount()).toBe(1)
   expect(h.spawnCommands).toHaveLength(2)
 })
+
+test('S-01 12단계 I-01: 사이드카는 띄울 논문 폴더를 알려 주고 앱 환경을 묻는다(겹침 검사가 시작 전에 돈다)', async () => {
+  const h = harness()
+  await h.sidecar.configure('/paper/A', null)
+  await h.sidecar.configure('/paper/B', null)
+  expect(h.depsProjects).toEqual(['/paper/A', '/paper/B'])
+})
+

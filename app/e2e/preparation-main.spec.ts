@@ -57,6 +57,9 @@ function harness(sidecar = new ControlledSidecar()) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>(), sent: string[] = []
   const marked: string[] = [], discarded: string[] = [], restored: (string | null)[] = [], events: string[] = []
   let prior: string | null = null, trusted = '', lockHeld = false
+  /** 12단계 I-01: 환경 자리 검사 대역 — (논문 폴더, 호출 순번) → 문제 또는 null. */
+  let placement: (call: number) => string | null = () => null
+  const placementRoots: unknown[] = []
   const settings: { first_project_permission_asked_at?: string; python_override: null } = {
     first_project_permission_asked_at: 'synthetic-consent', python_override: null
   }
@@ -74,6 +77,7 @@ function harness(sidecar = new ControlledSidecar()) {
       discardUnmarked: (root: string, key: string) => { discarded.push(join(root, key)); events.push('discard'); return false },
       // I-03: 이번 작업 전의 표식(있으면 문자열)을 읽어 두고, 실패·취소 때 그것으로 되돌린다(없었으면 null → 표식 제거).
       trustedEnv: () => trusted,
+      envPlacement: (_root: string, _key: string, project: unknown) => { placementRoots.push(project); return placement(placementRoots.length) },
       readMark: () => prior,
       restoreMark: (_root: string, _key: string, before: string | null) => { restored.push(before); events.push('restore') },
       // I-01: 공유 환경 전환 잠금 — 한 번에 한 작업. 기다리는 동안 취소·방문 변경이면 null.
@@ -94,6 +98,7 @@ function harness(sidecar = new ControlledSidecar()) {
   sidecar.configureTo = () => marked.at(-1) ?? '' // 표식을 쓴 뒤의 재시작은 목표 환경으로 뜬다(정상)
   const services = module.registerIpc!(sidecar as unknown as Parameters<typeof IpcModule.registerIpc>[0], () => null)
   return { root, other, sidecar, settings, sent, marked, discarded, restored, events,
+    placementRoots, setPlacement: (f: (call: number) => string | null) => { placement = f },
     setPrior: (v: string | null) => { prior = v }, setTrusted: (v: string) => { trusted = v }, chat: services.chat,
     invoke: async (name: string, ...args: unknown[]): Promise<unknown> => handlers.get(name)!(null, ...args),
     cleanup: async () => { await services.chat.close(); rmSync(dir, { recursive: true, force: true }) }
@@ -541,3 +546,36 @@ test('S-01 I-04 r2: 목표 환경으로 전환하지 못하고 기본 실행기�
     expect(h.sent).toEqual([])
   } finally { await h.cleanup() }
 })
+
+// 12단계 I-01(격리 계약 2판 전제 ①②): 환경 자리가 논문 폴더와 겹치거나 앱 데이터 밖이면 준비 버튼이 아무것도 건드리지 않고 거부한다.
+for (const problem of ['overlaps_project', 'outside_app_data']) {
+  test(`S-01 12단계 I-01: 환경 자리 ${problem} 이면 준비는 진단·잠금·폐기·설치 전에 deps_env_placement 로 닫는다`, async () => {
+    const h = harness()
+    h.setPlacement(() => problem)
+    try {
+      await h.invoke('project:open', h.root)
+      const result = await h.invoke('deps:ensure', h.root, 'owner')
+      expect(result).toMatchObject({ error: { code: 'deps_env_placement', data: { phase: 'checking', detail: { problem } } } })
+      expect(h.placementRoots[0]).toBe(h.root)
+      expect(h.sidecar.calls).toEqual([])
+      expect(h.events).toEqual([])
+      expect(h.marked).toEqual([])
+    } finally { await h.cleanup() }
+  })
+}
+
+test('S-01 12단계 I-01: 설치 뒤에 자리가 어긋났으면(링크로 바뀜) 표식을 쓰지 않고, 폐기도 하지 않고 닫는다', async () => {
+  const h = harness()
+  let installed = false
+  h.sidecar.install = async () => { installed = true; h.sidecar.ready = true; return env(true) }
+  h.setPlacement(() => installed ? 'outside_app_data' : null)
+  try {
+    await h.invoke('project:open', h.root)
+    const result = await h.invoke('deps:ensure', h.root, 'owner')
+    expect(result).toMatchObject({ error: { code: 'deps_env_placement' } })
+    expect(h.marked).toEqual([])
+    // 설치 전 폐기 + 실패 정리의 폐기 호출. 실제 discardUnmarked 는 어긋난 자리를 지우지 않는다(venv-guard.spec 가 잠근다).
+    expect(h.events.slice(h.events.indexOf('lock'))).toEqual(['lock', 'discard', 'discard', 'unlock'])
+  } finally { await h.cleanup() }
+})
+

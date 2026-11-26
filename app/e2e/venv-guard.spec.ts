@@ -10,7 +10,7 @@
 // 이 시험은 고치기 전 빨강이 정상이다(설계 `DESIGN-venv-guard.md` 검토 판정 뒤 구현이 초록으로 만든다).
 import { test, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -263,5 +263,159 @@ test('윈도 환경 실행기 자리: Scripts\\python.exe 만 인정하고 bin/p
     expect(de.envPython(winLike, 'win32')).toBe(join(winLike, 'Scripts', 'python.exe'))
     expect(de.envPython(winLike, 'darwin')).toBeNull()
     expect(de.envPython(posixOnly, 'darwin')).toBe(join(posixOnly, 'bin', 'python3'))
+  } finally { h.cleanup() }
+})
+
+// ---- 12단계 I-01(D-U 격리 계약 2판 전제 ①②, roh-win-iso1): 사이드카 시작 전에 환경 자리를 검사한다 ----------------
+// 링크는 폴더 'junction' 으로 만든다 — 윈도는 관리자 권한 없이 되고, posix 는 그 인자를 무시하고 심볼릭 링크를 만든다.
+const KEY = 'aaaaaaaaaaaaaaaa'
+type Api = Record<string, (...a: unknown[]) => unknown>
+
+/** 지금 키의 신뢰 환경(표식 + 이 OS 의 실행기)을 만든다. 반환 = 환경 폴더. */
+function trustedFixture(h: ReturnType<typeof harness>): { root: string; key: string; env: string } {
+  const py = h.python as unknown as Api
+  const root = py.depsRoot() as string, key = py.depsEnvKey(null) as string, env = join(root, key)
+  fakeInterpreter(env)
+  writeFileSync(join(env, 'knuaf-ready.json'), JSON.stringify({ key }))
+  return { root, key, env }
+}
+
+/** 앱이 사이드카·도우미에 싣는 모든 갈래가 `project` 에 대해 그 환경을 거부했는지. */
+function expectRejected(h: ReturnType<typeof harness>, project: string): void {
+  const py = h.python as unknown as Api
+  expect(py.depsVenv(null, project)).toBe('')
+  expect(py.venvPython(project)).toBeNull()
+  expect(py.agentDepsVenv(project)).toBe(py.depsNoneDir())
+  expect(h.python.choosePython(project, null)).toEqual({ python: h.managed, kind: 'managed' })
+}
+
+test('I-01 정상 배치: 분리된 환경은 신뢰한다 — 논문 폴더를 링크로 열어도 같다', () => {
+  const h = harness()
+  try {
+    const { env } = trustedFixture(h), py = h.python as unknown as Api
+    const alias = join(h.dir, '바로가기'); symlinkSync(h.root, alias, 'junction')
+    for (const project of [h.root, alias]) {
+      expect(py.depsVenv(null, project)).toBe(env)
+      expect(h.python.choosePython(project, null).kind).toBe('venv')
+    }
+    expect((h.depsEnv as unknown as Api).envPlacement(py.depsRoot(), py.depsEnvKey(null), h.root)).toBeNull()
+  } finally { h.cleanup() }
+})
+
+test('I-01 ②: 환경 폴더가 링크를 따라 앱 데이터 밖으로 풀리면 거부한다(표식·실행기가 있어도)', () => {
+  const h = harness()
+  try {
+    const { root, key, env } = trustedFixture(h), py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
+    const outside = join(h.dir, '바깥', '환경'); mkdirSync(join(outside, '..'), { recursive: true })
+    renameSync(env, outside); symlinkSync(outside, env, 'junction')
+    expectRejected(h, h.root)
+    expect(py.depsVenv(null)).toBe('') // 논문 폴더가 없어도 거부
+    expect(de.envPlacement(root, key, null)).toBe('outside_app_data')
+  } finally { h.cleanup() }
+})
+
+test('I-01 ②: deps 루트 자체가 앱 데이터 밖을 가리키는 링크면 거부하고, 정리·폐기도 바깥을 지우지 않는다', async () => {
+  const h = harness()
+  try {
+    const { root, key } = trustedFixture(h), de = h.depsEnv as unknown as Api
+    const outside = join(h.dir, '바깥-deps')
+    renameSync(root, outside); symlinkSync(outside, root, 'junction')
+    // 표식 없는 폴더 둘 — 정상 배치라면 정리·폐기 대상
+    const loose = 'bbbbbbbbbbbbbbbb'; mkdirSync(join(outside, loose))
+    expectRejected(h, h.root)
+    expect(await de.pruneEnvs(root, key)).toEqual([])
+    expect(de.discardUnmarked(root, loose)).toBe(false)
+    expect(existsSync(join(outside, loose))).toBe(true)
+    expect(() => de.markReady(root, key)).toThrow(/outside app data/)
+    expect(de.envPlacement(root, key, null)).toBe('outside_app_data')
+  } finally { h.cleanup() }
+})
+
+test('I-01 ②: 끊긴 링크(대상 없음)인 환경 자리는 "아직 없음"이 아니라 거부다', () => {
+  const h = harness()
+  try {
+    const py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
+    const root = py.depsRoot() as string; mkdirSync(root, { recursive: true })
+    expect(de.envPlacement(root, KEY, h.root)).toBeNull() // 아직 없는 정상 자리(준비 전)는 통과
+    symlinkSync(join(h.dir, '없는 곳'), join(root, KEY), 'junction')
+    expect(de.envPlacement(root, KEY, h.root)).toBe('outside_app_data')
+  } finally { h.cleanup() }
+})
+
+test('I-01 ① 환경이 논문 폴더 안: 논문 폴더가 앱 데이터를 품으면 그 폴더에서만 거부한다(링크로 열어도)', () => {
+  const h = harness()
+  try {
+    const { root, key, env } = trustedFixture(h), py = h.python as unknown as Api, de = h.depsEnv as unknown as Api
+    const alias = join(h.dir, '앱데이터-바로가기'); symlinkSync(join(h.dir, 'userData'), alias, 'junction')
+    for (const project of [h.dir, join(h.dir, 'userData'), root, env, alias]) {
+      expectRejected(h, project)
+      expect(de.envPlacement(root, key, project)).toBe('overlaps_project')
+    }
+    expect(py.depsVenv(null, h.root)).toBe(env) // 겹치지 않는 폴더에서는 그대로 — 표식은 철회하지 않는다
+  } finally { h.cleanup() }
+})
+
+test('I-01 ① 논문 폴더가 환경 안: 환경 안 하위 폴더(직접·링크)는 거부하고, 폐기는 그 폴더를 지우지 않는다', () => {
+  const h = harness()
+  try {
+    const { root, key, env } = trustedFixture(h), de = h.depsEnv as unknown as Api
+    const inner = join(env, '논문'); mkdirSync(inner)
+    const alias = join(h.dir, '논문-바로가기'); symlinkSync(inner, alias, 'junction')
+    for (const project of [inner, alias]) {
+      expectRejected(h, project)
+      expect(de.envPlacement(root, key, project)).toBe('overlaps_project')
+    }
+    rmSync(join(env, 'knuaf-ready.json'))
+    expect(de.discardUnmarked(root, key, alias)).toBe(false) // 학생 폴더를 품은 자리는 지우지 않는다
+    expect(existsSync(inner)).toBe(true)
+  } finally { h.cleanup() }
+})
+
+test('I-01 ① 환경 링크가 논문 폴더 안을 가리키면 거부한다', () => {
+  const h = harness()
+  try {
+    const { root, key, env } = trustedFixture(h), de = h.depsEnv as unknown as Api
+    const planted = join(h.root, '환경'); renameSync(env, planted); symlinkSync(planted, env, 'junction')
+    expectRejected(h, h.root)
+    expect(de.envPlacement(root, key, h.root)).not.toBeNull()
+  } finally { h.cleanup() }
+})
+
+// 12단계 I-02: 위 선택 시험은 가짜 실행기라 "고른다"만 본다. 여기서는 앱 데이터 자리에 **실제 venv** 를 만들어
+// 고른 실행기를 돌리고, 대상 환경 prefix 로 뜨며 논문 폴더의 `.venv`·동명 모듈이 끼지 않는지 본다(윈도 CI 는 Scripts\python.exe).
+test('I-02 실제 실행: 고른 앱 환경 python 은 대상 prefix 로 돌고 논문 폴더 .venv·미끼가 끼지 않는다', () => {
+  const base = [KNUAF_PYTHON_SAVED, process.platform === 'win32' ? 'python' : 'python3']
+    .find((c): c is string => !!c && spawnSync(c, ['-c', 'import venv'], { timeout: 20_000 }).status === 0)
+  test.skip(!base, 'venv 를 만들 수 있는 python 이 이 기계에 없다')
+  const h = harness()
+  try {
+    const py = h.python as unknown as Api
+    const root = py.depsRoot() as string, key = py.depsEnvKey(null) as string, env = join(root, key)
+    const make = (dir: string): void => {
+      const run = spawnSync(base!, ['-m', 'venv', '--without-pip', dir], { encoding: 'utf8', timeout: 60_000 })
+      expect(run.status, run.stderr).toBe(0)
+    }
+    make(env); make(join(h.root, '.venv'))
+    const purelib = spawnSync(base!, ['-c', 'import sys,sysconfig; p={"base":sys.argv[1],"platbase":sys.argv[1]}; print(sysconfig.get_path("purelib","venv",vars=p) if "venv" in sysconfig.get_scheme_names() else sysconfig.get_path("purelib",vars=p))', join(h.root, '.venv')], { encoding: 'utf8' }).stdout.trim()
+    writeFileSync(join(purelib, 'zz_planted.pth'), `import pathlib; pathlib.Path(${JSON.stringify(h.marker)}).write_text('ran')\n`)
+    writeFileSync(join(h.root, 'json.py'), `import pathlib; pathlib.Path(${JSON.stringify(h.marker)}).write_text('ran')\n`)
+    writeFileSync(join(env, 'knuaf-ready.json'), JSON.stringify({ key }))
+    const pick = h.python.choosePython(h.root, null)
+    expect(pick.kind).toBe('venv')
+    // 규칙집 자식 계약과 같은 꼴(`-I -X utf8`, cwd=환경 폴더). 호출자 환경의 PYTHONPATH 가 논문 폴더를 가리켜도 끼지 않는다.
+    const probe = 'import json,os,sys; print(json.dumps({"same": os.path.samefile(sys.prefix, sys.argv[1]), "isolated": sys.flags.isolated, "user": sys.flags.no_user_site, "path": sys.path}))'
+    const run = spawnSync(pick.python, ['-I', '-X', 'utf8', '-c', probe, env], { cwd: env, encoding: 'utf8', timeout: 20_000, env: { ...process.env, PYTHONPATH: h.root } })
+    expect(run.status, run.stderr).toBe(0)
+    const seen = JSON.parse(run.stdout) as { same: boolean; isolated: number; user: number; path: string[] }
+    expect(seen).toMatchObject({ same: true, isolated: 1, user: 1 })
+    const folder = realpathSync.native(h.root)
+    expect(seen.path.filter((p) => p === '' || (existsSync(p) && realpathSync.native(p).startsWith(folder)))).toEqual([])
+    // 사이드카와 같은 모양(격리 플래그 없이, cwd=앱 쪽)으로 띄워도 폴더 .venv 는 돌지 않는다.
+    expect(spawnSync(pick.python, ['-c', 'pass'], { cwd: h.dir, timeout: 20_000 }).status).toBe(0)
+    expect(existsSync(h.marker)).toBe(false)
+    // 미끼가 살아 있음을 확인한다(검사가 헛돌지 않게): 폴더 .venv 를 일부러 띄우면 표시가 남는다.
+    const planted = (h.depsEnv as unknown as Api).envPython(join(h.root, '.venv')) as string
+    spawnSync(planted, ['-c', 'pass'], { cwd: h.dir, timeout: 20_000 })
+    expect(existsSync(h.marker)).toBe(true)
   } finally { h.cleanup() }
 })
