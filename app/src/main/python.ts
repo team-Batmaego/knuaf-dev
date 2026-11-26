@@ -73,7 +73,21 @@ export function venvPython(projectRoot: string | null): string | null {
  * (설계 §3.4). READONLY(D-A)는 `agentDepsEnv` 가 늘 함께 싣는다.
  */
 export function agentDepsVenv(): string {
-  return depsVenv(loadSettings().python_override)
+  return processDepsVenv(loadSettings().python_override)
+}
+
+/**
+ * "환경 없음"을 나타내는 앱 데이터 안 고정 경로(B-01). **만들지 않는다** — 규칙집은 그 폴더의 실행 파일만 보므로
+ * 없으면 환경 없음이고, 폴더 `.venv` 로 돌아가지 않는다. 빈 값은 윈도 cmd 에서 변수 삭제가 되므로 쓰지 않는다.
+ * `_none` 은 키(16자리 16진수)가 아니라서 표식·정리·준비 대상이 될 수 없다(deps-env 가 키 모양만 받는다).
+ */
+export function depsNoneDir(): string {
+  return join(depsRoot(), '_none')
+}
+
+/** 프로세스(사이드카 기동 env·호출 인자·도우미 env)에 싣는 값: 신뢰 환경, 없으면 "없음" 경로. 늘 비어 있지 않다. */
+export function processDepsVenv(override: string | null = null): string {
+  return depsVenv(override) || depsNoneDir()
 }
 
 /**

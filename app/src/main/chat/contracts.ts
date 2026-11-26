@@ -128,12 +128,22 @@ export function pathKeyOf(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = pr
 export const DEPS_VENV_ENV = 'KNUAF_DEPS_VENV'
 export const DEPS_READONLY_ENV = 'KNUAF_DEPS_VENV_READONLY'
 
-/** 도우미 프로세스에 싣는 두 값(터미널 스크립트·본대화·담당이 이 함수 하나를 쓴다). */
-export function agentDepsEnv(depsVenv = ''): Record<typeof DEPS_VENV_ENV | typeof DEPS_READONLY_ENV, string> {
-  return { [DEPS_VENV_ENV]: depsVenv, [DEPS_READONLY_ENV]: '1' }
+/**
+ * 앱 데이터 의존성 환경이 아직 없거나 호출자가 값을 못 넘겼을 때 쓰는 **존재할 수 없는 고정 경로**(B-01).
+ * 빈 값은 쓰지 않는다 — 윈도 cmd 의 `set "K="` 는 변수를 지워 규칙집이 폴더 `.venv` 로 돌아간다.
+ * 운영에서는 `python.ts depsNoneDir()`(앱 데이터 `deps/_none`, 만들지 않음)가 먼저이고, 이 값은 값이 안 넘어온
+ * 옛 호출자·시험용 안전망이다. 일반 사용자가 쓸 수 없는 시스템 자리라 만들어 둘 수 없다.
+ */
+export function noDepsEnvFallback(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? 'C:\\Windows\\knuaf-deps-none' : '/var/empty/knuaf-deps-none'
 }
 
-export function subscriptionEnv(extraPathDirs: string[] = [], depsVenv = ''): NodeJS.ProcessEnv {
+/** 도우미 프로세스에 싣는 두 값(터미널 스크립트·본대화·담당이 이 함수 하나를 쓴다). 값은 늘 비어 있지 않다. */
+export function agentDepsEnv(depsVenv?: string, platform: NodeJS.Platform = process.platform): Record<typeof DEPS_VENV_ENV | typeof DEPS_READONLY_ENV, string> {
+  return { [DEPS_VENV_ENV]: depsVenv || noDepsEnvFallback(platform), [DEPS_READONLY_ENV]: '1' }
+}
+
+export function subscriptionEnv(extraPathDirs: string[] = [], depsVenv?: string): NodeJS.ProcessEnv {
   const env = { ...process.env }
   // A user's unrelated API environment must never silently change billing for this app.
   for (const key of Object.keys(env)) {

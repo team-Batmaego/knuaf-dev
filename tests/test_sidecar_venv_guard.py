@@ -357,3 +357,26 @@ def test_doctor_all_reports_legacy_folder_venv_without_touching_it(scene, monkey
     assert sorted(p.name for p in scene["root"].iterdir()) == before  # 지우지도 옮기지도 않는다
     if kind == "fake-venv":
         assert scene["fake"].read_text().startswith("#!/bin/sh")
+
+
+# --- B-01: 환경 없음 = 앱 데이터 안 고정 "없음" 경로(만들지 않음) -----------------------------------------------
+
+
+def test_none_path_is_never_an_ensure_target_and_never_runs_anything(scene):
+    none = scene["tmp"] / "userData" / "deps" / "_none"
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.deps_ensure(_ctx(), {"root": str(scene["root"]), "deps_venv": str(none),
+                                             "base_python": sys.executable, "no_index": True})
+    assert caught.value.code == "deps_contract_missing"
+    assert not none.exists()
+    assert _fired(scene) == []
+
+
+def test_none_path_means_not_ready_for_dependent_scripts(scene):
+    none = scene["tmp"] / "userData" / "deps" / "_none"
+    with pytest.raises(RpcError) as caught:
+        methods_scripts.docx_build(_ctx(), {"root": str(scene["root"]), "deps_venv": str(none),
+                                            "in": "sections/word-body.md", "out": "build/x.docx"})
+    assert caught.value.code == "deps_not_ready"
+    assert not none.exists()
+    assert _fired(scene) == []

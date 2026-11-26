@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline'
 import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import type { RpcError, SidecarInfo } from '../shared/types'
-import { choosePython, depsVenv, scriptsDir, sidecarDir } from './python'
+import { choosePython, depsNoneDir, depsVenv, scriptsDir, sidecarDir } from './python'
 import { skillSwitch } from './update/switch'
 import { agentActivity } from './update/activity'
 import { diag } from './diagLog'
@@ -144,8 +144,8 @@ export class Sidecar extends EventEmitter {
   private startNow(): Promise<void> {
     const { promise, resolve, reject } = Promise.withResolvers<void>()
     const args = ['-m', 'knuaf_sidecar', '--scripts-dir', this.info.scriptsDir, '--interpreter-kind', this.info.kind]
-    // KNUAF_DEPS_VENV: 같은 프로세스 doctor.all 이 쓰는 의존성 환경(빈 값 = 없음, 폴더는 보지 않음). S-01 §3.3-1.
-    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1', KNUAF_DEPS_VENV: this.info.depsVenv ?? '' }
+    // KNUAF_DEPS_VENV: 같은 프로세스 doctor.all 이 쓰는 의존성 환경. 없으면 빈 값이 아니라 "없음" 경로(B-01: 윈도에서 빈 값은 변수 삭제). S-01 §3.3-1.
+    const env = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1', KNUAF_DEPS_VENV: this.info.depsVenv || depsNoneDir() }
     let proc: ChildProcessWithoutNullStreams
     try {
       proc = spawn(this.info.python, args, { cwd: sidecarDir(), env, windowsHide: true })
@@ -207,7 +207,7 @@ export class Sidecar extends EventEmitter {
       await this.lifecycle
       // S-01 §3.3-1: 의존성 환경 판정은 **지금 띄워진** 사이드카의 값 하나에서 나온다(기동 env 와 같은 출처).
       // 렌더러 값은 ipc 의 EXECUTABLE_PARAMS 가 먼저 버린다. 준비(deps.ensure) 건만 main 이 대상 경로를 직접 싣는다.
-      const sent = Object.hasOwn(params, 'deps_venv') ? params : { ...params, deps_venv: this.info.depsVenv ?? '' }
+      const sent = Object.hasOwn(params, 'deps_venv') ? params : { ...params, deps_venv: this.info.depsVenv || depsNoneDir() }
       return this.sendCall<T>(method, sent, onEvent, onId)
     }))
   }

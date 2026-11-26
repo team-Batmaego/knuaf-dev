@@ -37,7 +37,11 @@ export function depsKey(scriptsDir: string, basePython: string, platform = proce
   return hash.digest('hex').slice(0, 16)
 }
 
+const KEY_SHAPE = /^[0-9a-f]{16}$/
+
+/** 키 모양(16자리 16진수)만 환경 폴더가 된다 — "없음" 경로(`_none`)나 임의 이름은 만들거나 지우지 않는다. */
 export function envDir(root: string, key: string): string {
+  if (!KEY_SHAPE.test(key)) throw new Error('not a deps env key: ' + key)
   return join(root, key)
 }
 
@@ -50,6 +54,7 @@ export function envPython(dir: string, platform = process.platform): string | nu
 
 /** 신뢰된 환경 폴더, 없으면 빈 문자열. */
 export function trustedEnv(root: string, key: string): string {
+  if (!KEY_SHAPE.test(key)) return ''
   const dir = envDir(root, key)
   try {
     const ready = JSON.parse(readFileSync(join(dir, READY_FILE), 'utf-8')) as { key?: unknown }
@@ -80,14 +85,13 @@ export function markReady(root: string, key: string, meta: Record<string, unknow
  * 표식 있는 환경은 건드리지 않는다. 앱 데이터 뿌리 밖이면 아무것도 하지 않는다.
  */
 export function discardUnmarked(root: string, key: string): boolean {
+  if (!KEY_SHAPE.test(key)) return false
   const dir = envDir(root, key)
   if (!existsSync(dir) || !inside(root, dir)) return false
   if (existsSync(join(dir, READY_FILE))) return false
   rmSync(dir, { recursive: true, force: true })
   return true
 }
-
-const KEY_NAME = /^[0-9a-f]{16}$/
 
 /**
  * 오래된 키 환경 정리(§3.2): `root` 아래 키 모양 폴더 중 지금 키와, 표식 있는 것 가운데 가장 최근 것 1개(직전)만
@@ -100,7 +104,7 @@ export async function pruneEnvs(root: string, keepKey: string): Promise<string[]
   try { names = readdirSync(root) } catch { return [] }
   const others: { dir: string; readyAt: number | null }[] = []
   for (const name of names) {
-    if (name === keepKey || !KEY_NAME.test(name)) continue
+    if (name === keepKey || !KEY_SHAPE.test(name)) continue
     const dir = envDir(root, name)
     try { if (!lstatSync(dir).isDirectory() || !inside(root, dir)) continue } catch { continue }
     let readyAt: number | null = null

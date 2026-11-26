@@ -40,7 +40,8 @@ export interface LaunchScriptOptions {
   venvBin: string | null
   bundledBin: string | null
   /**
-   * 앱 데이터 의존성 환경(S-01). 없으면 빈 값으로 싣는다 — 스킬은 빈 값도 "폴더 `.venv` 보지 않음"으로 읽는다.
+   * 앱 데이터 의존성 환경(S-01) 또는, 준비 전이면 "없음" 경로(`deps/_none`, B-01). **빈 값은 쓰지 않는다** —
+   * 윈도 cmd 의 `set "K="` 는 변수를 지워 폴더 `.venv` 로 돌아가기 때문이다. 못 받으면 `noDepsEnvFallback`.
    * READONLY(D-A)는 늘 함께 싣는다(`agentDepsEnv`).
    */
   depsVenv?: string
@@ -669,7 +670,7 @@ function buildLaunchScriptPosix(o: LaunchScriptOptions): string {
     // 넘긴다(`contracts.ts subscriptionEnv`·`claude.ts` query 옵션) — 세 경로가 같은 값이어야 한다.
     'export PYTHONDONTWRITEBYTECODE=1',
     // S-01: 도우미가 돌리는 스킬 스크립트도 앱 데이터 환경만 쓰고(폴더 .venv 안 봄) 거기 설치하지 않는다(D-A).
-    ...Object.entries(agentDepsEnv(o.depsVenv)).map(([k, v]) => `export ${k}=${sq(v)}`),
+    ...Object.entries(agentDepsEnv(o.depsVenv, 'darwin')).map(([k, v]) => `export ${k}=${sq(v)}`),
     `printf '%s\\n' ${sq(BANNER)}`,
     "printf '%s\\n' ''",
     execLine,
@@ -743,7 +744,7 @@ function buildLaunchScriptWin(o: LaunchScriptOptions): string {
     'set "PYTHONIOENCODING=utf-8"',
     'set "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"',
     'set "PYTHONDONTWRITEBYTECODE=1"',
-    ...Object.entries(agentDepsEnv(o.depsVenv)).map(([k, v]) => `set "${k}=${batLiteral(v)}"`),
+    ...Object.entries(agentDepsEnv(o.depsVenv, 'win32')).map(([k, v]) => `set "${k}=${batLiteral(v)}"`),
     `echo ${batLiteral(BANNER)}`,
     'echo.',
     execLine,
@@ -839,7 +840,7 @@ export const agentApi = {
       agentPath,
       venvBin: venv ? dirname(venv) : null,
       bundledBin: bundled ? dirname(bundled) : null,
-      depsVenv: ctx.depsVenv?.() ?? '',
+      depsVenv: ctx.depsVenv?.(),
       firstPrompt: firstPromptFor(o.revision, o.root),
       home: ctx.home,
       supportDir: ctx.supportDir,

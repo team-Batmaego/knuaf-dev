@@ -105,7 +105,7 @@ test('S2: 표식 있는 앱 데이터 환경만 고르고, 표식 없음·키 �
     writeFileSync(envPy, '')
     // 표식 없음(만들다 만 잔해) → 신뢰 안 함
     expect(py.depsVenv(null)).toBe('')
-    expect(py.agentDepsVenv()).toBe('')
+    expect(py.agentDepsVenv()).toBe(py.depsNoneDir()) // 빈 값이 아니라 "없음" 경로(B-01)
     expect(h.python.choosePython(h.root, null).python).toBe(h.managed)
     // 키가 다른 표식 → 신뢰 안 함
     writeFileSync(join(env, 'knuaf-ready.json'), JSON.stringify({ key: 'other' }))
@@ -154,5 +154,29 @@ test('GC(§3.2): 앱 데이터 deps/ 에는 현재 키 + 직전(가장 최근 �
     expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('x')
     // 뿌리가 없으면 조용히 빈 목록
     expect(await de.pruneEnvs(join(h.dir, 'nope'), 'aaaaaaaaaaaaaaaa')).toEqual([])
+  } finally { h.cleanup() }
+})
+
+test('B-01: 환경이 없을 때 모든 갈래가 같은 "없음" 경로(앱 데이터 deps/_none, 만들지 않음)를 쓴다', () => {
+  test.skip(process.platform === 'win32', '가짜 실행 파일 경로를 posix 꼴로 만든다')
+  const h = harness()
+  try {
+    const py = h.python as unknown as Record<string, (...a: unknown[]) => string>
+    const de = h.depsEnv as Record<string, (...a: unknown[]) => unknown>
+    const root = py.depsRoot(), none = join(root, '_none')
+    expect(py.depsNoneDir()).toBe(none)
+    expect(py.agentDepsVenv()).toBe(none) // 표식 없음 → 도우미 env
+    expect(py.processDepsVenv(null)).toBe(none) // 사이드카 기동 env·호출 인자
+    expect(existsSync(none)).toBe(false)
+    // 준비된 뒤에는 실제 환경
+    const key = py.depsEnvKey(null), env = join(root, key)
+    mkdirSync(join(env, 'bin'), { recursive: true }); writeFileSync(join(env, 'bin', 'python3'), '')
+    de.markReady(root, key)
+    expect(py.agentDepsVenv()).toBe(env)
+    expect(py.processDepsVenv(null)).toBe(env)
+    // "없음" 폴더는 앱의 어떤 길로도 생기지 않는다: 표식·폐기·정리는 키 모양만 받는다
+    expect(() => de.markReady(root, '_none')).toThrow()
+    expect(de.discardUnmarked(root, '_none')).toBe(false)
+    expect(existsSync(none)).toBe(false)
   } finally { h.cleanup() }
 })

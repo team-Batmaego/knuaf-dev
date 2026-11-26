@@ -87,7 +87,9 @@ function harness(platform = 'darwin') {
         choosePython: (_root: string | null, override: string | null) => ({ python: override ?? 'base', kind: 'env' }),
         scriptsDir: () => scripts, sidecarDir: () => '/sidecar',
         // S-01 설계 3판 §3.3: 신뢰된 앱 데이터 의존성 환경(없으면 빈 문자열)
-        depsVenv: () => deps
+        depsVenv: () => deps,
+        // B-01: 환경이 없을 때 쓰는 "없음" 경로(존재하지 않는 앱 데이터 안 고정 경로)
+        depsNoneDir: () => '/app-data/deps/_none'
       }
       if (name === 'node:child_process') return { spawn: (command: string, args: string[], options: object) => {
         spawnArgs.push(args)
@@ -408,5 +410,21 @@ test('의존성 환경이 바뀌면 같은 실행기여도 사이드카를 다�
   // 같은 환경이면 지금처럼 생략한다(불필요한 재시작 없음).
   await h.sidecar.configure('/project', 'base')
   expect(h.children).toHaveLength(2)
+  await h.sidecar.stop()
+})
+
+
+test('B-01: 준비 전에도 사이드카 기동 env·호출 인자의 의존성 환경은 비어 있지 않은 "없음" 경로다', async () => {
+  const h = harness()
+  await h.sidecar.configure('/project', 'base')
+  expect(h.spawnEnvs[0].KNUAF_DEPS_VENV).toBe('/app-data/deps/_none') // 빈 값은 윈도에서 변수 삭제 → 폴더 .venv 로 복귀
+  const pending = h.sidecar.call('project.status')
+  await flush()
+  const sent = h.children[0].requests.find(r => r.method === 'project.status') as unknown as { params: { deps_venv: string } }
+  expect(sent.params.deps_venv).toBe('/app-data/deps/_none')
+  await pending
+  h.setDeps('/app-data/deps/0123456789abcdef')
+  await h.sidecar.configure('/project', 'base')
+  expect(h.spawnEnvs[1].KNUAF_DEPS_VENV).toBe('/app-data/deps/0123456789abcdef')
   await h.sidecar.stop()
 })
