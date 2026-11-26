@@ -241,3 +241,15 @@ test('추가 before-quit 청취자가 있으면 강제 종료하지 않고 그 �
     }
   }
 })
+
+test('launch가 준비 화면 확인에 실패해도 시작한 Electron을 남기지 않는다', async () => {
+  const dir = scratch()
+  const env = fakeCodexEnv(join(dir, 'bin'))
+  // 잘못된 선택자는 즉시 실패한다. 별도 시험용 앱이나 대기 상한 변경 없이 launch 실패 경로를 밟는다.
+  await expect(launch({ env, waitFor: 'css=]' })).rejects.toThrow(/waitForSelector/)
+
+  const log = readFileSync(test.info().outputPath('app-log.txt'), 'utf-8')
+  const pid = /^\d+ stage=boot pid=(\d+) /m.exec(log)?.[1]
+  expect(pid, '실제 Electron main PID를 기동 로그에서 읽지 못했다').toBeDefined()
+  expect(alive(Number(pid)), '호출자에게 반환되지 않은 Electron이 아직 살아 있다').toBe(false)
+})
