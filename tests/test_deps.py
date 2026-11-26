@@ -96,7 +96,7 @@ def test_pip_requirement_files_are_ascii():
 
 
 def test_ensure_hands_pip_utf8_env(empty_folder, monkeypatch):
-    """pip 자식에 격리·UTF-8 플래그, 환경 폴더 cwd, 명시적 UTF-8 해독을 적용한다.
+    """pip 자식에게 PYTHONUTF8=1 을 넘겨 -r 파일을 로케일과 무관하게 읽게 한다.
 
     실제 pip 은 돌리지 않는다 — subprocess.run 만 대역으로 바꿔 넘긴 환경을 본다.
     argv 앞부분과 cwd 는 지금 도는 규칙집 판의 계약을 그대로 요구한다(모듈 상단 PIP_CONTRACTS).
