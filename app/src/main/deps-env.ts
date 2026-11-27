@@ -245,6 +245,41 @@ export const LOCK_FILE = '.lock'
 const heldHere = new Set<string>()
 const STALE_MS = 10 * 60_000 // 소유자를 알 수 없는(깨진·쓰는 중) 잠금이 이만큼 낡으면 잔해
 const CLAIM_UNKNOWN_OWNER_MS = 10_000 // 소유자 pid 를 읽을 수 없는 청구 파일이 이보다 낡으면 잔해(소유자가 보이면 나이를 보지 않는다)
+const LOCK_OPEN_MAX_RETRIES = 20
+const LOCK_OPEN_WAIT_MS = 3_000
+
+function waitForLock(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
+}
+
+type RetryLockOpen = (error: unknown, path: string) => Promise<boolean>
+
+/** 한 획득에서 .lock·claim 이 재시도 예산을 공유한다. 정상 EEXIST 대기 시간은 세지 않는다. */
+function lockOpenRetry(isCancelled?: () => boolean): RetryLockOpen {
+  let attempts = 0, elapsedMs = 0
+  return async (error, path) => {
+    if (process.platform !== 'win32' || !(error instanceof Error)) throw error
+    const { code, syscall, path: failedPath } = error as NodeJS.ErrnoException
+    if (syscall !== 'open' || failedPath !== path || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw error
+    if (isCancelled?.()) return false
+    attempts++
+    const exhausted = () => Object.assign(error, { data: { code, syscall, path, attempts, elapsedMs: Math.ceil(elapsedMs) } })
+    if (attempts > LOCK_OPEN_MAX_RETRIES || elapsedMs >= LOCK_OPEN_WAIT_MS) throw exhausted()
+    const start = performance.now()
+    const delay = Math.min(100 + 50 * (attempts - 1), 250, LOCK_OPEN_WAIT_MS - elapsedMs)
+    await waitForLock(delay)
+    elapsedMs += performance.now() - start
+    if (isCancelled?.()) return false
+    if (elapsedMs >= LOCK_OPEN_WAIT_MS) throw exhausted()
+    return true
+  }
+}
+
+function isExistingLock(error: unknown): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === 'EEXIST'
+}
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
@@ -280,19 +315,25 @@ function staleBody(path: string, raw: string): boolean {
  *   늦게 깨어난 옛 청구자의 "같은 원문이면 지운다"는 새 잠금을 건드릴 수 없다(원문이 다르다).
  * 끝나면 그 원문의 청구 파일들을 치운다(남아도 해가 없다 — 해시가 다른 새 잠금과 무관).
  */
-async function reclaimStale(path: string, seen: string, hook?: () => void | Promise<void>): Promise<boolean> {
+async function reclaimStale(path: string, seen: string, retryOpen: RetryLockOpen,
+  isCancelled?: () => boolean, hook?: () => void | Promise<void>): Promise<boolean> {
   const key = createHash('sha256').update(seen).digest('hex').slice(0, 16)
   const prefix = `${path}.claim.${key}.`
   const mine = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex') })
   let claim: string | null = null
-  for (let k = 0; k < 64 && claim === null; k++) {
+  for (let k = 0; k < 64 && claim === null;) {
+    if (isCancelled?.()) return false
     const candidate = prefix + k
     try {
       writeFileSync(candidate, mine, { flag: 'wx' })
       claim = candidate
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (!isExistingLock(error)) {
+        if (!await retryOpen(error, candidate)) return false
+        continue // 같은 번호로 다시 wx — 열기 실패는 소유자가 있다는 증거가 아니다.
+      }
       if (!claimantGone(candidate)) return false // 살아 있는 청구자가 하고 있다 — 기다린다
+      k++
     }
   }
   if (claim === null) return false
@@ -330,6 +371,9 @@ function claimantGone(file: string): boolean {
 export async function acquireEnvLock(root: string, opts: { isCancelled?: () => boolean; pollMs?: number; onStaleJudged?: () => void | Promise<void>; onReclaimHeld?: () => void | Promise<void> } = {}): Promise<(() => void) | null> {
   mkdirSync(root, { recursive: true })
   const path = join(root, LOCK_FILE), poll = opts.pollMs ?? 100
+  const retryOpen = lockOpenRetry(opts.isCancelled)
+  // Windows open retry adds claim cancellation checks; other platforms keep the existing reclaim order.
+  const claimCancelled = process.platform === 'win32' ? opts.isCancelled : undefined
   const body = JSON.stringify({ pid: process.pid, token: randomBytes(8).toString('hex'), at: new Date().toISOString() })
   for (;;) {
     if (opts.isCancelled?.()) return null
@@ -342,15 +386,19 @@ export async function acquireEnvLock(root: string, opts: { isCancelled?: () => b
           if (readRaw(path) === body) rmSync(path, { force: true })
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (!isExistingLock(error)) {
+          if (!await retryOpen(error, path)) return null
+          continue
+        }
         const seen = readRaw(path)
         if (seen === null) continue // 그사이 풀렸다
         if (staleBody(path, seen)) {
           await opts.onStaleJudged?.()
-          if (await reclaimStale(path, seen, opts.onReclaimHeld)) continue
+          if (await reclaimStale(path, seen, retryOpen, claimCancelled, opts.onReclaimHeld)) continue
+          if (claimCancelled?.()) return null
         }
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, poll))
+    await waitForLock(poll)
   }
 }

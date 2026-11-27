@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { launch, navTo, openProject, python, synthProject } from './helpers'
+import { depsKey, envDir, markReady } from '../src/main/deps-env'
+import { launch, navTo, openProject, python, scripts, synthProject } from './helpers'
 
 for (const recovery of ['retry_stop', 'external_cleanup'] as const) {
   test(`설정은 종료 오류를 버리지 않고 ${recovery} 복구 조작을 알린다`, async () => {
@@ -60,9 +62,18 @@ test('실제 Python 시작·동시 폴더 열기·재시작·앱 종료 뒤 모�
   const wrapper = join(dir, 'python')
   const program = join(dir, 'run.py')
   writeFileSync(program, `import os, runpy, sys\nsys.path.insert(0, os.getcwd())\nwith open(${JSON.stringify(pidsFile)}, 'a') as f: f.write(str(os.getpid()) + '\\n')\nsys.argv = sys.argv[2:]\nrunpy.run_module('knuaf_sidecar', run_name='__main__')\n`)
-  writeFileSync(wrapper, `#!/bin/sh\nexec '${python}' '${program}' "$@"\n`, { mode: 0o755 })
+  // Preparation also uses KNUAF_PYTHON. Only sidecar starts belong in the PID log.
+  writeFileSync(wrapper, `#!/bin/sh\nif [ "$1" = '-m' ] && [ "$2" = 'knuaf_sidecar' ]; then\n  exec '${python}' '${program}' "$@"\nfi\nexec '${python}' "$@"\n`, { mode: 0o755 })
   const root = synthProject()
-  const { electronApp, page } = await launch({ env: { KNUAF_PYTHON: wrapper } })
+  // Start with real packages in app data, so first-time preparation doesn't add a restart to this PID test.
+  const userData = join(dir, 'userData'), depsRoot = join(userData, 'deps')
+  const key = depsKey(scripts, wrapper)
+  execFileSync(python, [join(scripts, 'gg_deps.py'), 'ensure', root], {
+    timeout: 60_000,
+    env: { ...process.env, KNUAF_DEPS_VENV: envDir(depsRoot, key), KNUAF_DEPS_VENV_READONLY: '0' }
+  })
+  markReady(depsRoot, key)
+  const { electronApp, page } = await launch({ userData, env: { KNUAF_PYTHON: wrapper } })
   let closed = false
   const pids = () => readFileSync(pidsFile, 'utf8').trim().split('\n').map(Number)
   const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }

@@ -41,14 +41,17 @@ function fakeInterpreter(env: string): string {
 
 function harness() {
   delete process.env.KNUAF_PYTHON
-  const dir = mkdtempSync(join(tmpdir(), 'knuaf-venv-guard-'))
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'knuaf-venv-guard-')))
   const userData = join(dir, 'userData'), managed = join(dir, 'managed', 'bin', 'python3')
   const root = join(dir, '남이 준 논문'), marker = join(dir, 'PWNED')
   mkdirSync(userData, { recursive: true }); mkdirSync(root)
+  // Windows depsRoot uses LOCALAPPDATA/app.getName(), not Electron's userData override.
+  const localAppData = process.env.LOCALAPPDATA
+  if (process.platform === 'win32') process.env.LOCALAPPDATA = dir
   const depsEnv: Record<string, unknown> = {}
   depsEnvFactory(realRequire, depsEnv, join(appRoot, 'out', 'main'))
   const dependencies: Record<string, unknown> = {
-    electron: { app: { isPackaged: false, getPath: () => userData, getVersion: () => '0.7.5', getName: () => 'knuaf-test' } },
+    electron: { app: { isPackaged: false, getPath: () => userData, getVersion: () => '0.7.5', getName: () => 'userData' } },
     './runtime': { managedPython: () => managed },
     './agent': { skillSource: () => join(dir, 'skill') },
     './settings': { loadSettings: () => ({ python_override: null }) },
@@ -59,6 +62,10 @@ function harness() {
   return { dir, root, marker, managed, depsEnv, python: module as unknown as typeof PythonModule,
     cleanup: () => {
       if (KNUAF_PYTHON_SAVED === undefined) delete process.env.KNUAF_PYTHON; else process.env.KNUAF_PYTHON = KNUAF_PYTHON_SAVED
+      if (process.platform === 'win32') {
+        if (localAppData === undefined) delete process.env.LOCALAPPDATA
+        else process.env.LOCALAPPDATA = localAppData
+      }
       rmSync(dir, { recursive: true, force: true })
     } }
 }
