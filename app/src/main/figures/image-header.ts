@@ -88,14 +88,16 @@ function countGifFrames(bytes: Uint8Array): number | null {
       continue
     }
     if (marker === 0x2c) {
-      // 이미지 서술자: 9바이트 + (선택) 국소 색표 + LZW 하위 블록들
+      // 이미지 서술자: 9바이트 + (선택) 국소 색표 + LZW 최소 코드 크기 1바이트 + 하위 블록들
       if (offset + 10 > bytes.length) return null
       frames += 1
       const flags = bytes[offset + 9] as number
       offset += 10
       if (flags & 0x80) offset += 3 * 2 ** ((flags & 0x07) + 1)
-      offset = skipGifSubBlocks(bytes, offset) ?? -1
-      if (offset < 0) return null
+      if (offset >= bytes.length) return null
+      const skipped = skipGifSubBlocks(bytes, offset + 1)
+      if (skipped === null) return null
+      offset = skipped
       continue
     }
     return null

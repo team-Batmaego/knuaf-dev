@@ -1,8 +1,7 @@
 /**
  * figures/image-header.test.ts — 머리만 보고 형식·화소·프레임을 가른다 (설계 §4-5, C-06).
  *
- * 시험은 실제 파일이 아니라 **손으로 만든 머리 바이트**를 쓴다. 우리가 보는 것은 머리뿐이므로
- * 완전한 이미지가 필요 없고, 픽셀 폭탄·거짓 매직·잘린 머리를 만들기 쉽다.
+ * 경계 조건은 손으로 만든 헤더를, GIF 회귀는 실제 그림 바이트를 쓴다.
  */
 
 import { registerHooks } from 'node:module'
@@ -22,6 +21,31 @@ registerHooks({
 
 const header = (await import(new URL('./image-header.ts', import.meta.url).href)) as typeof import('./image-header')
 
+// GIF87a: 보관된 맥 실행 자리 표본. 전역 색표, 200×120, 한 프레임.
+const gif87a = Buffer.from(
+  'R0lGODdhyAB4AIEAAB4eyAAAAAAAAAAAACwAAAAAyAB4AEAI+QABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFixgzatzIsaPH' +
+  'jyBDihxJsqTJkyhTqlzJsqXLlzBjypxJs6bNmzhz6tzJs6fPn0CDCh1KtKjRo0iTKl3KtKnTp1CjSp1KtarVq1izat3KtavX' +
+  'r2DDih1LtqzZs2jTql3Ltq3bt3Djyp1Lt67du3jz6t3Lt6/fv4ADCx5MuLDhw4gTK17MuLHjx5AjS55MubLly5gza97MubPn' +
+  'z6BDix5NurTp06hTq17NurXr17Bjy55Nu7bt27hz697Nu7fv38CDCx9OvLjx48iTK1/OvLnz59CjS59Ovbr169izaw8cEAA7',
+  'base64'
+)
+// GIF89a: FFmpeg로 만든 8×6 단색 한 프레임. 그래픽 제어 확장과 국소 색표를 사용한다.
+const gif89a = Buffer.from(
+  'R0lGODlhCAAGAHAQMSH5BARkAB8ALAAAAAAIAAYAhwAAAAAA/wBVAABV/wCqAACq/wD/AAD///8AAP8A//9VAP9V//+qAP+q' +
+  '////AP////4AAP4A//5VAP5V//6qAP6q//7/AP7///0AAP0A//1VAP1V//2qAP2q//3/AP3///wAAPwA//xVAPxV//yqAPyq' +
+  '//z/APz///sAAPsA//tVAPtV//uqAPuq//v/APv///oAAPoA//pVAPpV//qqAPqq//r/APr///kAAPkA//lVAPlV//mqAPmq' +
+  '//n/APn///gAAPgA//hVAPhV//iqAPiq//j/APj///cAAPcA//dVAPdV//eqAPeq//f/APf///YAAPYA//ZVAPZV//aqAPaq' +
+  '//b/APb///UAAPUA//VVAPVV//WqAPWq//X/APX///QAAPQA//RVAPRV//SqAPSq//T/APT///MAAPMA//NVAPNV//OqAPOq' +
+  '//P/APP///IAAPIA//JVAPJV//KqAPKq//L/APL///EAAPEA//FVAPFV//GqAPGq//H/APH///AAAPAA//BVAPBV//CqAPCq' +
+  '//D/APD//+8AAO8A/+9VAO9V/++qAO+q/+//AO///+4AAO4A/+5VAO5V/+6qAO6q/+7/AO7//+0AAO0A/+1VAO1V/+2qAO2q' +
+  '/+3/AO3//+wAAOwA/+xVAOxV/+yqAOyq/+z/AOz//+sAAOsA/+tVAOtV/+uqAOuq/+v/AOv//+oAAOoA/+pVAOpV/+qqAOqq' +
+  '/+r/AOr//+kAAOkA/+lVAOlV/+mqAOmq/+n/AOn//+gAAOgA/+hVAOhV/+iqAOiq/+j/AOj//+cAAOcA/+dVAOdV/+eqAOeq' +
+  '/+f/AOf//+YAAOYA/+ZVAOZV/+aqAOaq/+b/AOb//+UAAOUA/+VVAOVV/+WqAOWq/+X/AOX//+QAAOQA/+RVAORV/+SqAOSq' +
+  '/+T/AOT//+MAAOMA/+NVAONV/+OqAOOq/+P/AOP//+IAAOIA/+JVAOJV/+KqAOKq/+L/AOL//+EAAOEA/+FVAOFV/+GqAOGq' +
+  '/+H/AOH//wgPABEIHEiwoMGBAA4qVBgQADs=',
+  'base64'
+)
+
 function png(width: number, height: number): Uint8Array {
   const bytes = new Uint8Array(33)
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
@@ -33,12 +57,11 @@ function png(width: number, height: number): Uint8Array {
   return bytes
 }
 
-/** 이미지 서술자 `frames`개를 가진 GIF. 하위 블록은 1바이트 사설(garbage)로 닫는다. */
-function gif(width: number, height: number, frames = 1): Uint8Array {
-  const parts: number[] = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]
-  parts.push(width & 0xff, width >> 8, height & 0xff, height >> 8, 0x00, 0x00, 0x00)
+/** 논리 화면 10×10에 1×1 프레임을 반복해 애니메이션 판정을 시험한다. */
+function animatedGif(frames: number): Uint8Array {
+  const parts = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 10, 0, 10, 0, 0x80, 0, 0, 0, 0, 0, 255, 255, 255]
   for (let i = 0; i < frames; i += 1) {
-    parts.push(0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x00, 0x00) // 서술자 + 0길이 LZW
+    parts.push(0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0) // 서술자, 최소 코드 크기, LZW 데이터 블록, 종료
   }
   parts.push(0x3b)
   return Uint8Array.from(parts)
@@ -56,11 +79,19 @@ function jpeg(width: number, height: number): Uint8Array {
 }
 
 describe('sniffImage', () => {
-  it('PNG·GIF·JPEG를 형식과 크기까지 읽는다', () => {
+  it('PNG·JPEG를 형식과 크기까지 읽는다', () => {
     assert.deepEqual(header.sniffImage(png(640, 480)), { ok: true, format: 'png', width: 640, height: 480, frames: 1 })
-    assert.deepEqual(header.sniffImage(gif(120, 90)), { ok: true, format: 'gif', width: 120, height: 90, frames: 1 })
     assert.deepEqual(header.sniffImage(jpeg(1024, 768)), { ok: true, format: 'jpeg', width: 1024, height: 768, frames: 1 })
   })
+
+  for (const [version, bytes, width, height] of [
+    ['GIF87a', gif87a, 200, 120],
+    ['GIF89a', gif89a, 8, 6]
+  ] as const) {
+    it(`실제 단일 프레임 ${version}의 형식과 크기를 읽는다`, () => {
+      assert.deepEqual(header.sniffImage(bytes), { ok: true, format: 'gif', width, height, frames: 1 })
+    })
+  }
 
   it('매직만 흉내 낸 다른 형식은 받지 않는다', () => {
     // webp(RIFF)·bmp·svg·빈 바이트
@@ -81,7 +112,7 @@ describe('sniffImage', () => {
 
   it('잘린 머리는 truncated', () => {
     assert.deepEqual(header.sniffImage(png(10, 10).slice(0, 20)), { ok: false, reason: 'truncated' })
-    assert.deepEqual(header.sniffImage(gif(10, 10).slice(0, 10)), { ok: false, reason: 'truncated' })
+    assert.deepEqual(header.sniffImage(gif87a.subarray(0, 10)), { ok: false, reason: 'truncated' })
     assert.deepEqual(header.sniffImage(jpeg(10, 10).slice(0, 6)), { ok: false, reason: 'truncated' })
   })
 
@@ -98,11 +129,11 @@ describe('sniffImage', () => {
   })
 
   it('여러 프레임 GIF는 frames', () => {
-    assert.deepEqual(header.sniffImage(gif(10, 10, 2)), { ok: false, reason: 'frames' })
+    assert.deepEqual(header.sniffImage(animatedGif(2)), { ok: false, reason: 'frames' })
   })
 
-  it('GIF 구조가 끝을 못 만들면 malformed', () => {
-    const broken = gif(10, 10).slice(0, -1) // 꼬리표(0x3b) 제거
+  it('실제 GIF의 LZW 데이터 블록이 잘리면 malformed', () => {
+    const broken = gif87a.subarray(0, -3) // 마지막 압축 바이트, 블록 종료 바이트, 꼬리표를 제거한다.
     assert.deepEqual(header.sniffImage(broken), { ok: false, reason: 'malformed' })
   })
 
