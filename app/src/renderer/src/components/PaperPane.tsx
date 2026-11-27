@@ -24,7 +24,7 @@ import { useEdits, editsOfSection } from '../store/edits'
 import { locateSelection, replaceInBlock, type SelectionInput } from '../../../shared/edit'
 import { sameWordSuggestions, type BatchEdit, type Place, type SectionDraft, type Suggestion } from '../../../shared/sameword'
 import { ReviewDiffBlocks } from './ReviewDiff'
-import { MATERIALS, PAPER, REVIEW, fileStatusText } from '../copy'
+import { MATERIALS, PAPER, REVIEW, errorCopy, fileStatusText } from '../copy'
 import type { SectionRow } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 import { joinPath } from '../paths'
@@ -316,6 +316,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
   const [savedLine, setSavedLine] = useState<{ editId: string; needsCheck: boolean; recheck: boolean } | null>(null)
   /** 저장 실패 한 줄 — 원고는 그대로다(§3-5). */
   const [failure, setFailure] = useState<{ message: string; detail?: string } | null>(null)
+  const [cleanupWarningRoot, setCleanupWarningRoot] = useState<string | null>(null)
   const [failureOpen, setFailureOpen] = useState(false)
   const [listOpen, setListOpen] = useState(false)
   /** 같은 낱말 제안 — 저장 결과에서 뽑는다(§3-4). */
@@ -417,6 +418,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
       expected_draft_hash: now.draftHash, before_block: built.before_block, after_block: built.after_block
     })
     if (!outcome.ok) { setFailure({ message: outcome.message, detail: outcome.detail }); return }
+    if (outcome.result.cleanup_warning) setCleanupWarningRoot(rootNow)
     // The save store has already registered the committed fingerprints.
     setSlot(null)
     slotRef.current = null
@@ -451,6 +453,7 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
     const payload = edits.map((e) => ({ section_id: e.section_id, before_block: e.before_block, after_block: e.after_block }))
     const outcome = await saveEdit(rootNow, { kind: 'batch', expected_revision: live.revision, edits: payload })
     if (!outcome.ok) { setFailure({ message: outcome.message, detail: outcome.detail }); return }
+    if (outcome.result.cleanup_warning) setCleanupWarningRoot(rootNow)
     setSameword([])
     samewordStamps.current = null
     await refreshProject({ quiet: true })
@@ -622,6 +625,11 @@ export function PaperPane({ overlay }: { overlay?: ReactNode }) {
               </span>
             </div>
           ))}
+        </div>
+      )}
+      {cleanupWarningRoot === root && (
+        <div className="paper-fb">
+          <MakeFeedbackLine compact fb={{ kind: 'warning', title: errorCopy('committed_cleanup_pending').title, body: errorCopy('committed_cleanup_pending').action }} />
         </div>
       )}
       {savedLine && (
