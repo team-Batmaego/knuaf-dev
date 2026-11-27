@@ -213,7 +213,8 @@
       "chat-images",
       "lock-moved",
       "venv-guard",
-      "venv-guard-chat"
+      "venv-guard-chat",
+      "approval-stop"
     ]
   ],
   "macos": [
@@ -320,7 +321,8 @@
       "chat-images",
       "lock-moved",
       "venv-guard",
-      "venv-guard-chat"
+      "venv-guard-chat",
+      "approval-stop"
     ],
     [
       "agent-busy",

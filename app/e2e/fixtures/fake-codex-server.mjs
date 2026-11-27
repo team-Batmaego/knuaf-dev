@@ -10,6 +10,17 @@
  *   FAKE_CODEX_STATE  로그인 시작을 기억할 파일 하나 — 있으면 account/read 가 chatgpt
  *   FAKE_CODEX_REPLY  turn/start 뒤에 보낼 도우미 글의 **파일 경로**(예: 질문 원문)
  *   FAKE_CODEX_ASK    1이면 turn/start 뒤에 권한 요청을 보내고 턴을 끝내지 않는다
+ *   FAKE_CODEX_ASK_ONCE_FILE  주면 권한 요청은 **처음 한 번만** 보낸다(이 파일을 만들어 표시 — 앱이 프로세스를
+ *                           갈아 끼워도 유지). 그다음 턴은 정상으로 답한다 — 중단 뒤 같은 대화의 다음 턴 시험용
+ *   FAKE_CODEX_EVENT_LOG    턴·권한 요청의 구조화된 사건을 한 줄 JSON 으로 덧붙일 파일 — 시험이 읽는다:
+ *                           turn-start{n,threadId,turnId} · ask{requestId,threadId,turnId} ·
+ *                           interrupt{threadId,turnId,matched} · turn-cancelled{threadId,turnId} ·
+ *                           decision{requestId,decision,applied} · turn-completed{threadId,turnId}
+ *   FAKE_CODEX_ASK_WRITE_FILE  주면 권한 요청에 **허용이 살아 있는 턴에서** 오면 이 파일을 실제로 만든다 —
+ *                           '허용된 명령만 파일을 만든다'는 승인의 효과를 흉내 내는 대역(미승인 파일 미생성 시험용)
+ *   FAKE_CODEX_CANCEL_ON_INTERRUPT  1이면 `turn/interrupt` 가 **승인 대기 중인 그 턴(threadId·turnId 일치)** 에 오면
+ *                           대기를 풀고 턴을 취소 상태로 닫는다(`turn/completed` interrupted). 이후 그 요청에 오는
+ *                           허용은 무시된다(applied:false). 일치하지 않는 인터럽트는 취소하지 않는다
  *   FAKE_CODEX_ASK_COMMAND  권한 요청의 command (기본 `cat /etc/hosts`, 빈 값이면 필드 생략)
  *   FAKE_CODEX_ASK_REASON   권한 요청의 reason (기본 쉬운 이유 한 줄, 빈 값이면 필드 생략)
  *   FAKE_CODEX_FILE_EVENTS  JSON 알림 배열 뒤 파일 변경 승인을 요청한다(스키마 기반 시험)
@@ -80,6 +91,16 @@ if (MODE === 'dead') process.exit(1)
 const STATE = process.env.FAKE_CODEX_STATE ?? ''
 const REPLY_FILE = process.env.FAKE_CODEX_REPLY ?? ''
 const ASK = process.env.FAKE_CODEX_ASK === '1'
+const ASK_ONCE_FILE = process.env.FAKE_CODEX_ASK_ONCE_FILE ?? ''
+const EVENT_LOG = process.env.FAKE_CODEX_EVENT_LOG ?? ''
+const ASK_WRITE_FILE = process.env.FAKE_CODEX_ASK_WRITE_FILE ?? ''
+const CANCEL_ON_INTERRUPT = process.env.FAKE_CODEX_CANCEL_ON_INTERRUPT === '1'
+/** 구조화된 사건 한 줄 — `FAKE_CODEX_EVENT_LOG` 가 없으면 아무것도 안 한다. */
+const logEvent = (event) => { if (EVENT_LOG) appendFileSync(EVENT_LOG, `${JSON.stringify(event)}\n`) }
+/** 권한 요청 id → 그 요청이 속한 턴. 취소된 턴의 요청은 더는 허용이 먹히지 않는다. */
+const askRequests = new Map()
+const cancelledTurns = new Set()
+let turnStarts = 0
 /** 권한 요청의 command·reason — 여러 줄 명령/이유만 있는 요청을 재현하려고 열어 둔다(QA2A-R1-02). */
 const ASK_COMMAND = process.env.FAKE_CODEX_ASK_COMMAND ?? 'cat /etc/hosts'
 const ASK_REASON = process.env.FAKE_CODEX_ASK_REASON ?? '논문 폴더 밖 파일을 읽으려고 해요'
@@ -354,6 +375,17 @@ const responseThreadId = (requested) => {
 function handle(message) {
   // Answerless notifications and responses from the app.
   if (message.method === undefined) {
+    if (askRequests.has(message.id) && message.result?.decision) {
+      const ask = askRequests.get(message.id)
+      const allow = String(message.result.decision).startsWith('accept')
+      const live = !cancelledTurns.has(ask.turnId)
+      const applied = allow && live
+      if (applied && ASK_WRITE_FILE) writeFileSync(ASK_WRITE_FILE, 'created-after-approval')
+      logEvent({ event: 'decision', requestId: message.id, decision: message.result.decision, applied })
+      askRequests.delete(message.id)
+      if (live) out({ method: 'turn/completed', params: { threadId: ask.threadId, turn: { id: ask.turnId, status: 'completed' } } })
+      return
+    }
     if (pendingServerRequests.delete(message.id)) {
       if (SERVER_REPLY_LOG) appendFileSync(SERVER_REPLY_LOG, `${JSON.stringify(message)}\n`)
       if (pendingServerRequests.size === 0) out({ method: 'turn/completed', params: {
@@ -529,6 +561,7 @@ function handle(message) {
         process.exit(9)
       }
       turnsOf(turnThread).push(turnEntry(turnId))
+      logEvent({ event: 'turn-start', n: ++turnStarts, threadId: turnThread, turnId })
       out({ id, result: { turn: { id: turnId } } })
       const started = () => out({ method: 'turn/started', params: { threadId: turnThread, turn: { id: turnId } } })
       if (TURN_NOTIFY_DELAY_MS > 0) setTimeout(started, TURN_NOTIFY_DELAY_MS)
@@ -586,10 +619,18 @@ function handle(message) {
         out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } })
         return
       }
-      if (ASK) {
+      if (ASK && ASK_ONCE_FILE && existsSync(ASK_ONCE_FILE)) {
+        // 처음 한 번만 묻는 장면 — 이미 물었으면 아래 정상 응답으로 내려간다.
+      } else if (ASK) {
+        if (ASK_ONCE_FILE) writeFileSync(ASK_ONCE_FILE, '1')
         // 허락 카드 장면 — 턴을 끝내지 않고 학생의 답을 기다린다.
         // 요청 id 는 최상위에 있어야 한다(줄 단위 JSON-RPC — 앱도 그렇게 읽는다).
-        out({ id: ++serverSeq, method: 'item/commandExecution/requestApproval', params: {
+        const askId = ++serverSeq
+        if (EVENT_LOG) {
+          askRequests.set(askId, { threadId: turnThread, turnId })
+          logEvent({ event: 'ask', requestId: askId, threadId: turnThread, turnId })
+        }
+        out({ id: askId, method: 'item/commandExecution/requestApproval', params: {
           threadId,
           ...(ASK_COMMAND ? { command: ASK_COMMAND } : {}),
           ...(ASK_REASON ? { reason: ASK_REASON } : {})
@@ -609,10 +650,21 @@ function handle(message) {
         out({ method: 'item/agentMessage/delta', params: { threadId, itemId: 'i-fake', delta: text } })
         out({ method: 'item/completed', params: { threadId, item: { id: 'i-fake', type: 'agentMessage', text } } })
       }
+      logEvent({ event: 'turn-completed', threadId, turnId })
       out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } })
       return
     }
     case 'turn/interrupt':
+      if (EVENT_LOG) {
+        const pending = [...askRequests.values()].find((ask) => ask.threadId === params.threadId && ask.turnId === params.turnId)
+        logEvent({ event: 'interrupt', threadId: params.threadId, turnId: params.turnId, matched: !!pending })
+        if (CANCEL_ON_INTERRUPT && pending && !cancelledTurns.has(pending.turnId)) {
+          cancelledTurns.add(pending.turnId)
+          logEvent({ event: 'turn-cancelled', threadId: pending.threadId, turnId: pending.turnId })
+          out({ id, result: {} })
+          return out({ method: 'turn/completed', params: { threadId: pending.threadId, turn: { id: pending.turnId, status: 'interrupted' } } })
+        }
+      }
       return out({ id, result: {} })
     case 'item/commandExecution/requestApproval':
       return

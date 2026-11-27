@@ -3,10 +3,13 @@ import { CHAT } from '../copy'
 import { Disclosure } from './Disclosure'
 import { FileChangePreview } from './FileChangePreview'
 
-export function PermissionCard({ request, onRespond, onAllowAlways }: {
+export function PermissionCard({ request, onRespond, onAllowAlways, onStop, stopText }: {
   request: PermissionRequest
   onRespond: (id: string, allow: boolean) => void
   onAllowAlways: (id: string) => void
+  /** 현재 턴 중단 — 입력칸 ■ 와 같은 `chat:stop` 이다. '거절'(이 도구 요청 하나에 대한 답)과 다르다. */
+  onStop: () => void
+  stopText: string
 }) {
   return <div className="askcard" role="alert">
     <div className="askcard-h"><span className="ask-dot" />{CHAT.askTitle}</div>
@@ -26,6 +29,7 @@ export function PermissionCard({ request, onRespond, onAllowAlways }: {
       <button className="primary" onClick={() => onRespond(request.id, true)}>{CHAT.allow}</button>
       <button onClick={() => onAllowAlways(request.id)}>{CHAT.allowAlways}</button>
       <button onClick={() => onRespond(request.id, false)}>{CHAT.deny}</button>
+      <button type="button" className="askcard-stop" onClick={onStop}>{stopText}</button>
     </div>
   </div>
 }
