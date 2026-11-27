@@ -742,6 +742,21 @@ export function Chat() {
 
   // 아래 칸 하나를 정한다 — 허락 · 질문 카드 · 작업 중 · 입력칸 · 미연결(설계 §4-1).
   const zone = zoneOf(snapshot, status, pStatus ?? null)
+  /**
+   * 승인 카드가 입력칸(■)을 대신하는 동안에는 Esc 가 현재 턴 중단이다 — 카드 안 단추와 같은 `stop()`.
+   * 보관 대화 Esc(위, 캡처 단계에서 먼저 받고 전파를 끊는다)·이미 처리된 키·한글 조합 중 키는 건드리지 않는다.
+   */
+  const permissionOpen = zone.kind === 'permission'
+  useEffect(() => {
+    if (!permissionOpen || archive) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return
+      e.preventDefault()
+      void stop()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [permissionOpen, archive, stop])
   const [freeFormId, setFreeFormId] = useState<string | null>(null)
   const freeForm = zone.kind === 'form' && freeFormId === zone.messageId
   const [freeRequest, setFreeRequest] = useState<{ messageId: string; seq: number } | null>(null)
@@ -1004,7 +1019,8 @@ export function Chat() {
           onClose={() => setReportNotice(null)} />}
         {zone.kind === 'permission' && <PermissionCard request={zone.request}
           onRespond={(id, allow) => void respond(id, allow)}
-          onAllowAlways={(id) => { if (projectRoot) void window.knuaf.trustProject(projectRoot, true); void respond(id, true) }} />}
+          onAllowAlways={(id) => { if (projectRoot) void window.knuaf.trustProject(projectRoot, true); void respond(id, true) }}
+          onStop={() => void stop()} stopText={stopText} />}
 
         {zone.kind === 'question' && (
           <>

@@ -10,6 +10,9 @@
  *   FAKE_CODEX_STATE  로그인 시작을 기억할 파일 하나 — 있으면 account/read 가 chatgpt
  *   FAKE_CODEX_REPLY  turn/start 뒤에 보낼 도우미 글의 **파일 경로**(예: 질문 원문)
  *   FAKE_CODEX_ASK    1이면 turn/start 뒤에 권한 요청을 보내고 턴을 끝내지 않는다
+ *   FAKE_CODEX_ASK_ONCE_FILE  주면 권한 요청은 **처음 한 번만** 보낸다(이 파일을 만들어 표시 — 앱이 프로세스를
+ *                           갈아 끼워도 유지). 그다음 턴은 정상으로 답한다 — 중단 뒤 같은 대화의 다음 턴 시험용
+ *   FAKE_CODEX_INTERRUPT_LOG  `turn/interrupt` 가 올 때마다 한 줄 덧붙일 파일 — 앱이 턴을 실제로 취소했는지 읽는다
  *   FAKE_CODEX_ASK_COMMAND  권한 요청의 command (기본 `cat /etc/hosts`, 빈 값이면 필드 생략)
  *   FAKE_CODEX_ASK_REASON   권한 요청의 reason (기본 쉬운 이유 한 줄, 빈 값이면 필드 생략)
  *   FAKE_CODEX_FILE_EVENTS  JSON 알림 배열 뒤 파일 변경 승인을 요청한다(스키마 기반 시험)
@@ -80,6 +83,8 @@ if (MODE === 'dead') process.exit(1)
 const STATE = process.env.FAKE_CODEX_STATE ?? ''
 const REPLY_FILE = process.env.FAKE_CODEX_REPLY ?? ''
 const ASK = process.env.FAKE_CODEX_ASK === '1'
+const ASK_ONCE_FILE = process.env.FAKE_CODEX_ASK_ONCE_FILE ?? ''
+const INTERRUPT_LOG = process.env.FAKE_CODEX_INTERRUPT_LOG ?? ''
 /** 권한 요청의 command·reason — 여러 줄 명령/이유만 있는 요청을 재현하려고 열어 둔다(QA2A-R1-02). */
 const ASK_COMMAND = process.env.FAKE_CODEX_ASK_COMMAND ?? 'cat /etc/hosts'
 const ASK_REASON = process.env.FAKE_CODEX_ASK_REASON ?? '논문 폴더 밖 파일을 읽으려고 해요'
@@ -586,7 +591,10 @@ function handle(message) {
         out({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } })
         return
       }
-      if (ASK) {
+      if (ASK && ASK_ONCE_FILE && existsSync(ASK_ONCE_FILE)) {
+        // 처음 한 번만 묻는 장면 — 이미 물었으면 아래 정상 응답으로 내려간다.
+      } else if (ASK) {
+        if (ASK_ONCE_FILE) writeFileSync(ASK_ONCE_FILE, '1')
         // 허락 카드 장면 — 턴을 끝내지 않고 학생의 답을 기다린다.
         // 요청 id 는 최상위에 있어야 한다(줄 단위 JSON-RPC — 앱도 그렇게 읽는다).
         out({ id: ++serverSeq, method: 'item/commandExecution/requestApproval', params: {
@@ -613,6 +621,7 @@ function handle(message) {
       return
     }
     case 'turn/interrupt':
+      if (INTERRUPT_LOG) appendFileSync(INTERRUPT_LOG, `${JSON.stringify({ threadId: params.threadId, turnId: params.turnId })}\n`)
       return out({ id, result: {} })
     case 'item/commandExecution/requestApproval':
       return
