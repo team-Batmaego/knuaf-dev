@@ -6,7 +6,7 @@ import { launch, navTo, openProject, python, scripts, synthProject } from './hel
 
 const OUT = resolve(__dirname, 'artifacts')
 
-/** Apply a second change on top of the synth project (revision 1 → 2). */
+/** Apply a second change on top of the synth project (revision 2 → 3). */
 function applyChange(root: string, change: object, expected: number): void {
   const file = join(root, `change-${expected}.json`)
   writeFileSync(file, JSON.stringify(change), 'utf-8')
@@ -34,7 +34,7 @@ test('자료 팝오버: 현재 작성물과 참고자료를 구분하고 참고�
       intakeFact('fact-manuscript', 'intake.current_manuscript', 'sources/초고.docx', 'provided'),
       intakeFact('fact-basis', 'intake.work_basis', '이어쓰기', 'provided')
     ]
-  }, 1)
+  }, 2)
   const { electronApp, page } = await launch()
   await openProject(page, root)
   await page.waitForSelector('.chat-pane', { timeout: 30_000 })

@@ -81,7 +81,9 @@
       "guard-codex-thread-lock",
       "kordoc-mcp-policy",
       "support-sidebar",
-      "finance-hole-card"
+      "finance-hole-card",
+      "figure-channel-app",
+      "figure-wiring"
     ],
     [
       "artifacts-states",
@@ -203,7 +205,8 @@
       "kordoc-mcp-codex",
       "kordoc-mcp-wiring",
       "kordoc-runtime",
-      "skill-unknown-read"
+      "skill-unknown-read",
+      "main-watchdog"
     ]
   ],
   "macos": [
@@ -305,7 +308,8 @@
       "kordoc-mcp-registry",
       "support-sidebar",
       "app-update-recheck",
-      "outline-note"
+      "outline-note",
+      "main-watchdog"
     ],
     [
       "agent-busy",
@@ -327,6 +331,7 @@
       "diagnosis-feedback",
       "docx-zip",
       "fetch-codex",
+      "figure-channel-app",
       "file-open-guard",
       "invariants",
       "job-a-gate",
@@ -404,6 +409,7 @@
       "news-release-notes",
       "news-storage-failure",
       "empty-toc",
+      "figure-wiring",
       "skill-unknown-read"
     ]
   ]

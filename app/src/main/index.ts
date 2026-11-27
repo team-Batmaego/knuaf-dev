@@ -13,8 +13,10 @@ import { LEGACY_USERDATA_NAMES, migrateUserDataDir } from './userdata'
 import { APP_NAME } from '../shared/name'
 import { IMAGE_SCHEME } from '../shared/paper-image'
 import { defaultWindowSize } from '../shared/window'
+import type { FigureChannel } from './figures'
 import { needsReclaim, openHandles, reclaimChildren, shutdownWithin, type ShutdownTask } from './shutdown'
 import { codeOf, diag, diagEnabled } from './diagLog'
+import { startMainWatchdog } from './mainWatchdog'
 import { createStartupDiag, STARTUP_WINDOW_MS } from './diagLimits'
 
 // Tests point userData at a temp dir so first-run state (credit, recents) is isolated.
@@ -26,6 +28,8 @@ else migrateUserDataDir(app.getPath('userData'), LEGACY_USERDATA_NAMES.map((n) =
 let win: BrowserWindow | null = null
 const sidecar = new Sidecar()
 let chat: ChatService | null = null
+/** 그림 통로 — `registerIpc` 가 열고 여기서 종료에 닫는다. 열지 못했으면 `null`(그림만 꺼짐). */
+let figures: FigureChannel | null = null
 let probe: AccountProbe | null = null
 let quitting = false
 /**
@@ -66,7 +70,13 @@ if (diagEnabled()) {
   }, 5_000)
   beat.unref?.()
   trace('boot', `pid=${process.pid} electron=${process.versions.electron} node=${process.versions.node}`)
-  app.on('will-quit', () => trace('will-quit', `listeners=${app.listenerCount('will-quit')}`))
+  // 메인 JS 스레드가 멈추면 별도 worker 가 정지 시간·CPU 사용·바쁨 비율(숫자뿐)을 적는다(진단 전용·기록만, 자식 프로세스 없음).
+  // 패키징된 앱이거나 e2e 전용 환경값(KNUAF_E2E_MAIN_WATCHDOG=1)이 없으면 null — 학생 배포본에서는 worker 가 만들어지지 않는다.
+  const mainWatchdog = startMainWatchdog({ isPackaged: app.isPackaged })
+  app.on('will-quit', () => {
+    trace('will-quit', `listeners=${app.listenerCount('will-quit')}`)
+    mainWatchdog?.stop() // 종료 경로에서 worker 를 끝낸다 — 감시자가 만든 것은 worker 뿐이다.
+  })
   process.on('exit', (code) => trace('process-exit', `code=${code}`))
 }
 const isMac = process.platform === 'darwin'
@@ -260,8 +270,10 @@ else {
       const iconPng = join(APP_ROOT, 'build', 'icon.png')
       if (existsSync(iconPng)) app.dock?.setIcon(nativeImage.createFromPath(iconPng))
     }
-    const services = registerIpc(sidecar, () => win, () => installMenu(sendMenu))
+    // 네 번째 인자가 그림 통로를 연다 — 이 앱만 그 통로의 정리 의무(`figures.stop`)를 진다.
+    const services = registerIpc(sidecar, () => win, () => installMenu(sendMenu), true)
     chat = services.chat
+    figures = services.figures
     probe = services.probe
     // 그림 요청 하나가 들어오면 read → 폴더 안 판정 → 응답. 실패는 404로 닫고, 렌더러가
     // "그림을 찾지 못했어요 · <경로>"로 바꾼다(main.tsx 문서 리스너).
@@ -346,7 +358,13 @@ else {
         task('chat.close', async () => {
           const result = await (chat?.close() ?? Promise.resolve({ outcome: 'done' as const }))
           if (result.outcome === 'pending') throw new Error(`연결 정리 미완료 pids=${result.pids.join(',') || '없음'}`)
-        })
+        }),
+        /**
+         * figures (v0.7 그림 갈래): 그림 통로를 멈춘다. 타이머(하트비트·폴더 확인)를 지우고 지금 도는
+         * 요청은 끝까지 둔다 — 도우미의 60초 대기 안에서 결과가 나가야 하기 때문이다. 통로를 못
+         * 열었으면(`null`) 할 일이 없고, 그 경우도 정리 목록에는 남겨 로그에서 "그림도 닫았다"가 보이게 한다.
+         */
+        task('figures.stop', () => figures?.stop() ?? Promise.resolve())
       ], SHUTDOWN_DEADLINE_MS).then(async (outcome) => {
         trace(`before-quit#${quitPasses}:shutdown-outcome`, `done=[${outcome.done.join(', ')}] pending=[${outcome.pending.join(', ')}] failed=[${outcome.failed.map((f) => f.name).join(', ')}] elapsedMs=${outcome.elapsedMs}`)
         for (const failure of outcome.failed) console.error('Shutdown failed:', failure.name, codeOf(failure.reason))

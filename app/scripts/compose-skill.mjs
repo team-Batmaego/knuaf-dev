@@ -139,7 +139,13 @@ export function composeFiles(input, { source, overlay, version, api = 1 }) {
     const finish = '<!-- knuaf-dev:app:end -->'
     const body = overlayFiles.get(config.append)?.toString('utf8')
     if (!body || renamed.includes(start) || body.includes(start) || body.includes(finish)) throw new Error('Invalid app section markers')
-    renamed = renamed.trimEnd() + `\n\n${start}\n${body.trim()}\n${finish}\n`
+    const figureListSupported = /fetch\.add_argument\(\s*['"]--list['"]/.test(
+      files.get('scripts/gg_figure.py')?.toString('utf8') ?? ''
+    )
+    const figureHeading = '\n### 그림\n'
+    const figureStart = body.indexOf(figureHeading)
+    const appBody = figureStart >= 0 && !figureListSupported ? body.slice(0, figureStart) : body
+    renamed = renamed.trimEnd() + `\n\n${start}\n${appBody.trim()}\n${finish}\n`
   }
   files.set('SKILL.md', Buffer.from(renamed))
   files.set('skill.json', jsonBytes({ version, api, source, overlay: overlayHash(overlay) }))

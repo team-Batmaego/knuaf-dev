@@ -1,6 +1,6 @@
 # kordoc 덩어리 (OCR 뺀 판) — 만들기·형식 명세
 
-학생 PC 에 Node 가 없어도 kordoc 이 돌아야 한다. 그래서 앱은 **kordoc 4.17.1 과 그 실행 의존성만**
+학생 PC 에 Node 가 없어도 kordoc 이 돌아야 한다. 그래서 앱은 **kordoc 4.25.3 과 그 실행 의존성만**
 담은 tgz 를 내려받아 풀고, 앱 exe 를 `ELECTRON_RUN_AS_NODE=1` 로 띄워
 `node_modules/kordoc/dist/cli.js`(CLI) · `dist/mcp.js`(MCP) 를 자식 프로세스로 돌린다(11-13 확정).
 
@@ -46,17 +46,21 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
 
 ## 계약 — 이 스크립트가 지키는 것
 
-1. **판 고정.** `kordoc@4.17.1`, `pdfjs-dist@4.10.38`, `sharp@0.35.5`, `@hyzyla/pdfium@2.1.13`,
-   `@napi-rs/canvas@0.1.100`(+ 대상별 플랫폼 패키지).
-   뜨는 대로 깔지 않는다. `cli.js` 해시는 `f755b0bc…97a5c`(11-10 실측, 맥·윈도 동일)로 못박고
-   검사 단계에서 대조한다.
-   `@napi-rs/canvas` 를 직접 넣는 이유: `pdfjs-dist` 가 페이지 렌더에 이걸 선택 의존성으로 쓰는데
-   (`build/pdf.mjs` 의 `require("@napi-rs/canvas")`), 우리는 `--no-optional` 로 깔기 때문에
-   자동 유입이 막힌다. 빼면 PDF→이미지 렌더가 조용히 죽는다(11-10 lab 이 canvas ABI 로드까지 확인).
+1. **판 고정.** `kordoc@4.25.3`, `sharp@0.35.5`, `@hyzyla/pdfium@2.1.13`, `zxing-wasm@3.1.6`
+   (+ 대상별 플랫폼 패키지). 뜨는 대로 깔지 않는다. `cli.js` 해시는 4.25.3 첫 빌드 뒤 채운다 —
+   그때까지 `TODO-BUILD` 자리표시이고 verify 는 이 자리표시가 남아 있으면 실패한다.
+   (4.17.1 판은 `pdfjs-dist@4.10.38`·`@napi-rs/canvas@0.1.100` 도 고정했고 `cli.js` 는 `f755b0bc…97a5c` 였다.)
+   - **뺀 것: `pdfjs-dist`·`@napi-rs/canvas`** — 4.25.3 의존성(dependencies·optionalDependencies)에 둘 다 없다
+     (npm view 실측). 4.17.1 은 pdfjs-dist 가 페이지 렌더에 canvas 래퍼를 선택 의존성으로 요구해서
+     `--no-optional` 설치에서 직접 넣었으나, 이제 요구하는 쪽이 없다.
+   - **더한 것: `zxing-wasm`** — 4.25.3 의 새 optional 의존성. `--no-optional` 설치라 자동 유입이 막힌다.
+   - **미확정(TODO-BUILD):** 4.25.3 의 PDF 렌더 경로가 무엇인지, `zxing-wasm` 이 필수인지, peer 셋
+     (`@rhwp/core`·`libheif-js`·`puppeteer-core`, 모두 optional peer)을 넣어야 하는지는
+     `npm pack kordoc@4.25.3` 의 dist 를 본 뒤 정한다. 지금은 넣지 않는다(앱이 쓰는 hwpx 생성·읽기 경로에 불필요하다고 *가정* — 미실측).
 2. **대상 고정.** `darwin-arm64` · `darwin-x64` · `win32-x64`.
    대상마다 그 판의 네이티브 패키지만 담는다. 다른 판 패키지가 하나라도 섞이면 검사가 실패한다
    (11-10 실측: 섞이면 윈도 설치본이 깨진다).
-3. **OCR 제외.** `onnxruntime-node` · `@huggingface/*` 를 담지 않는다.
+3. **OCR 제외.** `onnxruntime-node` · `@huggingface/*`(4.25.3 은 `@huggingface/tokenizers`) 를 담지 않는다.
    대신 이미지 스캔 PDF 는 텍스트가 0자로 나온다 → 앱이 그 경고를 받으면 `ocr:true` 로 재시도하는
    경로를 따로 둔다(덩어리 자체는 OCR 을 못 한다).
 4. **tgz 결정성.** **같은 설치 트리 → 같은 tgz sha256.** 아래 "형식"이 그 근거다.
@@ -115,7 +119,7 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
 ```json
 {
   "formatVersion": 1,
-  "kordocVersion": "4.17.1",
+  "kordocVersion": "4.25.3",
   "ocr": false,
   "cli": { "path": "node_modules/kordoc/dist/cli.js", "sha256": "f755b0bc…" },
   "mcp": { "path": "node_modules/kordoc/dist/mcp.js" },
@@ -128,9 +132,9 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
       "sha256": "…",
       "unpackedBytes": 0,
       "files": 0,
-      "packages": { "kordoc": "4.17.1", "…": "…" },
+      "packages": { "kordoc": "4.25.3", "…": "…" },
       "cli": { "path": "node_modules/kordoc/dist/cli.js", "sha256": "…" },
-      "kordocVersion": "4.17.1",
+      "kordocVersion": "4.25.3",
       "mcp": { "path": "node_modules/kordoc/dist/mcp.js", "sha256": "…" },
       "tooling": { "node": "v22.x", "zlib": "1.3.x", "pnpm": "12.x" }
     }
@@ -149,8 +153,8 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
 
 ## 검사(`verifyTarGz`)가 잡는 것
 
-- `kordoc` 판이 `4.17.1` 이 아니다 / `node_modules/kordoc/package.json` 이 없다
-- `dist/cli.js` 가 없다 / 해시가 계약값과 다르다 / `dist/mcp.js` 가 없다
+- `kordoc` 판이 `4.25.3` 이 아니다 / `node_modules/kordoc/package.json` 이 없다
+- `dist/cli.js` 가 없다 / 해시가 계약값과 다르다(자리표시 `TODO-BUILD` 면 실제 digest 를 알려 주며 실패) / `dist/mcp.js` 가 없다
 - OCR 패키지(`onnxruntime*`, `@huggingface/*`)가 들어 있다
 - 필수 패키지가 빠졌다 / 판이 다르다
 - **다른 대상의** 플랫폼 패키지가 섞였다
@@ -159,22 +163,11 @@ shebang 없는 텍스트 스크립트면 POSIX 는 `sh <경로> …`, 윈도는 
 
 ## 실측값
 
-이 스크립트로 만든 결과(11-15, node v24.22.3 · zlib 1.3.2.1-motley · pnpm 12.18.0):
+**4.25.3 판은 아직 만들지 않았다 — TODO-BUILD.** 만든 뒤 아래 표(대상별 tgz·풀림·파일 수·sha256)와
+`cli.js`·`mcp.js` sha256 을 실측값으로 채운다. 지어 쓰지 않는다.
 
-| 대상 | tgz | 풀림 | 파일 수 | sha256 |
-|---|---|---|---|---|
-| darwin-arm64 | 40.42 MiB | 115.42 MiB | 4390 | `02e57a8844694db1335eee5b5df7e1956a6fd7d790d266443f99d5b079aed804` |
-| darwin-x64 | 41.95 MiB | 122.43 MiB | 4390 | `a65ef4f32cc55f4d15af6f4dcf186e9cb034f85333bb1c6ab9e1ca759281be91` |
-| win32-x64 | 43.26 MiB | 127.57 MiB | 4388 | `385b62644f6dd13fc0b8fcc35aa235aa4f0601600390a46cbc8b29ab601b78f7` |
-
-세 대상 모두 두 번씩 빌드해 같은 해시가 나왔다(재현 확인). 값은 만든 도구 판에 묶인다 —
-위 `tooling` 이 다르면 해시도 달라질 수 있다.
-
-11-10 실험실(`lab/make-payload.sh`, OCR 제외) 기준선: darwin-arm64 40.0 MiB / 115.5 MB,
-win32-x64 43.8 MiB / 127.7 MB — 같은 대역이다.
-
-`cli.js` sha256 은 맥·윈도 tarball 이 같다: `f755b0bc4ee860622066f30200e188481501d25969e2e38bcf79e9d2b4897a5c`
-(`mcp.js` 는 `ed675ba09018de9149414526d0a890aaad4c94410a392c68cb1dae0d241ba456`).
+참고(이전 4.17.1 판, 11-15, node v24.22.3 · zlib 1.3.2.1-motley · pnpm 12.18.0): darwin-arm64 40.42 MiB / 풀림 115.42 MiB,
+darwin-x64 41.95 / 122.43, win32-x64 43.26 / 127.57 MiB. 4.25.3 판은 의존성 축이 달라 이 값과 다를 수 있다.
 
 ## 경계
 

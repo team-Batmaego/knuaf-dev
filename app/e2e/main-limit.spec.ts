@@ -229,13 +229,23 @@ test('main-limit: Codex 코드만', async () => {
         })
       }
     })
-    await f.svc.send(f.root, 'codex', '질문', 'req-1')
-    await settled(f.svc, f.root, 'codex')
-    expect({ failure, sources: f.sources.length }).toEqual({ failure, sources: expected })
-    if (expected === 1) {
-      // 실패 당시 보낸 값 — 이 턴의 `turn/start` 에 실린 model·effort 다.
-      expect(f.sources[0].entry.company).toBe('codex')
-      expect(f.sources[0].entry.how).toBe('main')
+    // 루프마다 서비스가 가짜 codex app-server 자식(codex.cmd → node)을 띄운다 —
+    // 시험이 끝나도 남지 않게 서비스(=본대화 연결)를 닫는다. 정상 경로는 미회수(pending)를
+    // 시험 실패로 드러내고, 본문이 던진 경우의 정리는 먼저 난 단언 실패를 가리지 않는다.
+    let closed = false
+    try {
+      await f.svc.send(f.root, 'codex', '질문', 'req-1')
+      await settled(f.svc, f.root, 'codex')
+      expect({ failure, sources: f.sources.length }).toEqual({ failure, sources: expected })
+      if (expected === 1) {
+        // 실패 당시 보낸 값 — 이 턴의 `turn/start` 에 실린 model·effort 다.
+        expect(f.sources[0].entry.company).toBe('codex')
+        expect(f.sources[0].entry.how).toBe('main')
+      }
+      closed = true
+      expect(await f.svc.close()).toEqual({ outcome: 'done' })
+    } finally {
+      if (!closed) await f.svc.close().catch(() => {})
     }
   }
 })
@@ -619,11 +629,14 @@ test('handoff: 정지해도 도는 계정 조회를 끊지 않는다 — drain �
     // 정지가 조회의 자식을 끊지 않았다 — 인계는 이 자식이 죽을 때까지 기다린다.
     expect(alive(pid)).toBe(true)
     // 조회를 끝내는 쪽은 인계의 정지가 아니라 조회 자신의 종료(`close`)다.
-    await probe.close()
-    expect(await pending).toBeNull()
-    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다(다른 await 없이 바로 확인).
+    // 종료를 **유도만** 하고 다른 종료 약속(`pending`)을 기다리기 전에 drain 과 자식 생존을 본다 —
+    // `await pending` 뒤에 보면 drain 이 조회보다 먼저 풀려도 이 시험이 통과해 버린다.
+    const closing = probe.close()
     await draining
+    // drain 이 풀린 그 시점에 자식은 이미 죽어 있다(다른 await 없이 바로 확인).
     expect(alive(pid)).toBe(false)
+    await closing
+    expect(await pending).toBeNull()
     // 정지·drain 이 조회를 하나 더 띄우지 않았다 — 임대는 조회 하나에만 붙는다.
     expect(readFileSync(countFile, 'utf8')).toBe('x')
   } finally {

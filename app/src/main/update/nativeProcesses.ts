@@ -41,7 +41,9 @@ namespace KnuafUpdate {
      if(next<0 || (next!=0 && next<104) || offset+next>total) throw new InvalidOperationException("process listing is malformed");
      long born=Marshal.ReadInt64(entry,32);
      int length=(ushort)Marshal.ReadInt16(entry,56); long text=Marshal.ReadIntPtr(entry,64).ToInt64();
-     if((length&1)!=0 || (length>0 && (text<start || text+length>start+total))) throw new InvalidOperationException("process listing is malformed");
+     // Compare the pointer itself: a corrupted name pointer would overflow name+length and slip
+     // past an addition-based bound, so the upper bound is written as text>start+total-length.
+     if((length&1)!=0 || (length>0 && (length>total || text<start || text>start+total-length))) throw new InvalidOperationException("process listing is malformed");
      long pid=Marshal.ReadIntPtr(entry,80).ToInt64(), parent=Marshal.ReadIntPtr(entry,88).ToInt64();
      if(pid<0 || pid>Int32.MaxValue || parent<0 || parent>Int32.MaxValue) throw new InvalidOperationException("process listing is malformed");
      if(pid!=0) {

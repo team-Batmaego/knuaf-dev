@@ -79,7 +79,7 @@ export function questionProject(): string {
     request_id: 'e2e:task',
     ops: [{ collection: 'tasks', value: { id: 'task-interview', user_owned: true, required_fields: ['market.channel'], description: '판매처 확인' } }]
   }), 'utf-8')
-  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '1'], { encoding: 'utf-8' })
+  const r = spawnSync(python, [join(scripts, 'gg.py'), 'apply', root, '--change', change, '--expected-revision', '2'], { encoding: 'utf-8' })
   if (r.status !== 0) throw new Error(r.stdout + r.stderr)
   return root
 }

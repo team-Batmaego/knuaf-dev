@@ -6,6 +6,7 @@ import { Icon } from './Icon'
 import { useChat } from '../store/chat'
 import { useProject } from '../store/project'
 import { CHAT, MODEL_PICKER, PROVIDER_NAME } from '../copy'
+import { PLACEMENT_COPY, placementMessage } from '../copy-lanes'
 import { isCrossProviderModelId } from '../../../shared/chat'
 import { fitEffort, LANE_TABLE, type LaneRowId } from '../../../shared/lanes'
 import type { LaneModelGroup, PlacementEntries, PlacementOrigin } from '../../../shared/lanes-ipc'
@@ -118,8 +119,9 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
     try {
       const result = await laneActions().setPlacement(root, snapshot.version, next, origin)
       if (useProject.getState().root !== root) return false
-      if ('error' in result || result.value.outcome !== 'applied') {
-        setLaneError('배치를 적용하지 못했어요. 다시 확인해 주세요.')
+      const message = placementMessage(result)
+      if (message) {
+        setLaneError(message)
         await useLanes.getState().load(root)
         return false
       }
@@ -146,7 +148,7 @@ export function ComposerModelChip({ placement = 'up' }: { placement?: 'up' | 'do
             roles={{ research: labelEntry(entries.research), writing: labelEntry(entries.writing), repeat: labelEntry(entries.repeat), review: labelEntry(entries.review) }}
             models={menuModels} choice={choiceForView} recommendations={rowIds.map((id) => ({ id, label: LANE_TABLE[id].label, main: nameOf(LANE_TABLE[id].lanes.design.company, LANE_TABLE[id].lanes.design.model), review: nameOf(LANE_TABLE[id].lanes.review.company, LANE_TABLE[id].lanes.review.model) }))}
             selectedRecommendation={laneView?.source.kind === 'recommended' ? laneView.source.rowId : null} busy={laneBusy || (view !== 'main' && (!root || !snapshot))} onAccountPicked={close}
-            onView={setView} onTeam={() => { if (!root || !snapshot) return; if (laneView?.mode === 'on') { void laneActions().disable(root).then((error) => { if (error) setLaneError('배치를 적용하지 못했어요. 다시 확인해 주세요.') }) } else if (laneView?.recommendedRowId) { void savePlacement(entries, { kind: 'recommended', rowId: laneView.recommendedRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings() } }) } else setLaneError('추천 배치를 확인하지 못했어요.') }}
+            onView={setView} onTeam={() => { if (!root || !snapshot) { setLaneError(PLACEMENT_COPY.needFolder); return }; if (laneView?.mode === 'on') { void laneActions().disable(root).then((error) => { if (error) setLaneError(PLACEMENT_COPY.disableFailed) }) } else if (laneView?.recommendedRowId) { void savePlacement(entries, { kind: 'recommended', rowId: laneView.recommendedRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings() } }) } else setLaneError(PLACEMENT_COPY.noRecommendation) }}
             onModel={(model) => { if (view === 'main') { const next = { model: model.model, effort: fitEffort(displayEffort ?? null, model.efforts) }; void window.knuaf.chat.setModel(root, model.company, next).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else if (model.company === provider) { await loadModels(provider); await loadSettings() } }) } else selectRoleModel(model) }}
             onEffort={(effort) => { if (view === 'main' && choice) void window.knuaf.chat.setModel(root, provider, { ...choice, effort }).then(async (result) => { if ('error' in result) setLaneError('모델을 적용하지 못했어요. 다시 확인해 주세요.'); else { await loadModels(provider); await loadSettings() } }); else if (role && currentEntry) void savePlacement({ ...entries, [role]: { ...currentEntry, effort } }, { kind: 'mine' }) }}
             onRecommendation={(id) => { void savePlacement(entries, { kind: 'recommended', rowId: id as LaneRowId }).then(async (ok) => { if (ok) { await loadModels(provider); await loadSettings(); setView('top') } }) }} />

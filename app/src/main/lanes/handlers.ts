@@ -46,6 +46,8 @@ export interface LaneHandlerDeps {
   account: (company: Provider) => Promise<ExecutionAccount | null>
   /** 캐시를 건너뛴 계정 조회([C1-06]) — 카드 적용 직전 대조가 쓴다. 없으면 `account`. */
   freshAccount?: (company: Provider) => Promise<ExecutionAccount | null>
+  /** 사용량을 모르는 계정을 첫 턴 안 확인으로 넘길 회사 — 대화 넘기기와 같은 선언. 없으면 `unknown` 은 막힌다. */
+  gateInTurn?: (company: Provider) => boolean
   /**
    * 허용 폴더 경계([C1-08]) — main 이 지금 열어 둔 폴더(와 그 밖의 허용 폴더)만 통과시킨다.
    * 화면이 보낸 root 두 개를 서로 대조하는 것만으로는 **둘 다 바꿔** 다른 폴더의 저장 상태·
@@ -128,10 +130,21 @@ export interface LaneHandlers {
  * 22 요청을 등록한다. 반환한 표는 시험이 IPC 를 거치지 않고 같은 함수를 직접 부르는 통로다.
  */
 export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
+  /**
+   * 인계(정지) 중에는 **상태를 바꾸는 요청을 문 앞에서** 닫는다. 카드가 `applying` 으로 저장된
+   * 뒤에 막으면 카드가 영영 적용 중으로 남고, 계정 조회(자식 프로세스)가 인계 중에 뜬다.
+   * 읽기 요청은 그대로 통과시킨다(화면이 정지 중에도 상태를 볼 수 있어야 한다).
+   *
+   * 문 앞 검사만으로는 폴더 대기열에 선 요청을 못 막는다 — 그 요청은 검사를 통과한 뒤 잠금을
+   * 기다리다 정지될 수 있다. 그래서 카드 쪽에도 같은 장부를 넘겨 저장 직전에 다시 보게 한다.
+   */
+  const activity = deps.activity ?? agentActivity
   const cards: CardDeps = {
     store: deps.store,
     account: deps.account,
     freshAccount: deps.freshAccount,
+    gateInTurn: deps.gateInTurn,
+    ensureActive: () => activity.ensureActive(),
     get mainCompany() { return deps.mainCompany },
     designChoice: deps.designChoice,
     runner: deps.runner ? { records: () => deps.runner!.records(), stopJob: id => deps.runner!.stopJob(id) } : null,
@@ -171,20 +184,20 @@ export function registerLaneHandlers(deps: LaneHandlerDeps): LaneHandlers {
   const withFolder = <T>(root: unknown, run: (folder: string) => Promise<T> | T, touch = true): Promise<LanesReply<T>> =>
     reply<T>(typeof root === 'string' && root ? root : null, () => run(folderAllowed(deps, root)), touch)
 
-  /**
-   * 인계(정지) 중에는 **상태를 바꾸는 요청을 문 앞에서** 닫는다. 카드가 `applying` 으로 저장된
-   * 뒤에 막으면 카드가 영영 적용 중으로 남고, 계정 조회(자식 프로세스)가 인계 중에 뜬다.
-   * 읽기 요청은 그대로 통과시킨다(화면이 정지 중에도 상태를 볼 수 있어야 한다).
-   */
-  const activity = deps.activity ?? agentActivity
-
   const lanes = {
     snapshot: (root: string | null) => reply<LanesSnapshot>(
       typeof root === 'string' && root ? root : null,
       () => deps.hub.snapshot(typeof root === 'string' && root ? folderAllowed(deps, root) : null), false
     ),
     setPlacement: (root: string, baseVersion: number, entries: PlacementEntries, origin: PlacementOrigin) => withFolder(root,
-      folder => { activity.ensureActive(); return setPlacement(cards, folder, baseVersion, entries, origin) }),
+      folder => {
+        activity.ensureActive()
+        return setPlacement(cards, folder, baseVersion, entries, origin).then(decision => {
+          // 까닭 코드만 남긴다 — 계정·모델 이름 같은 개인 값은 넣지 않는다.
+          if (decision.outcome !== 'applied') diagnostic({ type: 'lanes-placement', outcome: decision.outcome, reason: decision.outcome === 'invalid' ? decision.reason : 'rejected' })
+          return decision
+        })
+      }),
     laneModels: (root: string, fresh?: boolean) => withFolder(root, () => laneModels(cards, { fresh: fresh === true }), false),
     decideCard: (root: string, cardId: string, baseVersion: number, action: CardAction) => withFolder(root,
       folder => { activity.ensureActive(); return decideCard(cards, folder, cardId, baseVersion, action) }),

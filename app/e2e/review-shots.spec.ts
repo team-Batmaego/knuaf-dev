@@ -70,7 +70,7 @@ for (const scheme of ['light', 'dark'] as const) {
       await shot(page, 'quote')
 
       // ③ 고친 부분 보기 — 도우미가 800평으로 다시 저장한 뒤
-      rewriteSection(root, { body: '농장A의 재배 면적은 800평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 1 })
+      rewriteSection(root, { body: '농장A의 재배 면적은 800평이다. 정읍 일대 기후를 고려해 작목을 선택했다.', expected: 2 })
       await expect(page.locator('.paperpane .sheet')).toContainText('800평', { timeout: 30_000 })
       await page.locator('.review-toggle').click()
       await expect(page.locator('.paperpane .sheet ins.rev-ins')).toBeVisible()

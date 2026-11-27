@@ -140,13 +140,13 @@ export function versionAtLeast(version: unknown, min: string = MIN_KORDOC_VERSIO
 
 /**
  * 그 판이 광고하는 읽기 도구(§3.3-3 기대 집합). 표에 없는 판은 `null` → 부분집합 조건만 쓴다.
- * 4.17.1 실측 17개 중 읽기 8개(`lint_document`·`agency_pack_info` 없음), 4.24.x 실측 22개 중 읽기 10개.
+ * 4.17.1 실측 17개 중 읽기 8개(`lint_document`·`agency_pack_info` 없음), 4.24.x·4.25.3 실측 22개 중 읽기 10개(4.25.3은 2026-11-24 tools/list 실측).
  */
 export function advertisedReadTools(version: unknown): readonly ReadTool[] | null {
   const v = parseVersion(version)
   if (!v) return null
   if (v[0] === 4 && v[1] === 17 && v[2] === 1) return READ_TOOLS.filter((t) => t !== 'lint_document' && t !== 'agency_pack_info')
-  if (v[0] === 4 && v[1] === 24) return [...READ_TOOLS]
+  if (v[0] === 4 && (v[1] === 24 || (v[1] === 25 && v[2] === 3))) return [...READ_TOOLS]
   return null
 }
 

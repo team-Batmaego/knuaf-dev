@@ -285,7 +285,7 @@ test('모델 목록이 정상이고 배치 저장만 실패하면 다시 불러�
     const choice = popup.getByRole('button', { name: /ChatGPT 높은 플랜만/ })
     await expect(choice).toBeEnabled()
     await choice.click()
-    await expect(popup.getByRole('alert')).toContainText('배치를 적용하지 못했어요')
+    await expect(popup.getByRole('alert')).toContainText('배치를 저장하지 못했어요')
     await expect(popup.getByRole('button', { name: MODEL_PICKER.reload, exact: true })).toHaveCount(0)
   } finally { await electronApp.close() }
 })

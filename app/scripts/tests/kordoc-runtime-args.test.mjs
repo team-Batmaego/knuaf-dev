@@ -66,7 +66,7 @@ const { resolveKordocMcp, resolveKordocMcpSpec } = load(join(CHAT, 'kordocMcp.ts
  */
 function fixtures(tag, { siblingMcp = true } = {}) {
   const base = tempDir(tag)
-  const install = join(base, 'kordoc-4.17.1+kordoc-bundle-1')
+  const install = join(base, 'kordoc-4.25.3+kordoc-bundle-2')
   const dist = join(install, 'node_modules', 'kordoc', 'dist')
   const root = join(base, '논문폴더')
   mkdirSync(dist, { recursive: true })
@@ -78,7 +78,7 @@ function fixtures(tag, { siblingMcp = true } = {}) {
   const runtime = {
     node: '/opt/kordoc/knuaf-dev 앱',
     cliJs: join(dist, 'cli.js'),
-    version: '4.17.1',
+    version: '4.25.3',
     extraEnv: { ELECTRON_RUN_AS_NODE: '1' }
   }
   return { base, install, dist, root, runtime, nodeArgs: ['-r', shimPath] }

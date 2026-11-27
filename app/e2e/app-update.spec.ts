@@ -505,6 +505,17 @@ test('confirmStopped starts the deadline at the first sample and never stops bef
   const capped = fake(80, () => [blocked])
   await expect(capped.runtime.confirmStopped(emptySnapshot(), 10_000, 50)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
   expect(capped.returned.length).toBe(1)
+  // ⑥ 상한 **직전**에 돌아온 표본 뒤의 대기(최대 100ms) 사이에 상한이 지나면 둘째 조회를 시작하지
+  //    않는다 — 표본이 돌아온 시점의 검사만 있으면 100ms 대기 뒤 조회가 한 건 더 붙는다.
+  //    지연 0(첫 표본 ≈0ms < 상한 90ms) → 대기 100ms → 100ms ≥ 90ms 이므로 조회는 한 번뿐이다.
+  //    상한은 대기(100ms)보다 작아야 갈래가 갈린다 — 부하 걸린 맥에서 첫 표본이 50ms를 넘겨도
+  //    흔들리지 않게 90ms로 잡는다.
+  const before = Date.now()
+  const justBefore = fake(0, () => [blocked])
+  await expect(justBefore.runtime.confirmStopped(emptySnapshot(), 10_000, 90)).rejects.toThrow('대화 도우미 프로세스 종료를 확인하지 못했어요. 잠시 후 다시 시도해 주세요.')
+  // 첫 표본이 정말 상한 전에 돌아왔는지 함께 잠근다 — 아니면 위 단언은 ⑤ 갈래로 통과해 버린다.
+  expect(justBefore.returned.length).toBe(1)
+  expect(justBefore.returned[0] - before).toBeLessThan(90)
 })
 
 test('native inventory consumes expanded 8.3 paths; tree and resources checks fail closed on missing helpers', async () => {
