@@ -206,7 +206,8 @@
       "kordoc-mcp-wiring",
       "kordoc-runtime",
       "skill-unknown-read",
-      "main-watchdog"
+      "main-watchdog",
+      "approval-stop"
     ]
   ],
   "macos": [
@@ -309,7 +310,8 @@
       "support-sidebar",
       "app-update-recheck",
       "outline-note",
-      "main-watchdog"
+      "main-watchdog",
+      "approval-stop"
     ],
     [
       "agent-busy",
