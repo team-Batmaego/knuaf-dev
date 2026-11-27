@@ -188,10 +188,13 @@ export function touchesProtected(root: string, t: string[], userData?: string): 
   const hits = protectedHits(root, t)
   if (!hits.length) return false
   const [exe, ...args] = t
-  const [script] = args
+  // 윈도 런처 `py -3 <스킬 스크립트>` 는 버전 선택 뒤가 스크립트 자리다 — 안 건너뛰면 앱 자신의 스킬 실행이
+  // 보호 경로(`.claude`) 접촉으로 읽혀 자동 실행이 막힌다. 이름은 경로 없는 `py` 뿐이다(`pyw`·`py3` 등은 종전).
+  const launcher = /^py(\.exe)?$/i.test(exe)
+  const [script] = launcher ? launcherArgs(args) : args
   const ownSkill = !!script && !script.startsWith('-') && !script.includes('..')
     && SKILL_PATH.test(script) && SKILL_SCRIPT.test(script)
-    && INTERPRETERS.test(exeName(exe))
+    && (INTERPRETERS.test(exeName(exe)) || launcher)
     && ((protectedRel(root, script) ?? '').startsWith(APP_SKILL_PREFIX) || isHostTarget(root, script, userData))
   return !(ownSkill && hits.length === 1 && hits[0] === script)
 }
@@ -387,6 +390,14 @@ const OUTSIDE_REACH = new Set([
  * 앱은 모른다 — 스킬이 실제로 돌리는 스크립트만 통과시킨다.
  */
 const INTERPRETERS = /^(python3?(\.\d+)?|sh|bash|zsh|node|perl|ruby)$/
+/**
+ * 윈도 파이썬 런처(`py`·`pyw`). 이름표에 없던 탓에 `py -3 -c "…"`·`py -3 임의.py` 가 "아는 프로그램이 아님"으로
+ * 읽혀 Bash 에서 묻지 않고 통과했다(`python3 -c` 는 카드). `exeName` 으로 접은 이름(`py.exe`·`py.cmd`·`PY`)에 쓴다.
+ * 런처의 버전 선택 `-3`·`-3.<숫자>` 는 스크립트 자리를 밀지 않게 건너뛴다(`launcherArgs`).
+ */
+const PY_LAUNCHER = /^pyw?$/
+/** `py -3 <스크립트> …` 에서 버전 선택을 뺀 인자. 첫 인자가 버전 선택이 아니면 그대로. */
+const launcherArgs = (args: string[]): string[] => (/^-3(\.\d+)?$/.test(args[0] ?? '') ? args.slice(1) : args)
 /** 스킬이 실제로 돌리는 스크립트들. */
 const SKILL_SCRIPT = /(^|[\\/])(gg|gg_[a-z_]+|build_docx|show_research|merge_sections|build_status|lint_[a-z_]+)\.py$/
 /**
@@ -561,7 +572,13 @@ function segmentReason(t: string[]): Reason | null {
   if (ASSIGNMENT.test(exe)) runs = { kind: args.length ? 'launch' : 'state', name: exe.split('=')[0] + '=' }
   else if (SHELL_STATE.has(base)) runs = { kind: 'state', name: base }
   else if (LAUNCHERS.has(base) && args.length && !args.every((a) => INFO_FLAG.test(a))) runs = { kind: 'launch', name: base }
-  else if (INTERPRETERS.test(base)) {
+  else if (PY_LAUNCHER.test(base)) {
+    // 파이썬 런처도 `python` 과 같은 선이다 — 버전 선택(`-3`) 뒤 첫 인자가 스킬 스크립트일 때만 통과한다.
+    const rest = launcherArgs(args)
+    const [script] = rest
+    const skill = !!script && !script.startsWith('-') && SKILL_PATH.test(script) && SKILL_SCRIPT.test(script)
+    if (rest.length && !skill && !rest.every((a) => INFO_FLAG.test(a))) runs = { kind: 'interp', name: base }
+  } else if (INTERPRETERS.test(base)) {
     // 인터프리터는 **첫 인자가 스킬 스크립트 파일**일 때만 통과한다. 그 앞에 옵션이 하나라도
     // 오면 묻는다 — 옵션은 묶을 수 있어(`-xc`·`-lc`·`-cc`) 하나씩 맞춰 보면 빠진다.
     // `bash -xc "echo; claude scripts/gg.py"` 는 인라인 코드 문자열이 `/gg.py` 로 끝나
@@ -847,12 +864,33 @@ function argsHitHost(root: string, args: string[], userData?: string): boolean {
 }
 
 /**
+ * 윈도 파이썬 런처 `py -3 <앱 스킬 스크립트> …` 를 `python <스크립트> …` 로 읽는다.
+ *
+ * 규칙집이 윈도 실행기를 `py -3` 으로 적는데(SKILL.md·update.md), 이름표(`INTERPRETERS`)에는 `python` 만
+ * 있어 이 호출이 "스킬 실행"으로 인식되지 않았고, 스크립트 경로 인자가 앱 자리 쓰기로 오판돼 거절됐다
+ * (윈도 Claude 시작하기 `gg.py init` 이 막힌 원인). 인식은 **아주 좁게** 한다:
+ * - 실행기는 경로 없는 `py`·`py.exe` 뿐(PATH 로 풀리는 런처. `./py`·`C:/x/py.exe` 같은 이름 흉내는 제외).
+ * - 첫 인자는 런처의 버전 선택 `-3`·`-3.<숫자>` 하나뿐. 그 밖 옵션(`-c`·`-m`·`-V:…`)은 그대로 둔다.
+ * - 그다음 낱말이 **앱 스킬 자리 안** 파일일 때만. 그 밖의 스크립트·인라인 코드는 종전 판정 그대로다.
+ * 읽어 낸 뒤의 모든 판정(자동 실행 범위·내용 대조·추가 인자 검사)은 `python` 과 똑같이 따른다.
+ */
+function pyLauncherAsPython(root: string, t: string[], userData?: string): string[] {
+  const [exe, version, script, ...args] = t
+  if (!userData || !exe || !version || !script) return t
+  // 윈도 런처다 — 맥·리눅스 뿌리에는 `py` 가 없으므로 인정할 이유가 없다(뿌리 모양은 `pathOpsFor` 가 정한다).
+  if (pathOpsFor(root) !== win32) return t
+  if (!/^py(\.exe)?$/i.test(exe) || !/^-3(\.\d+)?$/.test(version)) return t
+  if (script.startsWith('-') || !isHostTarget(root, script, userData)) return t
+  return ['python', script, ...args]
+}
+
+/**
  * 앱 자리 코드를 여는 호출인가. 직접 실행(t[0])과 인터프리터의 첫 인자를 모두 본다.
  * 이 인식은 승인 카드·쓰기 예외용이며, 자동 실행에 필요한 절대경로·파일명·깊이는 별도로 본다.
  * 추가 인자로 앱 자리 경로를 주면 자기 사본 쓰기일 수 있으므로 여기서 예외로 인정하지 않는다.
  */
 function hostScriptInvocation(root: string, t: string[], userData?: string): boolean {
-  const [exe, script, ...args] = t
+  const [exe, script, ...args] = pyLauncherAsPython(root, t, userData)
   if (!exe) return false
   if (isHostTarget(root, exe, userData)) return !argsHitHost(root, t.slice(1), userData)
   if (!INTERPRETERS.test(exeName(exe)) || !script || script.startsWith('-')) return false
@@ -862,7 +900,7 @@ function hostScriptInvocation(root: string, t: string[], userData?: string): boo
 /** 자동 실행 예외는 scripts/ 바로 아래만. 동봉 스킬의 실행 진입점은 모두 이 자리에 있다. */
 function hostSkillCall(root: string, t: string[], userData?: string): boolean {
   if (!userData || !hostScriptInvocation(root, t, userData)) return false
-  const [exe, script, ...args] = t
+  const [exe, script, ...args] = pyLauncherAsPython(root, t, userData)
   if (!script || !/^python3?(\.\d+)?$/.test(exeName(exe)) || isHostTarget(root, exe, userData)) return false
   const ops = pathOpsFor(userData)
   // 원문이 앱 자리 절대경로인 인터프리터 호출만 자동 실행한다. 상대경로·링크 별칭은 카드다.
@@ -1262,7 +1300,7 @@ function describePowerShell(root: string, cmd: string): { title: string; detail:
   if (AI_CLI.has(base)) return { title: '다른 AI 프로그램을 부르는 명령이에요', detail: `${shown}\n\n"${base}" 는 이 대화 밖에서 따로 도는 AI예요. 화면에 보이지 않고 멈출 수도 없어요. 의도한 일이 아니면 거절해 주세요.` }
   if (OUTSIDE_REACH.has(base)) return { title: '논문 폴더 밖으로 나가는 명령이에요', detail: `${shown}\n\n"${base}" 는 네트워크·다른 앱·설치처럼 폴더 밖에 닿아요. 의도한 일이 아니면 거절해 주세요.` }
   if (LAUNCHERS.has(base)) return { title: '다른 프로그램을 대신 실행하는 명령이에요', detail: `${shown}\n\n"${base}" 뒤에 오는 것이 실제로 실행돼요. 무엇이 실행될지 앱이 미리 확인하지 못해요. 무슨 일인지 모르겠으면 거절해 주세요.` }
-  if (INTERPRETERS.test(base)) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${shown}\n\n"${(words[1] ?? '').replace(/\\/g, '/')}" 안에 무엇이 있는지 앱이 미리 알 수 없어요. 스킬이 쓰는 스크립트가 아니면 자동으로 통과시키지 않아요. 무슨 일인지 모르겠으면 거절해 주세요.` }
+  if (INTERPRETERS.test(base) || PY_LAUNCHER.test(base)) return { title: '앱이 읽을 수 없는 프로그램을 실행해요', detail: `${shown}\n\n"${(PY_LAUNCHER.test(base) ? launcherArgs(words.slice(1))[0] ?? '' : words[1] ?? '').replace(/\\/g, '/')}" 안에 무엇이 있는지 앱이 미리 알 수 없어요. 스킬이 쓰는 스크립트가 아니면 자동으로 통과시키지 않아요. 무슨 일인지 모르겠으면 거절해 주세요.` }
   if (!parsed?.safe || !words.length) return { title: '앱이 읽을 수 없는 명령이에요', detail: `${shown}\n\n변수·파이프·리다이렉트처럼 앱이 미리 따라갈 수 없는 기호가 섞여 있어요. 무슨 일인지 모르겠으면 거절해 주세요.` }
   return { title: '컴퓨터에서 명령을 실행하려고 해요', detail: `${shown}\n\n앱이 폴더 안 일이라고 확인하지 못한 명령이에요. 무슨 일인지 모르겠으면 거절해 주세요.` }
 }

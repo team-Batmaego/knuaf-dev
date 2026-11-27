@@ -1147,3 +1147,180 @@ test('SDK 격리 옵션: 설정 출처 0개 + 엄격 MCP + 앱 자리 플러그�
   // 지킴이 열쇠가 없으면 플러그인도 없다 — 격리만 건다.
   expect(claudeIsolationOptions(undefined)).toEqual({ settingSources: [], strictMcpConfig: true, plugins: [] })
 })
+
+/**
+ * 윈도 파이썬 런처 `py -3` (v0.7.5 S2 실기 — 윈도 Claude '시작하기'가 막힘).
+ *
+ * 규칙집(SKILL.md:27·update.md:9)이 윈도 실행기를 `py -3` 으로 적는데, 앱 판정은 이름이 `python` 인 실행기만
+ * 스킬 스크립트 실행으로 알아봐서 `py -3 "<앱 스킬>/scripts/gg.py" init …` 이 앱 자리 쓰기로 오판돼 거절됐다.
+ * 고침은 좁다: **윈도 뿌리**에서 경로 없는 `py`·`py.exe` + `-3`·`-3.<숫자>` + **앱 스킬 자리 안 스크립트**일 때만
+ * `python` 과 같게 읽는다. 같은 판정으로 `py`·`pyw` 를 Bash 의 "아는 프로그램" 목록에서 빼(인터프리터로 취급) `py -3 -c "…"`·
+ * `py -3 임의.py` 가 python3 와 같은 카드로 가게 했다(기존 구멍 N1).
+ *
+ * 윈도 판정은 맥에서 윈도 모양 문자열 뿌리로 잠근다(위 `ABCDEF~1` 시험과 같은 방식). 현장 꼴(한글 사용자명·`C:/` 뿌리·
+ * PowerShell 역슬래시 따옴표 경로)을 그대로 쓴다. 실제 윈도 실행은 새 설치본 S2 재실기가 닫는다.
+ */
+const WIN_ROOT = 'C:/omo-work/rc-win/gate1-student'
+const WIN_USER_DATA = 'C:/Users/이뚠냥/AppData/Roaming/knuaf-dev'
+const winScript = (userData: string, name: string): string => `${userData.replace(/\\/g, '/')}/skill-host/.claude/skills/knuaf-dev/scripts/${name}`
+const PY_LAUNCHERS = ['py -3', 'py -3.11', 'py -3.9', 'py.exe -3', 'PY -3', 'Py.EXE -3.12']
+const TOOLS = ['Bash', 'PowerShell', 'pwsh']
+
+test('현장 꼴 그대로: 윈도 뿌리·한글 사용자명·PowerShell 역슬래시 따옴표의 py -3 스킬 호출은 거절하지 않고 자동 실행한다', () => {
+  // userData 를 역슬래시로 주는 변형은 맥에서 흉내 낼 수 없다(`skillHostDir` 가 맥의 posix join 이라 `C:\\…` 를 윈도처럼
+  // 잇지 못한다 — python 도 같다). 그 꼴은 윈도 실기·CI 가 닫는다. 명령 안의 역슬래시 경로는 아래에서 그대로 쓴다.
+  for (const userData of [WIN_USER_DATA]) {
+    const gg = winScript(userData, 'gg.py')
+    const upd = winScript(userData, 'gg_update.py')
+    const back = (p: string): string => p.replace(/\//g, '\\')
+    const field: Record<string, string[]> = {
+      // 노트북 실기의 4건(gate1-s2-denials.txt)과 같은 모양.
+      PowerShell: [`py -3 "${back(upd)}" auto`, `py -3 "${back(gg)}" init "${back(WIN_ROOT)}"`],
+      pwsh: [`py -3 "${back(upd)}" auto`, `py -3 "${back(gg)}" init "${back(WIN_ROOT)}"`],
+      Bash: [`py -3 "${gg}" init "${WIN_ROOT}"`, `py -3 "${upd}" auto`]
+    }
+    for (const tool of TOOLS) {
+      for (const command of field[tool]) {
+        const call = { command }
+        const label = `${tool}/${userData}/${command}`
+        expect(hostWriteDecision(WIN_ROOT, tool, call, userData), label).toBeNull()
+        expect(autoAllow(WIN_ROOT, tool, call, [], userData), label).toBe(true)
+        // python.exe 로 같은 호출을 한 것과 같은 결론이다.
+        const reference = { command: command.replace(/^py\b/, 'python.exe').replace(' -3', '') }
+        expect(hostWriteDecision(WIN_ROOT, tool, reference, userData), `ref/${label}`).toBeNull()
+        expect(autoAllow(WIN_ROOT, tool, reference, [], userData), `ref/${label}`).toBe(true)
+      }
+    }
+  }
+})
+
+test('py -3 계열 꼴은 python 과 똑같이 판정한다 — 거절하지 않고 scripts/ 직속만 자동 실행한다', () => {
+  for (const tool of TOOLS) {
+    for (const launcher of PY_LAUNCHERS) {
+      for (const [name, rest] of [['gg.py', `init "${WIN_ROOT}"`], ['gg_update.py', 'auto'], ['gg.py', 'status']]) {
+        const call = { command: `${launcher} "${winScript(WIN_USER_DATA, name)}" ${rest}` }
+        const label = `${tool}/${call.command}`
+        expect(hostWriteDecision(WIN_ROOT, tool, call, WIN_USER_DATA), label).toBeNull()
+        expect(autoAllow(WIN_ROOT, tool, call, [], WIN_USER_DATA), label).toBe(true)
+      }
+    }
+    // scripts/ 밖 앱 자리 파일은 python 과 같이 거절은 아니되 자동 실행도 아니다(위치 카드로 간다).
+    const outside = { command: `py -3 "${winScript(WIN_USER_DATA, 'sub/gg_extra.py')}"` }
+    const reference = { command: `python.exe "${winScript(WIN_USER_DATA, 'sub/gg_extra.py')}"` }
+    for (const call of [outside, reference]) {
+      expect(hostWriteDecision(WIN_ROOT, tool, call, WIN_USER_DATA), `${tool}/${call.command}`).toBeNull()
+      expect(autoAllow(WIN_ROOT, tool, call, [], WIN_USER_DATA), `${tool}/${call.command}`).toBe(false)
+    }
+  }
+})
+
+test('N2: 윈도 뿌리가 아니면 py -3 를 python 으로 읽지 않는다(맥·리눅스 뿌리는 종전 판정)', () => {
+  const { root, userData } = installedBox()
+  const gg = scriptIn(userData, 'gg.py')
+  for (const tool of TOOLS) {
+    const call = { command: `py -3 "${gg}" init "${root.replace(/\\/g, '/')}"` }
+    expect(hostWriteDecision(root, tool, call, userData), tool).toMatchObject({ behavior: 'deny' })
+    expect(autoAllow(root, tool, call, [], userData, source), tool).toBe(false)
+  }
+})
+
+const scriptIn = (userData: string, name: string): string => join(skillHostDir(userData), 'scripts', name).replace(/\\/g, '/')
+
+test('음성 대조: py 의 다른 인자·다른 이름·다른 꼴은 지금처럼 앱 자리 쓰기로 거절한다 (윈도 뿌리)', () => {
+  const gg = winScript(WIN_USER_DATA, 'gg.py')
+  const created = winScript(WIN_USER_DATA, 'gg_new.py')
+  const q = (s: string): string => `"${s}"`
+  const denied = [
+    // 인라인 코드·모듈 실행: `-3` 뒤가 `-c`/`-m` 이라 스크립트 자리가 옵션이다.
+    `py -3 -c "pass" ${q(gg)}`,
+    `py -3 -m http.server ${q(gg)}`,
+    `py -3 -c "open('x','w')" ${q(created)}`,
+    // 런처 옵션이 `-3` 꼴이 아니다 — 인식하지 않는다.
+    `py -V:3.11 ${q(gg)} init x`,
+    `py -2 ${q(gg)}`,
+    `py -3x ${q(gg)}`,
+    `py -3.11x ${q(gg)}`,
+    `py ${q(gg)} init x`,
+    `py -3 -3 ${q(gg)}`,
+    // 실행기 이름이 py 와 같지 않다 — 앞뒤 어느 쪽이든 이름 흉내는 런처가 아니다(N4).
+    `pyw -3 ${q(gg)} init x`,
+    `pypy -3 ${q(gg)} init x`,
+    `py3 -3 ${q(gg)} init x`,
+    `py.cmd -3 ${q(gg)} init x`,
+    `py.bat -3 ${q(gg)} init x`,
+    `py.exe.exe -3 ${q(gg)} init x`,
+    `xpy -3 ${q(gg)} init x`,
+    // 실행기가 경로 있는 이름이다.
+    `./py -3 ${q(gg)} init x`,
+    `C:/tmp/py.exe -3 ${q(gg)} init x`,
+    `${q(`${WIN_ROOT}/py`)} -3 ${q(gg)} init x`,
+    // 스크립트가 맞아도 추가 인자가 앱 자리를 쓴다(자기 사본 쓰기).
+    `py -3 ${q(gg)} --out=${q(created)}`,
+    `py -3 ${q(gg)} init ${q(created)}`,
+    // 앱 자리 파일을 다른 명령이 쓴다.
+    `touch ${q(created)}`
+  ]
+  const bashOnly = [`py -3 ${q(gg)} init x && touch ${q(created)}`]
+  for (const tool of TOOLS) {
+    for (const command of tool === 'Bash' ? [...denied, ...bashOnly] : denied) {
+      const call = { command }
+      expect(hostWriteDecision(WIN_ROOT, tool, call, WIN_USER_DATA), `${tool}/${command}`).toMatchObject({ behavior: 'deny' })
+      expect(autoAllow(WIN_ROOT, tool, call, [], WIN_USER_DATA), `${tool}/${command}`).toBe(false)
+    }
+  }
+})
+
+test('N1: py·pyw 의 인라인 코드·임의 스크립트는 Bash·PowerShell 모두 python3 와 같이 자동 실행하지 않는다', async () => {
+  const { root, userData } = installedBox()
+  const pairs: [string, string][] = [
+    ['py -3 -c "pass"', 'python3 -c "pass"'],
+    ['py -c "pass"', 'python3 -c "pass"'],
+    ['py -3.11 -c "pass"', 'python3 -c "pass"'],
+    ['py.exe -3 -m http.server', 'python3 -m http.server'],
+    ['py -3 analysis.py', 'python3 analysis.py'],
+    ['py -3.11 analysis.py --x', 'python3 analysis.py --x'],
+    ['py analysis.py', 'python3 analysis.py'],
+    ['pyw -3 analysis.py', 'python3 analysis.py'],
+    ['pyw -c "pass"', 'python3 -c "pass"'],
+    ['PY -3 -c "pass"', 'python3 -c "pass"']
+  ]
+  for (const [command, reference] of pairs) {
+    for (const tool of TOOLS) {
+      // 맥 뿌리·윈도 뿌리 둘 다 — 이 판정은 뿌리 모양과 무관해야 한다.
+      for (const [r, u, src] of [[root, userData, source], [WIN_ROOT, WIN_USER_DATA, undefined]] as const) {
+        expect(autoAllow(r, tool, { command }, [], u, src), `${tool}/${command}`).toBe(false)
+        expect(autoAllow(r, tool, { command: reference }, [], u, src), `ref/${tool}/${reference}`).toBe(false)
+      }
+    }
+  }
+  // 실제 흐름: Bash 에서 카드가 뜬다 — python3 -c 와 같은 제목.
+  const asked = await rig({ root, userData }, { trusted: false })
+  const titles: string[] = []
+  for (const command of ['py -3 -c "pass"', 'pyw -3 analysis.py', 'python3 -c "pass"']) {
+    const before = asked.cards.length
+    const pending = asked.ask('Bash', { command })
+    await settle(() => asked.cards.length > before)
+    expect(asked.cards, command).toHaveLength(before + 1)
+    titles.push(asked.cards[before].title)
+    asked.answer(false)
+    expect(plain(await pending), command).toEqual({ behavior: 'deny', message: '사용자가 허용하지 않았습니다.' })
+  }
+  expect(new Set(titles).size, titles.join(' | ')).toBe(1)
+  // 정보 조회(버전·도움말)는 python3 와 같이 그대로 통과한다.
+  for (const command of ['py --version', 'py -3 -V', 'py -h']) {
+    expect(autoAllow(root, 'Bash', { command }, [], userData, source), command).toBe(true)
+  }
+})
+
+test('N1 회귀 대조: 정상 스킬 호출(py -3 <앱 스킬>/scripts/gg.py)은 Bash 에서 계속 자동 통과한다', () => {
+  const gg = winScript(WIN_USER_DATA, 'gg.py')
+  for (const launcher of PY_LAUNCHERS) {
+    const call = { command: `${launcher} "${gg}" init "${WIN_ROOT}"` }
+    expect(autoAllow(WIN_ROOT, 'Bash', call, [], WIN_USER_DATA), call.command).toBe(true)
+    expect(hostWriteDecision(WIN_ROOT, 'Bash', call, WIN_USER_DATA), call.command).toBeNull()
+  }
+  // 폴더 안 규칙집 사본의 스킬 스크립트도 python 과 같다.
+  const local = `${WIN_ROOT}/.claude/skills/knuaf-dev/scripts/gg.py`
+  expect(autoAllow(WIN_ROOT, 'Bash', { command: `py -3 "${local}" status` }, [], WIN_USER_DATA)).toBe(
+    autoAllow(WIN_ROOT, 'Bash', { command: `python.exe "${local}" status` }, [], WIN_USER_DATA))
+})
