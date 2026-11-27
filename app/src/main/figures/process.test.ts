@@ -40,6 +40,7 @@ const fetchMod = (await import(new URL('./fetch.ts', import.meta.url).href)) as 
 const verdict = (await import(new URL('./verdict.ts', import.meta.url).href)) as typeof import('./verdict')
 // 확장자 없는 내부 import에 등록한 해석 훅을 적용하려고 훅 등록 뒤 모듈을 읽는다.
 const rulesMod = (await import(new URL('./rules.ts', import.meta.url).href)) as typeof rulesTypes
+const { animatedPng } = await import('./fixtures/png-samples')
 const vectors = JSON.parse((await readFile(new URL('./fixtures/pagequery-vectors.json', import.meta.url), 'utf8'))
   .replace(/\{\{(.)\*(\d+)\}\}/g, (_match, char: string, count: string) => char.repeat(Number(count)))) as {
   rules: unknown
@@ -66,6 +67,7 @@ function jpeg(): Buffer {
   bytes[24] = 8
   bytes.writeUInt16BE(8, 25)
   bytes.writeUInt16BE(8, 27)
+  bytes.set([3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1], 29)
   return bytes
 }
 
@@ -135,11 +137,11 @@ const okPage = (html: string, url = PAGE_URL): Record<string, fetchTypes.FetchRe
   [url]: { ok: true, finalUrl: new URL(url), status: 200, body: Buffer.from(html, 'utf8'), contentType: 'text/html' }
 })
 
-const okImage = (url = IMAGE_URL, contentType = 'image/jpeg'): fetchTypes.FetchResult => ({
+const okImage = (url = IMAGE_URL, contentType = 'image/jpeg', body = JPEG): fetchTypes.FetchResult => ({
   ok: true,
   finalUrl: new URL(url),
   status: 200,
-  body: JPEG,
+  body,
   contentType
 })
 
@@ -417,6 +419,17 @@ describe('processRequest — 거절·애매', () => {
     })
     const res = await processMod.processRequest({ request: h.request, folder: h.folder }, h.deps({ fetchFn: fetch.fn }))
     assert.equal(res.images[0]?.reason, 'format')
+  })
+
+  it('I-02 자료 그림의 다중 프레임 APNG는 GIF처럼 frames로 거절한다', async () => {
+    const h = await harness()
+    const fetch = fakeFetch({
+      ...okPage(pageHtml([IMAGE_URL])),
+      [IMAGE_URL]: okImage(IMAGE_URL, 'image/png', animatedPng)
+    })
+    const res = await processMod.processRequest({ request: h.request, folder: h.folder }, h.deps({ fetchFn: fetch.fn }))
+    assert.deepEqual(res.images.map(({ verdict, reason }) => ({ verdict, reason })), [{ verdict: 'rejected', reason: 'frames' }])
+    assert.deepEqual(await readdir(h.paths.store), [])
   })
 
   it('디코더가 실패하면 decode_*로 거절하고 PNG를 저장하지 않는다', async () => {

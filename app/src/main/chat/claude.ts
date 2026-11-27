@@ -7,9 +7,10 @@ import type { Dirent } from 'node:fs'
 // 한도 실패는 `MainTurnUsageError` 로 구분한다(설계 §1-2·1-3). 둘 다 같은 파일에 산다.
 import { join, posix, resolve, sep, win32 } from 'node:path'
 import {
-  query, type ModelInfo, type Query, type PermissionResult, type SettingSource, type SdkPluginConfig, type SyncHookJSONOutput
+  query, type ModelInfo, type Query, type PermissionResult, type SettingSource, type SdkPluginConfig, type SDKUserMessage, type SyncHookJSONOutput
 } from '@anthropic-ai/claude-agent-sdk'
 import { MainTurnUsageError, type AgentConnection, type AgentEvents, type AgentOptions } from './contracts'
+import { IMAGE_TURN_GUIDE, type AgentImage } from './images'
 import { SKILL_NAME, sameTreeContent, workFolderInstructions } from '../agent'
 import { winSpawn, killTree } from '../win'
 import { claudeSpawnOptions } from './claude-spawn'
@@ -1871,7 +1872,7 @@ export class ClaudeConnection implements AgentConnection {
     await this.cancelLogin()
     await this.login()
   }
-  async run(text: string, sessionId: string | undefined, events: AgentEvents) {
+  async run(text: string, sessionId: string | undefined, events: AgentEvents, _replayHistory?: boolean, images: readonly AgentImage[] = []) {
     if (!(await this.status()).connected) throw new Error('Claude 구독 계정 로그인을 완료해 주세요.')
     // 이 턴에 쓸 값을 **여기서 한 번만** 읽는다. 아래의 옵션 조립·초기화 대조·기본값 저장이
     // 모두 이 계획을 쓴다 — 전송 중에 칩이 바뀌어도 이미 정한 값으로 나간다(중요 1·5).
@@ -1894,17 +1895,25 @@ export class ClaudeConnection implements AgentConnection {
     // 첫 프롬프트에 논문 작업 폴더 경계와 스킬 생성 폴더 허용을 명시한다. 이어지는 턴은 학생
     // 글을 그대로 보내되, 슬래시로 시작하면 CLI 가 명령으로 읽지 않게 맨 앞에 한 칸을 붙인다
     // (U5c — `studentTurnText`). 첫 턴의 스킬 이름은 플러그인 이름표가 붙은 고정값이다(§4.1).
-    const q = this.active = query({ prompt: sessionId ? studentTurnText(text) : `${SKILL_PROMPT} ${text}\n\n${workFolderInstructions(this.options.root)}`, options: {
+    const prompt = sessionId ? studentTurnText(text) : `${SKILL_PROMPT} ${text}\n\n${workFolderInstructions(this.options.root)}`
+    // Text-only turns retain their existing SDK path. Only image turns use the single-message stream.
+    const imagePrompt = async function* (): AsyncIterable<SDKUserMessage> {
+      yield {
+        type: 'user', parent_tool_use_id: null, session_id: sessionId ?? '',
+        message: { role: 'user', content: [
+          { type: 'text', text: `${prompt}\n\n${IMAGE_TURN_GUIDE}` },
+          ...images.map(({ mime, bytes }) => ({
+            type: 'image' as const, source: { type: 'base64' as const, media_type: mime, data: bytes.toString('base64') }
+          }))
+        ] }
+      }
+    }
+    const q = this.active = query({ prompt: images.length ? imagePrompt() : prompt, options: {
       // 옵션은 한 곳에서만 조립한다 — 목록 조회(`probe()`)도 같은 함수를 쓴다. 격리(§4.1)·
       // kordoc MCP(§3.3)·모델 핀·시스템 지침·하위 담당 금지(§3.2 [r11])가 전부 그 안에 있다.
       ...this.queryOptions(sessionId, plan),
-      // 백그라운드 서브에이전트를 막는 것은 취향이 아니다. SDK 는 문자열 prompt 를 단일
-      // 턴으로 보고 첫 result 에서 CLI 의 stdin 을 닫는다(sdk.mjs: isSingleUserTurn).
-      // 그 뒤에 오는 쓰기 계열 호출은 승인 요청이 전송되기도 전에
-      // "AbortError: Stream closed" 로 죽고, canUseTool 은 호출조차 되지 않는다 —
-      // 앱은 승인 창을 띄울 기회조차 없고 도우미는 그것을 "쓰기 권한 차단"으로 읽는다
-      // (시험주행 발견 11, 재현으로 확인). 제대로 된 해법은 세션 동안 stdin 을 열어 두는
-      // 스트리밍 입력이며 연결 수명 구조를 바꿔야 한다. 그때까지는 말로 막는다.
+      // 백그라운드 담당은 계속 금지한다. 구 SDK에서 문자열 입력의 stdin이 첫 result 뒤
+      // 닫혀 승인 요청이 유실된 적이 있다. 현재 그림 스트림은 같은 승인·중단 경로를 쓴다.
       canUseTool: async (name, input, options): Promise<PermissionResult> => {
         if (name === 'AskUserQuestion') return { behavior: 'deny', message: 'knuaf-dev 인터뷰 지침에 따라 질문을 채팅 텍스트로 제시하세요.' }
         // kordoc MCP 는 앱의 허용 목록이 먼저다(§3.4) — 폴더 밖·쓰기·모르는 도구는 trust 여부와

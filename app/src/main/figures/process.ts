@@ -435,8 +435,8 @@ async function processImage(job: ImageJob, kogl: KoglReading): Promise<ImageResu
     return judged({ verdict: 'rejected', reason: 'format', finalUrl, kogl: null, org: null }, bytes)
   }
   const sniffed = sniffImage(fetched.body)
-  if (!sniffed.ok) {
-    return judged({ verdict: 'rejected', reason: sniffed.reason, finalUrl, kogl: null, org: null }, bytes)
+  if (!sniffed.ok || sniffed.frames > 1) {
+    return judged({ verdict: 'rejected', reason: sniffed.ok ? 'frames' : sniffed.reason, finalUrl, kogl: null, org: null }, bytes)
   }
 
   // 설계 §5-1: 페이지에 실재해야 하는 것은 **최종 URL**이다. 리다이렉트 전 URL은 인정하지 않는다(B-3).

@@ -25,6 +25,8 @@ import { APP_ROOT, basePython, bundledPython, venvPython, wheelhouseDir } from '
 import { cancelRuntimeInstall, cleanupRuntime, installRuntime, runtimeStatus } from './runtime'
 import { AgentToolLockError, agentApi, findExecutable, skillSource, type AgentCtx, type AgentKind } from './agent'
 import { ChatService, type HandoffSeam } from './chat/service'
+import { ChatImageError, ChatImages } from './chat/images'
+import { reencodeToPng } from './figures/reencode-window'
 import { ClaudeRelayConnection } from './chat/claude'
 import { CodexRelayConnection } from './chat/codex'
 import { subscriptionEnv, type AgentOptions } from './chat/contracts'
@@ -166,6 +168,11 @@ export function registerIpc(
   let openSeq = 0
   /** Published visit survives failed open attempts; openSeq still rejects stale successes. */
   let currentVisit = 0
+  const imageScope = () => currentRoot === null ? null : { root: currentRoot, visit: currentVisit }
+  const chatImages = new ChatImages(imageScope, async ({ bytes }) => {
+    const decoded = await reencodeToPng(bytes, { maxEdge: 160 })
+    return decoded.ok ? `data:image/png;base64,${Buffer.from(decoded.png).toString('base64')}` : null
+  })
   /** renderer clientId → in-flight sidecar request, for `rpc:cancel` and the agent-busy gate. */
   const inflight = new Map<string, { id: string; method: string }>()
   const dependencyFlights = new Map<string, { clientId: string; cancelled: boolean; promise: Promise<RpcResult<Envelope>> }>()
@@ -324,6 +331,7 @@ export function registerIpc(
       // 남아야 메인의 파일 검사 기준과 화면의 현재 폴더가 어긋나지 않는다. 늦게 성공한 옛
       // 요청(그사이 다른 열기가 시작됨)도 기준을 되돌리지 않는다.
       if (seq === openSeq) { currentRoot = root; currentVisit = seq; dependencyGate = { root, visit: seq, phase: 'checking' } }
+      if (seq === openSeq) chatImages.clear()
       // progress (v0.6.4 2단계): 성공한 전환만 감시 대상을 바꾼다(이전 감시는 닫힌다).
       if (seq === openSeq) progress.follow(root)
       rememberRecent(root)
@@ -778,6 +786,7 @@ export function registerIpc(
   const chat = new ChatService({
     skillSource: () => skillSource(APP_ROOT, app.isPackaged, process.resourcesPath),
     userData: app.getPath('userData'),
+    chatImages,
     /**
      * figures (v0.7 그림 갈래): 통로의 고리 넷을 그대로 넘긴다. 통로를 못 열었으면 `undefined` —
      * 그러면 `ChatService` 는 지금까지와 같은 객체를 쓰고 env 도 손대지 않는다(바이트까지 동일).
@@ -955,15 +964,29 @@ export function registerIpc(
   // 켜 둔 채 쓰는 학생에게 새 판을 알린다(A1-3) — 켤 때 확인은 아래 한 번, 이후는 30분마다 조용히.
   appUpdates.startRecheck()
   void appUpdates.check()
-  const chatFail = (e: unknown): { error: { code: string; message: string } } => ({ error: { code: e instanceof FreeRelayError ? e.kind : e instanceof UpdateSuspendedError ? e.code : 'chat', message: e instanceof Error ? e.message : String(e) } })
+  const chatFail = (e: unknown): { error: { code: string; message: string } } => ({ error: {
+    code: e instanceof FreeRelayError ? e.kind : e instanceof ChatImageError || e instanceof UpdateSuspendedError ? e.code : 'chat',
+    message: e instanceof Error ? e.message : String(e)
+  } })
   ipcMain.handle('chat:snapshot', (_e, root: string, provider: Provider) => { try { activeMainCompany = providerOf(provider); return { result: chat.snapshot(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:draft', (_e, root: string) => { try { return { result: chat.draft(root) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:set-draft', (_e, root: string, text: string, expected?: string) => { try { return { result: chat.setDraft(root, text, expected) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:status', async (_e, root: string, provider: Provider) => { try { return { result: await chat.status(root, provider) } } catch (e) { return chatFail(e) } })
   ipcMain.handle('chat:login', async (_e, root: string, provider: Provider) => { try { await chat.login(root, provider); return { result: true } } catch (e) { return chatFail(e) } })
-  ipcMain.handle('chat:send', async (_e, root: string, provider: Provider, text: string, requestId: string) => {
+  ipcMain.handle('chat:image-scope', imageScope)
+  ipcMain.handle('chat:image-drop', (_e, scope: unknown, path: unknown) => chatImages.fromDrop(scope, path))
+  ipcMain.handle('chat:image-paste', (_e, scope: unknown, bytes: unknown) => chatImages.fromPaste(scope, bytes))
+  ipcMain.handle('chat:image-pick', (_e, scope: unknown) => chatImages.fromPicker(scope, async () => {
+    const w = win()
+    if (!w) return null
+    const picked = await dialog.showOpenDialog(w, { properties: ['openFile'], title: '파일 첨부', defaultPath: currentRoot ?? undefined })
+    return picked.canceled ? null : picked.filePaths[0] ?? null
+  }))
+  ipcMain.handle('chat:image-remove', (_e, id: unknown) => chatImages.drop(id))
+  ipcMain.handle('chat:send', async (_e, root: string, provider: Provider, text: string, requestId: string, imageIds?: unknown) => {
     try {
-      const result = await chat.send(root, provider, text, requestId)
+      const batch = imageIds === undefined ? undefined : chatImages.resolve(root, imageIds)
+      const result = await chat.send(root, provider, text, requestId, batch)
       hideAppDirs(root)   // 첫 전송이 규칙집(.agents·.claude)과 대화 기록(.knuaf-gui)을 만든다
       return { result }
     } catch (e) { return chatFail(e) }

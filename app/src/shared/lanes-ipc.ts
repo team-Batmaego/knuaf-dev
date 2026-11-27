@@ -316,7 +316,7 @@ export type LaneEvent =
    * §4-1·§4-2 이어 받은 대화 첫 줄 — "…한도로 멈춰 {회사}가 이어 받았어요" [멈춘 대화 보기].
    * 기록으로 저장돼 재시작 뒤에도 남는다.
    */
-  | (EventBase & { kind: 'handoff-done'; from: ModelRef; to: ModelRef; archiveId: string })
+  | (EventBase & { kind: 'handoff-done'; from: ModelRef; to: ModelRef; archiveId: string; imageCount?: number })
 
 // ---------------------------------------------------------------- §3 카드
 

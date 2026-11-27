@@ -4,6 +4,7 @@ import type { LaneEntry } from '../../shared/lanes'
 import type { GuardKey } from '../guard/store'
 import type { KordocMcpSpec } from './kordocMcp'
 import { deleteFreeRelayEnvKeys } from '../free/provider'
+import type { AgentImage } from './images'
 
 export interface AgentEvents {
   message: (id: string, text: string) => void
@@ -24,7 +25,7 @@ export interface AgentConnection {
   /** 진행 중인 로그인 창을 다시 연다(학생이 브라우저를 닫았을 때). */
   reopenLogin?(): Promise<void>
   /** `replayHistory`: resume 시 과거 턴 재생은 스냅샷에 assistant 기록이 하나도 없을 때만. */
-  run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory?: boolean): Promise<void>
+  run(text: string, sessionId: string | undefined, events: AgentEvents, replayHistory?: boolean, images?: readonly AgentImage[]): Promise<void>
   /**
    * 이 계정이 쓸 수 있는 모델 목록. 그 통로가 아직 없는 공급자는 구현하지 않는다 —
    * ChatService 가 `supported:false` 로 답하고 화면은 추천을 띄우지 않는다.
