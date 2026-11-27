@@ -25,11 +25,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 태그 커밋이 main CI 에서 '같은 시험'을 이미 초록으로 통과했는지 본다. 기록이 온전하면 아래
+  # `verify`(맥 pytest·typecheck·build·맥 e2e)와 `e2e-windows`(윈도 e2e 5샤드)를 건너뛰고
+  # 빌드·서명·체크섬·판 확인·초안만 돈다 — v0.7.2 태그 한 번이 2시간 35분이었고 그중 2시간 16분이
+  # main 에서 이미 돈 시험의 중복이었다.
+  #
+  # 판정은 fail-closed 다: 기록이 없거나, 다른 커밋이거나, 실패·취소·건너뜀 작업이 하나라도
+  # 있거나(문서만 바뀐 실행의 e2e 는 skipped 다), 조회가 실패하면 예전처럼 전부 돈다.
+  # 재실행(attempt 2 이상)으로 초록이 된 실행도 근거로 인정한다 — 끄려면 저장소 변수
+  # `RELEASE_CI_EVIDENCE_ACCEPT_RERUNS=false`(기본값: 인정).
+  evidence:
+    runs-on: ubuntu-latest
+    # 조회가 매달리면 릴리스 전체가 늦어진다 — 이 작업은 몇 초짜리다.
+    timeout-minutes: 5
+    # 이 작업이 죽어도(네트워크·설치 실패) 릴리스가 막히지 않는다 — 판정 스크립트는 조회 실패를
+    # 스스로 닫고 `skip=false` 로 끝나고(단계 continue-on-error), 이 작업 자체가 실패해도 아래
+    # `verify` 는 `!cancelled()` 조건이라 그대로 시험을 돈다.
+    permissions:
+      # checkout 이 저장소를 읽고(contents), 판정은 실행·작업 목록만 읽는다(actions).
+      contents: read
+      actions: read
+    outputs:
+      skip: ${{ steps.judge.outputs.skip }}
+      # 판정 단계 자체가 성공했는지. `skip` 만 믿지 않는 이유: 판정 스크립트는 요약 쓰기 → 출력
+      # 쓰기 순서로 남기므로 요약이 실패하면 `skip=true` 가 남지 않지만, 그 반대(출력만 남고
+      # 단계 실패)를 워크플로가 논리로도 막는다 — 아래 조건들은 이 값이 'true' 일 때만 건너뛴다.
+      valid: ${{ steps.judge.outcome == 'success' }}
+      run_number: ${{ steps.judge.outputs.run_number }}
+      run_attempt: ${{ steps.judge.outputs.run_attempt }}
+      run_url: ${{ steps.judge.outputs.run_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 이 단계는 릴리스 자체를 막지 않는다. 실패하면 출력이 비어 `skip != 'true'` 가 되어
+      # 아래 시험 작업이 그대로 돈다(옛 태그처럼 판정 스크립트가 없는 커밋도 같은 길로 간다).
+      - name: 태그 커밋의 main CI 기록 판정
+        id: judge
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_CI_EVIDENCE_ACCEPT_RERUNS: ${{ vars.RELEASE_CI_EVIDENCE_ACCEPT_RERUNS }}
+        run: node app/scripts/release-ci-evidence.mjs
+
   # ci.yml 은 push 트리거가 브랜치 한정(`branches: ["main", "release/**"]`)이라 태그 푸시에는 돌지 않는다.
-  # 검증되지 않은 커밋이 설치본이 되지 않도록 여기서 다시 돈다. 맥 e2e 도 윈도 e2e 도 여기서 돈다 —
-  # ci.yml 의 e2e 는 PR·main push 를 덮지만 태그 커밋은 그 어느 쪽도 아니므로 아래 `e2e-windows` 가
-  # 태그 경로의 윈도 몫을 맡는다.
+  # 위 `evidence` 가 태그 커밋의 main CI 초록 기록을 찾지 못했을 때만 여기서 다시 돈다. 맥 e2e 도
+  # 윈도 e2e 도 여기서 돈다 - ci.yml 의 e2e 는 PR·main push 를 덮지만 태그 커밋은 그 어느 쪽도
+  # 아니므로 아래 `e2e-windows` 가 태그 경로의 윈도 몫을 맡는다.
   verify:
+    needs: evidence
+    # `if:` 를 적으면 암묵 `success()` 가 빠진다 — 그래서 `evidence` 작업이 실패(조회는 스크립트가
+    # 스스로 닫지만 체크아웃·런너 실패는 있다)해도 이 작업은 돈다. 건너뛰기는 세 가지가 모두
+    # 맞을 때만이다: evidence 작업 성공 · 판정 단계 성공(`valid`) · `skip=true`. 출력만 남고
+    # 판정이 실패한 경우(I-01)에는 `valid` 가 'false' 라 여기서 그대로 시험을 돈다.
+    if: ${{ !cancelled() && !(needs.evidence.result == 'success' && needs.evidence.outputs.valid == 'true' && needs.evidence.outputs.skip == 'true') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,11 +125,13 @@ jobs:
           KNUAF_PYTHON: ${{ env.pythonLocation }}/bin/python
 
   # 태그 경로의 윈도 e2e 관문. ci.yml 은 PR·main push 에서 윈도 e2e 를 돌지만 태그 커밋은 그
-  # 트리거에 걸리지 않으므로(브랜치 한정 push) 여기서 한 번 더 돈다 — 초안을 만드는 `macos` 와
-  # 설치본을 올리는 `windows` 가 이 작업의 성공을 `needs` 로 기다린다. 즉 윈도 e2e 가 빨개지면
-  # 초안 자체가 생기지 않는다. PR 에서 이미 같은 시험을 돌았더라도 태그 커밋은 PR 커밋과 다를 수
-  # 있으므로(머지 커밋) 중복이 아니라 재확인이다.
-  # 대가: 태그 1회당 러너 ~36분(5샤드 병렬) + 설치본 작업 대기. 배포는 드물어 감수한다.
+  # 트리거에 걸리지 않으므로(브랜치 한정 push) `evidence` 가 기록을 못 찾았을 때 여기서 한 번 더
+  # 돈다 — 초안을 만드는 `macos` 와 설치본을 올리는 `windows` 가 이 작업의 성공을 `needs` 로
+  # 기다린다. 즉 윈도 e2e 가 빨개지면 초안 자체가 생기지 않는다. PR 에서 이미 같은 시험을
+  # 돌았더라도 태그 커밋은 PR 커밋과 다를 수 있으므로(머지 커밋) `evidence` 가 태그 커밋의
+  # main CI 초록 기록을 확인해 주지 못하면 중복이 아니라 재확인이다.
+  # 대가: 태그 1회당 러너 ~36분(5샤드 병렬) + 설치본 작업 대기. 근거 기록이 있는 태그는 0분 —
+  # 그때는 위 `verify` 가 건너뛰어지고, 이 작업은 의존 작업이 건너뛰었으므로 함께 건너뛴다.
   e2e-windows:
     needs: verify
     runs-on: windows-latest
@@ -136,7 +188,13 @@ jobs:
           retention-days: 7
 
   macos:
-    needs: [verify, e2e-windows]
+    needs: [evidence, verify, e2e-windows]
+    # 두 갈래로만 돈다: (가) `evidence` 가 태그 커밋의 main CI 초록 기록을 증명해 위 시험을
+    # 건너뛴 경우, (나) 시험을 실제로 돌았고 둘 다 성공한 경우. 의존 작업이 '건너뜀'이면 여기서도
+    # 건너뛰므로 조건을 명시한다 — 시험이 실패·취소된 태그로 초안이 만들어지면 안 된다.
+    # (가)는 evidence 작업 성공 · 판정 단계 성공(`valid`) · `skip=true` 를 모두 요구한다 — 출력만
+    # 남고 판정이 실패한 경우(I-01)에 시험을 생략하지 않는다.
+    if: ${{ !cancelled() && ((needs.evidence.result == 'success' && needs.evidence.outputs.valid == 'true' && needs.evidence.outputs.skip == 'true') || (needs.verify.result == 'success' && needs.e2e-windows.result == 'success')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -202,6 +260,22 @@ jobs:
           # 빌드 환경으로 들어간다. `electron.vite.config.ts` 가 메인 define 으로 접어 넣는다.
           KNUAF_FREE_RELAY_TOKEN: ${{ secrets.KNUAF_FREE_RELAY_TOKEN }}
 
+      # C-01: 근거를 보고 `verify` 를 건너뛰면 `verify` 가 pytest 직전에 하던 **오프라인 재스테이징**
+      # 만 태그 경로에서 사라진다. CI 의 pytest 는 `KNUAF_TEST_SCRIPTS_DIR` 를 줘서 그 훅을 건너뛰므로
+      # (app/scripts/test-with-skill.mjs) main CI 초록 기록은 그 경로를 증명하지 않는다.
+      # `verify` 와 같은 방식으로 `stage-skill.mjs --offline` 을 한 번 돌린다 - 바로 위 설치본 빌드
+      # (dist:mac -> stage:skill)가 핀 소스를 캐시에 채웠으므로, 캐시만으로 같은 번들이 다시 만들어지고
+      # 호환 시험까지 통과하는지(= tests/conftest.py 의 pytest_sessionstart 가 하는 일)를 본다.
+      # 실패하면 릴리스는 여기서 멈춘다(초안 없음). 비용: 스테이징 1회 약 2분06초(맥 실측,
+      # app/scripts/verify-skill-staging.mjs 머리말) — 건너뛰기로 아끼는 2시간 16분에 비해 작다.
+      # 시험을 직접 돈 실행(verify 가 오프라인 경로 그대로 돌았다)에서는 중복이므로 돌리지 않는다.
+      # `success()` 를 명시해 둔다 — 암묵으로 붙는 것과 뜻이 같지만, 빌드가 실패한 판에서 2분짜리
+      # 확인까지 돌지 않는다는 의도를 읽는 사람에게 분명히 남긴다.
+      - name: 스킬 오프라인 재스테이징 확인 (건너뛴 실행의 pytest 준비 대체)
+        if: ${{ success() && needs.evidence.result == 'success' && needs.evidence.outputs.valid == 'true' && needs.evidence.outputs.skip == 'true' }}
+        working-directory: app
+        run: node scripts/stage-skill.mjs --offline --python python
+
       # 만들어진 번들과 포장된 app.asar 를 바이트로 본다: 운영 채널 주소와 운영 공개키 2개가 있고
       # 내부 시험용 빌드의 표식·같은 PC 채널 주소·다른 키가 없어야 한다. 올리기 전에 돈다.
       - name: 업데이트 채널 설정 확인 (산출물)
@@ -266,6 +340,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SIGNED: ${{ steps.sign.outputs.signed }}
+          # 초안 기록도 시험 생략과 같은 세 조건으로 판정한다 — 원시 `skip` 만 읽으면 evidence 잡이
+          # 최종 실패해 시험을 실제로 돈 판에서도 '건너뛰었다'고 잘못 적힌다(Roh A 2차 I-01).
+          SKIP_TESTS: ${{ needs.evidence.result == 'success' && needs.evidence.outputs.valid == 'true' && needs.evidence.outputs.skip == 'true' }}
+          EVIDENCE_RUN: ${{ needs.evidence.outputs.run_number }}
+          EVIDENCE_URL: ${{ needs.evidence.outputs.run_url }}
         working-directory: app/dist
         run: |
           {
@@ -285,6 +364,15 @@ jobs:
             echo
             echo "이 빌드는 서명 상태를 빌드가 직접 판정해 기록합니다 — 정식 서명: \`$SIGNED\`."
             echo "파일 무결성은 \`SHA256SUMS-macos.txt\`(macOS)·\`SHA256SUMS-windows.txt\`(Windows) 로 확인할 수 있습니다."
+            echo
+            echo "## 시험"
+            echo
+            if [ "$SKIP_TESTS" = "true" ]; then
+              echo "이 태그 커밋은 main CI 에서 같은 시험(pytest 3.13·typecheck·build·e2e 맥 2·윈도 5 샤드)을 이미 통과했습니다 — 근거: [CI 실행 #$EVIDENCE_RUN]($EVIDENCE_URL)."
+              echo "이번 실행은 설치본 빌드·서명·체크섬·판 확인·초안 단계와, CI 가 덮지 않는 스킬 오프라인 재스테이징 확인만 돌았습니다."
+            else
+              echo "이 태그 커밋의 main CI 초록 기록을 근거로 쓰지 못해, 이 워크플로가 시험을 직접 돌렸습니다(맥 pytest·typecheck·build·e2e, 윈도 e2e 5샤드)."
+            fi
           } > notes.md
           gh release create "$GITHUB_REF_NAME" \
             --draft \
@@ -292,12 +380,13 @@ jobs:
             --notes-file notes.md \
             *.dmg *.zip SHA256SUMS-macos.txt
 
-  # 윈도우 설치본(NSIS, 서명 없음). 맥 job 과 같은 트리거·같은 검증(verify) 뒤에 돈다.
+  # 윈도우 설치본(NSIS, 서명 없음). 맥 job 과 같은 트리거·같은 조건(시험 성공 또는 시험 건너뜀) 뒤에 돈다.
   # dist:win = build → prepare:resources(번들 CPython·휠하우스·아이콘·안내 PDF·스킬) →
   # electron-builder --win. fetch:python 은 PBS_TARGET 기본값이 x86_64-pc-windows-msvc 이고,
   # build:wheelhouse 는 번들 python.exe 로 win_amd64 휠을 받는다(pywin32 포함).
   windows:
-    needs: [verify, e2e-windows]
+    needs: [evidence, verify, e2e-windows]
+    if: ${{ !cancelled() && ((needs.evidence.result == 'success' && needs.evidence.outputs.valid == 'true' && needs.evidence.outputs.skip == 'true') || (needs.verify.result == 'success' && needs.e2e-windows.result == 'success')) }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
