@@ -1215,12 +1215,18 @@ test('py -3 계열 꼴은 python 과 똑같이 판정한다 — 거절하지 않
 })
 
 test('N2: 윈도 뿌리가 아니면 py -3 를 python 으로 읽지 않는다(맥·리눅스 뿌리는 종전 판정)', () => {
-  const { root, userData } = installedBox()
-  const gg = scriptIn(userData, 'gg.py')
+  // 뿌리를 **문자열 맥 경로로 고정**한다 — 실제 임시 폴더를 쓰면 윈도 러너(`C:\\Users\\…`)에서는 뿌리가 윈도로
+  // 판정돼 같은 시험의 뜻이 뒤집힌다. 뿌리 모양은 문자열이 정하므로(`pathOpsFor`) 어느 OS 에서 돌아도 같은 판정이다.
+  const root = '/Users/x/paper'
+  const userData = '/Users/x/Library/Application Support/knuaf-dev'
+  const gg = `${userData}/skill-host/.claude/skills/knuaf-dev/scripts/gg.py`
   for (const tool of TOOLS) {
-    const call = { command: `py -3 "${gg}" init "${root.replace(/\\/g, '/')}"` }
+    const call = { command: `py -3 "${gg}" init "${root}"` }
     expect(hostWriteDecision(root, tool, call, userData), tool).toMatchObject({ behavior: 'deny' })
-    expect(autoAllow(root, tool, call, [], userData, source), tool).toBe(false)
+    expect(autoAllow(root, tool, call, [], userData), tool).toBe(false)
+    // 같은 자리·같은 인자를 python 으로 부르면 거절이 아니다 — 위 거절은 py 를 안 알아봐서이지 경로 문제가 아니다.
+    const reference = { command: `python3 "${gg}" init "${root}"` }
+    expect(hostWriteDecision(root, tool, reference, userData), `ref/${tool}`).toBeNull()
   }
 })
 
