@@ -1,5 +1,5 @@
 /**
- * figures/image-header.ts — 바이트 **머리만** 읽어 형식·크기·프레임 수를 확인한다 (설계 §4-5, C-06).
+ * figures/image-header.ts — 디코딩 없이 형식·크기·프레임 수를 확인한다 (설계 §4-5, C-06).
  *
  * 디코딩은 여기서 하지 않는다(디코딩은 네트워크 없는 숨김 창이 한다 — R4-5). 여기서 걸러야 하는
  * 두 가지: ① 받아들일 형식인가(JPEG·PNG·GIF만 — python-docx가 넣을 수 있는 것) ② 헤더가 주장하는
@@ -41,17 +41,39 @@ function checkPixels(width: number, height: number, maxPixels: number): SniffPro
 }
 
 function sniffPng(bytes: Uint8Array, maxPixels: number): SniffResult {
-  // IHDR는 첫 청크여야 한다: 길이(4) + 'IHDR'(4) + 폭(4) + 높이(4).
-  if (bytes.length < 24) return { ok: false, reason: 'truncated' }
+  // 시그니처 8B + IHDR(길이 4B, 타입 4B, 데이터 13B, CRC 4B).
+  if (bytes.length < 33) return { ok: false, reason: 'truncated' }
   if (!(bytes[12] === 0x49 && bytes[13] === 0x48 && bytes[14] === 0x44 && bytes[15] === 0x52)) {
     return { ok: false, reason: 'malformed' }
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (view.getUint32(8, false) !== 13) return { ok: false, reason: 'malformed' }
   const width = view.getUint32(16, false)
   const height = view.getUint32(20, false)
   const problem = checkPixels(width, height, maxPixels)
   if (problem) return { ok: false, reason: problem }
-  return { ok: true, format: 'png', width, height, frames: 1 }
+
+  let frames: number | undefined
+  let seenIdat = false
+  for (let offset = 33; offset < bytes.length;) {
+    if (offset + 12 > bytes.length) return { ok: false, reason: 'truncated' }
+    const length = view.getUint32(offset, false)
+    const end = offset + 12 + length // 길이·타입·CRC 각 4B와 데이터
+    if (end > bytes.length) return { ok: false, reason: 'truncated' }
+    const type = view.getUint32(offset + 4, false)
+    if (type === 0x6163544c) { // acTL
+      if (seenIdat || frames !== undefined || length !== 8) return { ok: false, reason: 'malformed' }
+      // 별도 기본 이미지가 있다면 애니메이션 프레임 수에는 포함되지 않는다.
+      frames = view.getUint32(offset + 8, false)
+      if (frames === 0) return { ok: false, reason: 'malformed' }
+    } else if (type === 0x49444154) { // IDAT
+      seenIdat = true
+    } else if (type === 0x49454e44) { // IEND
+      break
+    }
+    offset = end
+  }
+  return { ok: true, format: 'png', width, height, frames: frames ?? 1 }
 }
 
 function sniffGif(bytes: Uint8Array, maxPixels: number, animated: boolean): SniffResult {
@@ -94,7 +116,9 @@ function countGifFrames(bytes: Uint8Array): number | null {
       const flags = bytes[offset + 9] as number
       offset += 10
       if (flags & 0x80) offset += 3 * 2 ** ((flags & 0x07) + 1)
-      if (offset >= bytes.length) return null
+      if (offset + 1 >= bytes.length) return null
+      const minCodeSize = bytes[offset] ?? 0
+      if (minCodeSize < 2 || minCodeSize > 8 || bytes[offset + 1] === 0) return null
       const skipped = skipGifSubBlocks(bytes, offset + 1)
       if (skipped === null) return null
       offset = skipped
@@ -136,10 +160,13 @@ function sniffJpeg(bytes: Uint8Array, maxPixels: number): SniffResult {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const length = view.getUint16(offset, false)
     if (length < 2) return { ok: false, reason: 'malformed' }
+    if (offset + length > bytes.length) return { ok: false, reason: 'truncated' }
     // SOF0~SOF15 중 DHT(C4)·JPG(C8)·DAC(CC)는 크기 표지가 아니다.
     const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc
     if (isSof) {
-      if (offset + 7 >= bytes.length) return { ok: false, reason: 'truncated' }
+      if (length < 8) return { ok: false, reason: 'malformed' }
+      const components = view.getUint8(offset + 7)
+      if (components === 0 || length !== 8 + 3 * components) return { ok: false, reason: 'malformed' }
       const height = view.getUint16(offset + 3, false)
       const width = view.getUint16(offset + 5, false)
       const problem = checkPixels(width, height, maxPixels)

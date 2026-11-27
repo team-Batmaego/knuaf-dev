@@ -5,6 +5,7 @@ import { mock } from 'node:test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChatImages } from '../src/main/chat/images'
+import { animatedPng } from '../src/main/figures/fixtures/png-samples'
 import { CHAT_IMAGE_COPY, CHAT_IMAGE_LIMITS, type ChatImageReply } from '../src/shared/chat-image'
 
 const first = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR9sAAAAASUVORK5CYII=', 'base64')
@@ -128,6 +129,18 @@ test('T-6 only valid images get tickets and the draft is bounded to four', async
   } finally {
     images.clear()
     fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('I-02 chat accepts the original APNG while using a still preview', async () => {
+  const scope = { root: '/paper', visit: 1 }
+  const images = new ChatImages(() => scope, async () => 'data:image/png;base64,preview')
+  try {
+    const chipId = idOf(await images.fromPaste(scope, animatedPng))
+    const { image } = images.resolve(scope.root, [chipId]).images[0]
+    expect(image).toEqual({ mime: 'image/png', bytes: animatedPng })
+  } finally {
+    images.clear()
   }
 })
 

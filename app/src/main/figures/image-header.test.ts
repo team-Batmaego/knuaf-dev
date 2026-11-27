@@ -20,6 +20,7 @@ registerHooks({
 })
 
 const header = (await import(new URL('./image-header.ts', import.meta.url).href)) as typeof import('./image-header')
+const { animatedPng, staticPng } = await import('./fixtures/png-samples')
 
 // GIF87a: 보관된 맥 실행 자리 표본. 전역 색표, 200×120, 한 프레임.
 const gif87a = Buffer.from(
@@ -68,10 +69,10 @@ function animatedGif(frames: number): Uint8Array {
 }
 
 /** SOI + APP0(길이 4) + SOF0 만든 것. `width`/`height`는 SOF 안에. */
-function jpeg(width: number, height: number): Uint8Array {
+function jpeg(width: number, height: number, sof = 0xc0): Uint8Array {
   const parts: number[] = [0xff, 0xd8]
   parts.push(0xff, 0xe0, 0x00, 0x04, 0x00, 0x00) // APP0, 길이 4
-  parts.push(0xff, 0xc0, 0x00, 0x11, 0x08)
+  parts.push(0xff, sof, 0x00, 0x11, 0x08)
   parts.push((height >> 8) & 0xff, height & 0xff)
   parts.push((width >> 8) & 0xff, width & 0xff)
   parts.push(0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9)
@@ -110,6 +111,36 @@ describe('sniffImage', () => {
     assert.deepEqual(header.sniffImage(bytes), { ok: false, reason: 'malformed' })
   })
 
+  it('I-02 실제 APNG에서 선언된 애니메이션 프레임 수를 읽는다', () => {
+    assert.deepEqual(header.sniffImage(animatedPng), { ok: true, format: 'png', width: 3, height: 2, frames: 2 })
+  })
+
+  it('I-02 PNG 청크 데이터 안의 acTL 텍스트는 청크가 아니다', () => {
+    const comment = Buffer.from('0000000c74455874436f6d6d656e74006163544cc6ecfa0d', 'hex')
+    const bytes = Buffer.concat([staticPng.subarray(0, 33), comment, staticPng.subarray(33)])
+    assert.deepEqual(header.sniffImage(bytes), { ok: true, format: 'png', width: 3, height: 2, frames: 1 })
+  })
+
+  for (const [description, bytes, reason] of [
+    ['프레임 수 0', Buffer.concat([animatedPng.subarray(0, 41), Buffer.alloc(4), animatedPng.subarray(45)]), 'malformed'],
+    ['잘못된 청크 길이 7', Buffer.concat([animatedPng.subarray(0, 33), Buffer.from([0, 0, 0, 7]), animatedPng.subarray(37)]), 'malformed'],
+    ['중복 acTL', Buffer.concat([animatedPng.subarray(0, 53), animatedPng.subarray(33, 53), animatedPng.subarray(53)]), 'malformed'],
+    ['버퍼를 넘는 acTL', animatedPng.subarray(0, 52), 'truncated'],
+    ['IDAT 뒤 acTL', Buffer.concat([staticPng.subarray(0, -12), animatedPng.subarray(33, 53), staticPng.subarray(-12)]), 'malformed']
+  ] as const) {
+    it(`I-02 APNG ${description}을 ${reason}로 거절한다`, () => {
+      assert.deepEqual(header.sniffImage(bytes), { ok: false, reason })
+    })
+  }
+
+  for (const length of [0, 12, 14]) {
+    it(`I-03 IHDR 길이 ${length}인 PNG는 malformed`, () => {
+      const bytes = Buffer.from(staticPng)
+      bytes.writeUInt32BE(length, 8)
+      assert.deepEqual(header.sniffImage(bytes), { ok: false, reason: 'malformed' })
+    })
+  }
+
   it('잘린 머리는 truncated', () => {
     assert.deepEqual(header.sniffImage(png(10, 10).slice(0, 20)), { ok: false, reason: 'truncated' })
     assert.deepEqual(header.sniffImage(gif87a.subarray(0, 10)), { ok: false, reason: 'truncated' })
@@ -137,9 +168,20 @@ describe('sniffImage', () => {
     assert.deepEqual(header.sniffImage(broken), { ok: false, reason: 'malformed' })
   })
 
+  for (const [description, hex] of [
+    ['첫 데이터 블록이 비어 있음', '4749463839610a000a00800000000000ffffff2c00000000010001000002003b'],
+    ['LZW 최소 코드 크기 0', '4749463839610a000a00800000000000ffffff2c00000000010001000000024401003b'],
+    ['LZW 최소 코드 크기 9', '4749463839610a000a00800000000000ffffff2c00000000010001000009024401003b']
+  ] as const) {
+    it(`I-01 GIF ${description}은 malformed`, () => {
+      assert.deepEqual(header.sniffImage(Buffer.from(hex, 'hex')), { ok: false, reason: 'malformed' })
+    })
+  }
+
   it('JPEG의 DHT 표지를 SOF로 오해하지 않는다', () => {
-    const parts: number[] = [0xff, 0xd8, 0xff, 0xc4, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20]
-    parts.push(0x01, 0x01, 0x11, 0x00, 0xff, 0xd9)
+    const dht = [0xff, 0xc4, 0x00, 0x04, 0x00, 0x00]
+    const frame = jpeg(32, 16).subarray(8)
+    const parts = [0xff, 0xd8, ...dht, ...frame]
     assert.deepEqual(header.sniffImage(Uint8Array.from(parts)), { ok: true, format: 'jpeg', width: 32, height: 16, frames: 1 })
   })
 
@@ -147,4 +189,21 @@ describe('sniffImage', () => {
     const bytes = Uint8Array.from([0xff, 0xd8, 0xff, 0x12, 0x00, 0x02, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00])
     assert.deepEqual(header.sniffImage(bytes), { ok: false, reason: 'malformed' })
   })
+
+  it('I-04 프로그레시브 JPEG SOF2 치수를 읽는다', () => {
+    assert.deepEqual(header.sniffImage(jpeg(37, 23, 0xc2)), { ok: true, format: 'jpeg', width: 37, height: 23, frames: 1 })
+  })
+
+  for (const [description, bytes, reason] of [
+    ['최소 길이보다 짧은 일반 세그먼트', Buffer.from('ffd8ffe00001ffff', 'hex'), 'malformed'],
+    ['버퍼를 넘는 일반 세그먼트', Buffer.from('ffd8ffe0ffff0000', 'hex'), 'truncated'],
+    ['선언 범위 밖에 치수가 있는 SOF', Buffer.from('ffd8ffc00002080017002503000000000000000000', 'hex'), 'malformed'],
+    ['성분이 없는 SOF', Buffer.from('ffd8ffc00008080017002500', 'hex'), 'malformed'],
+    ['선언 길이와 성분 수가 다른 SOF', Buffer.from('ffd8ffc0000b080017002503011100', 'hex'), 'malformed'],
+    ['성분 목록이 잘린 SOF', jpeg(37, 23).subarray(0, -3), 'truncated']
+  ] as const) {
+    it(`I-04 JPEG ${description}를 ${reason}로 거절한다`, () => {
+      assert.deepEqual(header.sniffImage(bytes), { ok: false, reason })
+    })
+  }
 })
