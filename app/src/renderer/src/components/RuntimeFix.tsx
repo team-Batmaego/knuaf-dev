@@ -17,8 +17,8 @@ const INTERPRETER_FAILURES: Record<string, true> = { python_too_old: true, spawn
 /**
  * 준비 버튼을 세울 수 있는 실패인가(D8, §7 PY-D1-02).
  * - `env`(override·KNUAF_PYTHON): 학생이 고른 경로를 몰래 무시하지 않는다 — 기존 안내만.
- * - `venv`: 읽을 수 있는 낡은 cfg 는 이미 선택에서 빠지므로 여기 오는 것은 못 읽는 venv 뿐.
- *   자동 복구 대신 `.venv` 이름을 바꾸는 안내를 보여 준다.
+ * - `venv`: 이 컴퓨터의 앱 데이터 의존성 환경(S-01 — 폴더 `.venv` 는 고르지 않는다)이 실행되지 않는 경우.
+ *   자동 복구 대신 "패키지 준비"를 다시 누르는 안내를 보여 준다.
  */
 export function runtimeFixKind(failure: RuntimeFailure, supported: boolean): 'button' | 'venv' | 'none' {
   if (!INTERPRETER_FAILURES[failure.code] || !supported) return 'none'

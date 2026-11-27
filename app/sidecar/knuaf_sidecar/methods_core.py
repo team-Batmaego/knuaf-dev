@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from itertools import chain
 from pathlib import Path
 
+from . import deps_contract
 from .rpc import RpcError
 from .diagnostic_trace import trace_doctor
 
@@ -276,14 +278,25 @@ def project_deps_report(report):
 def doctor_all(ctx, params):
     core = _core()
     root = _root(params)
+    # R-01: 다른 의존성 메서드와 같은 공통 검사(키 누락 → deps_contract_missing, 폴더 안 경로 → deps_venv_untrusted).
+    # 기동 env 가 실제 환경이므로 값은 쓰지 않는다 — 전역 os.environ 을 바꾸지 않는다.
+    from .methods_scripts import _deps_venv
+
+    _deps_venv(params, root)
+    # S-01: 계약을 모르는 gg_deps 는 같은 프로세스에서도 부르지 않는다(폴더 .venv 탐색). 사이드카 기동 때 이미
+    # 막았어도 다시 확인한다 — 시험·재import 에서도 같은 선.
+    contract = deps_contract.fence_in_process()
     with trace_doctor(ctx):
         report = core.doctor(root, probe=params.get("probe") is True)
         out = {"gg": report, **{key: report[key] for key in ("lock", "deps", "kordoc", "snapshots")}}
         try:
-            out["deps"] = project_deps_report(report["deps"])
+            out["deps"] = project_deps_report(report["deps"]) if contract else deps_contract.unsupported_report()
         except RpcError as error:
             out["deps"] = {"ready": False, "error": {"code": error.code, "message": error.message, "data": error.data}}
         out["python"] = {"executable": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3]}
+        # D1(형님 결정): v0.7.4 이하가 폴더에 만든 `.venv` 는 더 이상 쓰지 않는다. 있다는 사실만 알린다 —
+        # lexists(링크를 따라가지 않음)만 보고, 실행·삭제·이동은 하지 않는다. 안내는 준비 카드가 한다.
+        out["legacy_venv"] = os.path.lexists(root / ".venv")
         return out
 
 

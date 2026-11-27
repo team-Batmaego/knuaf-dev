@@ -129,7 +129,11 @@ export interface DependencyReport {
   selected_python: string | null
   dependencies: { dist: string; purpose: string; status: string; current: DependencyProbe; venv: DependencyProbe | null }[]
 }
-export interface SidecarInfo { python: string; kind: 'env' | 'venv' | 'managed' | 'bundled' | 'path'; scriptsDir: string; running: boolean }
+/**
+ * `depsVenv`: 사이드카가 실제로 띄워질 때 쓴 앱 데이터 의존성 환경(신뢰 표식이 있는 것, 없으면 빈 문자열).
+ * 호출 인자 `deps_venv` 는 이 값 하나에서 나온다(S-01 설계 3판 §3.3-1·3).
+ */
+export interface SidecarInfo { python: string; kind: 'env' | 'venv' | 'managed' | 'bundled' | 'path'; scriptsDir: string; running: boolean; depsVenv?: string }
 export interface AppInfo {
   version: string; packaged: boolean; logs: string; userData: string; electron: string; node: string
   buildDate: string; buildCommit: string

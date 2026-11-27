@@ -36,7 +36,9 @@
       "guard-codex-connection",
       "kordoc-mcp-lifecycle",
       "news-storage-failure",
-      "outline-note"
+      "outline-note",
+      "venv-guard-agent",
+      "venv-guard-lock"
     ],
     [
       "agent-busy",
@@ -206,7 +208,9 @@
       "kordoc-mcp-wiring",
       "kordoc-runtime",
       "skill-unknown-read",
-      "main-watchdog"
+      "main-watchdog",
+      "venv-guard",
+      "venv-guard-chat"
     ]
   ],
   "macos": [
@@ -309,7 +313,9 @@
       "support-sidebar",
       "app-update-recheck",
       "outline-note",
-      "main-watchdog"
+      "main-watchdog",
+      "venv-guard",
+      "venv-guard-chat"
     ],
     [
       "agent-busy",
@@ -410,7 +416,9 @@
       "news-storage-failure",
       "empty-toc",
       "figure-wiring",
-      "skill-unknown-read"
+      "skill-unknown-read",
+      "venv-guard-agent",
+      "venv-guard-lock"
     ]
   ]
 }

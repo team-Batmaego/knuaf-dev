@@ -9,15 +9,15 @@ import time
 
 import pytest
 
-from conftest import REPO, SCRIPTS, bind_test_major
+from conftest import REPO, SCRIPTS, bind_test_major, contract_skill_copy
 
 SIDECAR_DIR = REPO / "app" / "sidecar"
 
 
 class Sidecar:
-    def __init__(self):
+    def __init__(self, scripts=None):
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "knuaf_sidecar", "--scripts-dir", str(SCRIPTS), "--interpreter-kind", "test"],
+            [sys.executable, "-m", "knuaf_sidecar", "--scripts-dir", str(scripts or SCRIPTS), "--interpreter-kind", "test"],
             cwd=str(SIDECAR_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8",
         )
@@ -189,7 +189,7 @@ def test_owner_cleanup_cannot_break_a_live_guard(sidecar, publication_project):
 
 
 def test_doctor_all_shape(sidecar, publication_project):
-    d = sidecar.ok("doctor.all", root=str(publication_project))["result"]
+    d = sidecar.ok("doctor.all", root=str(publication_project), deps_venv=str(publication_project.parent / "appdeps"))["result"]
     assert {"gg", "lock", "deps", "kordoc", "snapshots", "python"} <= set(d)
     assert "ready" in d["deps"]
     assert d["kordoc"]["capability_verified"] is False
@@ -214,7 +214,8 @@ def test_positional_value_cannot_pose_as_an_option(sidecar, project):
 
 
 def test_docx_build_without_venv_reports_deps_not_ready(sidecar, project):
-    r = sidecar.call("docx.build", root=str(project), out="build/x.docx")
+    # S-01: main 이 "신뢰 환경 없음"(빈 deps_venv)을 넘기면 폴더 .venv 를 찾지 않고 준비 안 됨으로 닫는다.
+    r = sidecar.call("docx.build", root=str(project), out="build/x.docx", deps_venv="")
     assert r["error"]["code"] == "deps_not_ready"
 
 
@@ -318,12 +319,22 @@ def test_artifact_preview_xlsx(sidecar, project):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX sh wrapper")
-def test_cancel_terminates_running_script(sidecar, project, tmp_path):
+def test_cancel_terminates_running_script(project, tmp_path):
     # deps.ensure spawns `base_python gg_deps.py ensure <root>`; a wrapper that just sleeps stands in for it.
+    # 계약을 선언한 스킬 사본으로 띄운다 — 모르는 판은 실행 전에 닫혀 취소할 자식이 없다(S-01 5단계).
+    sidecar = Sidecar(contract_skill_copy(tmp_path))
+    try:
+        _cancel_running_ensure(sidecar, project, tmp_path)
+    finally:
+        sidecar.close()
+
+
+def _cancel_running_ensure(sidecar, project, tmp_path):
     wrapper = tmp_path / "slow-python"
     wrapper.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
     os.chmod(wrapper, 0o755)
-    rid = sidecar.send("deps.ensure", root=str(project), base_python=str(wrapper))
+    deps_venv = tmp_path.parent / (tmp_path.name + "-appdeps")  # 앱 데이터 자리(폴더 밖), S-01
+    rid = sidecar.send("deps.ensure", root=str(project), base_python=str(wrapper), deps_venv=str(deps_venv))
     time.sleep(0.5)
     started = time.monotonic()
     sidecar.proc.stdin.write(json.dumps({"id": "c", "method": "cancel", "params": {"id": rid}}) + "\n")

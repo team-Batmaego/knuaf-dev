@@ -68,7 +68,7 @@ function harness() {
   const chat = load(join(__dirname, '../src/renderer/src/store/chat.ts')).useChat as typeof ChatStore
   const rpc = load(join(__dirname, '../src/renderer/src/rpc.ts')).rpc as typeof RendererRpc
   const edits = load(join(__dirname, '../src/renderer/src/store/edits.ts')).useEdits as typeof EditsStore
-  return { project, prep, chat, rpc, edits, api, calls, sent,
+  return { project, prep, chat, rpc, edits, api, calls, sent, load,
     setDoctor: (fn: typeof doctor) => { doctor = fn }, setEnsure: (fn: typeof ensure) => { ensure = fn },
     setOpen: (fn: typeof open) => { open = fn },
     async open(root = '/A') {
@@ -328,3 +328,22 @@ test('A preparation failure after a failed switch becomes retryable blocked, nev
   expect(await h.chat.getState().send()).toBe(true)
   expect(h.sent).toEqual(['보존할 첫 문장'])
 })
+
+// S-01 5단계: 규칙집 D-U 판의 거부 코드(JSON code + 종료 2)를 뭉개지 않고 그대로 들고, 학생이 할 일을 말한다.
+//   deps_venv_empty    — 의존성 환경 경로가 빈 채로 ensure(이 컴퓨터에서 아직 준비 안 함)
+//   deps_venv_readonly — 도우미 전용 READONLY 에서 설치 시도
+for (const code of ['deps_venv_empty', 'deps_venv_readonly']) {
+  test(`S-01 ${code}: ensure 거부 코드를 그대로 두고 준비 단추 안내로 잇는다`, async () => {
+    const h = harness(); h.setDoctor(async () => ({ result: envelope(report(false)) }))
+    h.setEnsure(async () => ({ result: { ...envelope({ code, message: 'refused by skill' }), ok: false, exit: 2 } }))
+    await h.open(); expect(await h.chat.getState().send()).toBe(false)
+    const error = h.prep.getState().dependencies['/A'].error
+    expect(error?.code).toBe(code)
+    const { preparationFailureTitle } = h.load(join(__dirname, '../src/renderer/src/store/prep.ts')) as { preparationFailureTitle: (e: unknown) => string }
+    const { errorCopy } = h.load(join(__dirname, '../src/renderer/src/copy.ts')) as { errorCopy: (c: string) => { title: string; action: string | null } }
+    const copy = errorCopy(code)
+    expect(copy).not.toEqual(errorCopy('default'))
+    expect(preparationFailureTitle(error)).toBe(copy.title)
+    expect(copy.action).toContain('"패키지 준비"')
+  })
+}

@@ -10,7 +10,7 @@ import { Badge, StatusBadge } from '../components/Badge'
 import { ProgressPanel } from '../components/ProgressPanel'
 import { useRunner } from '../components/useRunner'
 import { Icon } from '../components/Icon'
-import { COMPLETION, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
+import { COMPLETION, DEPS_COPY, EMPTY, KORDOC_SENTENCE, LOCK_COPY, STATUS_LABEL, describeError, type DescribedError } from '../copy'
 import type { HistoryRow, LockInfo } from '../../../shared/types'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -94,7 +94,7 @@ export function TroubleshootSections() {
     setErr(null); setMsg(null)
     const result = await deps.runDeps(root)
     if (seq !== requestSeq.current || useProject.getState().root !== root || usePrep.getState().dependencies[root]?.visit !== visit) return
-    if (result?.phase === 'ready') { setMsg({ title: COMPLETION.deps_ready, body: '프로젝트 .venv의 import·버전을 확인했어요.' }); await refreshSidecar(); await load() }
+    if (result?.phase === 'ready') { setMsg({ title: COMPLETION.deps_ready, body: DEPS_COPY.readyBody }); await refreshSidecar(); await load() }
   }
   const prepareKordoc = async () => {
     setErr(null); setMsg(null)
@@ -131,11 +131,12 @@ export function TroubleshootSections() {
             <tbody>{(depsInfo.dependencies ?? []).map((d: any) => <tr key={d.dist}><td><code>{d.dist}</code></td><td>{d.purpose}</td><td><StatusBadge status={d.status} /></td></tr>)}</tbody>
           </table>
         )}
+        {doc?.legacy_venv === true && <Feedback kind="status" title={DEPS_COPY.legacyVenvTitle} body={DEPS_COPY.legacyVenvBody} />}
         {preparation?.phase === 'blocked' && <Feedback kind="warning" title={preparationFailureTitle(preparation.error)}
           body="쓴 글은 그대로 남아 있어요. 원인을 확인하고 다시 준비해 주세요." details={<code>{preparation.error?.message}</code>} />}
         <div className="row" style={{ marginTop: 'var(--sp-3)' }}>
           <button className="primary" disabled={deps.busy} onClick={ensureDeps}>{deps.busy ? '준비 중…' : '패키지 준비'}</button>
-          <span className="caption">프로젝트 폴더 안 <code>.venv</code>에만 설치해요. 전역 Python은 건드리지 않아요.</span>
+          <span className="caption">{DEPS_COPY.installCaption}</span>
         </div>
         <ProgressPanel busy={deps.busy} phase={deps.phase} elapsedMs={deps.elapsedMs} lines={deps.lines} onCancel={deps.clientId ? deps.cancel : undefined} />
       </Disclosure>

@@ -51,7 +51,11 @@ export default defineConfig({
     'lanes.spec.ts',
     'jobs.spec.ts',
     'job-control.spec.ts',
-    'skill-unknown-read.spec.ts'
+    'skill-unknown-read.spec.ts',
+    'venv-guard.spec.ts',
+    'venv-guard-agent.spec.ts',
+    'venv-guard-chat.spec.ts',
+    'venv-guard-lock.spec.ts'
   ],
   timeout: 30_000,
   retries: 0,
