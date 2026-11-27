@@ -57,6 +57,7 @@ function jpeg(): Buffer {
   bytes[24] = 8
   bytes.writeUInt16BE(8, 25)
   bytes.writeUInt16BE(8, 27)
+  bytes.set([3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1], 29)
   return bytes
 }
 const JPEG = jpeg()
